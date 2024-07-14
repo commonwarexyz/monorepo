@@ -50,15 +50,93 @@
             flex-direction: column;
             font-size: 2em;
         }
+
+        .logo-line {
+            display: flex;
+        }
+
+        .logo-text {
+            white-space: pre;
+        }
+
+        .vertical-logo-symbol,
+        .horizontal-logo-symbol,
+        .edge-logo-symbol {
+            white-space: pre;
+        }
     </style>
 </head>
 
 <body>
-    +~ -+-+ -+-~~*<br>
-    | commonware<br>
-    *~++- ~-+ -*-+<br><br>
-    democratizing ownership and trust on the internet with common software<br><br><br><br>
-    contact@commonware.xyz<br>
+    <div class="logo-line">
+        <span class="edge-logo-symbol">+</span>
+        <span class="horizontal-logo-symbol">~</span>
+        <span class="horizontal-logo-symbol"> </span>
+        <span class="horizontal-logo-symbol">-</span>
+        <span class="horizontal-logo-symbol">+</span>
+        <span class="horizontal-logo-symbol">-</span>
+        <span class="horizontal-logo-symbol">+</span>
+        <span class="horizontal-logo-symbol"> </span>
+        <span class="horizontal-logo-symbol">-</span>
+        <span class="horizontal-logo-symbol">+</span>
+        <span class="horizontal-logo-symbol">-</span>
+        <span class="horizontal-logo-symbol">~</span>
+        <span class="horizontal-logo-symbol">~</span>
+        <span class="edge-logo-symbol">*</span>
+    </div>
+    <div class="logo-line">
+        <span class="vertical-logo-symbol">|</span>
+        <span class="logo-text"> commonware </span>
+        <span class="vertical-logo-symbol"> </span>
+    </div>
+    <div class="logo-line">
+        <span class="edge-logo-symbol">*</span>
+        <span class="horizontal-logo-symbol">~</span>
+        <span class="horizontal-logo-symbol">+</span>
+        <span class="horizontal-logo-symbol">+</span>
+        <span class="horizontal-logo-symbol">-</span>
+        <span class="horizontal-logo-symbol"> </span>
+        <span class="horizontal-logo-symbol">~</span>
+        <span class="horizontal-logo-symbol">-</span>
+        <span class="horizontal-logo-symbol">+</span>
+        <span class="horizontal-logo-symbol"> </span>
+        <span class="horizontal-logo-symbol">-</span>
+        <span class="horizontal-logo-symbol">*</span>
+        <span class="horizontal-logo-symbol">-</span>
+        <span class="edge-logo-symbol">+</span>
+    </div>
+    <br>
+    democratizing ownership and trust on the internet with common software
+    <br><br><br><br>
+    contact@commonware.xyz
+
+    <script>
+        const horizontalSymbols = [" ", "*", "+", "-", "~"];
+        const verticalSymbols = [" ", "*", "+", "|"];
+        const edgeSymbols = [" ", "*", "+"];
+
+        function getRandomValue(arr) {
+            return arr[Math.floor(Math.random() * arr.length)];
+        }
+
+        function updateSymbol(symbol, choices) {
+            symbol.innerText = getRandomValue(choices);
+            const interval = Math.random() * (5000 - 500) + 500;
+            setTimeout(() => updateSymbol(symbol, choices), interval);
+        }
+
+        document.querySelectorAll('.horizontal-logo-symbol').forEach(symbol => {
+            updateSymbol(symbol, horizontalSymbols);
+        });
+
+        document.querySelectorAll('.vertical-logo-symbol').forEach(symbol => {
+            updateSymbol(symbol, verticalSymbols);
+        });
+
+        document.querySelectorAll('.edge-logo-symbol').forEach(symbol => {
+            updateSymbol(symbol, edgeSymbols);
+        });
+    </script>
 </body>
 
 </html>
