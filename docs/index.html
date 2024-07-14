@@ -119,22 +119,25 @@
             return arr[Math.floor(Math.random() * arr.length)];
         }
 
+        function getRandomDuration(min) {
+            return Math.random() * (10000 - min) + min;
+        }
+
         function updateSymbol(symbol, choices) {
             symbol.innerText = getRandomItem(choices);
-            const interval = Math.random() * (10000 - 500) + 500;
-            setTimeout(() => updateSymbol(symbol, choices), interval);
+            setTimeout(() => updateSymbol(symbol, choices), getRandomDuration(500));
         }
 
         document.querySelectorAll('.horizontal-logo-symbol').forEach(symbol => {
-            updateSymbol(symbol, horizontalSymbols);
+            setTimeout(() => updateSymbol(symbol, horizontalSymbols), getRandomDuration(1500));
         });
 
         document.querySelectorAll('.vertical-logo-symbol').forEach(symbol => {
-            updateSymbol(symbol, verticalSymbols);
+            setTimeout(() => updateSymbol(symbol, verticalSymbols), getRandomDuration(1500));
         });
 
         document.querySelectorAll('.edge-logo-symbol').forEach(symbol => {
-            updateSymbol(symbol, edgeSymbols);
+            setTimeout(() => updateSymbol(symbol, edgeSymbols), getRandomDuration(1500));
         });
     </script>
 </body>
