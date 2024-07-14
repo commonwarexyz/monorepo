@@ -115,13 +115,13 @@
         const verticalSymbols = [" ", "*", "+", "|"];
         const edgeSymbols = [" ", "*", "+"];
 
-        function getRandomValue(arr) {
+        function getRandomItem(arr) {
             return arr[Math.floor(Math.random() * arr.length)];
         }
 
         function updateSymbol(symbol, choices) {
-            symbol.innerText = getRandomValue(choices);
-            const interval = Math.random() * (5000 - 500) + 500;
+            symbol.innerText = getRandomItem(choices);
+            const interval = Math.random() * (10000 - 500) + 500;
             setTimeout(() => updateSymbol(symbol, choices), interval);
         }
 
