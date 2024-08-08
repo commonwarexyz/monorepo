@@ -1,9 +1,12 @@
 # Reporting Security Issues
 
-We welcome security reports and are committed to providing prompt attention to security issues.
+We welcome security reports and are committed to providing prompt attention to any security issues.
 
-Security issues should be reported privately [here](https://github.com/commonwarexyz/monorepo/security).
+Vulnerabilities should be reported privately [via GitHub Security](https://github.com/commonwarexyz/monorepo/security) instead of the public issue tracker.
 
-# No Bounty Program 
+We do not yet offer a bounty program for responsible disclosure of security vulnerabilities, however, we do track meaningful contributors and record them on the leaderboard below.
 
-At this time, we do not offer a bounty program for responsible disclosure of security vulnerabilities.
+# Leaderboard
+
+1. Your Name Here
+...
