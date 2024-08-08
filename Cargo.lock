@@ -6,9 +6,15 @@ version = 3
 name = "commonware-chat"
 version = "0.0.3"
 dependencies = [
- "commonware-p2p",
+ "commonware-p2p 0.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "commonware-p2p"
 version = "0.0.3"
+
+[[package]]
+name = "commonware-p2p"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f74eb2841e68d7ab3135b4128c5c52b7417cc16aefbe50e6fcd5cf140bb0fc47"
