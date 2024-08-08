@@ -42,11 +42,11 @@ async fn main() {
 
     // Create logger
     let logs = Arc::new(Mutex::new(Vec::new()));
-    let vec_writer = logger::Writer::new(logs.clone());
+    let writer = logger::Writer::new(logs.clone());
     tracing_subscriber::fmt()
         .json()
         .with_max_level(tracing::Level::DEBUG)
-        .with_writer(vec_writer)
+        .with_writer(writer)
         .init();
 
     // Configure my identity

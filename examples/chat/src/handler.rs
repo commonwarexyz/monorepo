@@ -4,20 +4,20 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use prometheus_client::encoding::text::encode;
-use prometheus_client::registry::Registry;
-use ratatui::text::Text;
+use prometheus_client::{encoding::text::encode, registry::Registry};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    text::Line,
+    text::{Line, Text},
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
-use std::io;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    io::stdout,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 pub const CHANNEL: u32 = 0;
 
@@ -36,7 +36,7 @@ pub async fn run(
 ) {
     // Setup terminal
     enable_raw_mode().unwrap();
-    let mut stdout = io::stdout();
+    let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen).unwrap();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).unwrap();
