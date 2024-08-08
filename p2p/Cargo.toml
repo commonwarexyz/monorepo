@@ -5,6 +5,9 @@ publish = true
 version = "0.0.4"
 license = "MIT OR Apache-2.0"
 description = "p2p for blockchains"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
