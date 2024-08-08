@@ -10,7 +10,7 @@ homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo"
 
 [dependencies]
-commonware-p2p = "0.0.4" 
+commonware-p2p = "0.0.5" 
 tokio = { version = "1", features = ["full"] }
 clap = "4"
 chrono = "0.4"
