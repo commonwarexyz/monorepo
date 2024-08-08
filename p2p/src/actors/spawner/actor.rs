@@ -62,10 +62,23 @@ impl<C: Crypto> Actor<C> {
                     connection,
                     reservation,
                 } => {
+                    // Clone required variables
                     let sent_messages = self.sent_messages.clone();
                     let received_messages = self.received_messages.clone();
                     let tracker = tracker.clone();
                     let router = router.clone();
+
+                    // Record handshake messages
+                    //
+                    // TODO: consider moving into connection to collect unsuccessful handshakes
+                    sent_messages
+                        .get_or_create(&metrics::Message::new_handshake(&peer))
+                        .inc();
+                    received_messages
+                        .get_or_create(&metrics::Message::new_handshake(&peer))
+                        .inc();
+
+                    // Spawn peer
                     tokio::spawn(async move {
                         // Create peer
                         info!(peer = hex::encode(&peer), "peer started");

@@ -278,6 +278,9 @@ impl Actor {
                         sender.send((peer.clone(), message.freeze())).await.unwrap();
                     }
                     Some(wire::message::Payload::Handshake(_)) => {
+                        self.received_messages
+                            .get_or_create(&metrics::Message::new_handshake(&peer))
+                            .inc();
                         return Err(Error::UnexpectedHandshake);
                     }
                     _ => {
