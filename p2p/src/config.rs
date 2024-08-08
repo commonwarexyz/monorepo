@@ -63,6 +63,9 @@ pub struct Config<C: Crypto> {
     /// Duration after which to close the connection if a message cannot be written.
     pub write_timeout: Duration,
 
+    /// Whether or not to disable Nagle's algorithm
+    pub tcp_nodelay: bool,
+
     /// Quota for connection attempts per peer (incoming or outgoing).
     pub allowed_connection_rate_per_peer: Quota,
 
@@ -118,6 +121,7 @@ impl<C: Crypto> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
+            tcp_nodelay: true,
             allowed_connection_rate_per_peer: Quota::per_minute(NonZeroU32::new(1).unwrap()),
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
             dial_frequency: Duration::from_secs(60),

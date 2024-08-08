@@ -106,8 +106,10 @@ impl<C: Crypto> Actor<C> {
             "dialed peer"
         );
 
-        // Disable Nagle delay.
-        _ = connection.set_nodelay(true);
+        // Set TCP_NODELAY
+        if let Err(e) = connection.set_nodelay(config.tcp_nodelay) {
+            debug!(peer = hex::encode(&peer), error = ?e, "failed to set TCP_NODELAY")
+        }
 
         // Upgrade connection
         let stream = match Stream::upgrade_dialer(config, connection, peer.clone()).await {
