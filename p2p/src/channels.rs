@@ -31,7 +31,7 @@ impl Sender {
     /// * `recipients` - The set of recipients to send the message to.
     /// * `message` - The message to send.
     /// * `priority` - Whether the message should be sent with priority (across
-    /// all channels).
+    ///   all channels).
     pub async fn send(&self, recipients: Vec<PublicKey>, message: Bytes, priority: bool) {
         self.messenger
             .content(recipients, self.channel, message, priority)
