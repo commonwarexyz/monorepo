@@ -1,3 +1,5 @@
+//! Instance of a commonware-p2p network.
+
 use crate::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
@@ -7,6 +9,7 @@ use crate::{
 };
 use tracing::info;
 
+/// Instance of a commonware-p2p network.
 pub struct Network<C: Crypto> {
     cfg: Config<C>,
 
@@ -18,6 +21,16 @@ pub struct Network<C: Crypto> {
 }
 
 impl<C: Crypto> Network<C> {
+    /// Create a new instance of a commonware-p2p network.
+    ///
+    /// # Parameters
+    ///
+    /// * `cfg` - Configuration for the network.
+    ///
+    /// # Returns
+    ///
+    /// * A tuple containing the network instance and the oracle that
+    /// can be used by a developer to configure which peers are authorized.
     pub fn new(cfg: Config<C>) -> (Self, tracker::Oracle) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(tracker::Config {
             crypto: cfg.crypto.clone(),
@@ -49,6 +62,19 @@ impl<C: Crypto> Network<C> {
         )
     }
 
+    /// Register a new channel over the network.
+    ///
+    /// # Parameters
+    ///
+    /// * `channel` - Unique identifier for the channel.
+    /// * `rate` - Rate at which messages can be received over the channel.
+    /// * `max_size` - Maximum size of a message that can be sent/received over the channel.
+    /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
+    ///
+    /// # Returns
+    ///
+    /// * A tuple containing the sender and receiver for the channel (how to communicate
+    /// with external peers on the network).
     pub fn register(
         &mut self,
         channel: u32,
@@ -59,6 +85,9 @@ impl<C: Crypto> Network<C> {
         self.channels.register(channel, rate, max_size, backlog)
     }
 
+    /// Starts the network.
+    ///
+    /// After the network is started, it is not possible to add more channels.
     pub async fn run(self) {
         // Start tracker
         let mut tracker_task = tokio::spawn(self.tracker.run());
