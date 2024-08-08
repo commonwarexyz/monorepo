@@ -339,7 +339,7 @@ version = "0.0.4"
 dependencies = [
  "chrono",
  "clap",
- "commonware-p2p 0.0.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "commonware-p2p 0.0.4",
  "crossterm 0.22.1",
  "governor",
  "hex",
@@ -349,29 +349,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "commonware-p2p"
-version = "0.0.4"
-dependencies = [
- "bitvec",
- "bytes",
- "chacha20poly1305",
- "ed25519-dalek",
- "futures",
- "governor",
- "hex",
- "prometheus-client",
- "prost",
- "prost-build",
- "rand",
- "sha2",
- "tokio",
- "tokio-test",
- "tokio-util",
- "tracing",
- "x25519-dalek",
 ]
 
 [[package]]
@@ -393,6 +370,29 @@ dependencies = [
  "rand",
  "sha2",
  "tokio",
+ "tokio-util",
+ "tracing",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "commonware-p2p"
+version = "0.0.5"
+dependencies = [
+ "bitvec",
+ "bytes",
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "futures",
+ "governor",
+ "hex",
+ "prometheus-client",
+ "prost",
+ "prost-build",
+ "rand",
+ "sha2",
+ "tokio",
+ "tokio-test",
  "tokio-util",
  "tracing",
  "x25519-dalek",
