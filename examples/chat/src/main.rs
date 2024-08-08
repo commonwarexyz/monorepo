@@ -54,10 +54,8 @@ use tracing::info;
 #[tokio::main]
 async fn main() {
     // Parse arguments
-    let matches = Command::new("chat")
-        .version("0.1")
-        .author("Patrick O'Grady <patrick@commonware.xyz>")
-        .about("encrypted chat between authorized peers")
+    let matches = Command::new("commonware-chat")
+        .about("send encrypted messages to a group of friends")
         .arg(Arg::new("me").long("me").required(true))
         .arg(
             Arg::new("allowed_keys")
