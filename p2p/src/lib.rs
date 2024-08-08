@@ -18,7 +18,7 @@
 //! * No TLS, No X.509 Certificates, No Protocol Negotiation
 //! * ChaCha20-Poly1305 Stream Encryption
 //! * Arbitrary Cryptographic Peer Identities
-//! * Automatic Peer Discovery Using Bit Vectors
+//! * Automatic Peer Discovery Using Bit Vectors (Used as Ping/Pongs)
 //! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
 //! * Emebdded Message Chunking
 //! * Metrics via Prometheus
