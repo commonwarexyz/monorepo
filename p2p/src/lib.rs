@@ -3,7 +3,7 @@
 //! TODO: Add more documentation here
 //!
 //! ```rust
-//! use chat::{
+//! use commonware_p2p::{
 //!     crypto::{Crypto, ed25519},
 //!     Config, Network,
 //! };
