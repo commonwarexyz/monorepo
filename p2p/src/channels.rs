@@ -4,6 +4,14 @@ use governor::Quota;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
+/// Tuple representing a message received from a given public key.
+///
+/// This message is guranteed to adhere to the configuration of the channel and
+/// will already be decrypted and authenticated.
+pub type Message = (PublicKey, Bytes);
+/// Channel to asynchronously receive messages from a channel.
+pub type Receiver = mpsc::Receiver<Message>;
+
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
 pub struct Sender {
@@ -30,9 +38,6 @@ impl Sender {
             .await;
     }
 }
-
-pub type Message = (PublicKey, Bytes);
-pub type Receiver = mpsc::Receiver<Message>;
 
 #[derive(Clone)]
 pub struct Channels {
