@@ -5,6 +5,9 @@ publish = true
 version = "0.0.3"
 license = "MIT OR Apache-2.0"
 description = "chat using commonware-p2p"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo"
 
 [dependencies]
 commonware-p2p = "0.0.4" 
@@ -16,3 +19,6 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
 ratatui = "0.27"
 crossterm = "0.22"
 serde_json = "1"
+prometheus-client = "0.22"
+governor = "0.6"
+hex = "0.4"
