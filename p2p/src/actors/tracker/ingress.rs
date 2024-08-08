@@ -97,6 +97,10 @@ impl Mailbox {
     }
 }
 
+/// Mechanism to register authorized peers.
+///
+/// Peers that are not explicitly authorized
+/// will be blocked by commonware-p2p.
 #[derive(Clone)]
 pub struct Oracle {
     sender: mpsc::Sender<Message>,
@@ -107,6 +111,17 @@ impl Oracle {
         Self { sender }
     }
 
+    /// Register a set of authorized peers at a given index.
+    ///
+    /// These peer sets are used to construct a bit vector (sorted by public key)
+    /// to share knowledge about dialable IPs. If a peer does not yet have an index
+    /// associated with a bit vector, the discovery message will be dropped.
+    ///
+    /// # Parameters
+    ///
+    /// * `index` - Index of the set of authorized peers (like a blockchain height).
+    ///   Should be monotonically increasing.
+    /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     pub async fn register(&self, index: u64, peers: Vec<PublicKey>) {
         let _ = self.sender.send(Message::Register { index, peers }).await;
     }

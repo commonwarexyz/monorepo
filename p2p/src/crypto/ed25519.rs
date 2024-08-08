@@ -1,3 +1,5 @@
+//! Ed25519 implementation of the Crypto trait.
+
 use crate::crypto;
 use ed25519_dalek::{
     Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH,
@@ -5,6 +7,9 @@ use ed25519_dalek::{
 };
 use sha2::{Digest, Sha256};
 
+const MESSAGE_PREFIX: &str = "commonware-p2p";
+
+/// Ed25519 Signer.
 #[derive(Clone)]
 pub struct Ed25519 {
     signer: SigningKey,
@@ -19,6 +24,12 @@ impl Ed25519 {
             verifier: verifier.to_bytes().to_vec().into(),
         }
     }
+
+    fn payload(message: Vec<u8>) -> Vec<u8> {
+        let mut payload = Vec::from(MESSAGE_PREFIX.as_bytes());
+        payload.extend_from_slice(&message);
+        payload
+    }
 }
 
 impl crypto::Crypto for Ed25519 {
@@ -27,7 +38,8 @@ impl crypto::Crypto for Ed25519 {
     }
 
     fn sign(&mut self, message: Vec<u8>) -> crypto::Signature {
-        self.signer.sign(&message).to_bytes().to_vec().into()
+        let payload = Self::payload(message);
+        self.signer.sign(&payload).to_bytes().to_vec().into()
     }
 
     fn validate(public_key: &crypto::PublicKey) -> bool {
@@ -56,11 +68,19 @@ impl crypto::Crypto for Ed25519 {
             Err(_) => return false,
         };
         let signature = Signature::from(signature);
-        public_key.verify(&message, &signature).is_ok()
+        let payload = Self::payload(message);
+        public_key.verify(&payload, &signature).is_ok()
     }
 }
 
-pub fn insecure_signer(peer: u16) -> Ed25519 {
-    let secret_key: [u8; SECRET_KEY_LENGTH] = Sha256::digest(peer.to_be_bytes()).into();
+/// Creates a new Ed25519 signer with a secret key derived from the provided
+/// seed.
+///
+/// # Warning
+///
+/// This function is intended for testing and demonstration purposes only.
+/// It should never be used in production.
+pub fn insecure_signer(seed: u16) -> Ed25519 {
+    let secret_key: [u8; SECRET_KEY_LENGTH] = Sha256::digest(seed.to_be_bytes()).into();
     Ed25519::new(SigningKey::from(secret_key))
 }

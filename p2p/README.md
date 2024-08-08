@@ -1,32 +1,9 @@
-# p2p
+# commonware-p2p
 
-## Disclaimer
+[![Crates.io](https://img.shields.io/crates/v/commonware-p2p.svg)](https://crates.io/crates/commonware-p2p)
 
-`p2p` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
+Communicate with authenticated peers over encrypted connections.
 
-## Features
+## Status 
 
-* no TLS
-* chacha20-poly1305 encryption
-* native message chunking
-* arbitrary crypto identities
-* peer discovery using ordered bit vectors
-* fully-connected peers
-* configurable rate limiting for each message type
-* metrics via prometheus
-* message prioritization across channels
-* multi-plexing over a single connection
-
-## Components 
-
-### Dialer
-
-### Listener
-
-### Tracker
-
-### Spawner
-
-### Peer
-
-### Router
+`commonware-p2p` is **ALPHA** software and is not yet recommended for production use. Developers should expect breaking changes and occasional instability.
