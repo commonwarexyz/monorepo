@@ -1,0 +1,23 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install protobuf compiler
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    - name: Build
+      run: cargo build --verbose
+    - name: Lint with clippy
+      run: cargo clippy -- -D warnings
+    - name: Run tests
+      run: cargo test --verbose

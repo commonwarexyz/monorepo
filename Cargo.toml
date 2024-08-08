@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "p2p",
+    "examples/chat",
+]
