@@ -4,11 +4,11 @@ version = 3
 
 [[package]]
 name = "commonware-chat"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "commonware-p2p",
 ]
 
 [[package]]
 name = "commonware-p2p"
-version = "0.1.0"
+version = "0.0.0"
