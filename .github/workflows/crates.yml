@@ -2,8 +2,7 @@ name: Crates
 
 on:
   push:
-    tags:
-      - '*'
+    branches: [ "main" ]
 
 jobs:
   publish:
@@ -18,31 +17,14 @@ jobs:
       with:
         toolchain: stable
     
-    - name: Extract version from Cargo.toml 
-      id: extract_version
-      run: |
-        version=$(grep '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-        echo "::set-output name=version::$version"
-  
-    - name: Extract tag
-      id: extract_tag
-      run: |
-        tag=${GITHUB_REF#refs/tags/}
-        echo "::set-output name=tag::$tag"
-  
-    - name: Verify version matches tag
-      run: |
-        if [ "${{ steps.extract_version.outputs.version }}" != "${{ steps.extract_tag.outputs.tag }}" ]; then
-          echo "Version mismatch: version in workspace.package (${{ steps.extract_version.outputs.version }}) does not match tag (${{ steps.extract_tag.outputs.tag }})"
-          exit 1
-        fi
-
     - name: Publish p2p
       run: cargo publish --manifest-path p2p/Cargo.toml
+      continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
     - name: Publish chat
       run: cargo publish --manifest-path examples/chat/Cargo.toml
+      continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

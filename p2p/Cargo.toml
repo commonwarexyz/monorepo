@@ -2,5 +2,6 @@
 name = "commonware-p2p"
 edition = "2021"
 publish = true
+version = "0.0.3"
 
 [dependencies]
