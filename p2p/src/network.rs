@@ -30,7 +30,7 @@ impl<C: Crypto> Network<C> {
     /// # Returns
     ///
     /// * A tuple containing the network instance and the oracle that
-    /// can be used by a developer to configure which peers are authorized.
+    ///   can be used by a developer to configure which peers are authorized.
     pub fn new(cfg: Config<C>) -> (Self, tracker::Oracle) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(tracker::Config {
             crypto: cfg.crypto.clone(),
@@ -74,7 +74,7 @@ impl<C: Crypto> Network<C> {
     /// # Returns
     ///
     /// * A tuple containing the sender and receiver for the channel (how to communicate
-    /// with external peers on the network).
+    ///   with external peers on the network).
     pub fn register(
         &mut self,
         channel: u32,

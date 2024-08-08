@@ -120,7 +120,7 @@ impl Oracle {
     /// # Parameters
     ///
     /// * `index` - Index of the set of authorized peers (like a blockchain height).
-    /// Should be monotonically increasing.
+    ///   Should be monotonically increasing.
     /// * `peers` - Vector of authorized peers at an `index` (does not need to be sorted).
     pub async fn register(&self, index: u64, peers: Vec<PublicKey>) {
         let _ = self.sender.send(Message::Register { index, peers }).await;
