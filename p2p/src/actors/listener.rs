@@ -109,6 +109,9 @@ impl<C: Crypto> Actor<C> {
             };
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
+            // Disable Nagle delay.
+            _ = stream.set_nodelay(true);
+
             // Spawn a new handshaker to upgrade connection
             tokio::spawn(Self::handshake(
                 self.connection.clone(),

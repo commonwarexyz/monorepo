@@ -106,6 +106,9 @@ impl<C: Crypto> Actor<C> {
             "dialed peer"
         );
 
+        // Disable Nagle delay.
+        _ = connection.set_nodelay(true);
+
         // Upgrade connection
         let stream = match Stream::upgrade_dialer(config, connection, peer.clone()).await {
             Ok(stream) => stream,
