@@ -1,11 +1,45 @@
 //! Send encrypted messages to a group of friends using [commonware-p2p](https://crates.io/crates/commonware-p2p).
+//!
+//! # Usage (4 Friends)
+//!
+//! ## Friend 1 (Bootstrapper)
+//!
+//! ```sh
+//! cargo run -- --me=1@3001 --allowed_keys=1,2,3,4
+//! ```
+//!
+//! ## Friend 2
+//!
+//! ```sh
+//! cargo run -- --me=2@3002 --allowed_keys=1,2,3,4 --bootstrappers=1@127.0.0.1:3001
+//! ```
+//!
+//! ### Friend 3
+//!
+//! ```sh
+//! cargo run -- --me=3@3003 --allowed_keys=1,2,3,4 --bootstrappers=1@127.0.0.1:3001
+//! ```
+//!
+//! ### Friend 4 (Different Friend as Bootstrapper)
+//!
+//! ```sh
+//! cargo run -- --me=4@3004 --allowed_keys=1,2,3,4 --bootstrappers=3@127.0.0.1:3003
+//! ```
+//!
+//! ### Not Friend (Blocked)
+//!
+//! ```sh
+//! cargo run -- --me=5@3005 --allowed_keys=1,2,3,4,5 --bootstrappers=1@127.0.0.1:3001
+//! ```
 
+#[doc(hidden)]
 mod handler;
+#[doc(hidden)]
 mod logger;
 
 use clap::{value_parser, Arg, Command};
 use commonware_p2p::{
-    crypto::{self, Crypto},
+    crypto::{ed25519, Crypto},
     Config, Network,
 };
 use governor::Quota;
@@ -16,13 +50,12 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
+#[doc(hidden)]
 #[tokio::main]
 async fn main() {
     // Parse arguments
-    let matches = Command::new("chat")
-        .version("0.1")
-        .author("Patrick O'Grady <patrick@commonware.xyz>")
-        .about("encrypted chat between authorized peers")
+    let matches = Command::new("commonware-chat")
+        .about("send encrypted messages to a group of friends")
         .arg(Arg::new("me").long("me").required(true))
         .arg(
             Arg::new("allowed_keys")
@@ -55,7 +88,7 @@ async fn main() {
         .expect("Please provide identity");
     let parts = me.split('@').collect::<Vec<&str>>();
     let key = parts[0].parse::<u16>().expect("Key not well-formed");
-    let signer = crypto::ed25519::insecure_signer(key);
+    let signer = ed25519::insecure_signer(key);
     info!(key = hex::encode(signer.me()), "loaded signer");
 
     // Configure my port
@@ -72,7 +105,7 @@ async fn main() {
         panic!("Please provide at least one allowed key");
     }
     for peer in allowed_keys {
-        let verifier = crypto::ed25519::insecure_signer(peer).me();
+        let verifier = ed25519::insecure_signer(peer).me();
         info!(key = hex::encode(&verifier), "registered authorized key",);
         recipients.push(verifier);
     }
@@ -86,7 +119,7 @@ async fn main() {
             let bootstrapper_key = parts[0]
                 .parse::<u16>()
                 .expect("Bootstrapper key not well-formed");
-            let verifier = crypto::ed25519::insecure_signer(bootstrapper_key).me();
+            let verifier = ed25519::insecure_signer(bootstrapper_key).me();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
             bootstrapper_identities.push((verifier, bootstrapper_address));
