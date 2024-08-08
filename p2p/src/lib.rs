@@ -4,21 +4,19 @@
 //! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.). Unlike
 //! most p2p crates, commonware-p2p implements its own encrypted transport layer (no TLS) that
 //! exclusively uses said cryptographic identities to authenticate incoming connections (dropping
-//! any that aren't explicitly authorized). Peer discovery is also implemented from scratch and uses
-//! ordered bit vectors to efficiently communicate knowledge of authorized, dialable peers.
+//! any that aren't explicitly authorized). Peer discovery occurs automatically using ordered bit
+//! vectors (sorted by authorized cryptographic identities) to efficiently communicate knowledge
+//! of dialable peers.
 //!
 //! # Features
 //!
-//! * no TLS
-//! * chacha20-poly1305 encryption
-//! * native message chunking
-//! * arbitrary crypto identities
-//! * peer discovery using ordered bit vectors
-//! * fully-connected peers
-//! * configurable rate limiting for each message type
-//! * metrics via prometheus
-//! * message prioritization across channels
-//! * multi-plexing over a single connection
+//! * No TLS, No X.509 Certificates, No Protocol Negotiation
+//! * ChaCha20-Poly1305 Stream Encryption
+//! * Arbitrary Cryptographic Peer Identities
+//! * Automatic Peer Discovery Using Bit Vectors
+//! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
+//! * Emebdded Message Chunking
+//! * Metrics via Prometheus
 //!
 //! # Example
 //!
