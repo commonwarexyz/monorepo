@@ -13,6 +13,7 @@ pub type Signature = Bytes;
 /// Cryptographic operations required by commonware-p2p.
 ///
 /// # Warning
+///
 /// Although data provided to this implementation to be signed are expected to be
 /// unique to commonware-p2p, it is strongly recommended to prefix any payloads
 /// with a unique identifier to prevent replay attacks.

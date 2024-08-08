@@ -77,6 +77,7 @@ impl crypto::Crypto for Ed25519 {
 /// seed.
 ///
 /// # Warning
+///
 /// This function is intended for testing and demonstration purposes only.
 /// It should never be used in production.
 pub fn insecure_signer(seed: u16) -> Ed25519 {

@@ -8,6 +8,11 @@
 //! vectors (sorted by authorized cryptographic identities) to efficiently communicate knowledge
 //! of dialable peers.
 //!
+//! # Status
+//!
+//! `commonware-p2p` is **ALPHA** software and is not yet recommended for production use. Developers should
+//! expect breaking changes and occasional instability.
+//!
 //! # Features
 //!
 //! * No TLS, No X.509 Certificates, No Protocol Negotiation
