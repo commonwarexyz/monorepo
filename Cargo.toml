@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "p2p",
+    "examples/chat",
+]
+resolver = "2"
