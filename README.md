@@ -12,7 +12,7 @@
 
 _This directory contains examples of how to use various crates in this repository. The code in these examples is often insecure and is not intended to be used in production._
 
-* [chat](./examples/chat/README.md): TODO  
+* [chat](./examples/chat/README.md): Send encrypted messages to a group of friends using [commonware-p2p](https://crates.io/crates/commonware-p2p). 
 
 ## Licensing
 

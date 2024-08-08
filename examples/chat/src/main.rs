@@ -1,3 +1,5 @@
+//! Send encrypted messages to a group of friends using [commonware-p2p](https://crates.io/crates/commonware-p2p).
+
 use clap::{value_parser, Arg, Command};
 use commonware_p2p::{
     crypto::{self, Crypto},
