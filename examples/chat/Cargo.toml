@@ -4,4 +4,4 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-p2p = { path = "../../p2p" }
+commonware-p2p = { path = "../../p2p" }
