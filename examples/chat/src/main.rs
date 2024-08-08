@@ -1,5 +1,7 @@
 //! Send encrypted messages to a group of friends using [commonware-p2p](https://crates.io/crates/commonware-p2p).
 
+mod logger;
+
 use clap::{value_parser, Arg, Command};
 use commonware_p2p::{
     crypto::{self, Crypto},
@@ -40,75 +42,6 @@ const CHAT_CHANNEL: u32 = 0;
 enum Event<I> {
     Input(I),
     Tick,
-}
-
-// Custom writer that appends log messages to a vector of strings
-struct VecWriter {
-    logs: Arc<Mutex<Vec<String>>>,
-}
-
-fn add_to_log_message(key: &str, value: &serde_json::Value, log_message: &mut String) {
-    if let serde_json::Value::Object(map) = value {
-        for (key, value) in map {
-            add_to_log_message(key, value, log_message);
-        }
-    } else if !key.is_empty()
-        && key != "level"
-        && key != "timestamp"
-        && key != "target"
-        && key != "message"
-    {
-        log_message.push_str(&format!("{}={} ", key, value));
-    }
-}
-
-impl Write for VecWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // Process JSON
-        let json_str = String::from_utf8_lossy(buf);
-        let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-
-        // Create log message
-        let level = json["level"].as_str().unwrap();
-        let timestamp = json["timestamp"].as_str().unwrap();
-        let target = json["target"].as_str().unwrap();
-        let msg = json["fields"]["message"].as_str().unwrap();
-        let mut log_message = format!(
-            "[{}|{}] {} => {} (",
-            chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.6fZ")
-                .unwrap()
-                .format("%m/%d %H:%M:%S"),
-            level,
-            target,
-            msg,
-        );
-
-        // Add remaning fields
-        add_to_log_message("", &json, &mut log_message);
-        let log_message = format!("{})", log_message.trim_end());
-
-        // Cleanup empty logs
-        let log_message = log_message.replace("()", "");
-
-        // Append log message
-        let mut logs = self.logs.lock().unwrap();
-        logs.push(log_message.trim_end().to_string());
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> MakeWriter<'a> for VecWriter {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        VecWriter {
-            logs: Arc::clone(&self.logs),
-        }
-    }
 }
 
 async fn run_chat_handler(
@@ -303,7 +236,7 @@ async fn main() {
 
     // Create logger
     let logs = Arc::new(Mutex::new(Vec::new()));
-    let vec_writer = VecWriter {
+    let vec_writer = logger::VecWriter {
         logs: Arc::clone(&logs),
     };
     tracing_subscriber::fmt()
