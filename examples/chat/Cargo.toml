@@ -1,6 +1,7 @@
 [package]
 name = "commonware-chat"
 edition = "2021"
+publish = true
 
 [dependencies]
 commonware-p2p = { path = "../../p2p" }

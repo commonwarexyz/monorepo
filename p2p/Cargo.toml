@@ -1,5 +1,6 @@
 [package]
 name = "commonware-p2p"
 edition = "2021"
+publish = true
 
 [dependencies]
