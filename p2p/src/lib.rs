@@ -1,4 +1,4 @@
-//! <What it does>
+//! Communicate with authenticated peers over encrypted connections.
 //!
 //! p2p is built
 //!

@@ -2,8 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-p2p.svg)](https://crates.io/crates/commonware-p2p)
 
-
-TODO: description
+Communicate with authenticated peers over encrypted connections.
 
 ## Disclaimer
 

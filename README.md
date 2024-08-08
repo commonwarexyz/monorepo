@@ -6,7 +6,7 @@
 
 ## Primitives 
 
-* [p2p](./p2p/README.md): TODO 
+* [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections. 
 
 ## Examples
 
