@@ -3,6 +3,8 @@ name = "commonware-chat"
 edition = "2021"
 publish = true
 version = "0.0.3"
+license = "MIT OR Apache-2.0"
+description = "chat using commonware-p2p"
 
 [dependencies]
 commonware-p2p = { path = "../../p2p" }

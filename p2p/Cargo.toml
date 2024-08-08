@@ -3,5 +3,7 @@ name = "commonware-p2p"
 edition = "2021"
 publish = true
 version = "0.0.3"
+license = "MIT OR Apache-2.0"
+description = "p2p for blockchains"
 
 [dependencies]
