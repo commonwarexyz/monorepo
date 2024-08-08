@@ -1,6 +1,21 @@
-//! Fully-connected ...
+//! <What it does>
 //!
-//! TODO: Add more documentation here
+//! p2p is built
+//!
+//! # Features
+//!
+//! * no TLS
+//! * chacha20-poly1305 encryption
+//! * native message chunking
+//! * arbitrary crypto identities
+//! * peer discovery using ordered bit vectors
+//! * fully-connected peers
+//! * configurable rate limiting for each message type
+//! * metrics via prometheus
+//! * message prioritization across channels
+//! * multi-plexing over a single connection
+//!
+//! # Example
 //!
 //! ```rust
 //! use commonware_p2p::{
