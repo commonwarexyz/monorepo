@@ -32,7 +32,9 @@
 //! cargo run -- --me=5@3005 --allowed_keys=1,2,3,4,5 --bootstrappers=1@127.0.0.1:3001
 //! ```
 
+#[doc(hidden)]
 mod handler;
+#[doc(hidden)]
 mod logger;
 
 use clap::{value_parser, Arg, Command};
@@ -48,6 +50,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
+#[doc(hidden)]
 #[tokio::main]
 async fn main() {
     // Parse arguments
