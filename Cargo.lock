@@ -198,7 +198,7 @@ checksum = "f74eb2841e68d7ab3135b4128c5c52b7417cc16aefbe50e6fcd5cf140bb0fc47"
 
 [[package]]
 name = "commonware-p2p"
-version = "0.1.0"
+version = "0.0.4"
 dependencies = [
  "bitvec",
  "bytes",

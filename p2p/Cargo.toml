@@ -2,7 +2,7 @@
 name = "commonware-p2p"
 edition = "2021"
 publish = true
-version = "0.1.0"
+version = "0.0.4"
 license = "MIT OR Apache-2.0"
 description = "p2p for blockchains"
 
