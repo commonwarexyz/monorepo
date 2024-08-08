@@ -4,6 +4,8 @@ use governor::Quota;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
+/// Sender is the mechanism used to send arbitrary bytes to
+/// a set of recipients over a pre-defined channel.
 pub struct Sender {
     channel: u32,
     messenger: Messenger,
@@ -14,7 +16,14 @@ impl Sender {
         Self { channel, messenger }
     }
 
-    /// priority is over all messages across all channels
+    /// Sends a message to a set of recipients.
+    ///
+    /// # Parameters
+    ///
+    /// * `recipients` - The set of recipients to send the message to.
+    /// * `message` - The message to send.
+    /// * `priority` - Whether the message should be sent with priority (across
+    /// all channels).
     pub async fn send(&self, recipients: Vec<PublicKey>, message: Bytes, priority: bool) {
         self.messenger
             .content(recipients, self.channel, message, priority)
@@ -39,7 +48,6 @@ impl Channels {
         }
     }
 
-    /// messages can span multiple frames
     pub fn register(
         &mut self,
         channel: u32,
