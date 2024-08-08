@@ -2,8 +2,7 @@ name: Crates
 
 on:
   push:
-    tags:
-      - '*'
+    branches: [ "main" ]
 
 jobs:
   publish:
@@ -17,13 +16,15 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
-
+    
     - name: Publish p2p
       run: cargo publish --manifest-path p2p/Cargo.toml
+      continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
     - name: Publish chat
       run: cargo publish --manifest-path examples/chat/Cargo.toml
+      continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
