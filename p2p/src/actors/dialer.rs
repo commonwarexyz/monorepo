@@ -107,8 +107,10 @@ impl<C: Crypto> Actor<C> {
         );
 
         // Set TCP_NODELAY
-        if let Err(e) = connection.set_nodelay(config.tcp_nodelay) {
-            debug!(peer = hex::encode(&peer), error = ?e, "failed to set TCP_NODELAY")
+        if let Some(nodelay) = config.tcp_nodelay {
+            if let Err(e) = connection.set_nodelay(nodelay) {
+                debug!(peer = hex::encode(&peer), error = ?e, "failed to set TCP_NODELAY")
+            }
         }
 
         // Upgrade connection

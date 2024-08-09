@@ -110,8 +110,10 @@ impl<C: Crypto> Actor<C> {
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
             // Set TCP_NODELAY
-            if let Err(e) = stream.set_nodelay(self.connection.tcp_nodelay) {
-                debug!(ip = ?address.ip(), port = ?address.port(), error = ?e, "failed to set TCP_NODELAY")
+            if let Some(nodelay) = self.connection.tcp_nodelay {
+                if let Err(e) = stream.set_nodelay(nodelay) {
+                    debug!(ip = ?address.ip(), port = ?address.port(), error = ?e, "failed to set TCP_NODELAY")
+                }
             }
 
             // Spawn a new handshaker to upgrade connection
