@@ -113,6 +113,7 @@ impl<C: Crypto> Network<C> {
             handshake_timeout: self.cfg.handshake_timeout,
             read_timeout: self.cfg.read_timeout,
             write_timeout: self.cfg.write_timeout,
+            tcp_nodelay: self.cfg.tcp_nodelay,
         };
         let listener = listener::Actor::new(listener::Config {
             port: self.cfg.address.port(),
