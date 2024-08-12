@@ -63,6 +63,18 @@ pub struct Config<C: Crypto> {
     /// Duration after which to close the connection if a message cannot be written.
     pub write_timeout: Duration,
 
+    /// Whether or not to disable Nagle's algorithm.
+    ///
+    /// The algorithm combines a series of small network packets into a single packet
+    /// before sending to reduce overhead of sending multiple small packets which might not
+    /// be efficient on slow, congested networks. However, to do so the algorithm introduces
+    /// a slight delay as it waits to accumulate more data. Latency-sensitive networks should
+    /// consider disabling it to send the packets as soon as possible to reduce latency.
+    ///
+    /// Note: Make sure that your compile target has and allows this configuration otherwise
+    /// panics or unexpected behaviours are possible.
+    pub tcp_nodelay: Option<bool>,
+
     /// Quota for connection attempts per peer (incoming or outgoing).
     pub allowed_connection_rate_per_peer: Quota,
 
@@ -118,6 +130,7 @@ impl<C: Crypto> Config<C> {
             handshake_timeout: Duration::from_secs(5),
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
+            tcp_nodelay: None,
             allowed_connection_rate_per_peer: Quota::per_minute(NonZeroU32::new(1).unwrap()),
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
             dial_frequency: Duration::from_secs(60),

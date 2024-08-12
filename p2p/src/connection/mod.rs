@@ -19,6 +19,7 @@ pub struct Config<C: Crypto> {
     pub handshake_timeout: Duration,
     pub read_timeout: Duration,
     pub write_timeout: Duration,
+    pub tcp_nodelay: Option<bool>,
 }
 
 #[derive(Debug)]
