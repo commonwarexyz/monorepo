@@ -31,8 +31,8 @@ pub struct Actor<C: Crypto> {
 
     sender: mpsc::Sender<Message>,
     receiver: mpsc::Receiver<Message>,
-    peers: HashMap<PublicKey, Address>,
-    sets: BTreeMap<u64, BTreeSet<PublicKey>>,
+    peers: HashMap<PublicKey, (Address, usize)>,
+    sets: BTreeMap<u64, (HashMap<PublicKey, usize>, BitVec<u8, Lsb0>)>,
     connections_rate_limiter: DefaultKeyedRateLimiter<PublicKey>,
     connections: HashSet<PublicKey>,
 
@@ -41,7 +41,6 @@ pub struct Actor<C: Crypto> {
     rate_limited_connections: Family<metrics::Peer, Counter>,
 
     ip_signature: wire::Peer,
-    bit_vec: Option<wire::BitVec>,
 }
 
 impl<C: Crypto> Actor<C> {
