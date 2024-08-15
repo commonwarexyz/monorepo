@@ -214,6 +214,19 @@ impl<C: Crypto> Actor<C> {
         )
     }
 
+    /// Returns whether a peer is not us and in one of the known peer sets.
+    fn allowed(&self, peer: &PublicKey) -> bool {
+        if *peer == self.crypto.me() {
+            return false;
+        }
+        for set in self.sets.values() {
+            if set.order.contains_key(peer) {
+                return true;
+            }
+        }
+        false
+    }
+
     async fn review_peers(&mut self) {
         // Get latest peer set
         let latest = match self.sets.last_key_value() {
@@ -543,11 +556,27 @@ impl<C: Crypto> Actor<C> {
                     self.connections_rate_limiter.shrink_to_fit();
                 }
                 Message::Register { index, peers } => {
-                    // Store new peer set
-                    let set = self.sets.entry(index).or_default();
-                    for peer in peers {
-                        set.insert(peer);
+                    // Check if peer set already exists
+                    if self.sets.contains_key(&index) {
+                        debug!(index, "peer set already exists");
+                        continue;
                     }
+
+                    // Ensure that peer set is monotonically increasing
+                    match self.sets.keys().last() {
+                        Some(last) if index <= *last => {
+                            debug!(
+                                index,
+                                last, "peer set index must be monotonically increasing"
+                            );
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    // Create and store new peer set
+                    let set = PeerSet::new(index, peers);
+                    self.sets.insert(index, set);
 
                     // Remove oldest entries if necessary
                     while self.sets.len() > self.tracked_peer_sets {
@@ -566,25 +595,14 @@ impl<C: Crypto> Actor<C> {
                 }
                 Message::Reserve { peer, reservation } => {
                     // Get latest peer set
-                    let latest = match self.sets.last_key_value() {
-                        Some((_, set)) => set,
-                        None => {
-                            debug!("no peer sets available");
-                            let _ = reservation.send(None);
-                            continue;
-                        }
-                    };
-
-                    // Check if peer is authorized
-                    if !latest.contains(&peer) {
+                    if self.allowed(&peer) {
+                        // Because dropping the reservation will release the connection,
+                        // we don't need to worry about the case that this fails.
+                        let _ = reservation.send(self.reserve(peer));
+                    } else {
                         debug!(peer = hex::encode(&peer), "peer not authorized to connect");
                         let _ = reservation.send(None);
-                        continue;
                     }
-
-                    // Because dropping the reservation will release the connection,
-                    // we don't need to worry about the case that this fails.
-                    let _ = reservation.send(self.reserve(peer));
                 }
                 Message::Release { peer } => {
                     self.connections.remove(&peer);
