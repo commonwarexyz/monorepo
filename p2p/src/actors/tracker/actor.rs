@@ -5,9 +5,7 @@ pub use super::{
 };
 use crate::{
     crypto::{Crypto, PublicKey},
-    ip,
-    metrics::{self, Peer},
-    wire,
+    ip, metrics, wire,
 };
 use bitvec::prelude::*;
 use governor::DefaultKeyedRateLimiter;
@@ -349,7 +347,12 @@ impl<C: Crypto> Actor<C> {
 
         // Update peer address
         let record = self.peers.get_mut(peer).unwrap();
-        if !record.update(address) {
+        if !record.update(address.clone()) {
+            trace!(
+                peer = hex::encode(peer),
+                wire = address.peer.timestamp,
+                "stored peer newer"
+            );
             return false;
         }
 
