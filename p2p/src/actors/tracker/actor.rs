@@ -21,6 +21,8 @@ use std::{
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
+const DST: &[u8] = b"_COMMONWARE_P2P_IP_";
+
 pub struct Actor<C: Crypto> {
     crypto: C,
     allow_private_ips: bool,
@@ -50,7 +52,7 @@ impl<C: Crypto> Actor<C> {
             .expect("Failed to get current time")
             .as_secs();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
-        let ip_signature = cfg.crypto.sign(payload_bytes);
+        let ip_signature = cfg.crypto.sign(DST, &payload_bytes);
         let ip_signature = wire::Peer {
             socket: socket_bytes,
             timestamp: current_time,
@@ -250,7 +252,7 @@ impl<C: Crypto> Actor<C> {
 
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
-            if !C::verify(payload, public_key, &signature.signature) {
+            if !C::verify(DST, &payload, public_key, &signature.signature) {
                 return Err(Error::InvalidSignature);
             }
 
@@ -624,7 +626,7 @@ mod tests {
         // Provide peer address
         let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
         let (socket_bytes, payload_bytes) = socket_peer_payload(&socket, 0);
-        let ip_signature = peer1_signer.sign(payload_bytes);
+        let ip_signature = peer1_signer.sign(DST, &payload_bytes);
         let peers = wire::Peers {
             peers: vec![wire::Peer {
                 socket: socket_bytes,

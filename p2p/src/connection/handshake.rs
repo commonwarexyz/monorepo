@@ -11,6 +11,8 @@ use tokio::time;
 use tokio_util::codec::Framed;
 use tokio_util::codec::LengthDelimitedCodec;
 
+const DST: &[u8] = b"_COMMONWARE_P2P_HANDSHAKE_";
+
 pub async fn create_handshake<C: Crypto>(
     crypto: &mut C,
     recipient_public_key: PublicKey,
@@ -20,7 +22,7 @@ pub async fn create_handshake<C: Crypto>(
     let mut payload = Vec::new();
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key.as_bytes());
-    let signature = crypto.sign(payload);
+    let signature = crypto.sign(DST, &payload);
 
     // Send handshake
     Ok(wire::Message {
@@ -83,7 +85,7 @@ impl Handshake {
         payload.extend_from_slice(&handshake.ephemeral_public_key);
 
         // Verify signature
-        if !C::verify(payload, &public_key, &signature.signature) {
+        if !C::verify(DST, &payload, &public_key, &signature.signature) {
             return Err(Error::InvalidSignature);
         }
 

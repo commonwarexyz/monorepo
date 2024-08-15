@@ -5,31 +5,31 @@
 //! ## Friend 1 (Bootstrapper)
 //!
 //! ```sh
-//! cargo run -- --me=1@3001 --allowed_keys=1,2,3,4
+//! cargo run -- --me=1@3001 --friends=1,2,3,4
 //! ```
 //!
 //! ## Friend 2
 //!
 //! ```sh
-//! cargo run -- --me=2@3002 --allowed_keys=1,2,3,4 --bootstrappers=1@127.0.0.1:3001
+//! cargo run -- --me=2@3002 --friends=1,2,3,4 --bootstrappers=1@127.0.0.1:3001
 //! ```
 //!
 //! ### Friend 3
 //!
 //! ```sh
-//! cargo run -- --me=3@3003 --allowed_keys=1,2,3,4 --bootstrappers=1@127.0.0.1:3001
+//! cargo run -- --me=3@3003 --friends=1,2,3,4 --bootstrappers=1@127.0.0.1:3001
 //! ```
 //!
 //! ### Friend 4 (Different Friend as Bootstrapper)
 //!
 //! ```sh
-//! cargo run -- --me=4@3004 --allowed_keys=1,2,3,4 --bootstrappers=3@127.0.0.1:3003
+//! cargo run -- --me=4@3004 --friends=1,2,3,4 --bootstrappers=3@127.0.0.1:3003
 //! ```
 //!
 //! ### Not Friend (Blocked)
 //!
 //! ```sh
-//! cargo run -- --me=5@3005 --allowed_keys=1,2,3,4,5 --bootstrappers=1@127.0.0.1:3001
+//! cargo run -- --me=5@3005 --friends=1,2,3,4,5 --bootstrappers=1@127.0.0.1:3001
 //! ```
 
 #[doc(hidden)]
@@ -58,8 +58,8 @@ async fn main() {
         .about("send encrypted messages to a group of friends")
         .arg(Arg::new("me").long("me").required(true))
         .arg(
-            Arg::new("allowed_keys")
-                .long("allowed_keys")
+            Arg::new("friends")
+                .long("friends")
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(u16)),
@@ -98,11 +98,11 @@ async fn main() {
     // Configure allowed peers
     let mut recipients = Vec::new();
     let allowed_keys = matches
-        .get_many::<u16>("allowed_keys")
-        .expect("Please provide allowed keys")
+        .get_many::<u16>("friends")
+        .expect("Please provide friends to chat with")
         .copied();
     if allowed_keys.len() == 0 {
-        panic!("Please provide at least one allowed key");
+        panic!("Please provide at least one friend");
     }
     for peer in allowed_keys {
         let verifier = ed25519::insecure_signer(peer).me();
