@@ -27,6 +27,7 @@ const DST: &[u8] = b"_COMMONWARE_P2P_IP_";
 
 struct PeerSet {
     index: u64,
+    sorted: Vec<PublicKey>,
     order: HashMap<PublicKey, usize>,
     knowldege: BitVec<u8, Lsb0>,
     msg: wire::BitVec,
@@ -52,6 +53,7 @@ impl PeerSet {
 
         Self {
             index,
+            sorted: peers,
             order,
             knowldege,
             msg,
@@ -434,17 +436,16 @@ impl<C: Crypto> Actor<C> {
         let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
 
         // Ensure bit vector is the correct length
-        let required_bytes = (set.len() / 8 + 1) * 8;
+        let required_bytes = (set.order.len() / 8 + 1) * 8;
         if bits.len() != required_bytes {
             return Err(Error::BitVecLengthMismatch(required_bytes, bits.len()));
         }
 
         // Compile peers to send
         let mut peers = Vec::new();
-        let mut set_iter = set.iter();
-        for bit in bits.iter() {
+        for (order, bit) in bits.iter().enumerate() {
             // Check if we have exhausted our known peers
-            let peer = match set_iter.next() {
+            let peer = match set.sorted.get(order) {
                 Some(peer) => peer,
                 None => {
                     if *bit {
@@ -462,14 +463,19 @@ impl<C: Crypto> Actor<C> {
                 continue;
             }
 
-            // Add the peer to the list if its address is unknown
+            // Add the peer to the list if its address is known
             if *peer == self.crypto.me() {
                 peers.push(self.ip_signature.clone());
                 continue;
             }
-            if let Some(Address::Network(signature)) = self.peers.get(peer) {
-                peers.push(signature.peer.clone());
-            }
+            let signature = match self.peers.get(peer) {
+                Some(AddressCount {
+                    address: Some(Address::Network(signature)),
+                    ..
+                }) => signature,
+                _ => continue,
+            };
+            peers.push(signature.peer.clone());
         }
 
         // Return None if no peers to send
@@ -537,7 +543,7 @@ impl<C: Crypto> Actor<C> {
                     }
                 }
                 Message::BitVec { bit_vec, peer } => {
-                    let result = self.handle_bit_vec(bit_vec).await;
+                    let result = self.handle_bit_vec(bit_vec);
                     if let Err(e) = result {
                         debug!(error = ?e, "failed to handle bit vector");
                         peer.kill().await;
