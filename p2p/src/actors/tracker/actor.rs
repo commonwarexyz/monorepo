@@ -14,6 +14,7 @@ use governor::DefaultKeyedRateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
+use rand::prelude::IteratorRandom;
 use rand::{seq::SliceRandom, thread_rng};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
@@ -516,14 +517,19 @@ impl<C: Crypto> Actor<C> {
     }
 
     pub async fn run(mut self) {
-        // TODO: make connection set updates a higher priority than
-        // messaages we receive over the wire (add separate mpsc)
         while let Some(msg) = self.receiver.recv().await {
             match msg {
                 Message::Construct { public_key, peer } => {
-                    // Get latest peer set
-                    let latest = match self.sets.last_key_value() {
-                        Some((_, set)) => set,
+                    // Kill if peer is not authorized
+                    if !self.peers.contains_key(&public_key) {
+                        peer.kill().await;
+                        continue;
+                    }
+
+                    // Select a random peer set (we want to learn about all peers in
+                    // our tracked sets)
+                    let set = match self.sets.values().choose(&mut thread_rng()) {
+                        Some(set) => set,
                         None => {
                             debug!("no peer sets available");
                             peer.kill().await;
@@ -531,16 +537,8 @@ impl<C: Crypto> Actor<C> {
                         }
                     };
 
-                    // Kill if peer is not authorized
-                    if !latest.contains(&public_key) {
-                        peer.kill().await;
-                        continue;
-                    }
-
                     // Send bit vector if stored
-                    if let Some(bit_vec) = self.bit_vec.clone() {
-                        let _ = peer.bit_vec(bit_vec).await;
-                    }
+                    let _ = peer.bit_vec(set.msg()).await;
                 }
                 Message::BitVec { bit_vec, peer } => {
                     let result = self.handle_bit_vec(bit_vec);
