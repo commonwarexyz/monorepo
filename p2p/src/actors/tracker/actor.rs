@@ -5,7 +5,9 @@ pub use super::{
 };
 use crate::{
     crypto::{Crypto, PublicKey},
-    ip, metrics, wire,
+    ip,
+    metrics::{self, Peer},
+    wire,
 };
 use bitvec::prelude::*;
 use governor::DefaultKeyedRateLimiter;
@@ -80,12 +82,14 @@ impl AddressCount {
     fn new_config(address: SocketAddr) -> Self {
         Self {
             address: Address::Config(address),
+            // Ensures that we never remove a bootstrapper (even
+            // if not in any active set)
             count: usize::MAX,
         }
     }
-    fn new_network(peer: wire::Peer) -> Self {
+    fn new_network(address: Signature) -> Self {
         Self {
-            address: Address::Network(peer),
+            address: Address::Network(address),
             count: 1,
         }
     }
@@ -112,7 +116,7 @@ pub struct Actor<C: Crypto> {
 
     sender: mpsc::Sender<Message>,
     receiver: mpsc::Receiver<Message>,
-    peers: HashMap<PublicKey, (Address, usize)>,
+    peers: HashMap<PublicKey, AddressCount>,
     sets: BTreeMap<u64, PeerSet>,
     connections_rate_limiter: DefaultKeyedRateLimiter<PublicKey>,
     connections: HashSet<PublicKey>,
@@ -148,7 +152,7 @@ impl<C: Crypto> Actor<C> {
             if peer == cfg.crypto.me() {
                 continue;
             }
-            peers.insert(peer, (Address::Config(address), usize::MAX));
+            peers.insert(peer, AddressCount::new_config(address));
         }
 
         // Configure peer set
@@ -156,7 +160,7 @@ impl<C: Crypto> Actor<C> {
         if tracked_peer_sets == 0 {
             tracked_peer_sets = 1
         };
-        let sets: BTreeMap<u64, (HashMap<PublicKey, usize>, BitVec<u8, Lsb0>)> = BTreeMap::new();
+        let sets: BTreeMap<u64, PeerSet> = BTreeMap::new();
 
         // Construct channels
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
