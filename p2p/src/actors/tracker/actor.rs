@@ -729,17 +729,36 @@ mod tests {
         // Register new peers
         oracle.register(1, vec![peer2.clone(), peer3.clone()]).await;
 
-        // Request bit vector again
-        mailbox.construct(peer2, peer_mailbox.clone()).await; // peer1 no longer allowed
-        let msg = peer_receiver.recv().await.unwrap();
-        let bit_vec = match msg {
-            peer::Message::BitVec { bit_vec } => bit_vec,
-            _ => panic!("unexpected message"),
-        };
-        assert!(bit_vec.index == 1);
-        let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-        for bit in bits.iter() {
-            assert!(!*bit);
+        // Request bit vector until both indexes returned
+        let mut index_0_returned = false;
+        let mut index_1_returned = false;
+        while !index_0_returned || !index_1_returned {
+            mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
+            let msg = peer_receiver.recv().await.unwrap();
+            let bit_vec = match msg {
+                peer::Message::BitVec { bit_vec } => bit_vec,
+                _ => panic!("unexpected message"),
+            };
+            let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
+            match bit_vec.index {
+                0 => {
+                    for (idx, bit) in bits.iter().enumerate() {
+                        if idx == 1 {
+                            assert!(*bit);
+                        } else {
+                            assert!(!*bit);
+                        }
+                    }
+                    index_0_returned = true
+                }
+                1 => {
+                    for bit in bits.iter() {
+                        assert!(!*bit);
+                    }
+                    index_1_returned = true
+                }
+                _ => panic!("unexpected index"),
+            };
         }
     }
 }
