@@ -58,14 +58,19 @@ impl PeerSet {
         }
     }
 
-    fn found(&mut self, peer: PublicKey) {
+    fn found(&mut self, peer: PublicKey) -> bool {
         if let Some(idx) = self.order.get(&peer) {
             self.knowldege.set(*idx, true);
-            self.msg = wire::BitVec {
-                index: self.index,
-                bits: self.knowldege.clone().into(),
-            };
+            return true;
         }
+        false
+    }
+
+    fn update_msg(&mut self) {
+        self.msg = wire::BitVec {
+            index: self.index,
+            bits: self.knowldege.clone().into(),
+        };
     }
 
     fn msg(&self) -> wire::BitVec {
@@ -74,14 +79,20 @@ impl PeerSet {
 }
 
 struct AddressCount {
-    address: Address,
+    address: Option<Address>,
     count: usize,
 }
 
 impl AddressCount {
+    fn new() -> Self {
+        Self {
+            address: None,
+            count: 1,
+        }
+    }
     fn new_config(address: SocketAddr) -> Self {
         Self {
-            address: Address::Config(address),
+            address: Some(Address::Config(address)),
             // Ensures that we never remove a bootstrapper (even
             // if not in any active set)
             count: usize::MAX,
@@ -89,9 +100,21 @@ impl AddressCount {
     }
     fn new_network(address: Signature) -> Self {
         Self {
-            address: Address::Network(address),
+            address: Some(Address::Network(address)),
             count: 1,
         }
+    }
+    fn update(&mut self, address: Signature) -> bool {
+        if let Some(Address::Network(past)) = &self.address {
+            if past.peer.timestamp >= address.peer.timestamp {
+                return false;
+            }
+        }
+        self.address = Some(Address::Network(address));
+        true
+    }
+    fn has_network(&self) -> bool {
+        matches!(self.address, Some(Address::Network(_)))
     }
     fn increment(&mut self) {
         if self.count == usize::MAX {
@@ -227,34 +250,57 @@ impl<C: Crypto> Actor<C> {
         false
     }
 
-    async fn review_peers(&mut self) {
-        // Get latest peer set
-        let latest = match self.sets.last_key_value() {
-            Some((_, set)) => set,
-            None => {
-                debug!("no peer sets available");
+    /// Stores a new peer set and increments peer counters.
+    fn store_peer_set(&mut self, index: u64, peers: Vec<PublicKey>) {
+        // Check if peer set already exists
+        if self.sets.contains_key(&index) {
+            debug!(index, "peer set already exists");
+            return;
+        }
+
+        // Ensure that peer set is monotonically increasing
+        match self.sets.keys().last() {
+            Some(last) if index <= *last => {
+                debug!(
+                    index,
+                    last, "peer set index must be monotonically increasing"
+                );
                 return;
             }
-        };
+            _ => {}
+        }
 
-        // Check if peers are authorized
-        for peer in self
-            .peers
-            .iter()
-            .filter(|(peer, address)| match address {
-                Address::Config(_) => false, // skip any bootstrappers we haven't received updates from
-                Address::Network(_) => {
-                    if !latest.contains(*peer) {
-                        return true;
-                    }
-                    false
+        // Create and store new peer set
+        let set = PeerSet::new(index, peers.clone());
+        self.sets.insert(index, set);
+
+        // Update stored counters
+        let set = self.sets.get_mut(&index).unwrap();
+        for peer in peers.iter() {
+            if let Some(address) = self.peers.get_mut(peer) {
+                address.increment();
+                if address.has_network() {
+                    set.found(peer.clone());
                 }
-            })
-            .map(|(peer, _)| peer.clone())
-            .collect::<Vec<_>>()
-        {
-            debug!(peer = hex::encode(&peer), "peer no longer authorized");
-            self.peers.remove(&peer);
+            } else {
+                self.peers.insert(peer.clone(), AddressCount::new());
+            }
+        }
+        set.update_msg();
+
+        // Remove oldest entries if necessary
+        while self.sets.len() > self.tracked_peer_sets {
+            let (index, set) = self.sets.pop_first().unwrap();
+            debug!(index, "removed oldest peer set");
+
+            // Iterate over peer set and decrement counts
+            for peer in set.order.keys() {
+                if let Some(address) = self.peers.get_mut(peer) {
+                    if address.decrement() {
+                        self.peers.remove(peer);
+                    }
+                }
+            }
         }
     }
 
@@ -373,35 +419,6 @@ impl<C: Crypto> Actor<C> {
             );
         }
         Ok(())
-    }
-
-    fn update_bit_vec(&mut self) {
-        // Get the latest peer set
-        let (index, set) = match self.sets.last_key_value() {
-            Some((index, set)) => (index, set),
-            None => {
-                debug!("no peer sets available");
-                return;
-            }
-        };
-
-        // Iterate over the peer set and set the bits in the bit vector
-        let mut bits: BitVec<u8, Lsb0> = BitVec::repeat(false, set.len());
-        for (index, peer) in set.iter().enumerate() {
-            if *peer == self.crypto.me() {
-                bits.set(index, true);
-                continue;
-            }
-            if let Some(Address::Network(_)) = self.peers.get(peer) {
-                bits.set(index, true);
-            };
-        }
-
-        // Return the populated bit vector
-        self.bit_vec = Some(wire::BitVec {
-            index: *index,
-            bits: bits.into(),
-        });
     }
 
     async fn handle_bit_vec(&self, bit_vec: wire::BitVec) -> Result<Option<wire::Peers>, Error> {
@@ -556,42 +573,8 @@ impl<C: Crypto> Actor<C> {
                     self.connections_rate_limiter.shrink_to_fit();
                 }
                 Message::Register { index, peers } => {
-                    // Check if peer set already exists
-                    if self.sets.contains_key(&index) {
-                        debug!(index, "peer set already exists");
-                        continue;
-                    }
-
-                    // Ensure that peer set is monotonically increasing
-                    match self.sets.keys().last() {
-                        Some(last) if index <= *last => {
-                            debug!(
-                                index,
-                                last, "peer set index must be monotonically increasing"
-                            );
-                            continue;
-                        }
-                        _ => {}
-                    }
-
-                    // Create and store new peer set
-                    let set = PeerSet::new(index, peers);
-                    self.sets.insert(index, set);
-
-                    // Remove oldest entries if necessary
-                    while self.sets.len() > self.tracked_peer_sets {
-                        let set = self.sets.pop_first();
-                        if let Some((id, _)) = set {
-                            debug!(id, "removed oldest peer set");
-                        }
-                    }
-
-                    // Check if existing peers are still authorized
-                    self.review_peers().await;
+                    self.store_peer_set(index, peers);
                     self.tracked_peers.set(self.peers.len() as i64);
-
-                    // Update stored bit vector
-                    self.update_bit_vec();
                 }
                 Message::Reserve { peer, reservation } => {
                     // Get latest peer set
