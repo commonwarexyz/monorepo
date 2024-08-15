@@ -12,16 +12,119 @@ use governor::DefaultKeyedRateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
+use rand::prelude::IteratorRandom;
 use rand::{seq::SliceRandom, thread_rng};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 const DST: &[u8] = b"_COMMONWARE_P2P_IP_";
+
+struct PeerSet {
+    index: u64,
+    sorted: Vec<PublicKey>,
+    order: HashMap<PublicKey, usize>,
+    knowldege: BitVec<u8, Lsb0>,
+    msg: wire::BitVec,
+}
+
+impl PeerSet {
+    fn new(index: u64, mut peers: Vec<PublicKey>) -> Self {
+        // Insert peers in sorted order
+        peers.sort();
+        let mut order = HashMap::new();
+        for (idx, peer) in peers.iter().enumerate() {
+            order.insert(peer.clone(), idx);
+        }
+
+        // Create bit vector
+        let knowldege = BitVec::repeat(false, peers.len());
+
+        // Create message
+        let msg = wire::BitVec {
+            index,
+            bits: knowldege.clone().into(),
+        };
+
+        Self {
+            index,
+            sorted: peers,
+            order,
+            knowldege,
+            msg,
+        }
+    }
+
+    fn found(&mut self, peer: PublicKey) -> bool {
+        if let Some(idx) = self.order.get(&peer) {
+            self.knowldege.set(*idx, true);
+            return true;
+        }
+        false
+    }
+
+    fn update_msg(&mut self) {
+        self.msg = wire::BitVec {
+            index: self.index,
+            bits: self.knowldege.clone().into(),
+        };
+    }
+
+    fn msg(&self) -> wire::BitVec {
+        self.msg.clone()
+    }
+}
+
+struct AddressCount {
+    address: Option<Address>,
+    count: usize,
+}
+
+impl AddressCount {
+    fn new() -> Self {
+        Self {
+            address: None,
+            count: 1,
+        }
+    }
+    fn new_config(address: SocketAddr) -> Self {
+        Self {
+            address: Some(Address::Config(address)),
+            // Ensures that we never remove a bootstrapper (even
+            // if not in any active set)
+            count: usize::MAX,
+        }
+    }
+    fn set_network(&mut self, address: Signature) -> bool {
+        if let Some(Address::Network(past)) = &self.address {
+            if past.peer.timestamp >= address.peer.timestamp {
+                return false;
+            }
+        }
+        self.address = Some(Address::Network(address));
+        true
+    }
+    fn has_network(&self) -> bool {
+        matches!(self.address, Some(Address::Network(_)))
+    }
+    fn increment(&mut self) {
+        if self.count == usize::MAX {
+            return;
+        }
+        self.count += 1;
+    }
+    fn decrement(&mut self) -> bool {
+        if self.count == usize::MAX {
+            return false;
+        }
+        self.count -= 1;
+        self.count == 0
+    }
+}
 
 pub struct Actor<C: Crypto> {
     crypto: C,
@@ -31,8 +134,8 @@ pub struct Actor<C: Crypto> {
 
     sender: mpsc::Sender<Message>,
     receiver: mpsc::Receiver<Message>,
-    peers: HashMap<PublicKey, Address>,
-    sets: BTreeMap<u64, BTreeSet<PublicKey>>,
+    peers: HashMap<PublicKey, AddressCount>,
+    sets: BTreeMap<u64, PeerSet>,
     connections_rate_limiter: DefaultKeyedRateLimiter<PublicKey>,
     connections: HashSet<PublicKey>,
 
@@ -41,7 +144,6 @@ pub struct Actor<C: Crypto> {
     rate_limited_connections: Family<metrics::Peer, Counter>,
 
     ip_signature: wire::Peer,
-    bit_vec: Option<wire::BitVec>,
 }
 
 impl<C: Crypto> Actor<C> {
@@ -68,7 +170,7 @@ impl<C: Crypto> Actor<C> {
             if peer == cfg.crypto.me() {
                 continue;
             }
-            peers.insert(peer, Address::Config(address));
+            peers.insert(peer, AddressCount::new_config(address));
         }
 
         // Configure peer set
@@ -76,7 +178,7 @@ impl<C: Crypto> Actor<C> {
         if tracked_peer_sets == 0 {
             tracked_peer_sets = 1
         };
-        let sets: BTreeMap<u64, BTreeSet<PublicKey>> = BTreeMap::new();
+        let sets: BTreeMap<u64, PeerSet> = BTreeMap::new();
 
         // Construct channels
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
@@ -124,62 +226,91 @@ impl<C: Crypto> Actor<C> {
                 tracked_peers,
                 reserved_connections,
                 rate_limited_connections,
-
-                bit_vec: None,
             },
             Mailbox::new(sender.clone()),
             Oracle::new(sender),
         )
     }
 
-    async fn review_peers(&mut self) {
-        // Get latest peer set
-        let latest = match self.sets.last_key_value() {
-            Some((_, set)) => set,
-            None => {
-                debug!("no peer sets available");
+    /// Returns whether a peer is not us and in one of the known peer sets.
+    fn allowed(&self, peer: &PublicKey) -> bool {
+        if *peer == self.crypto.me() {
+            return false;
+        }
+        for set in self.sets.values() {
+            if set.order.contains_key(peer) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Stores a new peer set and increments peer counters.
+    fn store_peer_set(&mut self, index: u64, peers: Vec<PublicKey>) {
+        // Check if peer set already exists
+        if self.sets.contains_key(&index) {
+            debug!(index, "peer set already exists");
+            return;
+        }
+
+        // Ensure that peer set is monotonically increasing
+        match self.sets.keys().last() {
+            Some(last) if index <= *last => {
+                debug!(
+                    index,
+                    last, "peer set index must be monotonically increasing"
+                );
                 return;
             }
-        };
+            _ => {}
+        }
 
-        // Check if peers are authorized
-        for peer in self
-            .peers
-            .iter()
-            .filter(|(peer, address)| match address {
-                Address::Config(_) => false, // skip any bootstrappers we haven't received updates from
-                Address::Network(_) => {
-                    if !latest.contains(*peer) {
-                        return true;
-                    }
-                    false
+        // Create and store new peer set
+        let set = PeerSet::new(index, peers.clone());
+        self.sets.insert(index, set);
+
+        // Update stored counters
+        let set = self.sets.get_mut(&index).unwrap();
+        for peer in peers.iter() {
+            if let Some(address) = self.peers.get_mut(peer) {
+                address.increment();
+                if address.has_network() {
+                    set.found(peer.clone());
                 }
-            })
-            .map(|(peer, _)| peer.clone())
-            .collect::<Vec<_>>()
-        {
-            debug!(peer = hex::encode(&peer), "peer no longer authorized");
-            self.peers.remove(&peer);
+            } else {
+                self.peers.insert(peer.clone(), AddressCount::new());
+            }
+        }
+        set.update_msg();
+
+        // Remove oldest entries if necessary
+        while self.sets.len() > self.tracked_peer_sets {
+            let (index, set) = self.sets.pop_first().unwrap();
+            debug!(index, "removed oldest peer set");
+
+            // Iterate over peer set and decrement counts
+            for peer in set.order.keys() {
+                if let Some(address) = self.peers.get_mut(peer) {
+                    if address.decrement() {
+                        self.peers.remove(peer);
+                    }
+                }
+            }
         }
     }
 
-    async fn handle_dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation)> {
+    fn handle_dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation)> {
         // Collect unreserved peers
-        let unreserved_peers: Vec<_> = self
+        let available_peers: Vec<_> = self
             .peers
-            .iter()
-            .filter_map(|(peer, address)| {
-                if !self.connections.contains(peer) {
-                    Some((peer.clone(), address.clone()))
-                } else {
-                    None
-                }
-            })
+            .keys()
+            .filter(|peer| !self.connections.contains(*peer))
+            .cloned()
             .collect();
 
         // Iterate over available peers
         let mut reserved = Vec::new();
-        for (peer, address) in unreserved_peers {
+        for peer in available_peers {
             // Reserve the connection
             let reservation = match self.reserve(peer.clone()) {
                 Some(reservation) => reservation,
@@ -187,34 +318,50 @@ impl<C: Crypto> Actor<C> {
             };
 
             // Grab address
-            let address = match address {
-                Address::Config(address) => address,
-                Address::Network(address_signature) => address_signature.addr,
+            let address = match self.peers.get(&peer).unwrap().address.as_ref() {
+                Some(Address::Network(signature)) => signature.addr,
+                Some(Address::Config(address)) => *address,
+                None => continue,
             };
             reserved.push((peer.clone(), address, reservation));
         }
         reserved
     }
 
-    async fn handle_peers(&mut self, peers: wire::Peers) -> Result<(), Error> {
+    fn handle_peer(&mut self, peer: &PublicKey, address: Signature) -> bool {
+        // Check if peer is authorized
+        if !self.allowed(peer) {
+            return false;
+        }
+
+        // Update peer address
+        let record = self.peers.get_mut(peer).unwrap();
+        let wire_time = address.peer.timestamp;
+        if !record.set_network(address) {
+            trace!(peer = hex::encode(peer), wire_time, "stored peer newer");
+            return false;
+        }
+
+        // Update peer set knowledge
+        for set in self.sets.values_mut() {
+            if set.found(peer.clone()) {
+                set.update_msg();
+            }
+        }
+        true
+    }
+
+    fn handle_peers(&mut self, peers: wire::Peers) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         let peers_len = peers.peers.len();
         if peers_len > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(peers_len));
         }
 
-        // Get latest peer set
-        let latest = match self.sets.last_key_value() {
-            Some((_, set)) => set,
-            None => {
-                // This shouldn't result in us terminating our connection with the peer
-                return Ok(());
-            }
-        };
-
         // We allow peers to be sent in any order when responding to a bit vector (allows
         // for selecting a random subset of peers when there are too many) and allow
         // for duplicates (no need to create an additional set to check this)
+        let mut updated = false;
         for peer in peers.peers {
             // Check if address is well formatted
             let address = socket_from_payload(&peer)?;
@@ -237,79 +384,35 @@ impl<C: Crypto> Actor<C> {
                 return Err(Error::ReceivedSelf);
             }
 
-            // If we already know about a peer and its timestamp is as good, just skip (no need to verify signature)
-            if let Some(Address::Network(stored_peer)) = self.peers.get(public_key) {
-                if stored_peer.peer.timestamp >= peer.timestamp {
-                    trace!(
-                        peer = hex::encode(public_key),
-                        stored = stored_peer.peer.timestamp,
-                        wire = peer.timestamp,
-                        "stored peer newer"
-                    );
-                    continue;
-                }
-            }
-
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
             if !C::verify(DST, &payload, public_key, &signature.signature) {
                 return Err(Error::InvalidSignature);
             }
 
-            // Check if peer is authorized
-            if !latest.contains(public_key) {
-                // We don't throw an error here because we may just have a different
-                // view of who is authorized than the peer that sent us this information.
-                trace!(
-                    peer = hex::encode(public_key),
-                    "peer not authorized for tracking"
-                );
-                continue;
-            }
-
-            // Update interesting peer
-            debug!(peer = hex::encode(public_key), "updated peer record");
-            self.peers.insert(
-                public_key.clone(),
-                Address::Network(Signature {
+            // Attempt to update peer record
+            if self.handle_peer(
+                public_key,
+                Signature {
                     addr: address,
-                    peer,
-                }),
-            );
+                    peer: peer.clone(),
+                },
+            ) {
+                debug!(peer = hex::encode(public_key), "updated peer record");
+                updated = true;
+            }
+        }
+
+        // Update messages for bit vectors
+        if updated {
+            for set in self.sets.values_mut() {
+                set.update_msg();
+            }
         }
         Ok(())
     }
 
-    fn update_bit_vec(&mut self) {
-        // Get the latest peer set
-        let (index, set) = match self.sets.last_key_value() {
-            Some((index, set)) => (index, set),
-            None => {
-                debug!("no peer sets available");
-                return;
-            }
-        };
-
-        // Iterate over the peer set and set the bits in the bit vector
-        let mut bits: BitVec<u8, Lsb0> = BitVec::repeat(false, set.len());
-        for (index, peer) in set.iter().enumerate() {
-            if *peer == self.crypto.me() {
-                bits.set(index, true);
-                continue;
-            }
-            if let Some(Address::Network(_)) = self.peers.get(peer) {
-                bits.set(index, true);
-            };
-        }
-
-        // Return the populated bit vector
-        self.bit_vec = Some(wire::BitVec {
-            index: *index,
-            bits: bits.into(),
-        });
-    }
-
-    async fn handle_bit_vec(&self, bit_vec: wire::BitVec) -> Result<Option<wire::Peers>, Error> {
+    fn handle_bit_vec(&self, bit_vec: wire::BitVec) -> Result<Option<wire::Peers>, Error> {
         // Ensure we have the peerset requested
         let set = match self.sets.get(&bit_vec.index) {
             Some(set) => set,
@@ -323,17 +426,16 @@ impl<C: Crypto> Actor<C> {
         let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
 
         // Ensure bit vector is the correct length
-        let required_bytes = (set.len() / 8 + 1) * 8;
+        let required_bytes = (set.order.len() / 8 + 1) * 8;
         if bits.len() != required_bytes {
             return Err(Error::BitVecLengthMismatch(required_bytes, bits.len()));
         }
 
         // Compile peers to send
         let mut peers = Vec::new();
-        let mut set_iter = set.iter();
-        for bit in bits.iter() {
+        for (order, bit) in bits.iter().enumerate() {
             // Check if we have exhausted our known peers
-            let peer = match set_iter.next() {
+            let peer = match set.sorted.get(order) {
                 Some(peer) => peer,
                 None => {
                     if *bit {
@@ -351,14 +453,19 @@ impl<C: Crypto> Actor<C> {
                 continue;
             }
 
-            // Add the peer to the list if its address is unknown
+            // Add the peer to the list if its address is known
             if *peer == self.crypto.me() {
                 peers.push(self.ip_signature.clone());
                 continue;
             }
-            if let Some(Address::Network(signature)) = self.peers.get(peer) {
-                peers.push(signature.peer.clone());
-            }
+            let signature = match self.peers.get(peer) {
+                Some(AddressCount {
+                    address: Some(Address::Network(signature)),
+                    ..
+                }) => signature,
+                _ => continue,
+            };
+            peers.push(signature.peer.clone());
         }
 
         // Return None if no peers to send
@@ -399,34 +506,30 @@ impl<C: Crypto> Actor<C> {
     }
 
     pub async fn run(mut self) {
-        // TODO: make connection set updates a higher priority than
-        // messaages we receive over the wire (add separate mpsc)
         while let Some(msg) = self.receiver.recv().await {
             match msg {
                 Message::Construct { public_key, peer } => {
-                    // Get latest peer set
-                    let latest = match self.sets.last_key_value() {
-                        Some((_, set)) => set,
-                        None => {
-                            debug!("no peer sets available");
-                            peer.kill().await;
-                            continue;
-                        }
-                    };
-
                     // Kill if peer is not authorized
-                    if !latest.contains(&public_key) {
+                    if !self.peers.contains_key(&public_key) {
                         peer.kill().await;
                         continue;
                     }
 
+                    // Select a random peer set (we want to learn about all peers in
+                    // our tracked sets)
+                    let set = match self.sets.values().choose(&mut thread_rng()) {
+                        Some(set) => set,
+                        None => {
+                            debug!("no peer sets available");
+                            continue;
+                        }
+                    };
+
                     // Send bit vector if stored
-                    if let Some(bit_vec) = self.bit_vec.clone() {
-                        let _ = peer.bit_vec(bit_vec).await;
-                    }
+                    let _ = peer.bit_vec(set.msg()).await;
                 }
                 Message::BitVec { bit_vec, peer } => {
-                    let result = self.handle_bit_vec(bit_vec).await;
+                    let result = self.handle_bit_vec(bit_vec);
                     if let Err(e) = result {
                         debug!(error = ?e, "failed to handle bit vector");
                         peer.kill().await;
@@ -437,72 +540,38 @@ impl<C: Crypto> Actor<C> {
                     }
                 }
                 Message::Peers { peers, peer } => {
-                    // Consider adding new peers
-                    let previous = self.peers.len();
-                    let result = self.handle_peers(peers).await;
+                    // Consider new peer signatures
+                    let result = self.handle_peers(peers);
                     if let Err(e) = result {
                         debug!(error = ?e, "failed to handle peers");
                         peer.kill().await;
                         continue;
                     }
-                    let after = self.peers.len();
-                    self.tracked_peers.set(after as i64);
 
-                    // Update stored bit vector
-                    if previous != after {
-                        self.update_bit_vec();
-                    }
+                    // We will never add/remove tracked peers here, so we
+                    // don't need to update the gauge.
                 }
                 Message::Dialable { peers } => {
                     // Fetch dialable peers
-                    let _ = peers.send(self.handle_dialable().await);
+                    let _ = peers.send(self.handle_dialable());
 
                     // Shirnk to fit rate limiter
                     self.connections_rate_limiter.shrink_to_fit();
                 }
                 Message::Register { index, peers } => {
-                    // Store new peer set
-                    let set = self.sets.entry(index).or_default();
-                    for peer in peers {
-                        set.insert(peer);
-                    }
-
-                    // Remove oldest entries if necessary
-                    while self.sets.len() > self.tracked_peer_sets {
-                        let set = self.sets.pop_first();
-                        if let Some((id, _)) = set {
-                            debug!(id, "removed oldest peer set");
-                        }
-                    }
-
-                    // Check if existing peers are still authorized
-                    self.review_peers().await;
+                    self.store_peer_set(index, peers);
                     self.tracked_peers.set(self.peers.len() as i64);
-
-                    // Update stored bit vector
-                    self.update_bit_vec();
                 }
                 Message::Reserve { peer, reservation } => {
                     // Get latest peer set
-                    let latest = match self.sets.last_key_value() {
-                        Some((_, set)) => set,
-                        None => {
-                            debug!("no peer sets available");
-                            let _ = reservation.send(None);
-                            continue;
-                        }
-                    };
-
-                    // Check if peer is authorized
-                    if !latest.contains(&peer) {
+                    if self.allowed(&peer) {
+                        // Because dropping the reservation will release the connection,
+                        // we don't need to worry about the case that this fails.
+                        let _ = reservation.send(self.reserve(peer));
+                    } else {
                         debug!(peer = hex::encode(&peer), "peer not authorized to connect");
                         let _ = reservation.send(None);
-                        continue;
                     }
-
-                    // Because dropping the reservation will release the connection,
-                    // we don't need to worry about the case that this fails.
-                    let _ = reservation.send(self.reserve(peer));
                 }
                 Message::Release { peer } => {
                     self.connections.remove(&peer);
@@ -534,7 +603,7 @@ mod tests {
             bootstrappers,
             allow_private_ips: true,
             mailbox_size: 32,
-            tracked_peer_sets: 32,
+            tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             peer_gossip_max_count: 32,
         }
@@ -640,7 +709,7 @@ mod tests {
         mailbox.peers(peers, peer_mailbox.clone()).await;
 
         // Request bit vector again
-        mailbox.construct(peer1, peer_mailbox.clone()).await;
+        mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
         let msg = peer_receiver.recv().await.unwrap();
         let bit_vec = match msg {
             peer::Message::BitVec { bit_vec } => bit_vec,
@@ -660,17 +729,72 @@ mod tests {
         // Register new peers
         oracle.register(1, vec![peer2.clone(), peer3.clone()]).await;
 
-        // Request bit vector again
-        mailbox.construct(peer2, peer_mailbox.clone()).await; // peer1 no longer allowed
+        // Request bit vector until both indexes returned
+        let mut index_0_returned = false;
+        let mut index_1_returned = false;
+        while !index_0_returned || !index_1_returned {
+            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await; // peer1 still allowed
+            let msg = peer_receiver.recv().await.unwrap();
+            let bit_vec = match msg {
+                peer::Message::BitVec { bit_vec } => bit_vec,
+                _ => panic!("unexpected message"),
+            };
+            let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
+            match bit_vec.index {
+                0 => {
+                    for (idx, bit) in bits.iter().enumerate() {
+                        if idx == 1 {
+                            assert!(*bit);
+                        } else {
+                            assert!(!*bit);
+                        }
+                    }
+                    index_0_returned = true
+                }
+                1 => {
+                    for bit in bits.iter() {
+                        assert!(!*bit);
+                    }
+                    index_1_returned = true
+                }
+                _ => panic!("unexpected index"),
+            };
+        }
+
+        // Register some peers
+        oracle.register(2, vec![peer2.clone()]).await;
+
+        // Ensure peer1 has been evicted from the peer tracker and should die
+        mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
         let msg = peer_receiver.recv().await.unwrap();
-        let bit_vec = match msg {
-            peer::Message::BitVec { bit_vec } => bit_vec,
-            _ => panic!("unexpected message"),
-        };
-        assert!(bit_vec.index == 1);
-        let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-        for bit in bits.iter() {
-            assert!(!*bit);
+        assert!(matches!(msg, peer::Message::Kill));
+
+        // Wait for valid sets to be returned
+        let mut index_1_returned = false;
+        let mut index_2_returned = false;
+        while !index_1_returned || !index_2_returned {
+            mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
+            let msg = peer_receiver.recv().await.unwrap();
+            let bit_vec = match msg {
+                peer::Message::BitVec { bit_vec } => bit_vec,
+                _ => panic!("unexpected message"),
+            };
+            let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
+            match bit_vec.index {
+                1 => {
+                    for bit in bits.iter() {
+                        assert!(!*bit);
+                    }
+                    index_1_returned = true
+                }
+                2 => {
+                    for bit in bits.iter() {
+                        assert!(!*bit);
+                    }
+                    index_2_returned = true
+                }
+                _ => panic!("unexpected index"),
+            };
         }
     }
 }
