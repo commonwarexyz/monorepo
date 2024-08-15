@@ -603,7 +603,7 @@ mod tests {
             bootstrappers,
             allow_private_ips: true,
             mailbox_size: 32,
-            tracked_peer_sets: 32,
+            tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             peer_gossip_max_count: 32,
         }

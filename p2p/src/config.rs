@@ -87,7 +87,14 @@ pub struct Config<C: Crypto> {
     /// Quota for peers to dial.
     pub dial_rate: Quota,
 
-    /// Number of peer sets to keep in memory for handling peer requests.
+    /// Number of peer sets to track.
+    ///
+    /// We will attempt to maintain connections to peers stored
+    /// across all peer sets, not just the most recent. This allows
+    /// us to continue serving requests to peers that have recently
+    /// been evicted and/or to communicate with peers in a future
+    /// set (if we, for example, are trying to do a reshare of a threshold
+    /// key).
     pub tracked_peer_sets: usize,
 
     /// Frequency we gossip about known peers.
@@ -135,7 +142,7 @@ impl<C: Crypto> Config<C> {
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
             dial_frequency: Duration::from_secs(60),
             dial_rate: Quota::per_second(NonZeroU32::new(30).unwrap()),
-            tracked_peer_sets: 32,
+            tracked_peer_sets: 4,
             gossip_bit_vec_frequency: Duration::from_secs(50),
             allowed_bit_vec_rate: Quota::per_second(NonZeroU32::new(2).unwrap()),
             peer_gossip_max_count: 32,
