@@ -99,13 +99,7 @@ impl AddressCount {
             count: usize::MAX,
         }
     }
-    fn new_network(address: Signature) -> Self {
-        Self {
-            address: Some(Address::Network(address)),
-            count: 1,
-        }
-    }
-    fn update(&mut self, address: Signature) -> bool {
+    fn set_network(&mut self, address: Signature) -> bool {
         if let Some(Address::Network(past)) = &self.address {
             if past.peer.timestamp >= address.peer.timestamp {
                 return false;
@@ -307,21 +301,16 @@ impl<C: Crypto> Actor<C> {
 
     fn handle_dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation)> {
         // Collect unreserved peers
-        let unreserved_peers: Vec<_> = self
+        let available_peers: Vec<_> = self
             .peers
-            .iter()
-            .filter_map(|(peer, address)| {
-                if !self.connections.contains(peer) {
-                    Some((peer.clone(), address.clone()))
-                } else {
-                    None
-                }
-            })
+            .keys()
+            .filter(|peer| !self.connections.contains(*peer))
+            .cloned()
             .collect();
 
         // Iterate over available peers
         let mut reserved = Vec::new();
-        for (peer, address) in unreserved_peers {
+        for peer in available_peers {
             // Reserve the connection
             let reservation = match self.reserve(peer.clone()) {
                 Some(reservation) => reservation,
@@ -329,7 +318,7 @@ impl<C: Crypto> Actor<C> {
             };
 
             // Grab address
-            let address = match &address.address {
+            let address = match self.peers.get(&peer).unwrap().address.as_ref() {
                 Some(Address::Network(signature)) => signature.addr,
                 Some(Address::Config(address)) => *address,
                 None => continue,
@@ -341,18 +330,15 @@ impl<C: Crypto> Actor<C> {
 
     fn handle_peer(&mut self, peer: &PublicKey, address: Signature) -> bool {
         // Check if peer is authorized
-        if !self.allowed(&peer) {
+        if !self.allowed(peer) {
             return false;
         }
 
         // Update peer address
         let record = self.peers.get_mut(peer).unwrap();
-        if !record.update(address.clone()) {
-            trace!(
-                peer = hex::encode(peer),
-                wire = address.peer.timestamp,
-                "stored peer newer"
-            );
+        let wire_time = address.peer.timestamp;
+        if !record.set_network(address) {
+            trace!(peer = hex::encode(peer), wire_time, "stored peer newer");
             return false;
         }
 
