@@ -341,14 +341,14 @@ impl<C: Crypto> Actor<C> {
         reserved
     }
 
-    fn handle_peer(&mut self, peer: PublicKey, address: Signature) -> bool {
+    fn handle_peer(&mut self, peer: &PublicKey, address: Signature) -> bool {
         // Check if peer is authorized
         if !self.allowed(&peer) {
             return false;
         }
 
         // Update peer address
-        let record = self.peers.get_mut(&peer).unwrap();
+        let record = self.peers.get_mut(peer).unwrap();
         if !record.update(address) {
             return false;
         }
@@ -532,7 +532,6 @@ impl<C: Crypto> Actor<C> {
                         Some(set) => set,
                         None => {
                             debug!("no peer sets available");
-                            peer.kill().await;
                             continue;
                         }
                     };
