@@ -5,7 +5,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  publish:
+  Publish:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
