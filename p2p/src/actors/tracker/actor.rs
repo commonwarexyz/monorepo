@@ -406,11 +406,11 @@ impl<C: Crypto> Actor<C> {
 
             // Attempt to update peer record
             if self.handle_peer(
-                peer,
-                Address::Network(Signature {
+                public_key,
+                Signature {
                     addr: address,
                     peer: peer.clone(),
-                }),
+                },
             ) {
                 debug!(peer = hex::encode(public_key), "updated peer record");
                 updated = true;
