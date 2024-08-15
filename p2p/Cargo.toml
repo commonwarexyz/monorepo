@@ -2,12 +2,13 @@
 name = "commonware-p2p"
 edition = "2021"
 publish = true
-version = "0.0.6"
+version = "0.0.7"
 license = "MIT OR Apache-2.0"
 description = "Communicate with authenticated peers over encrypted connections."
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo"
+documentation = "https://docs.rs/commonware-p2p"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
