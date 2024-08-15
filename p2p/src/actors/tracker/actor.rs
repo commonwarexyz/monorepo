@@ -15,13 +15,94 @@ use prometheus_client::metrics::gauge::Gauge;
 use rand::{seq::SliceRandom, thread_rng};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 const DST: &[u8] = b"_COMMONWARE_P2P_IP_";
+
+struct PeerSet {
+    index: u64,
+    order: HashMap<PublicKey, usize>,
+    knowldege: BitVec<u8, Lsb0>,
+    msg: wire::BitVec,
+}
+
+impl PeerSet {
+    fn new(index: u64, mut peers: Vec<PublicKey>) -> Self {
+        // Insert peers in sorted order
+        peers.sort();
+        let mut order = HashMap::new();
+        for (idx, peer) in peers.iter().enumerate() {
+            order.insert(peer.clone(), idx);
+        }
+
+        // Create bit vector
+        let knowldege = BitVec::repeat(false, peers.len());
+
+        // Create message
+        let msg = wire::BitVec {
+            index,
+            bits: knowldege.clone().into(),
+        };
+
+        Self {
+            index,
+            order,
+            knowldege,
+            msg,
+        }
+    }
+
+    fn found(&mut self, peer: PublicKey) {
+        if let Some(idx) = self.order.get(&peer) {
+            self.knowldege.set(*idx, true);
+            self.msg = wire::BitVec {
+                index: self.index,
+                bits: self.knowldege.clone().into(),
+            };
+        }
+    }
+
+    fn msg(&self) -> wire::BitVec {
+        self.msg.clone()
+    }
+}
+
+struct AddressCount {
+    address: Address,
+    count: usize,
+}
+
+impl AddressCount {
+    fn new_config(address: SocketAddr) -> Self {
+        Self {
+            address: Address::Config(address),
+            count: usize::MAX,
+        }
+    }
+    fn new_network(peer: wire::Peer) -> Self {
+        Self {
+            address: Address::Network(peer),
+            count: 1,
+        }
+    }
+    fn increment(&mut self) {
+        if self.count == usize::MAX {
+            return;
+        }
+        self.count += 1;
+    }
+    fn decrement(&mut self) -> bool {
+        if self.count == usize::MAX {
+            return false;
+        }
+        self.count -= 1;
+        self.count == 0
+    }
+}
 
 pub struct Actor<C: Crypto> {
     crypto: C,
@@ -32,7 +113,7 @@ pub struct Actor<C: Crypto> {
     sender: mpsc::Sender<Message>,
     receiver: mpsc::Receiver<Message>,
     peers: HashMap<PublicKey, (Address, usize)>,
-    sets: BTreeMap<u64, (HashMap<PublicKey, usize>, BitVec<u8, Lsb0>)>,
+    sets: BTreeMap<u64, PeerSet>,
     connections_rate_limiter: DefaultKeyedRateLimiter<PublicKey>,
     connections: HashSet<PublicKey>,
 
@@ -67,7 +148,7 @@ impl<C: Crypto> Actor<C> {
             if peer == cfg.crypto.me() {
                 continue;
             }
-            peers.insert(peer, Address::Config(address));
+            peers.insert(peer, (Address::Config(address), usize::MAX));
         }
 
         // Configure peer set
@@ -75,7 +156,7 @@ impl<C: Crypto> Actor<C> {
         if tracked_peer_sets == 0 {
             tracked_peer_sets = 1
         };
-        let sets: BTreeMap<u64, BTreeSet<PublicKey>> = BTreeMap::new();
+        let sets: BTreeMap<u64, (HashMap<PublicKey, usize>, BitVec<u8, Lsb0>)> = BTreeMap::new();
 
         // Construct channels
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
@@ -123,8 +204,6 @@ impl<C: Crypto> Actor<C> {
                 tracked_peers,
                 reserved_connections,
                 rate_limited_connections,
-
-                bit_vec: None,
             },
             Mailbox::new(sender.clone()),
             Oracle::new(sender),
