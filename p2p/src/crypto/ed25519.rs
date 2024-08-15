@@ -1,13 +1,16 @@
 //! Ed25519 implementation of the Crypto trait.
+//!
+//! This implementation uses the `ed25519-consensus` crate to adhere to a strict
+//! set of validation rules for Ed25519 signatures (which is necessary for
+//! stability in a consensus context).
 
 use crate::crypto;
-use ed25519_dalek::{
-    Signature, Signer, SigningKey, Verifier, VerifyingKey, PUBLIC_KEY_LENGTH, SECRET_KEY_LENGTH,
-    SIGNATURE_LENGTH,
-};
+use ed25519_consensus::{Signature, SigningKey, VerificationKey};
 use sha2::{Digest, Sha256};
 
-const MESSAGE_PREFIX: &str = "commonware-p2p";
+const SECRET_KEY_LENGTH: usize = 32;
+const PUBLIC_KEY_LENGTH: usize = 32;
+const SIGNATURE_LENGTH: usize = 64;
 
 /// Ed25519 Signer.
 #[derive(Clone)]
@@ -18,16 +21,17 @@ pub struct Ed25519 {
 
 impl Ed25519 {
     pub fn new(signer: SigningKey) -> Self {
-        let verifier = signer.verifying_key();
+        let verifier = signer.verification_key();
         Self {
             signer,
             verifier: verifier.to_bytes().to_vec().into(),
         }
     }
 
-    fn payload(message: Vec<u8>) -> Vec<u8> {
-        let mut payload = Vec::from(MESSAGE_PREFIX.as_bytes());
-        payload.extend_from_slice(&message);
+    fn payload(dst: &[u8], message: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(dst.len() + message.len());
+        payload.extend_from_slice(dst);
+        payload.extend_from_slice(message);
         payload
     }
 }
@@ -37,39 +41,40 @@ impl crypto::Crypto for Ed25519 {
         self.verifier.clone()
     }
 
-    fn sign(&mut self, message: Vec<u8>) -> crypto::Signature {
-        let payload = Self::payload(message);
+    fn sign(&mut self, dst: &[u8], message: &[u8]) -> crypto::Signature {
+        let payload = Self::payload(dst, message);
         self.signer.sign(&payload).to_bytes().to_vec().into()
     }
 
     fn validate(public_key: &crypto::PublicKey) -> bool {
-        let public_key: &[u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
+        let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
             Ok(key) => key,
             Err(_) => return false,
         };
-        VerifyingKey::from_bytes(public_key).is_ok()
+        VerificationKey::try_from(public_key).is_ok()
     }
 
     fn verify(
-        message: Vec<u8>,
+        dst: &[u8],
+        message: &[u8],
         public_key: &crypto::PublicKey,
         signature: &crypto::Signature,
     ) -> bool {
-        let public_key: &[u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
+        let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
             Ok(key) => key,
             Err(_) => return false,
         };
-        let public_key = match VerifyingKey::from_bytes(public_key) {
+        let public_key = match VerificationKey::try_from(public_key) {
             Ok(key) => key,
             Err(_) => return false,
         };
-        let signature: &[u8; SIGNATURE_LENGTH] = match signature.as_ref().try_into() {
+        let signature: [u8; SIGNATURE_LENGTH] = match signature.as_ref().try_into() {
             Ok(sig) => sig,
             Err(_) => return false,
         };
         let signature = Signature::from(signature);
-        let payload = Self::payload(message);
-        public_key.verify(&payload, &signature).is_ok()
+        let payload = Self::payload(dst, message);
+        public_key.verify(&signature, &payload).is_ok()
     }
 }
 
