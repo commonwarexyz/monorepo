@@ -304,7 +304,7 @@ impl<C: Crypto> Actor<C> {
         }
     }
 
-    async fn handle_dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation)> {
+    fn handle_dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation)> {
         // Collect unreserved peers
         let unreserved_peers: Vec<_> = self
             .peers
@@ -328,34 +328,48 @@ impl<C: Crypto> Actor<C> {
             };
 
             // Grab address
-            let address = match address {
-                Address::Config(address) => address,
-                Address::Network(address_signature) => address_signature.addr,
+            let address = match &address.address {
+                Some(Address::Network(signature)) => signature.addr,
+                Some(Address::Config(address)) => *address,
+                None => continue,
             };
             reserved.push((peer.clone(), address, reservation));
         }
         reserved
     }
 
-    async fn handle_peers(&mut self, peers: wire::Peers) -> Result<(), Error> {
+    fn handle_peer(&mut self, peer: PublicKey, address: Signature) -> bool {
+        // Check if peer is authorized
+        if !self.allowed(&peer) {
+            return false;
+        }
+
+        // Update peer address
+        let record = self.peers.get_mut(&peer).unwrap();
+        if !record.update(address) {
+            return false;
+        }
+
+        // Update peer set knowledge
+        for set in self.sets.values_mut() {
+            if set.found(peer.clone()) {
+                set.update_msg();
+            }
+        }
+        true
+    }
+
+    fn handle_peers(&mut self, peers: wire::Peers) -> Result<(), Error> {
         // Ensure there aren't too many peers sent
         let peers_len = peers.peers.len();
         if peers_len > self.peer_gossip_max_count {
             return Err(Error::TooManyPeers(peers_len));
         }
 
-        // Get latest peer set
-        let latest = match self.sets.last_key_value() {
-            Some((_, set)) => set,
-            None => {
-                // This shouldn't result in us terminating our connection with the peer
-                return Ok(());
-            }
-        };
-
         // We allow peers to be sent in any order when responding to a bit vector (allows
         // for selecting a random subset of peers when there are too many) and allow
         // for duplicates (no need to create an additional set to check this)
+        let mut updated = false;
         for peer in peers.peers {
             // Check if address is well formatted
             let address = socket_from_payload(&peer)?;
@@ -378,50 +392,35 @@ impl<C: Crypto> Actor<C> {
                 return Err(Error::ReceivedSelf);
             }
 
-            // If we already know about a peer and its timestamp is as good, just skip (no need to verify signature)
-            if let Some(Address::Network(stored_peer)) = self.peers.get(public_key) {
-                if stored_peer.peer.timestamp >= peer.timestamp {
-                    trace!(
-                        peer = hex::encode(public_key),
-                        stored = stored_peer.peer.timestamp,
-                        wire = peer.timestamp,
-                        "stored peer newer"
-                    );
-                    continue;
-                }
-            }
-
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
             if !C::verify(DST, &payload, public_key, &signature.signature) {
                 return Err(Error::InvalidSignature);
             }
 
-            // Check if peer is authorized
-            if !latest.contains(public_key) {
-                // We don't throw an error here because we may just have a different
-                // view of who is authorized than the peer that sent us this information.
-                trace!(
-                    peer = hex::encode(public_key),
-                    "peer not authorized for tracking"
-                );
-                continue;
-            }
-
-            // Update interesting peer
-            debug!(peer = hex::encode(public_key), "updated peer record");
-            self.peers.insert(
-                public_key.clone(),
+            // Attempt to update peer record
+            if self.handle_peer(
+                peer,
                 Address::Network(Signature {
                     addr: address,
-                    peer,
+                    peer: peer.clone(),
                 }),
-            );
+            ) {
+                debug!(peer = hex::encode(public_key), "updated peer record");
+                updated = true;
+            }
+        }
+
+        // Update messages for bit vectors
+        if updated {
+            for set in self.sets.values_mut() {
+                set.update_msg();
+            }
         }
         Ok(())
     }
 
-    async fn handle_bit_vec(&self, bit_vec: wire::BitVec) -> Result<Option<wire::Peers>, Error> {
+    fn handle_bit_vec(&self, bit_vec: wire::BitVec) -> Result<Option<wire::Peers>, Error> {
         // Ensure we have the peerset requested
         let set = match self.sets.get(&bit_vec.index) {
             Some(set) => set,
@@ -549,25 +548,20 @@ impl<C: Crypto> Actor<C> {
                     }
                 }
                 Message::Peers { peers, peer } => {
-                    // Consider adding new peers
-                    let previous = self.peers.len();
-                    let result = self.handle_peers(peers).await;
+                    // Consider new peer signatures
+                    let result = self.handle_peers(peers);
                     if let Err(e) = result {
                         debug!(error = ?e, "failed to handle peers");
                         peer.kill().await;
                         continue;
                     }
-                    let after = self.peers.len();
-                    self.tracked_peers.set(after as i64);
 
-                    // Update stored bit vector
-                    if previous != after {
-                        self.update_bit_vec();
-                    }
+                    // We will never add/remove tracked peers here, so we
+                    // don't need to update the gauge.
                 }
                 Message::Dialable { peers } => {
                     // Fetch dialable peers
-                    let _ = peers.send(self.handle_dialable().await);
+                    let _ = peers.send(self.handle_dialable());
 
                     // Shirnk to fit rate limiter
                     self.connections_rate_limiter.shrink_to_fit();
