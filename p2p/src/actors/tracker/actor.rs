@@ -709,7 +709,7 @@ mod tests {
         mailbox.peers(peers, peer_mailbox.clone()).await;
 
         // Request bit vector again
-        mailbox.construct(peer1, peer_mailbox.clone()).await;
+        mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
         let msg = peer_receiver.recv().await.unwrap();
         let bit_vec = match msg {
             peer::Message::BitVec { bit_vec } => bit_vec,
@@ -733,7 +733,7 @@ mod tests {
         let mut index_0_returned = false;
         let mut index_1_returned = false;
         while !index_0_returned || !index_1_returned {
-            mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
+            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await; // peer1 still allowed
             let msg = peer_receiver.recv().await.unwrap();
             let bit_vec = match msg {
                 peer::Message::BitVec { bit_vec } => bit_vec,
@@ -756,6 +756,42 @@ mod tests {
                         assert!(!*bit);
                     }
                     index_1_returned = true
+                }
+                _ => panic!("unexpected index"),
+            };
+        }
+
+        // Register some peers
+        oracle.register(2, vec![peer2.clone()]).await;
+
+        // Ensure peer1 has been evicted from the peer tracker and should die
+        mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
+        let msg = peer_receiver.recv().await.unwrap();
+        assert!(matches!(msg, peer::Message::Kill));
+
+        // Wait for valid sets to be returned
+        let mut index_1_returned = false;
+        let mut index_2_returned = false;
+        while !index_1_returned || !index_2_returned {
+            mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
+            let msg = peer_receiver.recv().await.unwrap();
+            let bit_vec = match msg {
+                peer::Message::BitVec { bit_vec } => bit_vec,
+                _ => panic!("unexpected message"),
+            };
+            let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
+            match bit_vec.index {
+                1 => {
+                    for bit in bits.iter() {
+                        assert!(!*bit);
+                    }
+                    index_1_returned = true
+                }
+                2 => {
+                    for bit in bits.iter() {
+                        assert!(!*bit);
+                    }
+                    index_2_returned = true
                 }
                 _ => panic!("unexpected index"),
             };
