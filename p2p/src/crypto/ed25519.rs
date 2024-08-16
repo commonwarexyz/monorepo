@@ -28,9 +28,9 @@ impl Ed25519 {
         }
     }
 
-    fn payload(dst: &[u8], message: &[u8]) -> Vec<u8> {
-        let mut payload = Vec::with_capacity(dst.len() + message.len());
-        payload.extend_from_slice(dst);
+    fn payload(namespace: &[u8], message: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(namespace.len() + message.len());
+        payload.extend_from_slice(namespace);
         payload.extend_from_slice(message);
         payload
     }
@@ -41,8 +41,8 @@ impl crypto::Crypto for Ed25519 {
         self.verifier.clone()
     }
 
-    fn sign(&mut self, dst: &[u8], message: &[u8]) -> crypto::Signature {
-        let payload = Self::payload(dst, message);
+    fn sign(&mut self, namespace: &[u8], message: &[u8]) -> crypto::Signature {
+        let payload = Self::payload(namespace, message);
         self.signer.sign(&payload).to_bytes().to_vec().into()
     }
 
@@ -55,7 +55,7 @@ impl crypto::Crypto for Ed25519 {
     }
 
     fn verify(
-        dst: &[u8],
+        namespace: &[u8],
         message: &[u8],
         public_key: &crypto::PublicKey,
         signature: &crypto::Signature,
@@ -73,7 +73,7 @@ impl crypto::Crypto for Ed25519 {
             Err(_) => return false,
         };
         let signature = Signature::from(signature);
-        let payload = Self::payload(dst, message);
+        let payload = Self::payload(namespace, message);
         public_key.verify(&signature, &payload).is_ok()
     }
 }
