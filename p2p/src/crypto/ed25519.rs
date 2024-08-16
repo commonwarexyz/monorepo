@@ -4,7 +4,7 @@
 //! set of validation rules for Ed25519 signatures (which is necessary for
 //! stability in a consensus context).
 
-use crate::crypto;
+use crate::crypto::{self, utils::payload};
 use ed25519_consensus::{Signature, SigningKey, VerificationKey};
 use sha2::{Digest, Sha256};
 
@@ -27,13 +27,6 @@ impl Ed25519 {
             verifier: verifier.to_bytes().to_vec().into(),
         }
     }
-
-    fn payload(namespace: &[u8], message: &[u8]) -> Vec<u8> {
-        let mut payload = Vec::with_capacity(namespace.len() + message.len());
-        payload.extend_from_slice(namespace);
-        payload.extend_from_slice(message);
-        payload
-    }
 }
 
 impl crypto::Crypto for Ed25519 {
@@ -42,7 +35,7 @@ impl crypto::Crypto for Ed25519 {
     }
 
     fn sign(&mut self, namespace: &[u8], message: &[u8]) -> crypto::Signature {
-        let payload = Self::payload(namespace, message);
+        let payload = payload(namespace, message);
         self.signer.sign(&payload).to_bytes().to_vec().into()
     }
 
@@ -73,7 +66,7 @@ impl crypto::Crypto for Ed25519 {
             Err(_) => return false,
         };
         let signature = Signature::from(signature);
-        let payload = Self::payload(namespace, message);
+        let payload = payload(namespace, message);
         public_key.verify(&signature, &payload).is_ok()
     }
 }
