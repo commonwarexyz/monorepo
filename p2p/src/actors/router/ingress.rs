@@ -12,7 +12,7 @@ pub enum Message {
         peer: PublicKey,
     },
     Content {
-        recipients: Vec<PublicKey>,
+        recipients: Option<Vec<PublicKey>>,
         channel: u32,
         message: Bytes,
         priority: bool,
@@ -59,7 +59,7 @@ impl Messenger {
 
     pub async fn content(
         &self,
-        recipients: Vec<PublicKey>,
+        recipients: Option<Vec<PublicKey>>,
         channel: u32,
         message: Bytes,
         priority: bool,
