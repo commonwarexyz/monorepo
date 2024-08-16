@@ -1,4 +1,4 @@
-use commonware_p2p::{crypto::PublicKey, Receiver, Sender};
+use commonware_p2p::{Receiver, Sender};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
@@ -30,7 +30,6 @@ pub async fn run(
     me: String,
     registry: Arc<Mutex<Registry>>,
     logs: Arc<Mutex<Vec<String>>>,
-    peers: Vec<PublicKey>,
     sender: Sender,
     mut receiver: Receiver,
 ) {
@@ -156,7 +155,7 @@ pub async fn run(
                                 continue;
                             }
                             sender
-                                .send(peers.clone(), input.clone().into_bytes().into(), false)
+                                .send(None, input.clone().into_bytes().into(), false)
                                 .await;
                             let msg = Line::styled(format!(
                                 "[{}] {}: {}",

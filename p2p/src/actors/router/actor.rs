@@ -63,31 +63,41 @@ impl Actor {
                     message,
                     priority,
                 } => {
-                    for recipient in recipients {
-                        if let Some(messenger) = self.connections.get(&recipient) {
-                            match messenger
-                                .content(channel, message.clone(), priority)
-                                .await
-                            {
+                    if let Some(recipients) = recipients {
+                        for recipient in recipients {
+                            if let Some(messenger) = self.connections.get(&recipient) {
+                                match messenger.content(channel, message.clone(), priority).await {
+                                    Ok(()) => {
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        self.messages_dropped
+                                            .get_or_create(&metrics::Message::new_chunk(
+                                                &recipient, channel,
+                                            ))
+                                            .inc();
+                                    }
+                                }
+                            } else {
+                                self.messages_dropped
+                                    .get_or_create(&metrics::Message::new_chunk(
+                                        &recipient, channel,
+                                    ))
+                                    .inc();
+                            }
+                        }
+                    } else {
+                        for (peer, messenger) in self.connections.iter() {
+                            match messenger.content(channel, message.clone(), priority).await {
                                 Ok(()) => {
                                     continue;
                                 }
                                 Err(_) => {
                                     self.messages_dropped
-                                        .get_or_create(&metrics::Message::new_chunk(
-                                            &recipient,
-                                            channel,
-                                        ))
+                                        .get_or_create(&metrics::Message::new_chunk(peer, channel))
                                         .inc();
                                 }
                             }
-                        } else {
-                            self.messages_dropped
-                                .get_or_create(&metrics::Message::new_chunk(
-                                    &recipient,
-                                    channel,
-                                ))
-                                .inc();
                         }
                     }
                 }

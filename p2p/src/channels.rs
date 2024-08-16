@@ -28,11 +28,13 @@ impl Sender {
     ///
     /// # Parameters
     ///
-    /// * `recipients` - The set of recipients to send the message to.
+    /// * `recipients` - If `Some`, the set of recipients to send the message to. If `None`,
+    ///   all connected peers that we are tracking across registered peer sets (that have
+    ///   yet to be pruned).
     /// * `message` - The message to send.
     /// * `priority` - Whether the message should be sent with priority (across
     ///   all channels).
-    pub async fn send(&self, recipients: Vec<PublicKey>, message: Bytes, priority: bool) {
+    pub async fn send(&self, recipients: Option<Vec<PublicKey>>, message: Bytes, priority: bool) {
         self.messenger
             .content(recipients, self.channel, message, priority)
             .await;

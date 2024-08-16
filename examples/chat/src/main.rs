@@ -141,7 +141,7 @@ async fn main() {
     //
     // In a real-world scenario, this would be updated as new peer sets are created (like when
     // the composition of a validator set changes).
-    oracle.register(0, recipients.clone()).await;
+    oracle.register(0, recipients).await;
 
     // Initialize chat
     let (chat_sender, chat_receiver) = network.register(
@@ -159,7 +159,6 @@ async fn main() {
         hex::encode(signer.me()),
         registry,
         logs,
-        recipients,
         chat_sender,
         chat_receiver,
     )
