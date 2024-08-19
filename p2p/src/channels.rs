@@ -14,6 +14,7 @@ pub type Receiver = mpsc::Receiver<Message>;
 
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
+#[derive(Clone)]
 pub struct Sender {
     channel: u32,
     messenger: Messenger,
