@@ -281,6 +281,11 @@ impl<C: Crypto> Actor<C> {
                 self.peers.insert(peer.clone(), AddressCount::new());
             }
         }
+
+        // Add self
+        set.found(self.crypto.me());
+
+        // Update bit vector now that we have changed it
         set.update_msg();
 
         // Remove oldest entries if necessary
