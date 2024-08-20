@@ -281,6 +281,11 @@ impl<C: Crypto> Actor<C> {
                 self.peers.insert(peer.clone(), AddressCount::new());
             }
         }
+
+        // Add self
+        set.found(self.crypto.me());
+
+        // Update bit vector now that we have changed it
         set.update_msg();
 
         // Remove oldest entries if necessary
@@ -654,7 +659,8 @@ mod tests {
     #[tokio::test]
     async fn test_bit_vec() {
         // Create actor
-        let cfg = test_config(ed25519::insecure_signer(0), Vec::new());
+        let peer0 = ed25519::insecure_signer(0);
+        let cfg = test_config(peer0.clone(), Vec::new());
         let (actor, mailbox, oracle) = Actor::new(cfg);
 
         // Run actor in background
@@ -676,7 +682,10 @@ mod tests {
 
         // Register some peers
         oracle
-            .register(0, vec![peer1.clone(), peer2.clone(), peer3.clone()])
+            .register(
+                0,
+                vec![peer0.me(), peer1.clone(), peer2.clone(), peer3.clone()],
+            )
             .await;
 
         // Request bit vector
@@ -688,8 +697,12 @@ mod tests {
         };
         assert!(bit_vec.index == 0);
         let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-        for bit in bits.iter() {
-            assert!(!*bit);
+        for (idx, bit) in bits.iter().enumerate() {
+            if idx == 3 {
+                assert!(*bit);
+            } else {
+                assert!(!*bit);
+            }
         }
 
         // Provide peer address
@@ -718,8 +731,9 @@ mod tests {
         assert!(bit_vec.index == 0);
         let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
         for (idx, bit) in bits.iter().enumerate() {
-            if idx == 1 {
+            if idx == 1 || idx == 3 {
                 // peer1 is the second peer in the bit vector (sorted by public key)
+                // peer3 is us
                 assert!(*bit);
             } else {
                 assert!(!*bit);
@@ -743,7 +757,7 @@ mod tests {
             match bit_vec.index {
                 0 => {
                     for (idx, bit) in bits.iter().enumerate() {
-                        if idx == 1 {
+                        if idx == 1 || idx == 3 {
                             assert!(*bit);
                         } else {
                             assert!(!*bit);
