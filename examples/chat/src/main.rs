@@ -128,12 +128,11 @@ async fn main() {
 
     // Configure network
     let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-    let config = Config::default(
+    let config = Config::aggressive(
         signer.clone(),
         registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        true,
     );
     let (mut network, oracle) = Network::new(config);
 

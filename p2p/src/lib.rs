@@ -58,14 +58,13 @@
 //!
 //!     // Configure network
 //!     //
-//!     // In production use, it is not recommended to allow private IPs.
+//!     // In production use, it is recommended to use the `deafault` config.
 //!     let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-//!     let config = Config::default(
+//!     let config = Config::aggressive(
 //!         signer.clone(),
 //!         registry,
 //!         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!         bootstrappers,
-//!         true,
 //!     );
 //!     let (mut network, oracle) = Network::new(config);
 //!
