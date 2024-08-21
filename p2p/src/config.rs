@@ -117,7 +117,7 @@ pub struct Config<C: Crypto> {
 }
 
 impl<C: Crypto> Config<C> {
-    /// Generates a configuration with reasonable defaults for production usage.
+    /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         crypto: C,
         registry: Arc<Mutex<Registry>>,
@@ -149,9 +149,10 @@ impl<C: Crypto> Config<C> {
         }
     }
 
-    /// Generates a configuration with aggressive defaults that minimize peer discovery latency.
+    /// Generates a configuration that minimizes peer discovery latency. This
+    /// configuration is commonly used when running local demos.
     ///
-    /// This configuration is not recommended for production use.
+    /// Do not use this configuration in production!
     pub fn aggressive(
         crypto: C,
         registry: Arc<Mutex<Registry>>,
