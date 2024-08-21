@@ -117,21 +117,20 @@ pub struct Config<C: Crypto> {
 }
 
 impl<C: Crypto> Config<C> {
-    /// Default produces a new configuration with reasonable defaults.
-    pub fn default(
+    /// Generates a configuration with reasonable defaults for usage in production.
+    pub fn recommended(
         crypto: C,
         registry: Arc<Mutex<Registry>>,
         address: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
-        allow_private_ips: bool,
     ) -> Self {
         Self {
             crypto,
             registry,
             address,
             bootstrappers,
-            allow_private_ips,
 
+            allow_private_ips: false,
             mailbox_size: 1_000,
             max_frame_length: 1024 * 1024, // 1 MB
             handshake_timeout: Duration::from_secs(5),
@@ -141,12 +140,48 @@ impl<C: Crypto> Config<C> {
             allowed_connection_rate_per_peer: Quota::per_minute(NonZeroU32::new(1).unwrap()),
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
             dial_frequency: Duration::from_secs(60),
-            dial_rate: Quota::per_second(NonZeroU32::new(30).unwrap()),
+            dial_rate: Quota::per_minute(NonZeroU32::new(30).unwrap()),
             tracked_peer_sets: 4,
             gossip_bit_vec_frequency: Duration::from_secs(50),
             allowed_bit_vec_rate: Quota::per_second(NonZeroU32::new(2).unwrap()),
             peer_gossip_max_count: 32,
             allowed_peers_rate: Quota::per_second(NonZeroU32::new(2).unwrap()),
+        }
+    }
+
+    /// Generates a configuration that minimizes peer discovery latency. This
+    /// can be useful when running local demos.
+    ///
+    /// # Warning
+    /// It is not recommended to use this configuration in production.
+    pub fn aggressive(
+        crypto: C,
+        registry: Arc<Mutex<Registry>>,
+        address: SocketAddr,
+        bootstrappers: Vec<Bootstrapper>,
+    ) -> Self {
+        Self {
+            crypto,
+            registry,
+            address,
+            bootstrappers,
+
+            allow_private_ips: true,
+            mailbox_size: 1_000,
+            max_frame_length: 1024 * 1024, // 1 MB
+            handshake_timeout: Duration::from_secs(5),
+            read_timeout: Duration::from_secs(60),
+            write_timeout: Duration::from_secs(30),
+            tcp_nodelay: None,
+            allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+            allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
+            dial_frequency: Duration::from_secs(5),
+            dial_rate: Quota::per_second(NonZeroU32::new(30).unwrap()),
+            tracked_peer_sets: 4,
+            gossip_bit_vec_frequency: Duration::from_secs(5),
+            allowed_bit_vec_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
+            peer_gossip_max_count: 32,
+            allowed_peers_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
         }
     }
 }

@@ -40,12 +40,12 @@
 //! async fn main() {
 //!     // Generate identity
 //!     //
-//!     // In production use, the signer should be generated from a secure source of entropy.
+//!     // In production, the signer should be generated from a secure source of entropy.
 //!     let signer = ed25519::insecure_signer(0);
 //!
 //!     // Generate peers
 //!     //
-//!     // In production use, peer identities will be provided by some external source of truth
+//!     // In production, peer identities will be provided by some external source of truth
 //!     // (like the staking set of a blockchain).
 //!     let peer1 = ed25519::insecure_signer(1).me();
 //!     let peer2 = ed25519::insecure_signer(2).me();
@@ -53,25 +53,24 @@
 //!
 //!     // Configure bootstrappers
 //!     //
-//!     // In production use, it is likely that the address of bootstrappers will be some public address.
+//!     // In production, it is likely that the address of bootstrappers will be some public address.
 //!     let bootstrappers = vec![(peer1.clone(), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001))];
 //!
 //!     // Configure network
 //!     //
-//!     // In production use, it is not recommended to allow private IPs.
+//!     // In production, use a more conservative configuration like `Config::recommended`.
 //!     let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-//!     let config = Config::default(
+//!     let config = Config::aggressive(
 //!         signer.clone(),
 //!         registry,
 //!         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!         bootstrappers,
-//!         true,
 //!     );
 //!     let (mut network, oracle) = Network::new(config);
 //!
 //!     // Register authorized peers
 //!     //
-//!     // In production use, this would be updated as new peer sets are created (like when
+//!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
 //!     oracle.register(0, vec![signer.me(), peer1, peer2, peer3]);
 //!
