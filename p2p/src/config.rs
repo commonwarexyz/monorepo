@@ -150,9 +150,10 @@ impl<C: Crypto> Config<C> {
     }
 
     /// Generates a configuration that minimizes peer discovery latency. This
-    /// configuration is commonly used when running local demos.
+    /// can be useful when running local demos.
     ///
-    /// Do not use this configuration in production!
+    /// # Warning
+    /// It is not recommended to use this configuration in production.
     pub fn aggressive(
         crypto: C,
         registry: Arc<Mutex<Registry>>,
