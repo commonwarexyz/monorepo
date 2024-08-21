@@ -170,8 +170,8 @@ impl<C: Crypto> Config<C> {
             mailbox_size: 1_000,
             max_frame_length: 1024 * 1024, // 1 MB
             handshake_timeout: Duration::from_secs(5),
-            read_timeout: Duration::from_secs(60),
-            write_timeout: Duration::from_secs(30),
+            read_timeout: Duration::from_secs(10), // should be greater than gossip_bit_vec_frequency
+            write_timeout: Duration::from_secs(10),
             tcp_nodelay: None,
             allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
