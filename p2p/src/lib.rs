@@ -98,7 +98,6 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
-pub mod crypto;
 pub use actors::tracker::Oracle;
 pub use channels::{Message, Receiver, Sender};
 pub use config::{Bootstrapper, Config};

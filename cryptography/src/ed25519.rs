@@ -6,6 +6,7 @@
 
 use crate::{utils::payload, PublicKey, Scheme, Signature};
 use ed25519_consensus;
+use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 
 const SECRET_KEY_LENGTH: usize = 32;
@@ -20,12 +21,30 @@ pub struct Ed25519 {
 }
 
 impl Ed25519 {
-    pub fn new(signer: ed25519_consensus::SigningKey) -> Self {
+    /// Creates a new Ed25519 signer using randomness from the operating system.
+    pub fn new() -> Self {
+        let signer = ed25519_consensus::SigningKey::new(OsRng);
         let verifier = signer.verification_key();
         Self {
             signer,
             verifier: verifier.to_bytes().to_vec().into(),
         }
+    }
+
+    /// Creates a new Ed25519 signer from a secret key.
+    pub fn from(signer: [u8; SECRET_KEY_LENGTH]) -> Self {
+        let signer = ed25519_consensus::SigningKey::from(signer);
+        let verifier = signer.verification_key();
+        Self {
+            signer,
+            verifier: verifier.to_bytes().to_vec().into(),
+        }
+    }
+}
+
+impl Default for Ed25519 {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -80,5 +99,5 @@ impl Scheme for Ed25519 {
 /// It should never be used in production.
 pub fn insecure_signer(seed: u16) -> Ed25519 {
     let secret_key: [u8; SECRET_KEY_LENGTH] = Sha256::digest(seed.to_be_bytes()).into();
-    Ed25519::new(ed25519_consensus::SigningKey::from(secret_key))
+    Ed25519::from(secret_key)
 }

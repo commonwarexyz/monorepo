@@ -1,31 +1,30 @@
 //! Listener
 
-use std::net::{Ipv4Addr, SocketAddr};
-
 use crate::{
     actors::{spawner, tracker},
     connection::{self, IncomingHandshake, Stream},
-    crypto::Crypto,
 };
+use commonware_cryptography::Scheme;
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
+use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::debug;
 
 /// Configuration for the listener actor.
-pub struct Config<C: Crypto> {
+pub struct Config<C: Scheme> {
     pub port: u16,
     pub connection: connection::Config<C>,
     pub allowed_incoming_connectioned_rate: Quota,
 }
 
-pub struct Actor<C: Crypto> {
+pub struct Actor<C: Scheme> {
     port: u16,
     connection: connection::Config<C>,
 
     rate_limiter: DefaultDirectRateLimiter,
 }
 
-impl<C: Crypto> Actor<C> {
+impl<C: Scheme> Actor<C> {
     pub fn new(cfg: Config<C>) -> Self {
         Self {
             port: cfg.port,

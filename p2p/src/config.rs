@@ -1,4 +1,4 @@
-use crate::crypto::{Crypto, PublicKey};
+use commonware_cryptography::{PublicKey, Scheme};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
@@ -19,7 +19,7 @@ pub type Bootstrapper = (PublicKey, SocketAddr);
 /// If this is not sycnhronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
 /// and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
-pub struct Config<C: Crypto> {
+pub struct Config<C: Scheme> {
     /// Cryptographic primitives.
     pub crypto: C,
 
@@ -116,7 +116,7 @@ pub struct Config<C: Crypto> {
     pub allowed_peers_rate: Quota,
 }
 
-impl<C: Crypto> Config<C> {
+impl<C: Scheme> Config<C> {
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         crypto: C,

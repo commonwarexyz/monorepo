@@ -1,4 +1,4 @@
-use crate::crypto::PublicKey;
+use commonware_cryptography::PublicKey;
 use prometheus_client::encoding::EncodeLabelSet;
 
 const HANDSHAKE_TYPE: i32 = -1;

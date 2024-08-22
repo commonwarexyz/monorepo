@@ -5,12 +5,12 @@ use crate::{
     channels::{self, Channels},
     config::Config,
     connection,
-    crypto::Crypto,
 };
+use commonware_cryptography::Scheme;
 use tracing::info;
 
 /// Instance of a commonware-p2p network.
-pub struct Network<C: Crypto> {
+pub struct Network<C: Scheme> {
     cfg: Config<C>,
 
     channels: Channels,
@@ -20,7 +20,7 @@ pub struct Network<C: Crypto> {
     router_mailbox: router::Mailbox,
 }
 
-impl<C: Crypto> Network<C> {
+impl<C: Scheme> Network<C> {
     /// Create a new instance of a commonware-p2p network.
     ///
     /// # Parameters
