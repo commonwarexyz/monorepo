@@ -11,7 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo"
 documentation = "https://docs.rs/commonware-cryptography"
 
 [dependencies]
-bytes = "1"
+bytes = { workspace = true }
 ed25519-consensus = "2.1.0"
 sha2 = "0.10"
 rand = "0.8"

@@ -2,7 +2,7 @@
 name = "commonware-chat"
 edition = "2021"
 publish = true
-version = "0.0.12"
+version = "0.0.13"
 license = "MIT OR Apache-2.0"
 description = "Send encrypted messages to a group of friends using commonware-cryptography and commonware-p2p."
 readme = "README.md"
@@ -11,8 +11,8 @@ repository = "https://github.com/commonwarexyz/monorepo"
 documentation = "https://docs.rs/commonware-chat"
 
 [dependencies]
-commonware-cryptography = { version = "0.0.3", path = "../../cryptography" }
-commonware-p2p = { version = "0.0.11", path = "../../p2p" } 
+commonware-cryptography = { workspace = true }
+commonware-p2p = { workspace = true } 
 tokio = { version = "1", features = ["full"] }
 clap = "4"
 chrono = "0.4"
