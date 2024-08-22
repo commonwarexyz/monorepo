@@ -6,7 +6,7 @@
 
 ## Primitives 
 
-* [cryptography](./cryptography/README.md): Cryptography primitives tailored for distributed systems running in byzantine environments.
+* [cryptography](./cryptography/README.md): Cryptographic primitives tailored for distributed systems running in byzantine environments.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections. 
 
 ## Examples

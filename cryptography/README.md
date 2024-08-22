@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-cryptography.svg)](https://crates.io/crates/commonware-cryptography)
 
-Cryptography primitives tailored for distributed systems running in byzantine environments.
+Cryptographic primitives tailored for distributed systems running in byzantine environments.
 
 ## Status 
 

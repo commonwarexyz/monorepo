@@ -1,8 +1,27 @@
-//! Ed25519 implementation of the Crypto trait.
+//! Ed25519 implementation of the Scheme trait.
 //!
 //! This implementation uses the `ed25519-consensus` crate to adhere to a strict
 //! set of validation rules for Ed25519 signatures (which is necessary for
-//! stability in a consensus context).
+//! stability in a consensus context). You can read more about this
+//! [here](https://hdevalence.ca/blog/2020-10-04-its-25519am).
+//!
+//! # Example
+//! ```rust
+//! use commonware_cryptography::{ed25519::Ed25519, Scheme};
+//!
+//! // Generate a new private key
+//! let mut signer = Ed25519::new();
+//!
+//! // Create a message to sign
+//! let namespace = b"demo";
+//! let msg = b"hello, world!";
+//!
+//! // Sign the message
+//! let signature = signer.sign(namespace, msg);
+//!
+//! // Verify the signature
+//! assert!(Ed25519::verify(namespace, msg, &signer.me(), &signature));
+//! ```
 
 use crate::{utils::payload, PublicKey, Scheme, Signature};
 use ed25519_consensus;
