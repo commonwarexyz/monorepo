@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 
-mod utils;
+pub mod utils;
 
 pub mod ed25519;
 
