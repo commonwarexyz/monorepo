@@ -2,7 +2,8 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-chat.svg)](https://crates.io/crates/commonware-chat)
 
-Send encrypted messages to a group of friends using [commonware-p2p](https://crates.io/crates/commonware-p2p).
+Send encrypted messages to a group of friends using [commonware-cryptography](https://crates.io/crates/commonware-cryptography)
+and [commonware-p2p](https://crates.io/crates/commonware-p2p).
 
 ## Usage (4 Friends)
 

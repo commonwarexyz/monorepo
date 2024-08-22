@@ -6,13 +6,14 @@
 
 ## Primitives 
 
+* [cryptography](./cryptography/README.md): TBD 
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections. 
 
 ## Examples
 
 _This directory contains examples of how to use various crates in this repository. The code in these examples is often insecure and is not intended to be used in production._
 
-* [chat](./examples/chat/README.md): Send encrypted messages to a group of friends using [commonware-p2p](https://crates.io/crates/commonware-p2p). 
+* [chat](./examples/chat/README.md): Send encrypted messages to a group of friends using [commonware-cryptography](https://crates.io/crates/commonware-cryptography) and [commonware-p2p](https://crates.io/crates/commonware-p2p). 
 
 ## Licensing
 
