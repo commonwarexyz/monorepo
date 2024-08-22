@@ -1,6 +1,6 @@
 //! Connection
 
-use crate::crypto::Crypto;
+use commonware_cryptography::Scheme;
 use prost::DecodeError;
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ pub use handshake::IncomingHandshake;
 pub use stream::{Sender, Stream};
 
 #[derive(Clone)]
-pub struct Config<C: Crypto> {
+pub struct Config<C: Scheme> {
     pub crypto: C,
     pub max_frame_length: usize,
     pub handshake_timeout: Duration,

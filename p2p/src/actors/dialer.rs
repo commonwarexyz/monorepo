@@ -5,9 +5,9 @@
 use crate::{
     actors::{spawner, tracker},
     connection::{self, Stream},
-    crypto::{Crypto, PublicKey},
     metrics,
 };
+use commonware_cryptography::{PublicKey, Scheme};
 use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -21,14 +21,14 @@ use tokio::net::TcpStream;
 use tokio::time::{self, Instant};
 use tracing::debug;
 
-pub struct Config<C: Crypto> {
+pub struct Config<C: Scheme> {
     pub registry: Arc<Mutex<Registry>>,
     pub connection: connection::Config<C>,
     pub dial_frequency: Duration,
     pub dial_rate: Quota,
 }
 
-pub struct Actor<C: Crypto> {
+pub struct Actor<C: Scheme> {
     connection: connection::Config<C>,
     dial_frequency: Duration,
 
@@ -37,7 +37,7 @@ pub struct Actor<C: Crypto> {
     dial_attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<C: Crypto> Actor<C> {
+impl<C: Scheme> Actor<C> {
     pub fn new(cfg: Config<C>) -> Self {
         let dial_attempts = Family::<metrics::Peer, Counter>::default();
         {

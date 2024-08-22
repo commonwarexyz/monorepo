@@ -3,10 +3,10 @@ use crate::{
     actors::tracker,
     channels::Channels,
     connection::{Sender, Stream},
-    crypto::{Crypto, PublicKey},
     metrics, wire,
 };
 use bytes::BytesMut;
+use commonware_cryptography::{PublicKey, Scheme};
 use governor::{DefaultDirectRateLimiter, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
@@ -102,7 +102,7 @@ impl Actor {
         Ok(())
     }
 
-    pub async fn run<C: Crypto>(
+    pub async fn run<C: Scheme>(
         mut self,
         peer: PublicKey,
         connection: Stream<C>,

@@ -3,11 +3,9 @@ pub use super::{
     ingress::{Mailbox, Message, Oracle, Reservation},
     Config, Error,
 };
-use crate::{
-    crypto::{Crypto, PublicKey},
-    ip, metrics, wire,
-};
+use crate::{ip, metrics, wire};
 use bitvec::prelude::*;
+use commonware_cryptography::{PublicKey, Scheme};
 use governor::DefaultKeyedRateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -126,7 +124,7 @@ impl AddressCount {
     }
 }
 
-pub struct Actor<C: Crypto> {
+pub struct Actor<C: Scheme> {
     crypto: C,
     allow_private_ips: bool,
     tracked_peer_sets: usize,
@@ -146,7 +144,7 @@ pub struct Actor<C: Crypto> {
     ip_signature: wire::Peer,
 }
 
-impl<C: Crypto> Actor<C> {
+impl<C: Scheme> Actor<C> {
     pub fn new(mut cfg: Config<C>) -> (Self, Mailbox, Oracle) {
         // Construct IP signature
         let current_time = SystemTime::now()
@@ -592,7 +590,8 @@ impl<C: Crypto> Actor<C> {
 mod tests {
     use super::*;
     use crate::actors::peer;
-    use crate::{config::Bootstrapper, crypto::ed25519};
+    use crate::config::Bootstrapper;
+    use commonware_cryptography::ed25519;
     use governor::Quota;
     use std::net::{IpAddr, Ipv4Addr};
     use std::num::NonZeroU32;
@@ -600,7 +599,7 @@ mod tests {
     use std::time::Duration;
     use tokio::time;
 
-    fn test_config<C: Crypto>(crypto: C, bootstrappers: Vec<Bootstrapper>) -> Config<C> {
+    fn test_config<C: Scheme>(crypto: C, bootstrappers: Vec<Bootstrapper>) -> Config<C> {
         Config {
             crypto,
             registry: Arc::new(Mutex::new(prometheus_client::registry::Registry::default())),

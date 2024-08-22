@@ -1,18 +1,18 @@
-//! Cryptographic definitions required by commonware-p2p and select implementations
-//! of different PKI schemes.
+//! Cryptographic primitives tailored for distributed systems running in byzantine environments.
 
 use bytes::Bytes;
 
+mod utils;
+
 pub mod ed25519;
-pub mod utils;
 
 /// Byte array representing an arbitrary public key.
 pub type PublicKey = Bytes;
 /// Byte array representing an arbitrary signature.
 pub type Signature = Bytes;
 
-/// Cryptographic operations required by commonware-p2p.
-pub trait Crypto: Send + Sync + Clone + 'static {
+/// Interface that commonware crates rely on for most cryptographic operations.
+pub trait Scheme: Send + Sync + Clone + 'static {
     /// Returns the public key of the signer.
     fn me(&self) -> PublicKey;
 

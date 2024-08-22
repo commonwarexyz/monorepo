@@ -1,10 +1,9 @@
-use super::{
-    handshake::{create_handshake, Handshake, IncomingHandshake},
-    utils::{codec, nonce_bytes},
-    Config, Error,
-};
 use crate::{
-    crypto::{Crypto, PublicKey},
+    connection::{
+        handshake::{create_handshake, Handshake, IncomingHandshake},
+        utils::{codec, nonce_bytes},
+        Config, Error,
+    },
     wire,
 };
 use bytes::Bytes;
@@ -12,6 +11,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
+use commonware_cryptography::{PublicKey, Scheme};
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
@@ -25,14 +25,14 @@ use tokio_util::codec::LengthDelimitedCodec;
 
 const CHUNK_PADDING: usize = 32 /* protobuf padding*/ + 12 /* chunk info */ + 16 /* encryption tag */;
 
-pub struct Stream<C: Crypto> {
+pub struct Stream<C: Scheme> {
     config: Config<C>,
     dialer: bool,
     framed: Framed<TcpStream, LengthDelimitedCodec>,
     cipher: ChaCha20Poly1305,
 }
 
-impl<C: Crypto> Stream<C> {
+impl<C: Scheme> Stream<C> {
     pub async fn upgrade_dialer(
         mut config: Config<C>,
         stream: TcpStream,

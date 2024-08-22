@@ -1,5 +1,6 @@
-use crate::{actors::peer, channels::Channels, crypto::PublicKey};
+use crate::{actors::peer, channels::Channels};
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
 use tokio::sync::{mpsc, oneshot};
 
 pub enum Message {

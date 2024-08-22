@@ -1,5 +1,6 @@
-use crate::{actors::Messenger, crypto::PublicKey};
+use crate::actors::Messenger;
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
 use governor::Quota;
 use std::collections::HashMap;
 use tokio::sync::mpsc;

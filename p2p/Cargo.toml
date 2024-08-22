@@ -2,7 +2,7 @@
 name = "commonware-p2p"
 edition = "2021"
 publish = true
-version = "0.0.10"
+version = "0.0.11"
 license = "MIT OR Apache-2.0"
 description = "Communicate with authenticated peers over encrypted connections."
 readme = "README.md"
@@ -11,6 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo"
 documentation = "https://docs.rs/commonware-p2p"
 
 [dependencies]
+commonware-cryptography = { version = "0.0.2", path = "../cryptography" }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"

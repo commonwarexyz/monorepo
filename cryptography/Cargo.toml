@@ -1,0 +1,17 @@
+[package]
+name = "commonware-cryptography"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "Cryptographic primitives tailored for distributed systems running in byzantine environments."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo"
+documentation = "https://docs.rs/commonware-cryptography"
+
+[dependencies]
+bytes = "1"
+ed25519-consensus = "2.1.0"
+sha2 = "0.10"
+rand = "0.8"

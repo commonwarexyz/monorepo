@@ -1,4 +1,5 @@
-//! Send encrypted messages to a group of friends using [commonware-p2p](https://crates.io/crates/commonware-p2p).
+//! Send encrypted messages to a group of friends using [commonware-cryptography](https://crates.io/crates/commonware-cryptography)
+//! and [commonware-p2p](https://crates.io/crates/commonware-p2p).
 //!
 //! # Usage (4 Friends)
 //!
@@ -38,10 +39,8 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_p2p::{
-    crypto::{ed25519, Crypto},
-    Config, Network,
-};
+use commonware_cryptography::{ed25519, Scheme};
+use commonware_p2p::{Config, Network};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

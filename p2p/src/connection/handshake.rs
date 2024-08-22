@@ -1,9 +1,9 @@
-use super::{utils::codec, x25519, Error};
 use crate::{
-    crypto::{Crypto, PublicKey},
+    connection::{utils::codec, x25519, Error},
     wire,
 };
 use bytes::{Bytes, BytesMut};
+use commonware_cryptography::{PublicKey, Scheme};
 use futures::StreamExt;
 use prost::Message;
 use tokio::net::TcpStream;
@@ -13,7 +13,7 @@ use tokio_util::codec::LengthDelimitedCodec;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_HANDSHAKE_";
 
-pub async fn create_handshake<C: Crypto>(
+pub async fn create_handshake<C: Scheme>(
     crypto: &mut C,
     recipient_public_key: PublicKey,
     ephemeral_public_key: x25519_dalek::PublicKey,
@@ -45,7 +45,7 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    pub fn verify<C: Crypto>(crypto: &C, msg: BytesMut) -> Result<Self, Error> {
+    pub fn verify<C: Scheme>(crypto: &C, msg: BytesMut) -> Result<Self, Error> {
         // Parse handshake message
         let handshake = match wire::Message::decode(msg)
             .map_err(Error::UnableToDecode)?
@@ -103,7 +103,7 @@ pub struct IncomingHandshake {
 }
 
 impl IncomingHandshake {
-    pub async fn verify<C: Crypto>(
+    pub async fn verify<C: Scheme>(
         crypto: &C,
         max_frame_len: usize,
         handshake_timeout: time::Duration,

@@ -4,16 +4,16 @@ use super::{
 };
 use crate::{
     actors::{peer, router, tracker},
-    crypto::Crypto,
     metrics,
 };
+use commonware_cryptography::Scheme;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-pub struct Actor<C: Crypto> {
+pub struct Actor<C: Scheme> {
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
@@ -25,7 +25,7 @@ pub struct Actor<C: Crypto> {
     received_messages: Family<metrics::Message, Counter>,
 }
 
-impl<C: Crypto> Actor<C> {
+impl<C: Scheme> Actor<C> {
     pub fn new(cfg: Config) -> (Self, Mailbox<C>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();

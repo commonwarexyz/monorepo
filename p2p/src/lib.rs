@@ -26,10 +26,8 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{
-//!     crypto::{Crypto, ed25519},
-//!     Config, Network,
-//! };
+//! use commonware_p2p::{Config, Network};
+//! use commonware_cryptography::{ed25519, Scheme};
 //! use governor::Quota;
 //! use prometheus_client::registry::Registry;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -98,7 +96,6 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
-pub mod crypto;
 pub use actors::tracker::Oracle;
 pub use channels::{Message, Receiver, Sender};
 pub use config::{Bootstrapper, Config};
