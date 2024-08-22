@@ -2,9 +2,8 @@
 
 use bytes::Bytes;
 
-pub mod utils;
-
 pub mod ed25519;
+pub mod utils;
 
 /// Byte array representing an arbitrary public key.
 pub type PublicKey = Bytes;
