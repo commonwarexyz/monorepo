@@ -11,25 +11,24 @@ repository = "https://github.com/commonwarexyz/monorepo"
 documentation = "https://docs.rs/commonware-p2p"
 
 [dependencies]
-commonware-cryptography = { version = "0.0.3", path = "../cryptography" }
+commonware-cryptography = { workspace = true }
+bytes = { workspace = true } 
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
-bytes = "1"
 governor = "0.6"
 x25519-dalek = { version = "2", features = ["getrandom"] }
 chacha20poly1305 = "0.10"
 prost = "0.12"
 sha2 = "0.10"
 hex = "0.4"
-ed25519-consensus = "2.1.0"
 tracing = "0.1"
 bitvec = "1"
 prometheus-client = "0.22"
 rand = "0.8"
 
 [dev-dependencies]
-tokio-test = { version = "0.4" }
+tokio-test = "0.4"
 
 [build-dependencies]
 prost-build = "0.12"
