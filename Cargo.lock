@@ -342,6 +342,7 @@ version = "0.0.11"
 dependencies = [
  "chrono",
  "clap",
+ "commonware-cryptography",
  "commonware-p2p",
  "crossterm 0.22.1",
  "governor",

@@ -11,6 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo"
 documentation = "https://docs.rs/commonware-chat"
 
 [dependencies]
+commonware-cryptography = { version = "0.0.2", path = "../../cryptography" }
 commonware-p2p = { version = "0.0.10", path = "../../p2p" } 
 tokio = { version = "1", features = ["full"] }
 clap = "4"

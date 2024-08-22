@@ -5,10 +5,10 @@ use super::{
 use crate::{
     actors::peer::{self, Relay},
     channels::Channels,
-    crypto::PublicKey,
     metrics,
 };
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::HashMap;
 use tokio::sync::mpsc;

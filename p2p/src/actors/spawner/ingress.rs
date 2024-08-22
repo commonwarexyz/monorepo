@@ -1,11 +1,8 @@
-use crate::{
-    actors::tracker,
-    connection::Stream,
-    crypto::{Crypto, PublicKey},
-};
+use crate::{actors::tracker, connection::Stream};
+use commonware_cryptography::{PublicKey, Scheme};
 use tokio::sync::mpsc;
 
-pub enum Message<C: Crypto> {
+pub enum Message<C: Scheme> {
     Spawn {
         peer: PublicKey,
         connection: Stream<C>,
@@ -14,11 +11,11 @@ pub enum Message<C: Crypto> {
 }
 
 #[derive(Clone)]
-pub struct Mailbox<C: Crypto> {
+pub struct Mailbox<C: Scheme> {
     sender: mpsc::Sender<Message<C>>,
 }
 
-impl<C: Crypto> Mailbox<C> {
+impl<C: Scheme> Mailbox<C> {
     pub fn new(sender: mpsc::Sender<Message<C>>) -> Self {
         Self { sender }
     }

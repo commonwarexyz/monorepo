@@ -38,10 +38,8 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_p2p::{
-    crypto::{ed25519, Crypto},
-    Config, Network,
-};
+use commonware_cryptography::{ed25519, Scheme};
+use commonware_p2p::{Config, Network};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

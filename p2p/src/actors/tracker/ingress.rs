@@ -1,4 +1,5 @@
-use crate::{actors::peer, crypto::PublicKey, wire};
+use crate::{actors::peer, wire};
+use commonware_cryptography::PublicKey;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 

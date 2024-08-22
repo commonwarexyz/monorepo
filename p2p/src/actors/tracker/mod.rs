@@ -1,6 +1,7 @@
 //! Tracker
 
-use crate::{config::Bootstrapper, crypto::Crypto};
+use crate::config::Bootstrapper;
+use commonware_cryptography::Scheme;
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::net::IpAddr;
@@ -14,7 +15,7 @@ mod ingress;
 pub use actor::Actor;
 pub use ingress::{Mailbox, Oracle, Reservation};
 
-pub struct Config<C: Crypto> {
+pub struct Config<C: Scheme> {
     pub crypto: C,
     pub registry: Arc<Mutex<Registry>>,
     pub address: SocketAddr,
