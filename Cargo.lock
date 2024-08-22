@@ -355,6 +355,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-cryptography"
+version = "0.0.2"
+dependencies = [
+ "bytes",
+ "ed25519-consensus",
+ "sha2 0.10.8",
+]
+
+[[package]]
 name = "commonware-p2p"
 version = "0.0.10"
 dependencies = [
