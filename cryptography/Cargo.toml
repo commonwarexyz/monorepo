@@ -2,7 +2,7 @@
 name = "commonware-cryptography"
 edition = "2021"
 publish = true
-version = "0.0.2"
+version = "0.0.3"
 license = "MIT OR Apache-2.0"
 description = "Cryptographic primitives tailored for distributed systems running in byzantine environments."
 readme = "README.md"
