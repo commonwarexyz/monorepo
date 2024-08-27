@@ -32,24 +32,24 @@ portable = ["blst/portable"]
 [[bench]]
 name="dkg_recovery"
 harness = false
-path = "bls12381/benches/dkg_recovery.rs"
+path = "src/bls12381/benches/dkg_recovery.rs"
 
 [[bench]]
 name="reshare_recovery"
 harness = false
-path = "bls12381/benches/reshare_recovery.rs"
+path = "src/bls12381/benches/reshare_recovery.rs"
 
 [[bench]]
 name="signature_generation"
 harness = false
-path = "bls12381/benches/signature_generation.rs"
+path = "src/bls12381/benches/signature_generation.rs"
 
 [[bench]]
 name="signature_aggregation"
 harness = false
-path = "bls12381/benches/signature_aggregation.rs"
+path = "src/bls12381/benches/signature_aggregation.rs"
 
 [[bench]]
 name="signature_verification"
 harness = false
-path = "bls12381/benches/signature_verification.rs"
+path = "src/bls12381/benches/signature_verification.rs"

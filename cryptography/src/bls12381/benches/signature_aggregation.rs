@@ -1,6 +1,6 @@
+use commonware_cryptography::bls12381::{dkg, primitives};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::hint::black_box;
-use vrf::bls12381::{dkg, primitives};
 
 fn benchmark_signature_aggregation(c: &mut Criterion) {
     let msg = b"hello";

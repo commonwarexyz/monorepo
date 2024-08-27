@@ -1,8 +1,7 @@
-use commonware_cryptography::{ed25519::insecure_signer, Scheme};
+use commonware_cryptography::{bls12381::dkg, ed25519::insecure_signer, Scheme};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
-use vrf::bls12381::dkg;
 
 fn benchmark_dkg_recovery(c: &mut Criterion) {
     let concurrency = 1; // only used in recovery during reshare

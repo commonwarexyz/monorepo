@@ -1,7 +1,6 @@
-use commonware_cryptography::Scheme;
+use commonware_cryptography::{bls12381::scheme::Bls12381, Scheme};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::hint::black_box;
-use vrf::bls12381::scheme::Bls12381;
 
 fn benchmark_signature_verification(c: &mut Criterion) {
     let namespace = b"namespace";

@@ -1,8 +1,11 @@
-use commonware_cryptography::{ed25519::insecure_signer, Scheme};
+use commonware_cryptography::{
+    bls12381::{dkg, primitives::poly},
+    ed25519::insecure_signer,
+    Scheme,
+};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
-use vrf::bls12381::{dkg, primitives::poly};
 
 fn benchmark_reshare_recovery(c: &mut Criterion) {
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
