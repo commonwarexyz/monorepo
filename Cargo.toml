@@ -3,6 +3,7 @@ members = [
     "cryptography",
     "p2p",
     "examples/chat",
+    "examples/vrf",
 ]
 resolver = "2"
 

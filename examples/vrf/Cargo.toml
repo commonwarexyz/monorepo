@@ -1,0 +1,15 @@
+[package]
+name = "commonware-vrf"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = ""
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo"
+documentation = "https://docs.rs/commonware-vrf"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-p2p = { workspace = true } 
