@@ -15,6 +15,10 @@ _This directory contains examples of how to use various crates in this repositor
 
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends using [commonware-cryptography](https://crates.io/crates/commonware-cryptography) and [commonware-p2p](https://crates.io/crates/commonware-p2p). 
 
+## Discord
+
+If you'd like to contribute to this repository, send your GitHub profile to [@commonwarexyz](https://x.com/commonwarexyz) and we'll invite you to our Discord!
+
 ## Licensing
 
 This repository is dual-licensed under both the [Apache 2.0](./LICENSE-APACHE) and [MIT](./LICENSE-MIT) licenses. You may choose either license when using this code.
