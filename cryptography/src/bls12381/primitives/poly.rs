@@ -7,8 +7,14 @@ use crate::bls12381::primitives::{
 use rand::{rngs::OsRng, RngCore};
 use std::collections::BTreeMap;
 
+/// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
+
+/// Public polynomials represent commitments to secrets on a private polynomial.
 pub type Public = Poly<group::Public>;
+
+/// Signature polynomials are used in threshold signing (where a signature
+/// is interpolated using at least `threshold` evaluations).
 pub type Signature = Poly<group::Signature>;
 
 /// A polynomial evaluation at a specific index.
