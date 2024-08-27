@@ -1,3 +1,5 @@
+//! Utility functions for cryptographic primitives.
+
 /// Concatenates the namespace and message into a single payload for signing.
 pub fn payload(namespace: &[u8], message: &[u8]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(namespace.len() + message.len());
