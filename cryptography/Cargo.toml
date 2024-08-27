@@ -15,3 +15,41 @@ bytes = { workspace = true }
 ed25519-consensus = "2.1.0"
 sha2 = "0.10"
 rand = "0.8"
+blst = { version = "0.3.13", features = ["no-threads"] }
+zeroize = "1.5.7"
+rayon = "1.10"
+
+[dev-dependencies]
+proptest = "1"
+criterion = "0.5.1"
+
+[build-dependencies]
+prost-build = "0.12"
+
+[features]
+portable = ["blst/portable"]
+
+[[bench]]
+name="dkg_recovery"
+harness = false
+path = "src/bls12381/benches/dkg_recovery.rs"
+
+[[bench]]
+name="reshare_recovery"
+harness = false
+path = "src/bls12381/benches/reshare_recovery.rs"
+
+[[bench]]
+name="signature_generation"
+harness = false
+path = "src/bls12381/benches/signature_generation.rs"
+
+[[bench]]
+name="signature_aggregation"
+harness = false
+path = "src/bls12381/benches/signature_aggregation.rs"
+
+[[bench]]
+name="signature_verification"
+harness = false
+path = "src/bls12381/benches/signature_verification.rs"
