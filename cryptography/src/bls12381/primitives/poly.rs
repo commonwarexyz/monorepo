@@ -1,4 +1,10 @@
 //! Polynomial operations over the BLS12-381 scalar field.
+//!
+//! # Warning
+//!
+//! The security of the polynomial operations is critical for the overall
+//! security of the threshold schemes. Ensure that the scalar field operations
+//! are performed over the correct field and that all elements are valid.
 
 use crate::bls12381::primitives::{
     group::{self, Element, Scalar},

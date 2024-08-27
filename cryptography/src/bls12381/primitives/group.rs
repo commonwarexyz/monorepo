@@ -1,4 +1,15 @@
 //! Group operations over the BLS12-381 scalar field.
+//!
+//! This crate implements basic group operations over BLS12-381 elements,
+//! including point addition, scalar multiplication, and pairing operations.
+//!
+//! # Warning
+//!
+//! Ensure that points are checked to belong to the correct subgroup
+//! (G1 or G2) to prevent small subgroup attacks. This is particularly important
+//! when handling deserialized points or points received from untrusted sources. This
+//! is already taken care of for you if you use the provided `serialize` and `deserialize`
+//! functions.
 
 use blst::{
     blst_bendian_from_scalar, blst_final_exp, blst_fp12, blst_fr, blst_fr_add, blst_fr_from_scalar,
