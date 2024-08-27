@@ -18,6 +18,11 @@ pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
 /// Signs the provided message with the private key.
 ///
 /// The message is hashed according to RFC 9380.
+///
+/// # Determinism
+///
+/// Signatures produced by this function are deterministic and are safe
+/// to use in a consensus-critical context.
 pub fn sign(private: &group::Private, msg: &[u8]) -> group::Signature {
     let mut s = group::Signature::zero();
     s.map(msg);
@@ -59,6 +64,11 @@ pub fn partial_verify(
 }
 
 /// Aggregates the partial signatures into a final signature.
+///
+/// # Determinism
+///
+/// Signatures recovered by this function are deterministic and are safe
+/// to use in a consensus-critical context.
 pub fn aggregate(
     threshold: u32,
     partials: Vec<Eval<group::Signature>>,

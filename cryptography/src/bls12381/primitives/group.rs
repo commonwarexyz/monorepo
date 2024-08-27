@@ -27,10 +27,10 @@ use zeroize::Zeroize;
 
 /// An element of a group.
 pub trait Element: Clone + Eq + PartialEq + Send + Sync {
-    /// Returns the zero element of the group.
+    /// Returns the additive identity.
     fn zero() -> Self;
 
-    /// Returns the one element of the group.
+    /// Returns the multiplicative identity.
     fn one() -> Self;
 
     /// Adds to self in-place.
