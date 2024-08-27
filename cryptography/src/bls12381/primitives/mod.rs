@@ -2,7 +2,7 @@
 //!
 //! # Acknowledgements
 //!
-//! _The following crates were used as a reference when implementing this crate. When code is very similar
+//! _The following crates were used as a reference when implementing this crate. If code is very similar
 //! to the reference, it is accompanied by a comment and link._
 //!
 //! * <https://github.com/celo-org/celo-threshold-bls-rs>: Operations over the BLS12-381 scalar field, GJKR99, and Desmedt97.
