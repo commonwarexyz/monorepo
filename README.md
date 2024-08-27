@@ -7,14 +7,14 @@
 
 ## Primitives 
 
-_Crates in this repository are designed for deployment in adversarial environments. If you find a way to exploit one, please refer to our [security policy](./SECURITY.md) before disclosing an issue publicly (it may equip a malicious party to attack users of these primitives)._
+_Crates in this repository are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify untrusted signatures.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections. 
 
 ## Examples
 
-_Examples may include insecure code to make it easier to get started. Examples are not intended to be used directly in production._
+_Examples may include insecure code (i.e. deriving keypairs from an integer arguements) to make them easier to run. Examples are not intended to be used directly in production._
 
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends using [commonware-cryptography](https://crates.io/crates/commonware-cryptography) and [commonware-p2p](https://crates.io/crates/commonware-p2p). 
 
