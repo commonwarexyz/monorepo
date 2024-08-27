@@ -1,0 +1,269 @@
+//! Generate bias-resistant randomness with untrusted contributors using commonware-cryptography and commonware-p2p.
+//!
+//! Contributors to this VRF connect to each other over commonware-p2p (using ED25519 identities), perform an initial
+//! DKG (to generate a static public key), and then perform a proactive refresh every 10 seconds. After a successful
+//! DKG and/or Reshare, contributors generate partial signatures over the round number and gossip them to others in
+//! the group (again using commonware-p2p). These partial signatures, when aggregated, form a threshold signature that
+//! was not knowable by any contributor prior to signing.
+//!
+//! To demonstrate how malicious contributors are handled, the CLI also lets you behave as a "rogue" dealer that generates
+//! invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, or a "defiant" dealer that doesn't
+//! respond to requests to reveal shares that weren't acknowledged by other contributors.
+//!
+//! # Usage (3 of 4 Threshold)
+//!
+//! ## Arbiter
+//! ```bash
+//! cargo run --release -- --me 0@3000 --participants 0,1,2,3,4 --contributors 1,2,3,4
+//! ```
+//!
+//! ## Contributor 1
+//! ```bash
+//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3001 --participants 0,1,2,3,4  --arbiter 0 --contributors 1,2,3,4
+//! ```
+//!
+//! ## Contributor 2
+//! ```bash
+//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participants 0,1,2,3,4  --arbiter 0 --contributors 1,2,3,4
+//! ```
+//!
+//! ## Contributor 3
+//! ```bash
+//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3,4  --arbiter 0 --contributors 1,2,3,4
+//! ```
+//!
+//! ## Contributor 4 (Rogue)
+//!
+//! _Send invalid shares to other contributors._
+//!
+//! ```bash
+//! cargo run --release -- --rogue --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
+//! ```
+//!
+//! ## Contributor 4 (Lazy)
+//!
+//! _Only share `t-1` shares. Post one share to arbiter to ensure commitment isn't dropped._
+//!
+//! ```bash
+//! cargo run --release -- --lazy --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
+//! ```
+//!
+//! ## Contributor 4 (Lazy + Defiant)
+//!
+//! _Only share `t-1` shares. Don't post any requested shares to arbiter (commitment will be dropped)._
+//!
+//! ```bash
+//! cargo run --release -- --lazy --defiant --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
+//! ```
+
+mod handlers;
+
+use clap::{value_parser, Arg, Command};
+use commonware_cryptography::{
+    bls12381::dkg::utils,
+    ed25519::{insecure_signer, Ed25519},
+    Scheme,
+};
+use commonware_p2p::{Config, Network};
+use governor::Quota;
+use prometheus_client::registry::Registry;
+use std::sync::{Arc, Mutex};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroU32,
+};
+use std::{str::FromStr, time::Duration};
+use tracing::info;
+
+#[tokio::main]
+async fn main() {
+    // Parse arguments
+    let matches = Command::new("commonware-vrf")
+        .about("generate bias-resistant randomness with friends")
+        .arg(
+            Arg::new("bootstrappers")
+                .long("bootstrappers")
+                .required(false)
+                .value_delimiter(',')
+                .value_parser(value_parser!(String)),
+        )
+        .arg(Arg::new("me").long("me").required(true))
+        .arg(
+            Arg::new("participants")
+                .long("participants")
+                .required(true)
+                .value_delimiter(',')
+                .value_parser(value_parser!(u16))
+                .help("All participants (arbiter and contributors)"),
+        )
+        .arg(
+            Arg::new("arbiter")
+                .long("arbiter")
+                .required(false)
+                .value_parser(value_parser!(u16))
+                .help("If set, run as a contributor otherwise run as the arbiter"),
+        )
+        .arg(
+            Arg::new("contributors")
+                .long("contributors")
+                .required(true)
+                .value_delimiter(',')
+                .value_parser(value_parser!(u16))
+                .help("contributors"),
+        )
+        .arg(
+            Arg::new("rogue")
+                .long("rogue")
+                .num_args(0)
+                .help("Configures whether the contributor is a rogue contributor"),
+        )
+        .arg(Arg::new("lazy").long("lazy").num_args(0).help(
+            "Configures whether the contributor distributes shares to everyone or just t-1 participants",
+        ))
+        .arg(
+            Arg::new("defiant")
+                .long("defiant")
+                .num_args(0)
+                .help("Configures whether the contributor responds to reveal requests"),
+        )
+        .get_matches();
+
+    // Create logger
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
+
+    // Configure my identity
+    let me = matches
+        .get_one::<String>("me")
+        .expect("Please provide identity");
+    let parts = me.split('@').collect::<Vec<&str>>();
+    if parts.len() != 2 {
+        panic!("Identity not well-formed");
+    }
+    let key = parts[0].parse::<u16>().expect("Key not well-formed");
+    let signer = insecure_signer(key);
+    tracing::info!(key = hex::encode(signer.me()), "loaded signer");
+
+    // Configure my port
+    let port = parts[1].parse::<u16>().expect("Port not well-formed");
+    tracing::info!(port, "loaded port");
+
+    // Configure allowed peers
+    let mut recipients = Vec::new();
+    let participants = matches
+        .get_many::<u16>("participants")
+        .expect("Please provide allowed keys")
+        .copied();
+    if participants.len() == 0 {
+        panic!("Please provide at least one participant");
+    }
+    for peer in participants {
+        let verifier = insecure_signer(peer).me();
+        tracing::info!(key = hex::encode(&verifier), "registered authorized key",);
+        recipients.push(verifier);
+    }
+
+    // Configure bootstrappers (if provided)
+    let bootstrappers = matches.get_many::<String>("bootstrappers");
+    let mut bootstrapper_identities = Vec::new();
+    if let Some(bootstrappers) = bootstrappers {
+        for bootstrapper in bootstrappers {
+            let parts = bootstrapper.split('@').collect::<Vec<&str>>();
+            let bootstrapper_key = parts[0]
+                .parse::<u16>()
+                .expect("Bootstrapper key not well-formed");
+            let verifier = insecure_signer(bootstrapper_key).me();
+            let bootstrapper_address =
+                SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
+            bootstrapper_identities.push((verifier, bootstrapper_address));
+        }
+    }
+
+    // Configure network
+    let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+    let config = Config::aggressive(
+        signer.clone(),
+        registry.clone(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        bootstrapper_identities.clone(),
+    );
+    let (mut network, oracle) = Network::new(config);
+
+    // Provide authorized peers
+    //
+    // In a real-world scenario, this would be updated as new peer sets are created (like when
+    // the composition of a validator set changes).
+    oracle.register(0, recipients).await;
+
+    // Parse contributors
+    let mut contributors = Vec::new();
+    let participants = matches
+        .get_many::<u16>("contributors")
+        .expect("Please provide contributors")
+        .copied();
+    if participants.len() == 0 {
+        panic!("Please provide at least one contributor");
+    }
+    for peer in participants {
+        let verifier = insecure_signer(peer).me();
+        tracing::info!(key = hex::encode(&verifier), "registered contributor",);
+        contributors.push(verifier);
+    }
+
+    // Infer threshold
+    let threshold = utils::threshold(contributors.len() as u32)
+        .expect("not enough contributors to form a threshold of 2f+1");
+    let max_reveals = utils::max_reveals(threshold);
+    info!(threshold, max_reveals, "inferred threshold");
+
+    // Check if I am the arbiter
+    if let Some(arbiter) = matches.get_one::<u16>("arbiter") {
+        // Create contributor
+        let rogue = matches.get_flag("rogue");
+        let lazy = matches.get_flag("lazy");
+        let defiant = matches.get_flag("defiant");
+        let (contributor_sender, contributor_receiver) = network.register(
+            handlers::DKG_CHANNEL,
+            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            1024 * 1024, // 1 MB max message size
+            256,         // 256 messages in flight
+        );
+        let arbiter = insecure_signer(*arbiter).me();
+        let (contributor, requests) = handlers::Contributor::new(
+            signer,
+            arbiter,
+            contributors.clone(),
+            threshold,
+            rogue,
+            lazy,
+            defiant,
+        );
+        tokio::spawn(contributor.run(contributor_sender, contributor_receiver));
+
+        // Create vrf
+        let (vrf_sender, vrf_receiver) = network.register(
+            handlers::VRF_CHANNEL,
+            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            1024 * 1024, // 1 MB max message size
+            256,         // 256 messages in flight
+        );
+        let signer = handlers::Vrf::new(Duration::from_secs(5), threshold, contributors, requests);
+        tokio::spawn(signer.run(vrf_sender, vrf_receiver));
+    } else {
+        let (arbiter_sender, arbiter_receiver) = network.register(
+            handlers::DKG_CHANNEL,
+            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            1024 * 1024, // 1 MB max message size
+            256,         // 256 messages in flight
+        );
+        let arbiter = handlers::Arbiter::new(
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            contributors,
+            threshold,
+        );
+        tokio::spawn(arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver));
+    }
+    network.run().await;
+}

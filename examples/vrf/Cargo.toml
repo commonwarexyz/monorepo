@@ -4,7 +4,7 @@ edition = "2021"
 publish = true
 version = "0.0.2"
 license = "MIT OR Apache-2.0"
-description = ""
+description = "Generate bias-resistant randomness with untrusted contributors using commonware-cryptography and commonware-p2p."
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo"
@@ -13,3 +13,12 @@ documentation = "https://docs.rs/commonware-vrf"
 [dependencies]
 commonware-cryptography = { workspace = true }
 commonware-p2p = { workspace = true } 
+tokio = { version = "1", features = ["full"] }
+clap = "4" 
+tracing-subscriber = "0.3"
+tracing = "0.1"
+hex = "0.4"
+prometheus-client = "0.22"
+prost = "0.12"
+bytes = "1"
+governor = "0.6"

@@ -2,6 +2,9 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-vrf.svg)](https://crates.io/crates/commonware-vrf)
 
+Generate bias-resistant randomness with untrusted contributors using [commonware-cryptography](https://crates.io/crates/commonware-cryptography)
+and [commonware-p2p](https://crates.io/crates/commonware-p2p).
+
 # Usage (3 of 4 Threshold)
 
 Perform a DKG (or Reshare) -> Generate Threshold Signature -> Repeat
