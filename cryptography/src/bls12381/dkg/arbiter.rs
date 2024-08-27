@@ -1,13 +1,19 @@
 //! Orchestrator of the DKG/Resharing procedure.
 //!
 //! In practice, this will often be implemented by a consensus mechanism but
-//! can be run as a trusted, standalone binary.
+//! can be run as a trusted, standalone binary (see <https://docs.rs/commonware-vrf>).
 //!
 //! # Duplicate/Unnecessary Information
 //!
 //! Duplicate/unnecessary information will error but not disqualify (to avoid including
 //! junk in a block), only invalid or missing information qualifies as an attributable
 //! fault (otherwise may occur by accident).
+//!
+//! # Warning
+//!
+//! It is up to the developer to authorize interaction with the arbiter. This is purposely
+//! not provided by the Arbiter because this authorization function is highly dependent on
+//! the context in which the contributor is being used.
 
 use super::utils;
 use crate::bls12381::{

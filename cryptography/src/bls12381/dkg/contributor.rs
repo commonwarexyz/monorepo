@@ -8,6 +8,12 @@
 //! said contributors can inform the arbiter of the issue. This could prevent
 //! an honest contributor from recognizing a commitment as valid (that all other
 //! contributors have agreed upon).
+//!
+//! # Warning
+//!
+//! It is up to the developer to authorize interaction with the contributor. This is purposely
+//! not provided by the contributor because this authorization function is highly dependent on
+//! the context in which the contributor is being used.
 
 use crate::bls12381::{
     dkg::{ops, Error},
