@@ -22,3 +22,7 @@ prometheus-client = "0.22"
 prost = "0.12"
 bytes = "1"
 governor = "0.6"
+rand = "0.8"
+
+[build-dependencies]
+prost-build = "0.12"

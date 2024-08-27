@@ -472,6 +472,8 @@ dependencies = [
  "hex",
  "prometheus-client",
  "prost",
+ "prost-build",
+ "rand",
  "tokio",
  "tracing",
  "tracing-subscriber",

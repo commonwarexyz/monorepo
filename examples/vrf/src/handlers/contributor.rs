@@ -1,4 +1,9 @@
-use crate::{
+use crate::handlers::{
+    payloads::{self, SHARE_NAMESPACE},
+    utils::public_hex,
+    wire,
+};
+use commonware_cryptography::{
     bls12381::{
         dkg::{
             self,
@@ -9,13 +14,8 @@ use crate::{
             poly,
         },
     },
-    handlers::{
-        payloads::{self, SHARE_NAMESPACE},
-        utils::public_hex,
-        wire,
-    },
+    PublicKey, Scheme,
 };
-use commonware_cryptography::{PublicKey, Scheme};
 use commonware_p2p::{Receiver, Sender};
 use prost::Message;
 use rand::thread_rng;

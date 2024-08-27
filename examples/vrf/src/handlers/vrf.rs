@@ -1,4 +1,5 @@
-use crate::{
+use crate::handlers::wire;
+use commonware_cryptography::{
     bls12381::{
         dkg::contributor::Output,
         primitives::{
@@ -7,9 +8,8 @@ use crate::{
             poly::Eval,
         },
     },
-    handlers::wire,
+    PublicKey,
 };
-use commonware_cryptography::PublicKey;
 use commonware_p2p::{Receiver, Sender};
 use prost::Message;
 use std::collections::{HashMap, HashSet};
