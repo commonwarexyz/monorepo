@@ -3,10 +3,11 @@ members = [
     "cryptography",
     "p2p",
     "examples/chat",
+    "examples/vrf",
 ]
 resolver = "2"
 
 [workspace.dependencies]
-commonware-cryptography = { version = "0.0.3", path = "cryptography" }
-commonware-p2p = { version = "0.0.12", path = "p2p" }
+commonware-cryptography = { version = "0.0.4", path = "cryptography" }
+commonware-p2p = { version = "0.0.13", path = "p2p" }
 bytes = "1.7.1"

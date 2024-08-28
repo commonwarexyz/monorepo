@@ -1,26 +1,28 @@
 [package]
-name = "commonware-chat"
+name = "commonware-vrf"
 edition = "2021"
 publish = true
-version = "0.0.14"
+version = "0.0.2"
 license = "MIT OR Apache-2.0"
-description = "Send encrypted messages to a group of friends using commonware-cryptography and commonware-p2p."
+description = "Generate bias-resistant randomness with untrusted contributors using commonware-cryptography and commonware-p2p."
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo"
-documentation = "https://docs.rs/commonware-chat"
+documentation = "https://docs.rs/commonware-vrf"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
 commonware-p2p = { workspace = true } 
+bytes = { workspace = true } 
 tokio = { version = "1", features = ["full"] }
-clap = "4"
-chrono = "0.4"
+clap = "4" 
+tracing-subscriber = "0.3"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
-ratatui = "0.27"
-crossterm = "0.22"
-serde_json = "1"
-prometheus-client = "0.22"
-governor = "0.6"
 hex = "0.4"
+prometheus-client = "0.22"
+prost = "0.12"
+governor = "0.6"
+rand = "0.8"
+
+[build-dependencies]
+prost-build = "0.12"

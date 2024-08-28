@@ -1,0 +1,84 @@
+syntax = "proto3";
+package wire;
+
+// All messages that can be sent over DKG_CHANNEL. 
+message DKG {
+    uint64 round = 1;
+    oneof payload {
+        Start start = 2;
+        Commitment commitment = 3;
+        Commitments commitments = 4;
+        Share share = 5;
+        Ack ack = 6;
+        Complaint complaint = 7;
+        Missing missing = 8;
+        Reveal reveal = 9;
+        Success success = 10;
+        Abort abort = 11;
+    }
+}
+
+message Start {
+    optional bytes group = 1;
+}
+
+message Commitment {
+    bytes commitment = 1;
+}
+
+message Dealer {
+    uint32 dealer = 1;
+    bytes commitment = 2;
+}
+
+message Commitments {
+    repeated Dealer dealers = 1;
+}
+
+message Share {
+    bytes share = 1;
+    bytes signature = 2;
+}
+
+message Ack {
+    uint32 dealer = 1;
+}
+
+message Complaint {
+    uint32 dealer = 1;
+    bytes share = 2;
+    bytes signature = 3;
+}
+
+message Request {
+    uint32 dealer = 1;
+    uint32 share = 2;
+}
+
+message Missing {
+    repeated Request shares = 1;
+}
+
+message Reveal {
+    bytes share = 2;
+    bytes signature = 3;
+}
+
+message Resolution {
+    uint32 dealer = 1;
+    bytes share = 2;
+    bytes signature = 3;
+}
+
+message Success {
+    repeated uint32 dealers = 1;
+    repeated Resolution resolutions = 2;
+}
+
+message Abort {}
+
+// All messages that can be sent over VRF_CHANNEL. 
+message VRF {
+    uint64 round = 1;
+    bytes signature = 2;
+}

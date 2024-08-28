@@ -1,13 +1,36 @@
 //! Orchestrator of the DKG/Resharing procedure.
 //!
-//! In practice, this will often be implemented by a consensus mechanism but
-//! can be run as a trusted, standalone binary (see <https://docs.rs/commonware-vrf>).
+//! # Deployment Options
 //!
-//! # Duplicate/Unnecessary Information
+//! ## Recommended: All Contributors Run the Arbiter
 //!
-//! Duplicate/unnecessary information will error but not disqualify (to avoid including
-//! junk in a block), only invalid or missing information qualifies as an attributable
-//! fault (otherwise may occur by accident).
+//! Each contributor should run its own instance of the arbiter over a replicated
+//! log (deterministic order of events across all contributors) of commitments,
+//! acknowledgements, complaints, and resolutions. All correct contributors, when given
+//! the same log, will arrive at the same result (will recover the same group polynomial
+//! and a share that can generate partial signatures over it).
+//!
+//! When this log is instantiated using BFT consensus, up to `f` contributors can
+//! behave maliciously without affecting the outcome of the DKG/Resharing procedure (which
+//! pairs nicely with a `threshold` set to `2f + 1`, in a population of `3f + 1` contributors).
+//!
+//! ## Simple Alternative: Trusted Arbiter
+//!
+//! It is possible to run the arbiter as a standalone instance that contributors
+//! must trust to track commitments, acks, complaints, and reveals. For an example of
+//! this approach, refer to <https://docs.rs/commonware-vrf>.
+//!
+//! # Disqualification on Attributable Faults
+//!
+//! Submitting duplicate and/or unnecessary information (i.e. a dealer submitting the same commitment twice
+//! or submitting an acknowledgement for a disqualified dealer) will throw an error but not disqualify the
+//! contributor. It may not be possible for contributors to know the latest state of the arbiter when submitting
+//! information and penalizing them for this is not helpful (i.e. an acknowledgement may be inflight when another
+//! contributor submits a valid complaint).
+//!
+//! Submitting invalid information (invalid commitment) or refusing to submit required information (not sending a commitment)
+//! qualifies as an attributable fault that disqualifies a dealer/recipient from a round of DKG/Resharing. A developer
+//! can additionally handle such a fault as they see fit (may warrant additional punishment).
 //!
 //! # Warning
 //!
