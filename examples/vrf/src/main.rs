@@ -25,6 +25,8 @@
 //! contributors over a replicated log (commonly instantiated with a BFT consensus algorithm). This ensures that all
 //! correct contributors have the same view of the arbiter's state at the end of a round.
 //!
+//! _Following the release of `commonware-consensus`, this example will be updated to use the "replicated arbiter" approach._
+//!
 //! `Threshold` contributors are assumed to be honest and online. `n-threshold` contributors can behave arbitrarily and
 //! will not be able to interrupt a DKG, Resharing, or Threshold Signature. Diverging contributors will be identified
 //! by the arbiter and reported at the end of a DKG/Resharing.
