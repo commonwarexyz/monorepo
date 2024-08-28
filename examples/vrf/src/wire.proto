@@ -1,7 +1,7 @@
 syntax = "proto3";
 package wire;
 
-// All messages that can be sent in DKG
+// All messages that can be sent over DKG_CHANNEL. 
 message DKG {
     uint64 round = 1;
     oneof payload {
@@ -77,7 +77,7 @@ message Success {
 
 message Abort {}
 
-// Message that can be sent in signature
+// All messages that can be sent over VRF_CHANNEL. 
 message VRF {
     uint64 round = 1;
     bytes signature = 2;

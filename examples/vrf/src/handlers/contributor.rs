@@ -1,6 +1,5 @@
 use crate::handlers::{
-    payloads::{self, SHARE_NAMESPACE},
-    utils::public_hex,
+    utils::{payload, public_hex, SHARE_NAMESPACE},
     wire,
 };
 use commonware_cryptography::{
@@ -23,6 +22,8 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+/// A DKG/Resharing contributor that can be configured to behave honestly
+/// or deviate as a rogue, lazy, or defiant participant.
 pub struct Contributor<C: Scheme> {
     crypto: C,
     arbiter: PublicKey,
@@ -324,7 +325,7 @@ impl<C: Scheme> Contributor<C> {
                     continue;
                 }
 
-                let payload = payloads::share(round, me_idx, &share_bytes);
+                let payload = payload(round, me_idx, &share_bytes);
                 let signature = self.crypto.sign(SHARE_NAMESPACE, &payload);
                 sender
                     .send(
@@ -394,7 +395,7 @@ impl<C: Scheme> Contributor<C> {
                                             continue;
                                         }
                                     };
-                                    let payload = payloads::share(round, me_idx, &share);
+                                    let payload = payload(round, me_idx, &share);
                                     let signature = self.crypto.sign(SHARE_NAMESPACE, &payload);
                                     sender
                                         .send(
@@ -430,11 +431,8 @@ impl<C: Scheme> Contributor<C> {
                                                 return (round, None);
                                             }
                                         };
-                                    let payload = payloads::share(
-                                        round,
-                                        resolution.dealer,
-                                        &resolution.share,
-                                    );
+                                    let payload =
+                                        payload(round, resolution.dealer, &resolution.share);
                                     // The arbiter should have already verified the signature but we verify just in case!
                                     if !C::verify(
                                         SHARE_NAMESPACE,
@@ -502,7 +500,7 @@ impl<C: Scheme> Contributor<C> {
                     };
 
                     // Verify signature on incoming share
-                    let payload = payloads::share(round, *dealer as u32, &msg.share);
+                    let payload = payload(round, *dealer as u32, &msg.share);
                     if !C::verify(SHARE_NAMESPACE, &payload, &s, &msg.signature) {
                         warn!(round, dealer, "received invalid share signature");
                         continue;

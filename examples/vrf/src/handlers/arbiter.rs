@@ -1,6 +1,5 @@
 use crate::handlers::{
-    payloads::{self, SHARE_NAMESPACE},
-    utils::public_hex,
+    utils::{payload, public_hex, SHARE_NAMESPACE},
     wire,
 };
 use commonware_cryptography::{
@@ -22,23 +21,6 @@ use std::{
 use tokio::{select, time};
 use tracing::{debug, info, warn};
 
-/// Replicates functionality of a consensus process.
-///
-/// Verifies that any resharing of a public key is done correctly (can't transition to invalid public group)
-///
-/// # Phases
-///
-/// * Set Round Timeouts (T_commitment, T_ack, T_repair)
-/// * Before T_commitment, broadcast a signed commitment to some polynomial
-///   * Disqualify any players who do not send a commitment (or invalid)
-/// * Before T_ack, broadcast a signed acknowledgment to any received commitments
-///   * Disqualify any players that do not have `t` acks or that have been complained against
-/// * Before T_repair, broadcast a signed plaintext share to any missing acks
-///   * Disqualify any players that do not have `n` shares distributed (or invalid)
-///
-/// # TODO
-/// * Support early phase termination (when work is done)
-/// * Support changning players
 pub struct Arbiter {
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
@@ -47,6 +29,11 @@ pub struct Arbiter {
     t: u32,
 }
 
+/// Implementation of a "trusted arbiter" that tracks commitments,
+/// acknoledgements, complaints, and reveals during a DKG round.
+///
+/// Following the release of `commonware-consensus`, this will be
+/// updated to use the "replicated arbiter" pattern.
 impl Arbiter {
     pub fn new(
         dkg_frequency: Duration,
@@ -248,7 +235,7 @@ impl Arbiter {
                                         continue;
                                     }
                                 };
-                                let payload = payloads::share(round, complaint.dealer, &complaint.share);
+                                let payload = payload(round, complaint.dealer, &complaint.share);
                                 if !C::verify(SHARE_NAMESPACE, &payload, &bad_dealer, &complaint.signature) {
                                     p1.disqualify(sender);
                                     continue;
@@ -403,7 +390,7 @@ impl Arbiter {
                                 continue;
                             }
                         };
-                        let payload = payloads::share(round, dealer, &msg.share);
+                        let payload = payload(round, dealer, &msg.share);
                         if !C::verify(SHARE_NAMESPACE, &payload, &sender, &msg.signature) {
                             p2.disqualify(sender);
                             continue;

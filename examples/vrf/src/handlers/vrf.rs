@@ -17,9 +17,8 @@ use std::time::Duration;
 use tokio::{select, sync::mpsc};
 use tracing::{debug, info, warn};
 
-/// Threshold Signature-based VRF that generates signatures
-/// over a round identifier (u64) when prompted by an external
-/// party.
+/// Generate bias-resistant, verifiable randomness using BLS12-381
+/// Threshold Signatures.
 pub struct Vrf {
     timeout: Duration,
     threshold: u32,
