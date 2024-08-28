@@ -16,7 +16,8 @@ _Crates in this repository are designed for deployment in adversarial environmen
 
 _Examples may include insecure code (i.e. deriving keypairs from an integer arguements) to make them easier to run. Examples are not intended to be used directly in production._
 
-* [chat](./examples/chat/README.md): Send encrypted messages to a group of friends using [commonware-cryptography](https://crates.io/crates/commonware-cryptography) and [commonware-p2p](https://crates.io/crates/commonware-p2p). 
+* [chat](./examples/chat/README.md): Send encrypted messages to a group of friends. 
+* [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
 ## Licensing
 
