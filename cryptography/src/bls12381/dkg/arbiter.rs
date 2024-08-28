@@ -10,8 +10,8 @@
 //! the same log, will arrive at the same result (will recover the same group polynomial
 //! and a share that can generate partial signatures over it).
 //!
-//! _It is a particularly nice combination to run this log using an instance of BFT consensus
-//! with a threshold of `2f + 1` (where there exist `3f + 1` total contributors)._
+//! _It is a particularly powerful combination to run this log using an instance of BFT
+//! consensus with a threshold of `2f + 1` (where there exist `3f + 1` total contributors)._
 //!
 //! ## Alternative: Trusted Arbiter
 //!

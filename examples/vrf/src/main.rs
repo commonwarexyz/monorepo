@@ -20,18 +20,14 @@
 //!
 //! # Trust Assumptions
 //!
-//! In this example, the arbiter is assumed to be honest. It tallies commitments from contributors, tracks acknowledgements
-//! and complaints, and communicates to contributors what dealers (commitments and shares) to use when recovering the group public polynomial (and
-//! each contributor's corresponding share). In a production deployment, the arbiter should be replaced with a consensus
-//! process (that all contributors run).
+//! In this example, the arbiter is trusted. It tracks commitments, acknowledgements, complaints, and reveals submitted
+//! by contributors. As alluded to in the arbiter docs, production deployments of the arbiter should be run by all
+//! contributors over a replicated log (commonly instantiated with a BFT consensus algorithm). This ensures that all
+//! correct contributors have the same view of the arbiter's state at the end of a round.
 //!
-//! TODO....
-//!
-//! Contributors, on the other hand, can behave arbitrarily. As long as `threshold` are online and honest, the DKG, Resharing, and
-//! Threshold Signature can be constructed.
-//!
-//! TODO....
-//!
+//! `Threshold` contributors are assumed to be honest and online. `n-threshold` contributors can behave arbitrarily and
+//! will not be able to interrupt a DKG, Resharing, or Threshold Signature. Diverging contributors will be identified
+//! by the arbiter and reported at the end of a DKG/Resharing.
 //!
 //! # Usage (3 of 4 Threshold)
 //!
