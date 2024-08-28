@@ -404,7 +404,7 @@ checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "chrono",
  "clap",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "blst",
  "bytes",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "bitvec",
  "bytes",
