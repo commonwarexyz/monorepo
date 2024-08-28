@@ -10,6 +10,17 @@
 //! invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, or a "defiant" dealer that doesn't
 //! respond to requests to reveal shares that weren't acknowledged by other contributors.
 //!
+//! # Trust Assumptions
+//!
+//! In this example, the arbiter is assumed to be honest.
+//!
+//! TODO....
+//!
+//! Contributors, on the hand, can behave arbitrarily. As long as `threshold` are online and honest, it will work.
+//!
+//! TODO....
+//!
+//!
 //! # Usage (3 of 4 Threshold)
 //!
 //! ## Arbiter

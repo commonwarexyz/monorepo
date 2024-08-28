@@ -7,8 +7,6 @@ and [commonware-p2p](https://crates.io/crates/commonware-p2p).
 
 # Usage (3 of 4 Threshold)
 
-Perform a DKG (or Reshare) -> Generate Threshold Signature -> Repeat
-
 ## Arbiter 
 ```bash
 cargo run --release -- --me 0@3000 --participants 0,1,2,3,4 --contributors 1,2,3,4
