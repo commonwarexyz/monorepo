@@ -1,13 +1,24 @@
 //! Orchestrator of the DKG/Resharing procedure.
 //!
+//! It is recommended to run the arbiter over a replicated log (provided by an
+//! instance of BFT consensus) to deterministically coordinate the DKG/Resharing procedure.
+//!
 //! In practice, this will often be implemented by a consensus mechanism but
 //! can be run as a trusted, standalone binary (see <https://docs.rs/commonware-vrf>).
 //!
-//! # Duplicate/Unnecessary Information
+//! TODO: run over consensus, not implemented by
 //!
-//! Duplicate/unnecessary information will error but not disqualify (to avoid including
-//! junk in a block), only invalid or missing information qualifies as an attributable
-//! fault (otherwise may occur by accident).
+//! # Disqualification on Attributable Faults
+//!
+//! Submitting duplicate and/or unnecessary information (i.e. a dealer submitting the same commitment twice
+//! or submitting an acknowledgement for a disqualified dealer) will throw an error but not disqualify the
+//! contributor. It may not be possible for contributors to know the latest state of the arbiter when submitting
+//! information and penalizing them for this is not helpful (i.e. an acknowledgement may be inflight when another
+//! contributor submits a valid complaint).
+//!
+//! Submitting invalid information (invalid commitment) or refusing to submit required information (not sending a commitment)
+//! qualifies as an attributable fault that disqualifies a dealer/recipient from a round of DKG/Resharing. A developer
+//! can additionally handle such a fault as they see fit (may warrant additional punishment).
 //!
 //! # Warning
 //!
