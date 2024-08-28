@@ -5,13 +5,13 @@
 //! ## Recommended: All Contributors Run the Arbiter
 //!
 //! Each contributor should run its own instance of the arbiter over a replicated
-//! log of commitments, acknowledgements, complaints, and resolutions (deterministic
-//! order of events across all contributors). All correct contributors, when given
+//! log (deterministic order of events across all contributors) of commitments,
+//! acknowledgements, complaints, and resolutions. All correct contributors, when given
 //! the same log, will arrive at the same result (will recover the same group polynomial
-//! and a share that can generate partial signatures over it).
-//!
-//! _It is a particularly powerful combination to run this log using an instance of BFT
-//! consensus with a threshold of `2f + 1` (where there exist `3f + 1` total contributors)._
+//! and a share that can generate partial signatures over it). When instantiated using
+//! BFT consensus, up to `f` contributors can behave maliciously without affecting the
+//! outcome of the DKG/Resharing procedure (which pairs nicely with a `threshold` set to
+//! `2f + 1`, in a population of `3f + 1` contributors).
 //!
 //! ## Alternative: Trusted Arbiter
 //!
