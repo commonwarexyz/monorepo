@@ -14,7 +14,7 @@
 //! behave maliciously without affecting the outcome of the DKG/Resharing procedure (which
 //! pairs nicely with a `threshold` set to `2f + 1`, in a population of `3f + 1` contributors).
 //!
-//! ## Alternative: Trusted Arbiter
+//! ## Simple Alternative: Trusted Arbiter
 //!
 //! It is possible to run the arbiter as a standalone instance that contributors
 //! must trust to track commitments, acks, complaints, and reveals. For an example of
