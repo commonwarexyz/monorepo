@@ -8,10 +8,11 @@
 //! log (deterministic order of events across all contributors) of commitments,
 //! acknowledgements, complaints, and resolutions. All correct contributors, when given
 //! the same log, will arrive at the same result (will recover the same group polynomial
-//! and a share that can generate partial signatures over it). When instantiated using
-//! BFT consensus, up to `f` contributors can behave maliciously without affecting the
-//! outcome of the DKG/Resharing procedure (which pairs nicely with a `threshold` set to
-//! `2f + 1`, in a population of `3f + 1` contributors).
+//! and a share that can generate partial signatures over it).
+//!
+//! When this log is instantiated using BFT consensus, up to `f` contributors can
+//! behave maliciously without affecting the outcome of the DKG/Resharing procedure (which
+//! pairs nicely with a `threshold` set to `2f + 1`, in a population of `3f + 1` contributors).
 //!
 //! ## Alternative: Trusted Arbiter
 //!
