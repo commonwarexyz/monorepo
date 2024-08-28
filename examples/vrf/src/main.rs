@@ -12,11 +12,15 @@
 //!
 //! # Trust Assumptions
 //!
-//! In this example, the arbiter is assumed to be honest.
+//! In this example, the arbiter is assumed to be honest. It tallies commitments from contributors, tracks acknowledgements
+//! and complaints, and communicates to contributors what dealers (commitments and shares) to use when recovering the group public polynomial (and
+//! each contributor's corresponding share). In a production deployment, the arbiter should be replaced with a consensus
+//! process (that all contributors run).
 //!
 //! TODO....
 //!
-//! Contributors, on the hand, can behave arbitrarily. As long as `threshold` are online and honest, it will work.
+//! Contributors, on the other hand, can behave arbitrarily. As long as `threshold` are online and honest, the DKG, Resharing, and
+//! Threshold Signature can be constructed.
 //!
 //! TODO....
 //!
