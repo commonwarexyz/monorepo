@@ -1,12 +1,23 @@
 //! Orchestrator of the DKG/Resharing procedure.
 //!
-//! It is recommended to run the arbiter over a replicated log (provided by an
-//! instance of BFT consensus) to deterministically coordinate the DKG/Resharing procedure.
+//! # Deployment Options
 //!
-//! In practice, this will often be implemented by a consensus mechanism but
-//! can be run as a trusted, standalone binary (see <https://docs.rs/commonware-vrf>).
+//! ## Recommended: All Contributors Run the Arbiter
 //!
-//! TODO: run over consensus, not implemented by
+//! Each contributor should run its own instance of the arbiter over a replicated
+//! log of commitments, acknowledgements, complaints, and resolutions (deterministic
+//! order of events across all contributors). All correct contributors, when given
+//! the same log, will arrive at the same result (will recover the same group polynomial
+//! and a share that can generate partial signatures over it).
+//!
+//! _It is a particularly nice combination to run this log using an instance of BFT consensus
+//! with a threshold of `2f + 1` (where there exist `3f + 1` total contributors)._
+//!
+//! ## Alternative: Trusted Arbiter
+//!
+//! It is possible to run the arbiter as a standalone instance that contributors
+//! must trust to track commitments, acks, complaints, and reveals. For an example of
+//! this approach, refer to <https://docs.rs/commonware-vrf>.
 //!
 //! # Disqualification on Attributable Faults
 //!
