@@ -1,14 +1,22 @@
 //! Generate bias-resistant randomness with untrusted contributors using commonware-cryptography and commonware-p2p.
 //!
 //! Contributors to this VRF connect to each other over commonware-p2p (using ED25519 identities), perform an initial
-//! DKG (to generate a static public key), and then perform a proactive refresh every 10 seconds. After a successful
-//! DKG and/or Reshare, contributors generate partial signatures over the round number and gossip them to others in
-//! the group (again using commonware-p2p). These partial signatures, when aggregated, form a threshold signature that
-//! was not knowable by any contributor prior to signing.
+//! Distributed Key Generation (DKG) to generate a static public key, and then perform a proactive Resharing every 10
+//! seconds. After a successful DKG and/or Reshare, contributors generate partial signatures over the round number and
+//! gossip them to others in the group (again using commonware-p2p). These partial signatures, when aggregated, form
+//! a threshold signature that was not knowable by any contributor prior to collecting `t` partial signatures.
 //!
 //! To demonstrate how malicious contributors are handled, the CLI also lets you behave as a "rogue" dealer that generates
-//! invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, or a "defiant" dealer that doesn't
-//! respond to requests to reveal shares that weren't acknowledged by other contributors.
+//! invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, and/or a "defiant" dealer that
+//! doesn't respond to requests to reveal shares that weren't acknowledged by other contributors.
+//!
+//! # Joining After a DKG
+//!
+//! In the case that a new contributor joins the VRF after a successful DKG, the new contributor will jump to "Phase 1"
+//! during the next Resharing and wait for a commitment and shares to be distributed from online contributors. As long
+//! as `t` contributors are online and honest at this time, the new contributor will be able to recover the group public
+//! polynomial and generate a share that can be used to generate partial signatures. They will also be able to participate
+//! in future Resharings.
 //!
 //! # Trust Assumptions
 //!
