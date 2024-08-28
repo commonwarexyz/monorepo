@@ -12,11 +12,11 @@
 //!
 //! # Joining After a DKG
 //!
-//! In the case that a new contributor joins the VRF after a successful DKG, the new contributor will jump to "Phase 1"
-//! during the next Resharing and wait for a commitment and shares to be distributed from online contributors. As long
-//! as `t` contributors are online and honest at this time, the new contributor will be able to recover the group public
-//! polynomial and generate a share that can be used to generate partial signatures. They will also be able to participate
-//! in future Resharings.
+//! If a new contributor joins the group after a successful DKG, the new contributor will jump to "Phase 1" of the contributor
+//! state machine during the next Resharing. They will skip the generation of a commitment/shares and just wait for commitments
+//! and shares from online contributors to be distributed to them. As long as `t` contributors are online and honest at this time,
+//! the new contributor will be able to recover the group public polynomial and generate a share that can be used to generate valid
+//! partial signatures. They will also be able to participate (share commitment/shares) in future Resharings.
 //!
 //! # Trust Assumptions
 //!
