@@ -78,10 +78,11 @@
 //! This x25519 secret is then used to create a ChaCha20-Poly1305 cipher for encrypting all messages exchanged between
 //! any two peers (including peer discovery messages)
 //!
-//! Nonces are orchestrated such that each message sent by the dialer increases by 2 starting from 0 and
-//! the recipient increases by 2 starting from 1. This prevents nonce reuse (which would allow for messages
-//! to be decrypted) and avoids the use of a small hash as a nonce (common in XChaCha-Poly1305), which may accidentally
-//! be reused when sending many messages over a long-lived connection (which is common in blockchain applications).
+//! Nonces (which are 12 bytes) are orchestrated such that each message sent by the dialer sets the first byte to 1 and
+//! then sets the last 8 bytes with a counter of the messages sent. The dialee uses a similar strategy byt does not set the
+//! first byte to be 1. This simple coordination prevents nonce reuse (which would allow for messages
+//! to be decrypted), avoids sending the nonce alongside the message (saves bandwidth), and avoids the use of a small hash
+//! as a nonce (common in XChaCha-Poly1305), which may accidentally be reused when sending many messages over a long-lived connection (which is common in blockchain applications).
 //!
 //! ## Discovery
 //!
