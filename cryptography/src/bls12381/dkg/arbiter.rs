@@ -10,8 +10,8 @@
 //! the same log, will arrive at the same result (will recover the same group polynomial
 //! and a share that can generate partial signatures over it). Using a replicated log allows
 //! us to provide both reliable broadcast (all honest contributors see all messages from
-//! all other honest contributors) and to enforce a "timeout" on when a phase of DKG/Resharing
-//! is complete (needed to support a `2f + 1` threshold).
+//! all other honest contributors) and to enforce a "timeout" (using log index) for each
+//! phase of DKG/Resharing (needed to support a `2f + 1` threshold in this construction).
 //!
 //! ## Trusted Alternative: Standalone Process
 //!
