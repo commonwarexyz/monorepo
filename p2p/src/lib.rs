@@ -131,6 +131,10 @@
 //!
 //! ## Message Chunking
 //!
+//! To support arbitarily large messages (while maintaing a small frame size), this crate automatically chunks messages
+//! that exceed the frame size (the frame size is configurable). A connection will be blocked until all chunks of a given
+//! message are sent.
+//!
 //! ```protobuf
 //! message Chunk {
 //!     uint32 channel = 1;
