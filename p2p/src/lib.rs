@@ -71,6 +71,23 @@
 //!
 //! ## Discovery
 //!
+//! ### Step X: Send Signed IP
+//!
+//! After establishing a connection, a peer will send a signed message that
+//! indicates how to dial to it (using IP:Port):
+//! ```protobuf
+//! syntax = "proto3";
+//!
+//! message Peer {
+//!     bytes socket = 1;
+//!     uint64 timestamp = 2;
+//!     Signature signature = 3;
+//! }
+//! ```
+//!
+//! If a peer receives a signed message that is newer than the last message it received,
+//! it will update its knowledge of the peer.
+//!
 //! # Example
 //!
 //! ```rust
