@@ -7,6 +7,7 @@ use prometheus_client::registry::Registry;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 mod actor;
 mod address;
@@ -22,6 +23,7 @@ pub struct Config<C: Scheme> {
     pub bootstrappers: Vec<Bootstrapper>,
     pub allow_private_ips: bool,
     pub mailbox_size: usize,
+    pub synchrony_bound: Duration,
     pub tracked_peer_sets: usize,
     pub allowed_connection_rate_per_peer: Quota,
     pub peer_gossip_max_count: usize,

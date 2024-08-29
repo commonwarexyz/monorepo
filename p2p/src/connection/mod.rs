@@ -16,6 +16,8 @@ pub use stream::{Sender, Stream};
 pub struct Config<C: Scheme> {
     pub crypto: C,
     pub max_frame_length: usize,
+    pub synchrony_bound: Duration,
+    pub max_handshake_age: Duration,
     pub handshake_timeout: Duration,
     pub read_timeout: Duration,
     pub write_timeout: Duration,
@@ -45,6 +47,7 @@ pub enum Error {
     EncryptionFailed,
     DecryptionFailed,
     ReadInvalidFrame,
+    InvalidTimestamp,
 }
 
 impl std::fmt::Display for Error {
@@ -77,6 +80,7 @@ impl std::fmt::Display for Error {
             Error::EncryptionFailed => write!(f, "encryption failed"),
             Error::DecryptionFailed => write!(f, "decryption failed"),
             Error::ReadInvalidFrame => write!(f, "read invalid frame"),
+            Error::InvalidTimestamp => write!(f, "invalid timestamp"),
         }
     }
 }

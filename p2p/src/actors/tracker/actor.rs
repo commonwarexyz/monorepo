@@ -12,7 +12,7 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::prelude::IteratorRandom;
 use rand::{seq::SliceRandom, thread_rng};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
@@ -127,6 +127,7 @@ impl AddressCount {
 pub struct Actor<C: Scheme> {
     crypto: C,
     allow_private_ips: bool,
+    synchrony_bound: Duration,
     tracked_peer_sets: usize,
     peer_gossip_max_count: usize,
 
@@ -140,6 +141,7 @@ pub struct Actor<C: Scheme> {
     tracked_peers: Gauge,
     reserved_connections: Gauge,
     rate_limited_connections: Family<metrics::Peer, Counter>,
+    updated_peers: Family<metrics::Peer, Counter>,
 
     ip_signature: wire::Peer,
 }
@@ -149,7 +151,7 @@ impl<C: Scheme> Actor<C> {
         // Construct IP signature
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("Failed to get current time")
+            .expect("failed to get current time")
             .as_secs();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
         let ip_signature = cfg.crypto.sign(NAMESPACE, &payload_bytes);
@@ -189,6 +191,7 @@ impl<C: Scheme> Actor<C> {
         let tracked_peers = Gauge::default();
         let reserved_connections = Gauge::default();
         let rate_limited_connections = Family::<metrics::Peer, Counter>::default();
+        let updated_peers = Family::<metrics::Peer, Counter>::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
             registry.register("tracked_peers", "tracked peers", tracked_peers.clone());
@@ -202,12 +205,18 @@ impl<C: Scheme> Actor<C> {
                 "number of rate limited connections",
                 rate_limited_connections.clone(),
             );
+            registry.register(
+                "updated_peers",
+                "number of peer records updated",
+                updated_peers.clone(),
+            );
         }
 
         (
             Self {
                 crypto: cfg.crypto,
                 allow_private_ips: cfg.allow_private_ips,
+                synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
 
@@ -224,6 +233,7 @@ impl<C: Scheme> Actor<C> {
                 tracked_peers,
                 reserved_connections,
                 rate_limited_connections,
+                updated_peers,
             },
             Mailbox::new(sender.clone()),
             Oracle::new(sender),
@@ -338,12 +348,19 @@ impl<C: Scheme> Actor<C> {
         }
 
         // Update peer address
+        //
+        // It is not safe to rate limit how many times this can happen
+        // over some interval because a malicious peer may just replay
+        // old IPs to prevent us from propogating a new one.
         let record = self.peers.get_mut(peer).unwrap();
         let wire_time = address.peer.timestamp;
         if !record.set_network(address) {
             trace!(peer = hex::encode(peer), wire_time, "stored peer newer");
             return false;
         }
+        self.updated_peers
+            .get_or_create(&metrics::Peer::new(peer))
+            .inc();
 
         // Update peer set knowledge
         for set in self.sets.values_mut() {
@@ -390,6 +407,15 @@ impl<C: Scheme> Actor<C> {
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
             if !C::verify(NAMESPACE, &payload, public_key, &signature.signature) {
+                return Err(Error::InvalidSignature);
+            }
+
+            // If any timestamp is too far into the future, disconnect from the peer
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("failed to get current time")
+                .as_secs();
+            if peer.timestamp > current_time + self.synchrony_bound.as_secs() {
                 return Err(Error::InvalidSignature);
             }
 
@@ -607,6 +633,7 @@ mod tests {
             bootstrappers,
             allow_private_ips: true,
             mailbox_size: 32,
+            synchrony_bound: Duration::from_secs(10),
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             peer_gossip_max_count: 32,

@@ -46,6 +46,8 @@ impl<C: Scheme> Actor<C> {
         let handshake = match IncomingHandshake::verify(
             &connection.crypto,
             connection.max_frame_length,
+            connection.synchrony_bound,
+            connection.max_handshake_age,
             connection.handshake_timeout,
             stream,
         )

@@ -15,13 +15,130 @@
 //!
 //! # Features
 //!
-//! * No TLS, No X.509 Certificates, No Protocol Negotiation
+//! * Simple Handshakes (No TLS, No X.509 Certificates, No Protocol Negotiation)
 //! * ChaCha20-Poly1305 Stream Encryption
-//! * Arbitrary Cryptographic Peer Identities
+//! * Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
 //! * Automatic Peer Discovery Using Bit Vectors (Used as Ping/Pongs)
 //! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
 //! * Emebdded Message Chunking
-//! * Metrics via Prometheus
+//!
+//! # Design
+//!
+//! ## Handshake
+//!
+//! When establishing a connection with a peer, a simple handshake is performed between
+//! peers to authenticate each other and to establish a shared secret for connection encryption (explained below).
+//! This simple handshake is done in lieu of using TLS, Noise, WireGuard, etc. because it supports
+//! the usage of arbitrary cryptographic schemes, there is no protocol negotation (only one way to connect), and
+//! because it only takes a few hundred lines of code to implement (not having any features is a feature
+//! in safety-critical code).
+//!
+//! In any handshake, the dialer is the party that attempts to connect to some known address/identity (public key)
+//! and the recipient of this connection is the dialee. Upon forming a TCP connection, the dialer sends a signed
+//! handshake message to the dialee.
+//!
+//! ```protobuf
+//! message Handshake {
+//!     bytes recipient_public_key = 1;
+//!     bytes ephemeral_public_key = 2;
+//!     uint64 timestamp = 3;
+//!     Signature signature = 4;
+//! }
+//! ```
+//!
+//! The dialee verifies the public keys are well-formatted, the timestamp is valid (not too old/not too far in the future),
+//! and that the signature is valid. If all these checks pass, the dialee checks to see if it is already connected or dialing
+//! this peer. If it is, it drops the connection. If it isn't, it sends back its own signed handshake message (same as above)
+//! and considers the connection established.
+//!
+//! Upon receiving the dialee's handshake message, the dialer verifies the same data as the dialee and additionally verifies
+//! that the public key returned matches what they expected at the address. If all these checks pass, the dialer considers the
+//! connection established. If not, the dialer drops the connection (the dialee will eventually drop the connection after
+//! some timeout).
+//!
+//! ## Encryption
+//!
+//! During the handshake (described above), a shared x25519 secret is established using a Diffie-Hellman Key Exchange. This
+//! x25519 secret is then used to create a ChaCha20-Poly1305 cipher for encrypting all messages exchanged between
+//! any two peers (including peer discovery messages).
+//!
+//! ChaCha20-Poly1305 nonces (12 bytes) are constructed such that each message sent by the dialer
+//! sets the first bit of the first byte and then sets the last 10 bytes with an iterator (incremented each time that sequence overflows)
+//! and sequence to provide a max one-way channel duration of 2^80 sends (automatically terminating when all values are
+//! exhausted). In the blockchain context, validators often maintain long-lived connections with each other and avoiding
+//! connection re-establishment (to reset iterator/sequence over a new x25519 key) is desirable.
+//!
+//! ```text
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! | D | U |It(u16)|         Sequence(u64)         |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! ```
+//!
+//! This simple coordination prevents nonce reuse (which would allow for messages to be decrypted) and saves a small amount of
+//! bandwidth (no need to send the nonce alongside the encrypted message). This "pedantic" construction of the nonce
+//! also avoids accidentally reusing a nonce over long-lived connections when setting it to be a small hash (as in XChaCha-Poly1305).
+//!
+//! ## Discovery
+//!
+//! Peer discovery relies heavily on the assumption that all peers are known at each index (a user-provided tuple of
+//! `(u64, Vec<PublicKey>)`). Using this assumption, we can construct a sorted bit vector that represents our knowledge
+//! of peer IPs (where 1 == we know, 0 == we don't know). This means we can represent our knowledge of 1000 peers in only 125 bytes!
+//!
+//! Because this representation is so efficient/small, peers send bit vectors to each other periodically as a "ping" to keep
+//! the connection alive. Because it may be useful to be connected to multiple indexes of peers at a given time (i.e. to perform a DKG
+//! with a new set of peers), it is possible to configure this crate to maintain connections to multiple indexes (and pings are a
+//! random index we are trying to connect to).
+//!
+//! ```protobuf
+//! message BitVec {
+//!     uint64 index = 1;
+//!     bytes bits = 2;
+//! }
+//! ```
+//!
+//! Upon receiving a bit vector, a peer will select a random collection of peers (under a configured max) that it knows about that the
+//! sender does not. If the sender knows about all peers that we know about, the receiver does nothing (and relies on its bit vector
+//! to serve as a pong to keep the connection alive).
+//!
+//! ```protobuf
+//! message Peers {
+//!     repeated Peer peers = 1;
+//! }
+//! ```
+//! If a peer learns about an updated address for a peer, it will update the record it has stored (for itself and for future gossip).
+//! This record is created during instantiation and is sent immediately after a connection is established (right after the handshake).
+//! This means that a peer that learned about an outdated record for a peer will update it immediately upon being dialed.
+//!
+//! ```protobuf
+//! message Peer {
+//!     bytes socket = 1;
+//!     uint64 timestamp = 2;
+//!     Signature signature = 3;
+//! }
+//! ```
+//!
+//! To get all of this started, a peer must first be bootstrapped with a list of known peers/addresses. The peer will dial these
+//! other peers, send its own record, send a bit vector (with all 0's except its own position in the sorted list), and then
+//! wait for the other peer to respond with some set of unknown peers. Different peers do not need to agree on who this list of
+//! bootstrapping peers is (this list is configurable).
+//!
+//! ## Chunking
+//!
+//! To support arbitarily large messages (while maintaing a small frame size), this crate automatically chunks messages
+//! that exceed the frame size (the frame size is configurable). A connection will be blocked until all chunks of a given
+//! message are sent. It is possible for a sender to prioritize messages over others but not to be interleaved with an
+//! ongoing multi-chunk message.
+//!
+//! ```protobuf
+//! message Chunk {
+//!     uint32 channel = 1;
+//!     uint32 part = 2;
+//!     uint32 total_parts = 3;
+//!     bytes content = 4;
+//! }  
+//! ```
 //!
 //! # Example
 //!
