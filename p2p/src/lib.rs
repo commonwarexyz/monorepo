@@ -47,6 +47,8 @@
 //! }
 //! ```
 //!
+//! The timestamp....
+//!
 //! ### Step 1: Dialee Verified Handshake and Sends Response
 //!
 //! The dialee verifies the handshake and sends back its own version of the same message:
@@ -86,7 +88,8 @@
 //! ```
 //!
 //! If a peer receives a signed message that is newer than the last message it received,
-//! it will update its knowledge of the peer.
+//! it will update its knowledge of the peer. Unlike handshakes, these update messages
+//! do not have a recency requirement.
 //!
 //! # Example
 //!
