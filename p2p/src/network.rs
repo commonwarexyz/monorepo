@@ -110,6 +110,7 @@ impl<C: Scheme> Network<C> {
         let connection = connection::Config {
             crypto: self.cfg.crypto,
             max_frame_length: self.cfg.max_frame_length,
+            max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,
             read_timeout: self.cfg.read_timeout,
             write_timeout: self.cfg.write_timeout,

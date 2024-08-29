@@ -54,6 +54,9 @@ pub struct Config<C: Scheme> {
     /// size).
     pub max_frame_length: usize,
 
+    /// Duration after which a handshake message is considered stale.
+    pub max_handshake_age: Duration,
+
     /// Duration after which to close the connection if the handshake is not completed.
     pub handshake_timeout: Duration,
 
@@ -133,6 +136,7 @@ impl<C: Scheme> Config<C> {
             allow_private_ips: false,
             mailbox_size: 1_000,
             max_frame_length: 1024 * 1024, // 1 MB
+            max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
@@ -169,6 +173,7 @@ impl<C: Scheme> Config<C> {
             allow_private_ips: true,
             mailbox_size: 1_000,
             max_frame_length: 1024 * 1024, // 1 MB
+            max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             read_timeout: Duration::from_secs(10), // should be greater than gossip_bit_vec_frequency
             write_timeout: Duration::from_secs(10),

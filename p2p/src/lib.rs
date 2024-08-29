@@ -23,6 +23,20 @@
 //! * Emebdded Message Chunking
 //! * Metrics via Prometheus
 //!
+//! # TODO
+//!
+//! ## Handshake
+//!
+//! When establishing a connection with a peer, a proprietary handshake is performed between
+//! peers to authenticate each other and to establish a shared secret for connection encryption.
+//!
+//! The dialer starts this process by sending a message that contains `{recipient_public_key,
+//! ephemeral_public_key, timestamp, signature}.`
+//!
+//! ## Encryption
+//!
+//! ## Discovery
+//!
 //! # Example
 //!
 //! ```rust

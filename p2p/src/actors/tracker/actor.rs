@@ -149,7 +149,7 @@ impl<C: Scheme> Actor<C> {
         // Construct IP signature
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("Failed to get current time")
+            .expect("failed to get current time")
             .as_secs();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
         let ip_signature = cfg.crypto.sign(NAMESPACE, &payload_bytes);

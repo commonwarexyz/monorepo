@@ -24,7 +24,8 @@ message Message {
 message Handshake {
     bytes recipient_public_key = 1;
     bytes ephemeral_public_key = 2;
-    Signature signature = 3;
+    uint64 timestamp = 3;
+    Signature signature = 4;
 }
 
 // BitVec is a bit vector that represents the peers a peer
