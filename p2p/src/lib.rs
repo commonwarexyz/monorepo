@@ -49,6 +49,8 @@
 //!
 //! The timestamp....
 //!
+//! // TODO: prevent signatures in the future (both handshake and peer discovery) -> change to max_age_drift
+//!
 //! ### Step 1: Dialee Verified Handshake and Sends Response
 //!
 //! The dialee verifies the handshake and sends back its own version of the same message:
