@@ -92,17 +92,14 @@
 //!
 //! ## Discovery
 //!
-//! ### Step X: Send Signed IP
+//! Peer discovery relies heavily on the assumption that all peers are known at each index (a user-provided tuple of
+//! `(u64, Vec<PublicKey>)`). Using this assumption, we can construct a sorted bit vector that represents our knowledge
+//! of peer IPs (where 1 == we know, 0 == we don't know). This means we can represent our knowledge of 1000 peers in only 125 bytes!
 //!
-//! After establishing a connection, a peer will send a signed message that
-//! indicates how to dial to it (using IP:Port):
-//! ```protobuf
-//! message Peer {
-//!     bytes socket = 1;
-//!     uint64 timestamp = 2;
-//!     Signature signature = 3;
-//! }
-//! ```
+//! Because this representation is so efficient/small, peers send bit vectors to each other periodically as a "ping" to keep
+//! the connection alive. Because it may be useful to be connected to multiple indexes of peers at a given time (i.e. to perform a DKG
+//! with a new set of peers), it is possible to configure this crate to maintain connections to multiple indexes (and pings are a
+//! random index we are trying to connect to).
 //!
 //! ```protobuf
 //! message BitVec {
@@ -111,15 +108,26 @@
 //! }
 //! ```
 //!
+//! Upon receiving a bit vector, a peer will select a random collection of peers (under a configured max) that it knows about that the
+//! sender does not. If the sender knows about all peers that we know about, the receiver does nothing (and relies on its bit vector
+//! to serve as a pong to keep the connection alive).
+//!
 //! ```protobuf
 //! message Peers {
 //!     repeated Peer peers = 1;
 //! }
 //! ```
+//! If a peer learns about an updated address for a peer, it will update the record it has stored (for itself and for future gossip).
+//! This record is created during instantiation and is sent immediately after a connection is established (right after the handshake).
+//! This means that a peer that learned about an outdated record for a peer will update it immediately upon being dialed.
 //!
-//! If a peer receives a signed message that is newer than the last message it received,
-//! it will update its knowledge of the peer. Unlike handshakes, these update messages
-//! do not have a recency requirement.
+//! ```protobuf
+//! message Peer {
+//!     bytes socket = 1;
+//!     uint64 timestamp = 2;
+//!     Signature signature = 3;
+//! }
+//! ```
 //!
 //! ## Message Chunking
 //!
