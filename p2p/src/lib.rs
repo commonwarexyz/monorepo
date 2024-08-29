@@ -33,8 +33,39 @@
 //! arbitrary cryptographic schemes, there is no protocol negotation (only one way to connect), and
 //! because it takes a few hundred lines of code to implement (not having any features is a feature).
 //!
-//! The dialer starts this process by sending a message that contains `{recipient_public_key,
-//! ephemeral_public_key, timestamp, signature}.`
+//! ### Step 0: Dialer Opens Connection and Sends Handshake
+//!
+//! The dialer starts the handshake by sending the following message:
+//! ```protobuf
+//! syntax = "proto3";
+//!
+//! message Handshake {
+//!     bytes recipient_public_key = 1;
+//!     bytes ephemeral_public_key = 2;
+//!     uint64 timestamp = 3;
+//!     Signature signature = 4;
+//! }
+//! ```
+//!
+//! ### Step 1: Dialee Verified Handshake and Sends Response
+//!
+//! The dialee verifies the handshake and sends back its own version of the same message:
+//! ```protobuf
+//! syntax = "proto3";
+//!
+//! message Handshake {
+//!     bytes recipient_public_key = 1;
+//!     bytes ephemeral_public_key = 2;
+//!     uint64 timestamp = 3;
+//!     Signature signature = 4;
+//! }
+//! ```
+//!
+//! At this point, the dialee considers the connection established.
+//!
+//! ### Step 3: Dialer Verifies Response
+//!
+//! The dialer verifies the response and considers the connection established.
 //!
 //! ## Encryption
 //!
