@@ -207,7 +207,7 @@ impl<C: Scheme> Actor<C> {
             );
             registry.register(
                 "updated_peers",
-                "updated peer records",
+                "number of peer records updated",
                 updated_peers.clone(),
             );
         }
