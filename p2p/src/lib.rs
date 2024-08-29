@@ -84,6 +84,8 @@
 //! to be decrypted), avoids sending the nonce alongside the message (saves bandwidth), and avoids the use of a small hash
 //! as a nonce (common in XChaCha-Poly1305), which may accidentally be reused when sending many messages over a long-lived connection (which is common in blockchain applications).
 //!
+//! // TODO: add bit diagram
+//!
 //! ## Discovery
 //!
 //! ### Step X: Send Signed IP
