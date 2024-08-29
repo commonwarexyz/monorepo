@@ -22,7 +22,7 @@
 //! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
 //! * Emebdded Message Chunking
 //!
-//! # Mechanisms
+//! # Design
 //!
 //! ## Handshake
 //!
@@ -124,11 +124,12 @@
 //! wait for the other peer to respond with some set of unknown peers. Different peers do not need to agree on who this list of
 //! bootstrapping peers is (this list is configurable).
 //!
-//! ## Message Chunking
+//! ## Chunking
 //!
 //! To support arbitarily large messages (while maintaing a small frame size), this crate automatically chunks messages
 //! that exceed the frame size (the frame size is configurable). A connection will be blocked until all chunks of a given
-//! message are sent.
+//! message are sent. It is possible for a sender to prioritize messages over others but not to be interleaved with an
+//! ongoing multi-chunk message.
 //!
 //! ```protobuf
 //! message Chunk {
