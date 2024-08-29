@@ -88,9 +88,10 @@ impl Handshake {
         // Verify that the timestamp in the handshake is recent
         //
         // This prevents an adversary from reopening an encrypted connection
-        // if they compromise a peer's ephemeral key (which would be stored
-        // in memory unlike the peer identity) or from blocking a peer
-        // from connecting if leaked.
+        // if a peer's ephemeral key is compromised (which would be stored in-memory
+        // unlike the peer identity) and/or from blocking a peer from connecting
+        // to others (if an adversary recovered a handshake message could open a
+        // connection to a peer first, peers only maintain one connection per peer).
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("failed to get current time")
