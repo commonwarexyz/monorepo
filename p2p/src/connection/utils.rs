@@ -10,10 +10,10 @@ pub fn codec(max_frame_len: usize) -> LengthDelimitedCodec {
 
 pub fn nonce_bytes(nonce: u64, dialer: bool) -> Nonce {
     let mut nonce_bytes = Nonce::default();
-    nonce_bytes[4..].copy_from_slice(&nonce.to_be_bytes());
     if dialer {
-        nonce_bytes[0] = 1;
+        nonce_bytes[0] = 0b10000000; // Set the first bit of the byte
     }
+    nonce_bytes[4..].copy_from_slice(&nonce.to_be_bytes());
     nonce_bytes
 }
 
