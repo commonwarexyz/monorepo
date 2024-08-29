@@ -119,6 +119,11 @@
 //! }
 //! ```
 //!
+//! To get all of this started, a peer must first be bootstrapped with a list of known peers/addresses. The peer will dial these
+//! other peers, send its own record, send a bit vector (with all 0's except its own position in the sorted list), and then
+//! wait for the other peer to respond with some set of unknown peers. Different peers do not need to agree on who this list of
+//! bootstrapping peers is (this list is configurable).
+//!
 //! ## Message Chunking
 //!
 //! To support arbitarily large messages (while maintaing a small frame size), this crate automatically chunks messages
