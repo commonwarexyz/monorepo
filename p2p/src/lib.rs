@@ -27,8 +27,11 @@
 //!
 //! ## Handshake
 //!
-//! When establishing a connection with a peer, a proprietary handshake is performed between
+//! When establishing a connection with a peer, a simple handshake is performed between
 //! peers to authenticate each other and to establish a shared secret for connection encryption.
+//! This is done in lieu of using TLS, Noise, WireGuard, etc. because it supports the usage of
+//! arbitrary cryptographic schemes, there is no protocol negotation (only one way to connect), and
+//! because it takes a few hundred lines of code to implement (not having any features is a feature).
 //!
 //! The dialer starts this process by sending a message that contains `{recipient_public_key,
 //! ephemeral_public_key, timestamp, signature}.`
