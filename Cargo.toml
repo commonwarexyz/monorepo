@@ -8,6 +8,6 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-commonware-cryptography = { version = "0.0.4", path = "cryptography" }
+commonware-cryptography = { version = "0.0.5", path = "cryptography" }
 commonware-p2p = { version = "0.0.13", path = "p2p" }
 bytes = "1.7.1"

@@ -8,17 +8,19 @@
 //! log (deterministic order of events across all contributors) of commitments,
 //! acknowledgements, complaints, and resolutions. All correct contributors, when given
 //! the same log, will arrive at the same result (will recover the same group polynomial
-//! and a share that can generate partial signatures over it).
+//! and a share that can generate partial signatures over it). Using a replicated log allows
+//! us to provide both reliable broadcast (all honest contributors see all messages from
+//! all other honest contributors) and to enforce a "timeout" (using log index) for each
+//! phase of DKG/Resharing (needed to support a `2f + 1` threshold in this construction).
 //!
-//! When this log is instantiated using BFT consensus, up to `f` contributors can
-//! behave maliciously without affecting the outcome of the DKG/Resharing procedure (which
-//! pairs nicely with a `threshold` set to `2f + 1`, in a population of `3f + 1` contributors).
+//! ## Trusted Alternative: Standalone Process
 //!
-//! ## Simple Alternative: Trusted Arbiter
+//! It is possible to run the arbiter as a standalone process that contributors
+//! must trust to track commitments, acks, complaints, and reveals. A rogue arbiter
+//! could request reveals from all dealers for all participants and recover the group
+//! secret key.
 //!
-//! It is possible to run the arbiter as a standalone instance that contributors
-//! must trust to track commitments, acks, complaints, and reveals. For an example of
-//! this approach, refer to <https://docs.rs/commonware-vrf>.
+//! _For an example of this approach, refer to <https://docs.rs/commonware-vrf>._
 //!
 //! # Disqualification on Attributable Faults
 //!
