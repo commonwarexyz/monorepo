@@ -70,7 +70,9 @@ impl<C: Scheme> Actor<C> {
 
                     // Record handshake messages
                     //
-                    // TODO: consider moving into connection to collect unsuccessful handshakes
+                    // We define these metrics in the spawner to ensure all recorded peers are in
+                    // the same family (if we define the same metric in the peer actor, a duplicate
+                    // family will be created for each peer).
                     sent_messages
                         .get_or_create(&metrics::Message::new_handshake(&peer))
                         .inc();
