@@ -39,6 +39,7 @@ impl<C: Scheme> Network<C> {
             bootstrappers: cfg.bootstrappers.clone(),
             allow_private_ips: cfg.allow_private_ips,
             mailbox_size: cfg.mailbox_size,
+            synchrony_bound: cfg.synchrony_bound,
             tracked_peer_sets: cfg.tracked_peer_sets,
             allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
             peer_gossip_max_count: cfg.peer_gossip_max_count,
@@ -110,6 +111,7 @@ impl<C: Scheme> Network<C> {
         let connection = connection::Config {
             crypto: self.cfg.crypto,
             max_frame_length: self.cfg.max_frame_length,
+            synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,
             read_timeout: self.cfg.read_timeout,

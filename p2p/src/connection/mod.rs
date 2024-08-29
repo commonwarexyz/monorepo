@@ -16,6 +16,7 @@ pub use stream::{Sender, Stream};
 pub struct Config<C: Scheme> {
     pub crypto: C,
     pub max_frame_length: usize,
+    pub synchrony_bound: Duration,
     pub max_handshake_age: Duration,
     pub handshake_timeout: Duration,
     pub read_timeout: Duration,

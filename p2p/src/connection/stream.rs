@@ -58,7 +58,12 @@ impl<C: Scheme> Stream<C> {
             .map_err(|_| Error::HandshakeTimeout)?
             .ok_or(Error::StreamClosed)?
             .map_err(|_| Error::ReadFailed)?;
-        let handshake = Handshake::verify(&config.crypto, config.max_handshake_age, msg)?;
+        let handshake = Handshake::verify(
+            &config.crypto,
+            config.synchrony_bound,
+            config.max_handshake_age,
+            msg,
+        )?;
 
         // Ensure we connected to the right peer
         if peer != handshake.peer_public_key {

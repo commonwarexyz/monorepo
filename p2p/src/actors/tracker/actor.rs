@@ -12,7 +12,7 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::prelude::IteratorRandom;
 use rand::{seq::SliceRandom, thread_rng};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
@@ -127,6 +127,7 @@ impl AddressCount {
 pub struct Actor<C: Scheme> {
     crypto: C,
     allow_private_ips: bool,
+    synchrony_bound: Duration,
     tracked_peer_sets: usize,
     peer_gossip_max_count: usize,
 
@@ -215,6 +216,7 @@ impl<C: Scheme> Actor<C> {
             Self {
                 crypto: cfg.crypto,
                 allow_private_ips: cfg.allow_private_ips,
+                synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
 
@@ -405,6 +407,15 @@ impl<C: Scheme> Actor<C> {
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
             if !C::verify(NAMESPACE, &payload, public_key, &signature.signature) {
+                return Err(Error::InvalidSignature);
+            }
+
+            // If any timestamp is too far into the future, disconnect from the peer
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("failed to get current time")
+                .as_secs();
+            if peer.timestamp > current_time + self.synchrony_bound.as_secs() {
                 return Err(Error::InvalidSignature);
             }
 
@@ -622,6 +633,7 @@ mod tests {
             bootstrappers,
             allow_private_ips: true,
             mailbox_size: 32,
+            synchrony_bound: Duration::from_secs(10),
             tracked_peer_sets: 2,
             allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             peer_gossip_max_count: 32,

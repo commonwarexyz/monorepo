@@ -54,6 +54,9 @@ pub struct Config<C: Scheme> {
     /// size).
     pub max_frame_length: usize,
 
+    /// Time into the future that a timestamp can be and still be considered valid.
+    pub synchrony_bound: Duration,
+
     /// Duration after which a handshake message is considered stale.
     pub max_handshake_age: Duration,
 
@@ -136,6 +139,7 @@ impl<C: Scheme> Config<C> {
             allow_private_ips: false,
             mailbox_size: 1_000,
             max_frame_length: 1024 * 1024, // 1 MB
+            synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             read_timeout: Duration::from_secs(60),
@@ -173,6 +177,7 @@ impl<C: Scheme> Config<C> {
             allow_private_ips: true,
             mailbox_size: 1_000,
             max_frame_length: 1024 * 1024, // 1 MB
+            synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
             read_timeout: Duration::from_secs(10), // should be greater than gossip_bit_vec_frequency

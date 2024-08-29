@@ -56,6 +56,7 @@ pub struct Handshake {
 impl Handshake {
     pub fn verify<C: Scheme>(
         crypto: &C,
+        synchrony_bound: Duration,
         max_handshake_age: Duration,
         msg: BytesMut,
     ) -> Result<Self, Error> {
@@ -99,6 +100,9 @@ impl Handshake {
         if handshake.timestamp < current_time - max_handshake_age.as_secs() {
             return Err(Error::InvalidTimestamp);
         }
+        if handshake.timestamp > current_time + synchrony_bound.as_secs() {
+            return Err(Error::InvalidTimestamp);
+        }
 
         // Get signature from peer
         let signature = handshake.signature.ok_or(Error::MissingSignature)?;
@@ -135,6 +139,7 @@ impl IncomingHandshake {
     pub async fn verify<C: Scheme>(
         crypto: &C,
         max_frame_len: usize,
+        synchrony_bound: Duration,
         max_handshake_age: Duration,
         handshake_timeout: Duration,
         stream: TcpStream,
@@ -148,7 +153,7 @@ impl IncomingHandshake {
             .map_err(|_| Error::HandshakeTimeout)?
             .ok_or(Error::StreamClosed)?
             .map_err(|_| Error::ReadFailed)?;
-        let handshake = Handshake::verify(crypto, max_handshake_age, msg)?;
+        let handshake = Handshake::verify(crypto, synchrony_bound, max_handshake_age, msg)?;
 
         Ok(Self {
             framed,
