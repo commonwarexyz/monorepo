@@ -68,16 +68,15 @@
 //!
 //! ## Encryption
 //!
-//! During the handshake, a shared x25519 secret is established between the peers using a Diffie-Hellman Key Exchange.
+//! During the handshake (described above), a shared x25519 secret is established using a Diffie-Hellman Key Exchange. This
+//! x25519 secret is then used to create a ChaCha20-Poly1305 cipher for encrypting all messages exchanged between
+//! any two peers (including peer discovery messages).
 //!
-//! This x25519 secret is then used to create a ChaCha20-Poly1305 cipher for encrypting all messages exchanged between
-//! any two peers (including peer discovery messages)
-//!
-//! Nonces (12 bytes) are orchestrated such that each message sent by the dialer sets the first bit of the first byte and
-//! then sets the last 8 bytes (of the 12) with a counter (in big-endian u64) of the messages sent. The dialee uses a similar strategy byt does not set the
-//! first bit of the first byte. This simple coordination prevents nonce reuse (which would allow for messages
-//! to be decrypted), avoids sending the nonce alongside the message (saves bandwidth), and avoids the use of a small hash
-//! as a nonce (common in XChaCha-Poly1305), which may accidentally be reused when sending many messages over a long-lived connection (which is common in blockchain applications).
+//! ChaCha20-Poly1305 nonces (12 bytes) are constructed such that each message sent by the dialer
+//! sets the first bit of the first byte and then sets the last 10 bytes with an iterator (incremented each time that sequence overflows)
+//! and sequence to provide a max one-way channel duration of 2^80 sends (automatically terminating when all values are
+//! exhausted). In the blockchain context, validators often maintain long-lived connections with each other and avoiding
+//! connection re-establishment (to reset iterator/sequence over a new x25519 key) is desirable.
 //!
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
@@ -86,6 +85,10 @@
 //! | D | U |It(u16)|         Sequence(u64)         |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
 //! ```
+//!
+//! This simple coordination prevents nonce reuse (which would allow for messages to be decrypted) and saves a small amount of
+//! bandwidth (no need to send the nonce alongside the encrypted message). This "pedantic" construction of the nonce
+//! also avoids accidentally reusing a nonce over long-lived connections when setting it to be a small hash (as in XChaCha-Poly1305).
 //!
 //! ## Discovery
 //!
