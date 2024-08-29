@@ -15,13 +15,12 @@
 //!
 //! # Features
 //!
-//! * No TLS, No X.509 Certificates, No Protocol Negotiation
+//! * Simple Handshakes (No TLS, No X.509 Certificates, No Protocol Negotiation)
 //! * ChaCha20-Poly1305 Stream Encryption
-//! * Arbitrary Cryptographic Peer Identities
+//! * Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
 //! * Automatic Peer Discovery Using Bit Vectors (Used as Ping/Pongs)
 //! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
 //! * Emebdded Message Chunking
-//! * Metrics via Prometheus
 //!
 //! # TODO
 //!
