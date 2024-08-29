@@ -115,7 +115,7 @@ pub struct Config<C: Scheme> {
     /// of which requires a signature verification).
     pub peer_gossip_max_count: usize,
 
-    ///  Quota for peers messages a peer can send us.
+    /// Quota for peers messages a peer can send us.
     pub allowed_peers_rate: Quota,
 }
 

@@ -140,6 +140,7 @@ pub struct Actor<C: Scheme> {
     tracked_peers: Gauge,
     reserved_connections: Gauge,
     rate_limited_connections: Family<metrics::Peer, Counter>,
+    updated_peers: Family<metrics::Peer, Counter>,
 
     ip_signature: wire::Peer,
 }
@@ -189,6 +190,7 @@ impl<C: Scheme> Actor<C> {
         let tracked_peers = Gauge::default();
         let reserved_connections = Gauge::default();
         let rate_limited_connections = Family::<metrics::Peer, Counter>::default();
+        let updated_peers = Family::<metrics::Peer, Counter>::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
             registry.register("tracked_peers", "tracked peers", tracked_peers.clone());
@@ -201,6 +203,11 @@ impl<C: Scheme> Actor<C> {
                 "rate_limited_connections",
                 "number of rate limited connections",
                 rate_limited_connections.clone(),
+            );
+            registry.register(
+                "updated_peers",
+                "updated peer records",
+                updated_peers.clone(),
             );
         }
 
@@ -224,6 +231,7 @@ impl<C: Scheme> Actor<C> {
                 tracked_peers,
                 reserved_connections,
                 rate_limited_connections,
+                updated_peers,
             },
             Mailbox::new(sender.clone()),
             Oracle::new(sender),
@@ -338,12 +346,19 @@ impl<C: Scheme> Actor<C> {
         }
 
         // Update peer address
+        //
+        // It is not safe to rate limit how many times this can happen
+        // over some interval because a malicious peer may just replay
+        // old IPs to prevent us from propogating a new one.
         let record = self.peers.get_mut(peer).unwrap();
         let wire_time = address.peer.timestamp;
         if !record.set_network(address) {
             trace!(peer = hex::encode(peer), wire_time, "stored peer newer");
             return false;
         }
+        self.updated_peers
+            .get_or_create(&metrics::Peer::new(peer))
+            .inc();
 
         // Update peer set knowledge
         for set in self.sets.values_mut() {
