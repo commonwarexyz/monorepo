@@ -37,8 +37,6 @@
 //!
 //! The dialer starts the handshake by sending the following message:
 //! ```protobuf
-//! syntax = "proto3";
-//!
 //! message Handshake {
 //!     bytes recipient_public_key = 1;
 //!     bytes ephemeral_public_key = 2;
@@ -55,8 +53,6 @@
 //!
 //! The dialee verifies the handshake and sends back its own version of the same message:
 //! ```protobuf
-//! syntax = "proto3";
-//!
 //! message Handshake {
 //!     bytes recipient_public_key = 1;
 //!     bytes ephemeral_public_key = 2;
@@ -99,8 +95,6 @@
 //! After establishing a connection, a peer will send a signed message that
 //! indicates how to dial to it (using IP:Port):
 //! ```protobuf
-//! syntax = "proto3";
-//!
 //! message Peer {
 //!     bytes socket = 1;
 //!     uint64 timestamp = 2;
@@ -109,8 +103,6 @@
 //! ```
 //!
 //! ```protobuf
-//! syntax = "proto3";
-//!
 //! message BitVec {
 //!     uint64 index = 1;
 //!     bytes bits = 2;
@@ -118,8 +110,6 @@
 //! ```
 //!
 //! ```protobuf
-//! syntax = "proto3";
-//!
 //! message Peers {
 //!     repeated Peer peers = 1;
 //! }
@@ -132,8 +122,6 @@
 //! ## Message Chunking
 //!
 //! ```protobuf
-//! syntax = "proto3";
-//!
 //! message Chunk {
 //!     uint32 channel = 1;
 //!     uint32 part = 2;
