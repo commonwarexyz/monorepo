@@ -73,6 +73,16 @@
 //!
 //! ## Encryption
 //!
+//! During the handshake, a shared x25519 secret is established between the peers using a Diffie-Hellman Key Exchange.
+//!
+//! This x25519 secret is then used to create a ChaCha20-Poly1305 cipher for encrypting all messages exchanged between
+//! any two peers (including peer discovery messages)
+//!
+//! Nonces are orchestrated such that each message sent by the dialer increases by 2 starting from 0 and
+//! the recipient increases by 2 starting from 1. This prevents nonce reuse (which would allow for messages
+//! to be decrypted) and avoids the use of a small hash as a nonce (common in XChaCha-Poly1305), which may accidentally
+//! be reused when sending many messages over a long-lived connection (which is common in blockchain applications).
+//!
 //! ## Discovery
 //!
 //! ### Step X: Send Signed IP
