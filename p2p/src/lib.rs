@@ -89,9 +89,39 @@
 //! }
 //! ```
 //!
+//! ```protobuf
+//! syntax = "proto3";
+//!
+//! message BitVec {
+//!     uint64 index = 1;
+//!     bytes bits = 2;
+//! }
+//! ```
+//!
+//! ```protobuf
+//! syntax = "proto3";
+//!
+//! message Peers {
+//!     repeated Peer peers = 1;
+//! }
+//! ```
+//!
 //! If a peer receives a signed message that is newer than the last message it received,
 //! it will update its knowledge of the peer. Unlike handshakes, these update messages
 //! do not have a recency requirement.
+//!
+//! ## Message Chunking
+//!
+//! ```protobuf
+//! syntax = "proto3";
+//!
+//! message Chunk {
+//!     uint32 channel = 1;
+//!     uint32 part = 2;
+//!     uint32 total_parts = 3;
+//!     bytes content = 4;
+//! }  
+//! ```
 //!
 //! # Example
 //!
