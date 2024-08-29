@@ -22,19 +22,21 @@
 //! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
 //! * Emebdded Message Chunking
 //!
-//! # TODO
+//! # Mechanisms
 //!
 //! ## Handshake
 //!
 //! When establishing a connection with a peer, a simple handshake is performed between
-//! peers to authenticate each other and to establish a shared secret for connection encryption.
-//! This is done in lieu of using TLS, Noise, WireGuard, etc. because it supports the usage of
-//! arbitrary cryptographic schemes, there is no protocol negotation (only one way to connect), and
-//! because it takes a few hundred lines of code to implement (not having any features is a feature).
+//! peers to authenticate each other and to establish a shared secret for connection encryption (explained below).
+//! This simple handshake is done in lieu of using TLS, Noise, WireGuard, etc. because it supports
+//! the usage of arbitrary cryptographic schemes, there is no protocol negotation (only one way to connect), and
+//! because it only takes a few hundred lines of code to implement (not having any features is a feature
+//! in safety-critical code).
 //!
-//! ### Step 0: Dialer Opens Connection and Sends Handshake
+//! In any handshake, the dialer is the party that attempts to connect to some known address/identity (public key)
+//! and the recipient of this connection is the dialee. Upon forming a TCP connection, the dialer sends a signed
+//! handshake message to the dialee.
 //!
-//! The dialer starts the handshake by sending the following message:
 //! ```protobuf
 //! message Handshake {
 //!     bytes recipient_public_key = 1;
@@ -44,27 +46,15 @@
 //! }
 //! ```
 //!
-//! The timestamp....
+//! The dialee verifies the public keys are well-formatted, the timestamp is valid (not too old/not too far in the future),
+//! and that the signature is valid. If all these checks pass, the dialee checks to see if it is already connected or dialing
+//! this peer. If it is, it drops the connection. If it isn't, it sends back its own signed handshake message (same as above)
+//! and considers the connection established.
 //!
-//! // TODO: prevent signatures in the future (both handshake and peer discovery) -> change to max_age_drift
-//!
-//! ### Step 1: Dialee Verified Handshake and Sends Response
-//!
-//! The dialee verifies the handshake and sends back its own version of the same message:
-//! ```protobuf
-//! message Handshake {
-//!     bytes recipient_public_key = 1;
-//!     bytes ephemeral_public_key = 2;
-//!     uint64 timestamp = 3;
-//!     Signature signature = 4;
-//! }
-//! ```
-//!
-//! At this point, the dialee considers the connection established.
-//!
-//! ### Step 3: Dialer Verifies Response
-//!
-//! The dialer verifies the response and considers the connection established.
+//! Upon receiving the dialee's handshake message, the dialer verifies the same data as the dialee and additionally verifies
+//! that the public key returned matches what they expected at the address. If all these checks pass, the dialer considers the
+//! connection established. If not, the dialer drops the connection (the dialee will eventually drop the connection after
+//! some timeout).
 //!
 //! ## Encryption
 //!
