@@ -84,11 +84,13 @@
 //! to be decrypted), avoids sending the nonce alongside the message (saves bandwidth), and avoids the use of a small hash
 //! as a nonce (common in XChaCha-Poly1305), which may accidentally be reused when sending many messages over a long-lived connection (which is common in blockchain applications).
 //!
+//! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
 //! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
 //! | F |  Unused   |     Sequence Number (u64)     |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! ```
 //!
 //! ## Discovery
 //!
