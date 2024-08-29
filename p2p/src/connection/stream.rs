@@ -123,17 +123,21 @@ impl<C: Scheme> Stream<C> {
             self.config.max_frame_length - CHUNK_PADDING,
             Sender {
                 write_timeout: self.config.write_timeout,
-                dialer: self.dialer,
                 cipher: self.cipher.clone(),
                 sink,
-                my_nonce: 0,
+
+                dialer: self.dialer,
+                iter: 0,
+                seq: 0,
             },
             Receiver {
                 read_timeout: self.config.read_timeout,
-                dialer: self.dialer,
                 cipher: self.cipher,
                 stream,
-                peer_nonce: 0,
+
+                dialer: self.dialer,
+                iter: 0,
+                seq: 0,
             },
         )
     }
@@ -141,19 +145,25 @@ impl<C: Scheme> Stream<C> {
 
 pub struct Sender {
     write_timeout: Duration,
-    dialer: bool,
     cipher: ChaCha20Poly1305,
     sink: SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>,
-    my_nonce: u64,
+
+    dialer: bool,
+    iter: u16,
+    seq: u64,
 }
 
 impl Sender {
     fn my_nonce(&mut self) -> Result<Nonce, Error> {
-        if self.my_nonce == u64::MAX {
-            return Err(Error::OurNonceOverflow);
+        if self.seq == u64::MAX {
+            if self.iter == u16::MAX {
+                return Err(Error::OurNonceOverflow);
+            }
+            self.iter += 1;
+            self.seq = 0;
         }
-        let nonce_bytes = nonce_bytes(self.my_nonce, self.dialer);
-        self.my_nonce += 1;
+        let nonce_bytes = nonce_bytes(self.dialer, self.iter, self.seq);
+        self.seq += 1;
         Ok(nonce_bytes)
     }
 
@@ -176,19 +186,25 @@ impl Sender {
 
 pub struct Receiver {
     read_timeout: Duration,
-    dialer: bool,
     cipher: ChaCha20Poly1305,
     stream: SplitStream<Framed<TcpStream, LengthDelimitedCodec>>,
-    peer_nonce: u64,
+
+    dialer: bool,
+    iter: u16,
+    seq: u64,
 }
 
 impl Receiver {
     fn peer_nonce(&mut self) -> Result<Nonce, Error> {
-        if self.peer_nonce == u64::MAX {
-            return Err(Error::PeerNonceOverflow);
+        if self.seq == u64::MAX {
+            if self.iter == u16::MAX {
+                return Err(Error::PeerNonceOverflow);
+            }
+            self.iter += 1;
+            self.seq = 0;
         }
-        let nonce_bytes = nonce_bytes(self.peer_nonce, !self.dialer);
-        self.peer_nonce += 1;
+        let nonce_bytes = nonce_bytes(!self.dialer, self.iter, self.seq);
+        self.seq += 1;
         Ok(nonce_bytes)
     }
 
