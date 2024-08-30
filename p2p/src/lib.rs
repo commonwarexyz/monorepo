@@ -226,3 +226,16 @@ pub use actors::tracker::Oracle;
 pub use channels::{Message, Receiver, Sender};
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::ed25519;
+
+    async fn test_connectivity(n: usize) {
+        // Create peers
+        for i in 0..n {
+            let signer = ed25519::insecure_signer(i as u16);
+        }
+    }
+}
