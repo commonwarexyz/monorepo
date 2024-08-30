@@ -17,6 +17,7 @@ pub enum Message {
         channel: u32,
         message: Bytes,
         priority: bool,
+        success: oneshot::Sender<Vec<PublicKey>>,
     },
 }
 
@@ -64,15 +65,18 @@ impl Messenger {
         channel: u32,
         message: Bytes,
         priority: bool,
-    ) {
+    ) -> Vec<PublicKey> {
+        let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Content {
                 recipients,
                 channel,
                 message,
                 priority,
+                success: sender,
             })
             .await
             .unwrap();
+        receiver.await.unwrap()
     }
 }

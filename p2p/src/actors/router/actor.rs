@@ -88,7 +88,9 @@ impl Actor {
                     channel,
                     message,
                     priority,
+                    success,
                 } => {
+                    let mut sent = Vec::new();
                     if let Some(recipients) = recipients {
                         for recipient in recipients {
                             let messenger = match self.connections.get(&recipient) {
@@ -110,6 +112,7 @@ impl Actor {
                                 priority,
                             )
                             .await;
+                            sent.push(recipient);
                         }
                     } else {
                         for (recipient, messenger) in self.connections.iter() {
@@ -121,8 +124,12 @@ impl Actor {
                                 priority,
                             )
                             .await;
+                            sent.push(recipient.clone());
                         }
                     }
+
+                    // Communicate success back to sender (if still alive)
+                    let _ = success.send(sent);
                 }
             }
         }

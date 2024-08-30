@@ -3,7 +3,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use governor::Quota;
 use std::collections::HashMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 /// Tuple representing a message received from a given public key.
 ///
@@ -55,7 +55,7 @@ impl Sender {
     ) -> Vec<PublicKey> {
         self.messenger
             .content(recipients, self.channel, message, priority)
-            .await;
+            .await
     }
 }
 
