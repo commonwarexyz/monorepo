@@ -706,13 +706,14 @@ mod tests {
         let msg = peer_receiver.recv().await.unwrap();
         assert!(matches!(msg, peer::Message::Kill));
 
+        // Find sorted indicies
+        let mut peers = vec![peer0.me(), peer1.clone(), peer2.clone(), peer3.clone()];
+        peers.sort();
+        let me_idx = peers.iter().position(|peer| peer == &peer0.me()).unwrap();
+        let peer1_idx = peers.iter().position(|peer| peer == &peer1).unwrap();
+
         // Register some peers
-        oracle
-            .register(
-                0,
-                vec![peer0.me(), peer1.clone(), peer2.clone(), peer3.clone()],
-            )
-            .await;
+        oracle.register(0, peers).await;
 
         // Request bit vector
         mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
@@ -724,7 +725,7 @@ mod tests {
         assert!(bit_vec.index == 0);
         let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
         for (idx, bit) in bits.iter().enumerate() {
-            if idx == 3 {
+            if idx == me_idx {
                 assert!(*bit);
             } else {
                 assert!(!*bit);
@@ -757,9 +758,7 @@ mod tests {
         assert!(bit_vec.index == 0);
         let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
         for (idx, bit) in bits.iter().enumerate() {
-            if idx == 1 || idx == 3 {
-                // peer1 is the second peer in the bit vector (sorted by public key)
-                // peer3 is us
+            if idx == me_idx || idx == peer1_idx {
                 assert!(*bit);
             } else {
                 assert!(!*bit);
@@ -783,7 +782,7 @@ mod tests {
             match bit_vec.index {
                 0 => {
                     for (idx, bit) in bits.iter().enumerate() {
-                        if idx == 1 || idx == 3 {
+                        if idx == me_idx || idx == peer1_idx {
                             assert!(*bit);
                         } else {
                             assert!(!*bit);

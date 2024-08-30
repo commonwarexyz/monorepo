@@ -268,7 +268,7 @@ mod tests {
             // Create network
             let signer = peers[i].clone();
             let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-            let config = Config::aggressive(
+            let config = Config::test(
                 signer.clone(),
                 registry,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -319,6 +319,7 @@ mod tests {
                         time::sleep(time::Duration::from_millis(100)).await;
                     }
                 }
+                println!("sent all: {}={}", i, hex::encode(signer.me()));
 
                 // Wait for all peers to send their identity
                 let mut received = HashSet::new();
@@ -330,6 +331,7 @@ mod tests {
                     // Add to received set
                     received.insert(sender);
                 }
+                println!("received all: {}={}", i, hex::encode(signer.me()));
 
                 // Shutdown network
                 network_handler.abort();
@@ -348,5 +350,15 @@ mod tests {
     #[tokio::test]
     async fn test_connectivity_small() {
         test_connectivity(5).await;
+    }
+
+    #[tokio::test]
+    async fn test_connectivity_medium() {
+        test_connectivity(25).await;
+    }
+
+    #[tokio::test]
+    async fn test_connectivity_large() {
+        test_connectivity(50).await;
     }
 }
