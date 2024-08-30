@@ -230,12 +230,64 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::ed25519;
+    use commonware_cryptography::{ed25519, Scheme};
+    use governor::Quota;
+    use prometheus_client::registry::Registry;
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        num::NonZeroU32,
+        sync::{Arc, Mutex},
+    };
 
+    const BASE_PORT: u16 = 3000;
     async fn test_connectivity(n: usize) {
         // Create peers
+        let mut peers = Vec::new();
         for i in 0..n {
-            let signer = ed25519::insecure_signer(i as u16);
+            peers.push(ed25519::insecure_signer(i as u64));
+        }
+        let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+
+        // Create networks
+        for i in 0..n {
+            // Derive port
+            let port = BASE_PORT + i as u16;
+
+            // Create bootstrappers
+            let mut bootstrappers = Vec::new();
+            if i > 0 {
+                bootstrappers.push((
+                    peers[0].me(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), BASE_PORT),
+                ));
+            }
+
+            // Create network
+            let signer = peers[i].clone();
+            let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+            let config = Config::aggressive(
+                signer,
+                registry,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                bootstrappers,
+            );
+            let (mut network, oracle) = Network::new(config);
+
+            // Register peers
+            oracle.register(0, addresses.clone()).await;
+
+            // Register basic application
+            let (sender, receiver) = network.register(
+                0,
+                Quota::per_second(NonZeroU32::new(1).unwrap()),
+                1_024,
+                128,
+            );
+
+            // Wait to connect to all peers, and then send messages to everyone
+            let handler = tokio::spawn(async move {
+                network.run().await;
+            });
         }
     }
 }
