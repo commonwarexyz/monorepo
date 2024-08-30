@@ -18,6 +18,4 @@ jobs:
     - name: Lint with clippy
       run: cargo clippy -- -D warnings
     - name: Run tests
-      env:
-        RUSTFLAGS: "-C opt-level=3 -C debuginfo=2"
       run: cargo test --verbose
