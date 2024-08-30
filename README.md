@@ -19,6 +19,12 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends. 
 * [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
+## Miscellaneous
+
+_GitHub hosting does not allow using an arbitrary path for website hosting yet, so we are stuck with `/docs` for now._
+
+* [docs](./docs): Provide information about Commonware at https://commonware.xyz.
+
 ## Licensing
 
 This repository is dual-licensed under both the [Apache 2.0](./LICENSE-APACHE) and [MIT](./LICENSE-MIT) licenses. You may choose either license when using this code.
