@@ -67,7 +67,8 @@
 //! are a `u16` iterator and the final 8 bytes are a `u64` sequence number. When the sequence reaches `u64::MAX`, the iterator
 //! is incremented and the sequence is reset to 0. This technique provides each sender with a channel duration of `2^80` frames
 //! (and automatically terminates when this number of frames has been sent). In the blockchain context, validators often maintain
-//! long-lived connections with each other and avoiding connection re-establishment (to reset iterator/sequence with a new cipher) is desirable.
+//! long-lived connections with each other and avoiding connection re-establishment (to reset iterator/sequence with a new cipher)
+//! is desirable.
 //!
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
