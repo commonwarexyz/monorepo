@@ -3,7 +3,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use governor::Quota;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Tuple representing a message received from a given public key.
 ///
@@ -41,7 +41,18 @@ impl Sender {
     /// * `message` - The message to send.
     /// * `priority` - Whether the message should be sent with priority (across
     ///   all channels).
-    pub async fn send(&self, recipients: Option<Vec<PublicKey>>, message: Bytes, priority: bool) {
+    ///
+    /// # Returns
+    ///
+    /// The set of recipients that the message was sent to. Note, a successful send does not
+    /// mean that the recipient will receive the message (connection may no longer be active and
+    /// we may not know that yet).
+    pub async fn send(
+        &self,
+        recipients: Option<Vec<PublicKey>>,
+        message: Bytes,
+        priority: bool,
+    ) -> Vec<PublicKey> {
         self.messenger
             .content(recipients, self.channel, message, priority)
             .await;
