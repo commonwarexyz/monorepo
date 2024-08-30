@@ -62,11 +62,13 @@
 //! x25519 secret is then used to create a ChaCha20-Poly1305 cipher for encrypting all messages exchanged between
 //! any two peers (including peer discovery messages).
 //!
-//! ChaCha20-Poly1305 nonces (12 bytes) are constructed such that each message sent by the dialer
-//! sets the first bit of the first byte and then sets the last 10 bytes with an iterator (incremented each time that sequence overflows)
-//! and sequence to provide a max one-way channel duration of 2^80 sends (automatically terminating when all values are
-//! exhausted). In the blockchain context, validators often maintain long-lived connections with each other and avoiding
-//! connection re-establishment (to reset iterator/sequence over a new x25519 key) is desirable.
+//! ChaCha20-Poly1305 nonces (12 bytes) are constructed such that the first bit indicates whether the sender is a dialer (1) or
+//! dialee (0). The rest of the first byte (next 7 bits) and next byte (all 8 bits) are unused (set to 0). The next 2 bytes
+//! are a `u16` iterator and the final 8 bytes are a `u64` sequence number. When the sequence reaches `u64::MAX`, the iterator
+//! is incremented and the sequence is reset to 0. This technique provides each sender with a channel duration of `2^80` frames
+//! (and automatically terminates when this number of frames has been sent). In the blockchain context, validators often maintain
+//! long-lived connections with each other and avoiding connection re-establishment (to reset iterator/sequence with a new cipher)
+//! is desirable.
 //!
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
@@ -74,7 +76,14 @@
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
 //! | D | U |It(u16)|         Sequence(u64)         |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
+//!
+//! D = Dialer/Dialee, U = Unused, It = Iterator
 //! ```
+//!
+//! _We use a combination of `u64` (sequence) and `u16` (iterator) instead of implementing `u80/u88` because
+//! CPUs provide native support for `u64` operations (which will always be faster than an implementation of a
+//! "wrapping add" over arbitrary bytes). With this technique, almost all operations (other than iterator
+//! increments every `2^64` frames) are just a basic `u64` increment._
 //!
 //! This simple coordination prevents nonce reuse (which would allow for messages to be decrypted) and saves a small amount of
 //! bandwidth (no need to send the nonce alongside the encrypted message). This "pedantic" construction of the nonce
