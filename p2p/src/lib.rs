@@ -234,10 +234,12 @@ mod tests {
     use governor::Quota;
     use prometheus_client::registry::Registry;
     use std::{
+        collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroU32,
         sync::{Arc, Mutex},
     };
+    use tokio::time;
 
     const BASE_PORT: u16 = 3000;
     async fn test_connectivity(n: usize) {
@@ -249,6 +251,7 @@ mod tests {
         let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
 
         // Create networks
+        let mut waiters = Vec::new();
         for i in 0..n {
             // Derive port
             let port = BASE_PORT + i as u16;
@@ -257,7 +260,7 @@ mod tests {
             let mut bootstrappers = Vec::new();
             if i > 0 {
                 bootstrappers.push((
-                    peers[0].me(),
+                    addresses[0].clone(),
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), BASE_PORT),
                 ));
             }
@@ -266,7 +269,7 @@ mod tests {
             let signer = peers[i].clone();
             let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
             let config = Config::aggressive(
-                signer,
+                signer.clone(),
                 registry,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                 bootstrappers,
@@ -277,7 +280,7 @@ mod tests {
             oracle.register(0, addresses.clone()).await;
 
             // Register basic application
-            let (sender, receiver) = network.register(
+            let (sender, mut receiver) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(1).unwrap()),
                 1_024,
@@ -285,9 +288,65 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            let handler = tokio::spawn(async move {
-                network.run().await;
+            let network_handler = tokio::spawn(network.run());
+
+            // Send/Recieve messages
+            let peer_addresses = addresses.clone();
+            let peer_handler = tokio::spawn(async move {
+                // Send identity to all peers
+                let msg = signer.me();
+                for j in 0..n {
+                    // Don't send message to self
+                    if i == j {
+                        continue;
+                    }
+
+                    // Send our identity
+                    let recipient = Some(vec![peer_addresses[j].clone()]);
+
+                    // Loop until success
+                    loop {
+                        if sender
+                            .send(recipient.clone(), msg.clone(), true)
+                            .await
+                            .len()
+                            == 1
+                        {
+                            break;
+                        }
+
+                        // Sleep and try again (avoid busy loop)
+                        time::sleep(time::Duration::from_millis(100)).await;
+                    }
+                }
+
+                // Wait for all peers to send their identity
+                let mut received = HashSet::new();
+                while received.len() < n - 1 {
+                    // Ensure message equals sender identity
+                    let (sender, message) = receiver.recv().await.unwrap();
+                    assert_eq!(sender, message);
+
+                    // Add to received set
+                    received.insert(sender);
+                }
+
+                // Shutdown network
+                network_handler.abort();
             });
+
+            // Add to waiters
+            waiters.push(peer_handler);
         }
+
+        // Wait for all peers to finish
+        for waiter in waiters {
+            waiter.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connectivity_small() {
+        test_connectivity(5).await;
     }
 }
