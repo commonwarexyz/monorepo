@@ -7,8 +7,6 @@ and [commonware-p2p](https://crates.io/crates/commonware-p2p).
 
 ## Offline Friends
 
-# Offline Friends
-
 `commonware-chat` only sends messages to connected friends. If a friend is offline at the time a message is sent,
 `commonware-p2p` will drop the message. You can confirm you are connected to all your friends by checking the value
 of `p2p_connections` in the "Metrics Panel" in the right corner of the window. This metric should be equal to
