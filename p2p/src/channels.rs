@@ -28,6 +28,11 @@ impl Sender {
 
     /// Sends a message to a set of recipients.
     ///
+    /// # Offline Recipients
+    ///
+    /// If a recipient is offline at the time a message is sent, the message will be dropped.
+    /// It is up to the application to handle retries (if necessary).
+    ///
     /// # Parameters
     ///
     /// * `recipients` - If `Some`, the set of recipients to send the message to. If `None`,
