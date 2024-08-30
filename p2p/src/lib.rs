@@ -241,8 +241,11 @@ mod tests {
     };
     use tokio::time;
 
-    const BASE_PORT: u16 = 3000;
-    async fn test_connectivity(n: usize) {
+    /// Test connectivity between `n` peers.
+    ///
+    /// We set a unique `base_port` for each test to avoid "address already in use"
+    /// errors when tests are run immediately after each other.
+    async fn test_connectivity(base_port: u16, n: usize) {
         // Create peers
         let mut peers = Vec::new();
         for i in 0..n {
@@ -254,14 +257,14 @@ mod tests {
         let mut waiters = Vec::new();
         for i in 0..n {
             // Derive port
-            let port = BASE_PORT + i as u16;
+            let port = base_port + i as u16;
 
             // Create bootstrappers
             let mut bootstrappers = Vec::new();
             if i > 0 {
                 bootstrappers.push((
                     addresses[0].clone(),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), BASE_PORT),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 ));
             }
 
@@ -349,16 +352,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_connectivity_small() {
-        test_connectivity(5).await;
+        test_connectivity(3000, 5).await;
     }
 
     #[tokio::test]
     async fn test_connectivity_medium() {
-        test_connectivity(25).await;
+        test_connectivity(3100, 25).await;
     }
 
     #[tokio::test]
     async fn test_connectivity_large() {
-        test_connectivity(50).await;
+        test_connectivity(3200, 100).await;
     }
 }

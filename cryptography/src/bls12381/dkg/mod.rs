@@ -491,8 +491,8 @@ mod tests {
     }
 
     #[test]
-    fn test_dkg_and_reshare_all_active_large() {
-        run_dkg_and_reshare(20, 13, 15, 30, 21, 15, 4);
+    fn test_dkg_and_reshare_min_active_large() {
+        run_dkg_and_reshare(20, 13, 13, 100, 67, 13, 4);
     }
 
     #[test]
