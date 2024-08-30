@@ -27,7 +27,6 @@ use crate::{utils::payload, PublicKey, Scheme, Signature};
 use ed25519_consensus;
 use rand::rngs::OsRng;
 use rand::{Rng, SeedableRng};
-use sha2::{Digest, Sha256};
 
 const SECRET_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
