@@ -115,11 +115,7 @@ impl Receiver {
     ///
     /// This method will block until a message is received.
     pub async fn recv(&mut self) -> Result<Message, Error> {
-        let (sender, mut message) = self
-            .receiver
-            .recv()
-            .await
-            .ok_or_else(|| Error::NetworkClosed)?;
+        let (sender, mut message) = self.receiver.recv().await.ok_or(Error::NetworkClosed)?;
 
         // If compression is enabled, decompress the message before returning.
         if self.compression {
@@ -130,7 +126,7 @@ impl Receiver {
 
         // We don't check that the message is too large here because we already enforce
         // that on the network layer.
-        return Ok((sender, message));
+        Ok((sender, message))
     }
 }
 

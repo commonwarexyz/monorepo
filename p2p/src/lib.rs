@@ -431,12 +431,12 @@ mod tests {
             let network_handler = tokio::spawn(network.run());
 
             // Crate random message
-            let mut msg = vec![0u8; 4 * 1024 * 1024]; // 4MB (greater than frame capacity)
+            let mut msg = vec![0u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
             let mut rng = thread_rng();
             rng.fill(&mut msg[..]);
 
             // Send/Recieve messages
-            let msg = Bytes::from(msg.to_vec());
+            let msg = Bytes::from(msg);
             let msg_sender = addresses[0].clone();
             let msg_recipient = addresses[1].clone();
             let peer_handler = tokio::spawn(async move {
@@ -516,7 +516,7 @@ mod tests {
         oracle.register(0, addresses.clone()).await;
 
         // Register basic application
-        let (sender, mut receiver) = network.register(
+        let (sender, _) = network.register(
             0,
             Quota::per_second(NonZeroU32::new(10).unwrap()),
             1_024 * 1_024, // 1MB
