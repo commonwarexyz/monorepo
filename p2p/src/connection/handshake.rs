@@ -14,7 +14,7 @@ use tokio_util::codec::LengthDelimitedCodec;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_HANDSHAKE_";
 
-pub async fn create_handshake<C: Scheme>(
+pub fn create_handshake<C: Scheme>(
     crypto: &mut C,
     recipient_public_key: PublicKey,
     ephemeral_public_key: x25519_dalek::PublicKey,
@@ -160,5 +160,60 @@ impl IncomingHandshake {
             peer_public_key: handshake.peer_public_key,
             ephemeral_public_key: handshake.ephemeral_public_key,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{
+        ed25519::{self, Ed25519},
+        Scheme,
+    };
+    use x25519_dalek::PublicKey;
+
+    #[test]
+    fn test_create_handshake() {
+        // Create participants
+        let mut sender = ed25519::insecure_signer(0);
+        let recipient = ed25519::insecure_signer(1).me();
+        let ephemeral_public_key = PublicKey::from([3u8; 32]);
+
+        // Create handshake message
+        let handshake =
+            create_handshake(&mut sender, recipient.clone(), ephemeral_public_key).unwrap();
+
+        // Decode the handshake message
+        let message = wire::Message::decode(handshake).unwrap();
+        let handshake = match message.payload {
+            Some(wire::message::Payload::Handshake(handshake)) => handshake,
+            _ => panic!("unexpected message"),
+        };
+        // Verify the timestamp
+        let current_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("failed to get current time")
+            .as_secs();
+        assert!(handshake.timestamp <= current_timestamp);
+        assert!(handshake.timestamp >= current_timestamp - 5); // Allow a 5-second window
+
+        // Verify the signature
+        assert_eq!(handshake.recipient_public_key, recipient);
+        assert_eq!(
+            handshake.ephemeral_public_key,
+            x25519::encode_public_key(ephemeral_public_key)
+        );
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&handshake.recipient_public_key);
+        payload.extend_from_slice(&handshake.ephemeral_public_key);
+        payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
+
+        // Verify signature
+        assert!(Ed25519::verify(
+            NAMESPACE,
+            &payload,
+            &sender.me(),
+            &handshake.signature.unwrap().signature,
+        ))
     }
 }
