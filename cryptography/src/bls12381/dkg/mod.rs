@@ -141,58 +141,51 @@ pub mod contributor;
 pub mod ops;
 pub mod utils;
 
-#[derive(Debug)]
+use thiserror::Error;
+
+#[derive(Error, Debug)]
 pub enum Error {
+    #[error("unexpected polynomial")]
     UnexpectedPolynomial,
+    #[error("commitment has wrong degree")]
     CommitmentWrongDegree,
+    #[error("misdirected share")]
     MisdirectedShare,
+    #[error("share does not on commitment")]
     ShareWrongCommitment,
+    #[error("insufficient dealings")]
     InsufficientDealings,
+    #[error("reshare mismatch")]
     ReshareMismatch,
+    #[error("share interpolation failed")]
     ShareInterpolationFailed,
+    #[error("public key interpolation failed")]
     PublicKeyInterpolationFailed,
+    #[error("dealer is invalid")]
     DealerInvalid,
+    #[error("missing share")]
     MissingShare,
+    #[error("commitment disqualified")]
     CommitmentDisqualified,
+    #[error("contributor disqualified")]
     ContributorDisqualified,
+    #[error("contributor is invalid")]
     ContirbutorInvalid,
+    #[error("complaint is invalid")]
     ComplaintInvalid,
+    #[error("unexpected reveal")]
     UnexpectedReveal,
+    #[error("missing commitment")]
     MissingCommitment,
+    #[error("self-ack")]
     SelfAck,
+    #[error("self-complaint")]
     SelfComplaint,
+    #[error("duplicate commitment")]
     DuplicateCommitment,
+    #[error("duplicate ack")]
     DuplicateAck,
 }
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Error::UnexpectedPolynomial => write!(f, "unexpected polynomial"),
-            Error::CommitmentWrongDegree => write!(f, "commitment has wrong degree"),
-            Error::MisdirectedShare => write!(f, "misdirected share"),
-            Error::ShareWrongCommitment => write!(f, "share does not on commitment"),
-            Error::InsufficientDealings => write!(f, "insufficient dealings"),
-            Error::ReshareMismatch => write!(f, "reshare mismatch"),
-            Error::ShareInterpolationFailed => write!(f, "share interpolation failed"),
-            Error::PublicKeyInterpolationFailed => write!(f, "public key interpolation failed"),
-            Error::DealerInvalid => write!(f, "dealer is invalid"),
-            Error::MissingShare => write!(f, "missing share"),
-            Error::CommitmentDisqualified => write!(f, "commitment disqualified"),
-            Error::ContributorDisqualified => write!(f, "contributor disqualified"),
-            Error::ContirbutorInvalid => write!(f, "contributor is invalid"),
-            Error::ComplaintInvalid => write!(f, "complaint is invalid"),
-            Error::UnexpectedReveal => write!(f, "unexpected reveal"),
-            Error::MissingCommitment => write!(f, "missing commitment"),
-            Error::SelfAck => write!(f, "self ack"),
-            Error::SelfComplaint => write!(f, "self complaint"),
-            Error::DuplicateCommitment => write!(f, "duplicate commitment"),
-            Error::DuplicateAck => write!(f, "duplicate ack"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
