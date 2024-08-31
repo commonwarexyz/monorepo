@@ -15,6 +15,7 @@ use ratatui::{
 };
 use std::{
     io::stdout,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -134,13 +135,13 @@ pub async fn run(
                         .collect::<Vec<Line>>(),
                 );
                 let logs_block = Paragraph::new(logs_text)
-                    .block(Block::default().borders(Borders::ALL).title("Logs"))
-                    .scroll(((logs.len() as u16).saturating_sub(chunks[1].height), 0));
+                    .block(Block::default().borders(Borders::ALL).title("Logs"));
                 f.render_widget(logs_block, chunks[1]);
             })
             .unwrap();
 
         // Handle input
+        let formatted_me = format!("{}**{}", &me[..4], &me[me.len() - 4..]);
         tokio::select! {
             Some(event) = rx.recv() => {
                 match event {
@@ -155,16 +156,23 @@ pub async fn run(
                             if input.is_empty() {
                                 continue;
                             }
-                            let successful = sender
+                            let mut successful = sender
                                 .send(None, input.clone().into_bytes().into(), false)
                                 .await;
-                            for success in successful {
-                                debug!(friend = hex::encode(success), "sent message");
+                            if !successful.is_empty() {
+                                successful.sort();
+                                let mut friends = String::from_str("[").unwrap();
+                                for friend in successful {
+                                    friends.push_str(&format!("{},", hex::encode(friend)));
+                                }
+                                friends.pop();
+                                friends.push(']');
+                                debug!(friends, "sent message");
                             }
                             let msg = Line::styled(format!(
                                 "[{}] {}: {}",
                                 chrono::Local::now().format("%m/%d %H:%M:%S"),
-                                me,
+                                formatted_me,
                                 input,
                             ), Style::default().fg(Color::Yellow));
                             messages.push(msg);
@@ -184,10 +192,12 @@ pub async fn run(
                 }
             },
             Some((peer, msg)) = receiver.recv() => {
+                let peer = hex::encode(peer);
                 messages.push(format!(
-                    "[{}] {}: {}",
+                    "[{}] {}**{}: {}",
                     chrono::Local::now().format("%m/%d %H:%M:%S"),
-                    hex::encode(peer),
+                    &peer[..4],
+                    &peer[peer.len() - 4..],
                     String::from_utf8_lossy(&msg)
                 ).into());
             }
