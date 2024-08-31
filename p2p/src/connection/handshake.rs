@@ -2,7 +2,7 @@ use crate::{
     connection::{utils::codec, x25519, Error},
     wire,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use futures::StreamExt;
 use prost::Message;
@@ -58,7 +58,7 @@ impl Handshake {
         crypto: &C,
         synchrony_bound: Duration,
         max_handshake_age: Duration,
-        msg: BytesMut,
+        msg: Bytes,
     ) -> Result<Self, Error> {
         // Parse handshake message
         let handshake = match wire::Message::decode(msg)
@@ -153,7 +153,8 @@ impl IncomingHandshake {
             .map_err(|_| Error::HandshakeTimeout)?
             .ok_or(Error::StreamClosed)?
             .map_err(|_| Error::ReadFailed)?;
-        let handshake = Handshake::verify(crypto, synchrony_bound, max_handshake_age, msg)?;
+        let handshake =
+            Handshake::verify(crypto, synchrony_bound, max_handshake_age, msg.freeze())?;
 
         Ok(Self {
             framed,
@@ -176,15 +177,15 @@ mod tests {
     fn test_create_handshake() {
         // Create participants
         let mut sender = ed25519::insecure_signer(0);
-        let recipient = ed25519::insecure_signer(1).me();
+        let recipient = ed25519::insecure_signer(1);
         let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
         // Create handshake message
-        let handshake =
-            create_handshake(&mut sender, recipient.clone(), ephemeral_public_key).unwrap();
+        let handshake_bytes =
+            create_handshake(&mut sender, recipient.me(), ephemeral_public_key).unwrap();
 
         // Decode the handshake message
-        let message = wire::Message::decode(handshake).unwrap();
+        let message = wire::Message::decode(handshake_bytes.clone()).unwrap();
         let handshake = match message.payload {
             Some(wire::message::Payload::Handshake(handshake)) => handshake,
             _ => panic!("unexpected message"),
@@ -198,7 +199,7 @@ mod tests {
         assert!(handshake.timestamp >= current_timestamp - 5); // Allow a 5-second window
 
         // Verify the signature
-        assert_eq!(handshake.recipient_public_key, recipient);
+        assert_eq!(handshake.recipient_public_key, recipient.me());
         assert_eq!(
             handshake.ephemeral_public_key,
             x25519::encode_public_key(ephemeral_public_key)
@@ -214,6 +215,17 @@ mod tests {
             &payload,
             &sender.me(),
             &handshake.signature.unwrap().signature,
-        ))
+        ));
+
+        // Verify using the handshake struct
+        let handshake = Handshake::verify(
+            &recipient,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            handshake_bytes,
+        )
+        .unwrap();
+        assert_eq!(handshake.peer_public_key, sender.me());
+        assert_eq!(handshake.ephemeral_public_key, ephemeral_public_key);
     }
 }

@@ -62,7 +62,7 @@ impl<C: Scheme> Stream<C> {
             &config.crypto,
             config.synchrony_bound,
             config.max_handshake_age,
-            msg,
+            msg.freeze(),
         )?;
 
         // Ensure we connected to the right peer
