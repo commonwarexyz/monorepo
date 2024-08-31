@@ -1,4 +1,7 @@
-use commonware_cryptography::bls12381::primitives::{group::Element, poly};
+use commonware_cryptography::{
+    bls12381::primitives::{group::Element, poly},
+    utils::hex,
+};
 
 pub const SHARE_NAMESPACE: &[u8] = b"_COMMONWARE_DKG_SHARE_";
 
@@ -17,5 +20,5 @@ pub fn payload(round: u64, dealer: u32, share: &[u8]) -> Vec<u8> {
 /// Convert a public polynomial to a hexadecimal representation of
 /// the public key.
 pub fn public_hex(public: &poly::Public) -> String {
-    hex::encode(poly::public(public).serialize())
+    hex(&poly::public(public).serialize().into())
 }

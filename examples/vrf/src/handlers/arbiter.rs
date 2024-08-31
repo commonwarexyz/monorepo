@@ -10,6 +10,7 @@ use commonware_cryptography::{
             poly,
         },
     },
+    utils::hex,
     PublicKey, Scheme,
 };
 use commonware_p2p::{Receiver, Sender};
@@ -69,7 +70,7 @@ impl Arbiter {
         if let Some(previous) = &previous {
             group = Some(previous.serialize());
             let public = poly::public(previous).serialize();
-            info!(round, public = hex::encode(public), "starting reshare");
+            info!(round, public = hex(&public.into()), "starting reshare");
         } else {
             info!(round, "starting key generation");
         }
@@ -159,10 +160,10 @@ impl Arbiter {
         let commitments = p1.commitments();
         info!(
             round,
-            commitments = ?commitments.iter().map(|(_, pk, _)| hex::encode(pk)).collect::<Vec<_>>(),
+            commitments = ?commitments.iter().map(|(_, pk, _)| hex(pk)).collect::<Vec<_>>(),
             disqualified = ?disqualified
                 .into_iter()
-                .map(hex::encode)
+                .map(|pk| hex(&pk))
                 .collect::<Vec<_>>(),
             "commitment phase complete"
         );
@@ -277,8 +278,8 @@ impl Arbiter {
         let commitments = p2.commitments();
         info!(
             round,
-            commitments = ?commitments.iter().map(|(_, pk, _)| hex::encode(pk)).collect::<Vec<_>>(),
-            disqualified = ?disqualified.into_iter().map(hex::encode).collect::<Vec<_>>(),
+            commitments = ?commitments.iter().map(|(_, pk, _)| hex(pk)).collect::<Vec<_>>(),
+            disqualified = ?disqualified.into_iter().map(|pk| hex(&pk)).collect::<Vec<_>>(),
             "ack phase complete"
         );
 
@@ -432,10 +433,10 @@ impl Arbiter {
         };
         info!(
             round,
-            commitments = ?commitments.iter().map(|(_, pk, _)| hex::encode(pk)).collect::<Vec<_>>(),
+            commitments = ?commitments.iter().map(|(_, pk, _)| hex(pk)).collect::<Vec<_>>(),
             disqualified = ?disqualified
                 .iter()
-                .map(hex::encode)
+                .map(hex)
                 .collect::<Vec<_>>(),
             "repair phase complete"
         );
@@ -485,7 +486,7 @@ impl Arbiter {
                     info!(
                         round,
                         public = public_hex(&public),
-                        disqualified = ?disqualified.into_iter().map(hex::encode).collect::<Vec<_>>(),
+                        disqualified = ?disqualified.into_iter().map(|pk| hex(&pk)).collect::<Vec<_>>(),
                         "round complete"
                     );
 
@@ -493,7 +494,7 @@ impl Arbiter {
                     previous = Some(public);
                 }
                 None => {
-                    info!(round, disqualified = ?disqualified.into_iter().map(hex::encode).collect::<Vec<_>>(), "round aborted");
+                    info!(round, disqualified = ?disqualified.into_iter().map(|pk| hex(&pk)).collect::<Vec<_>>(), "round aborted");
                 }
             }
 

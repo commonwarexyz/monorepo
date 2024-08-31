@@ -8,7 +8,7 @@ use crate::{
     metrics,
 };
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{utils::hex, PublicKey};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -75,12 +75,12 @@ impl Actor {
                     relay,
                     channels,
                 } => {
-                    debug!(peer = hex::encode(&peer), "peer ready");
+                    debug!(peer = hex(&peer), "peer ready");
                     self.connections.insert(peer, relay);
                     let _ = channels.send(routing.clone());
                 }
                 Message::Release { peer } => {
-                    debug!(peer = hex::encode(&peer), "peer released");
+                    debug!(peer = hex(&peer), "peer released");
                     self.connections.remove(&peer);
                 }
                 Message::Content {

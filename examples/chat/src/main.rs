@@ -46,7 +46,7 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{ed25519, Scheme};
+use commonware_cryptography::{ed25519, utils::hex, Scheme};
 use commonware_p2p::{Config, Network};
 use governor::Quota;
 use prometheus_client::registry::Registry;
@@ -95,7 +95,7 @@ async fn main() {
     let parts = me.split('@').collect::<Vec<&str>>();
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
     let signer = ed25519::insecure_signer(key);
-    info!(key = hex::encode(signer.me()), "loaded signer");
+    info!(key = hex(&signer.me()), "loaded signer");
 
     // Configure my port
     let port = parts[1].parse::<u16>().expect("Port not well-formed");
@@ -112,7 +112,7 @@ async fn main() {
     }
     for peer in allowed_keys {
         let verifier = ed25519::insecure_signer(peer).me();
-        info!(key = hex::encode(&verifier), "registered authorized key",);
+        info!(key = hex(&verifier), "registered authorized key",);
         recipients.push(verifier);
     }
 
@@ -161,7 +161,7 @@ async fn main() {
 
     // Start chat
     handler::run(
-        hex::encode(signer.me()),
+        hex(&signer.me()),
         registry,
         logs,
         chat_sender,

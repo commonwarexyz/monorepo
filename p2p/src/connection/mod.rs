@@ -3,6 +3,7 @@
 use commonware_cryptography::Scheme;
 use prost::DecodeError;
 use std::time::Duration;
+use thiserror::Error;
 
 mod handshake;
 mod stream;
@@ -24,65 +25,50 @@ pub struct Config<C: Scheme> {
     pub tcp_nodelay: Option<bool>,
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
+    #[error("unexpected message")]
     UnexpectedMessage,
+    #[error("unable to decode: {0}")]
     UnableToDecode(DecodeError),
+    #[error("invalid ephemeral public key")]
     InvalidEphemeralPublicKey,
+    #[error("invalid channel public key")]
     InvalidChannelPublicKey,
+    #[error("invalid peer public key")]
     InvalidPeerPublicKey,
+    #[error("handshake not for us")]
     HandshakeNotForUs,
+    #[error("missing signature")]
     MissingSignature,
+    #[error("invalid signature")]
     InvalidSignature,
+    #[error("handshake timeout")]
     HandshakeTimeout,
+    #[error("read timeout")]
     ReadTimeout,
+    #[error("write timeout")]
     WriteTimeout,
+    #[error("wrong peer")]
     WrongPeer,
+    #[error("read failed")]
     ReadFailed,
+    #[error("send failed")]
     SendFailed,
+    #[error("connection closed")]
     StreamClosed,
+    #[error("cipher creation failed")]
     CipherCreationFailed,
+    #[error("peer nonce overflow")]
     PeerNonceOverflow,
+    #[error("our nonce overflow")]
     OurNonceOverflow,
+    #[error("encryption failed")]
     EncryptionFailed,
+    #[error("decryption failed")]
     DecryptionFailed,
+    #[error("read invalid frame")]
     ReadInvalidFrame,
+    #[error("invalid timestamp")]
     InvalidTimestamp,
 }
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Error::UnexpectedMessage => write!(f, "unexpected message"),
-            Error::UnableToDecode(decode_error) => {
-                write!(f, "unable to decode: {}", decode_error)
-            }
-            Error::InvalidEphemeralPublicKey => write!(f, "invalid ephemeral public key"),
-            Error::InvalidChannelPublicKey => {
-                write!(f, "invalid channel public key")
-            }
-            Error::InvalidPeerPublicKey => write!(f, "invalid peer public key"),
-            Error::HandshakeNotForUs => {
-                write!(f, "handshake not for us")
-            }
-            Error::MissingSignature => write!(f, "missing signature"),
-            Error::InvalidSignature => write!(f, "invalid signature"),
-            Error::HandshakeTimeout => write!(f, "handshake timeout"),
-            Error::ReadTimeout => write!(f, "read timeout"),
-            Error::WriteTimeout => write!(f, "write timeout"),
-            Error::WrongPeer => write!(f, "wrong peer"),
-            Error::ReadFailed => write!(f, "read failed"),
-            Error::SendFailed => write!(f, "send failed"),
-            Error::StreamClosed => write!(f, "connection closed"),
-            Error::CipherCreationFailed => write!(f, "cipher creation failed"),
-            Error::PeerNonceOverflow => write!(f, "peer nonce overflow"),
-            Error::OurNonceOverflow => write!(f, "our nonce overflow"),
-            Error::EncryptionFailed => write!(f, "encryption failed"),
-            Error::DecryptionFailed => write!(f, "decryption failed"),
-            Error::ReadInvalidFrame => write!(f, "read invalid frame"),
-            Error::InvalidTimestamp => write!(f, "invalid timestamp"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}

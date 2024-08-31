@@ -83,6 +83,7 @@ use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{
     bls12381::dkg::utils,
     ed25519::{insecure_signer, Ed25519},
+    utils::hex,
     Scheme,
 };
 use commonware_p2p::{Config, Network};
@@ -164,7 +165,7 @@ async fn main() {
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
     let signer = insecure_signer(key);
-    tracing::info!(key = hex::encode(signer.me()), "loaded signer");
+    tracing::info!(key = hex(&signer.me()), "loaded signer");
 
     // Configure my port
     let port = parts[1].parse::<u16>().expect("Port not well-formed");
@@ -181,7 +182,7 @@ async fn main() {
     }
     for peer in participants {
         let verifier = insecure_signer(peer).me();
-        tracing::info!(key = hex::encode(&verifier), "registered authorized key",);
+        tracing::info!(key = hex(&verifier), "registered authorized key",);
         recipients.push(verifier);
     }
 
@@ -228,7 +229,7 @@ async fn main() {
     }
     for peer in participants {
         let verifier = insecure_signer(peer).me();
-        tracing::info!(key = hex::encode(&verifier), "registered contributor",);
+        tracing::info!(key = hex(&verifier), "registered contributor",);
         contributors.push(verifier);
     }
 

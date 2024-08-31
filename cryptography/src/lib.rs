@@ -8,6 +8,7 @@ pub mod utils;
 
 /// Byte array representing an arbitrary public key.
 pub type PublicKey = Bytes;
+
 /// Byte array representing an arbitrary signature.
 pub type Signature = Bytes;
 

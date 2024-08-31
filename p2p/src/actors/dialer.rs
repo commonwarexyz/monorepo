@@ -7,7 +7,7 @@ use crate::{
     connection::{self, Stream},
     metrics,
 };
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -96,12 +96,12 @@ impl<C: Scheme> Actor<C> {
         let connection = match TcpStream::connect(address).await {
             Ok(stream) => stream,
             Err(e) => {
-                debug!(peer=hex::encode(peer), error = ?e, "failed to dial peer");
+                debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
                 return;
             }
         };
         debug!(
-            peer = hex::encode(&peer),
+            peer = hex(&peer),
             address = address.to_string(),
             "dialed peer"
         );
@@ -109,7 +109,7 @@ impl<C: Scheme> Actor<C> {
         // Set TCP_NODELAY
         if let Some(nodelay) = config.tcp_nodelay {
             if let Err(e) = connection.set_nodelay(nodelay) {
-                debug!(peer = hex::encode(&peer), error = ?e, "failed to set TCP_NODELAY")
+                debug!(peer = hex(&peer), error = ?e, "failed to set TCP_NODELAY")
             }
         }
 
@@ -117,11 +117,11 @@ impl<C: Scheme> Actor<C> {
         let stream = match Stream::upgrade_dialer(config, connection, peer.clone()).await {
             Ok(stream) => stream,
             Err(e) => {
-                debug!(peer=hex::encode(&peer), error = ?e, "failed to upgrade connection");
+                debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
                 return;
             }
         };
-        debug!(peer = hex::encode(&peer), "upgraded connection");
+        debug!(peer = hex(&peer), "upgraded connection");
 
         // Start peer to handle messages
         supervisor.spawn(peer, stream, reservation).await;

@@ -19,7 +19,6 @@ tokio = { version = "1", features = ["full"] }
 clap = "4" 
 tracing-subscriber = "0.3"
 tracing = "0.1"
-hex = "0.4"
 prometheus-client = "0.22"
 prost = "0.12"
 governor = "0.6"

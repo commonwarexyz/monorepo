@@ -47,6 +47,8 @@ impl Sender {
     /// The set of recipients that the message was sent to. Note, a successful send does not
     /// mean that the recipient will receive the message (connection may no longer be active and
     /// we may not know that yet).
+
+    // TODO: make recipients an enum
     pub async fn send(
         &self,
         recipients: Option<Vec<PublicKey>>,

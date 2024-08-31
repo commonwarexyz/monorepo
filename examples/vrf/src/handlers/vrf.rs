@@ -8,6 +8,7 @@ use commonware_cryptography::{
             poly::Eval,
         },
     },
+    utils::hex,
     PublicKey,
 };
 use commonware_p2p::{Receiver, Sender};
@@ -161,7 +162,7 @@ impl Vrf {
                     let signature = signature.serialize();
                     info!(
                         round,
-                        siganture = hex::encode(signature),
+                        siganture = hex(&signature.into()),
                         "generated signature"
                     );
                 }

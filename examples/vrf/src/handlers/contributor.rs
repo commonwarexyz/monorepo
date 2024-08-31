@@ -13,6 +13,7 @@ use commonware_cryptography::{
             poly,
         },
     },
+    utils::hex,
     PublicKey, Scheme,
 };
 use commonware_p2p::{Receiver, Sender};
@@ -262,7 +263,7 @@ impl<C: Scheme> Contributor<C> {
 
                         // Verify commitment is on public
                         if let Err(e) = p1.commitment(dealer.clone(), commitment) {
-                            warn!(round, dealer = hex::encode(dealer), error = ?e, "received invalid commitment");
+                            warn!(round, dealer = hex(dealer), error = ?e, "received invalid commitment");
                             return (round, None);
                         }
                     }
