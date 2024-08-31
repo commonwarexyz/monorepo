@@ -2,7 +2,7 @@
 name = "commonware-cryptography"
 edition = "2021"
 publish = true
-version = "0.0.6"
+version = "0.0.7"
 license = "MIT OR Apache-2.0"
 description = "Generate keys, sign arbitrary messages, and deterministically verify untrusted signatures."
 readme = "README.md"
