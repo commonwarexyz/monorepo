@@ -150,6 +150,10 @@
 //! }  
 //! ```
 //!
+//! To minimize the number of chunks sent and to ensure each chunk is full (otherwise someone could send us a million chunks
+//! each 1 byte), content is compressed (if enabled) before chunking rather than after. As a result, the configuration
+//! chosen for frame size has no impact on compression efficiency.
+//!
 //! # Example
 //!
 //! ```rust
