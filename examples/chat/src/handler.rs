@@ -18,6 +18,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tracing::debug;
 
 pub const CHANNEL: u32 = 0;
 
@@ -154,9 +155,12 @@ pub async fn run(
                             if input.is_empty() {
                                 continue;
                             }
-                            sender
+                            let successful = sender
                                 .send(None, input.clone().into_bytes().into(), false)
                                 .await;
+                            for success in successful {
+                                debug!(friend = hex::encode(success), "sent message");
+                            }
                             let msg = Line::styled(format!(
                                 "[{}] {}: {}",
                                 chrono::Local::now().format("%m/%d %H:%M:%S"),
