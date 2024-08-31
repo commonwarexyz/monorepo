@@ -226,3 +226,238 @@ pub use actors::tracker::Oracle;
 pub use channels::{Message, Receiver, Sender};
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use commonware_cryptography::{ed25519, Scheme};
+    use governor::Quota;
+    use prometheus_client::registry::Registry;
+    use std::{
+        collections::HashSet,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        num::NonZeroU32,
+        sync::{Arc, Mutex},
+    };
+    use tokio::time;
+
+    /// Test connectivity between `n` peers.
+    ///
+    /// We set a unique `base_port` for each test to avoid "address already in use"
+    /// errors when tests are run immediately after each other.
+    async fn test_connectivity(base_port: u16, n: usize) {
+        // Create peers
+        let mut peers = Vec::new();
+        for i in 0..n {
+            peers.push(ed25519::insecure_signer(i as u64));
+        }
+        let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+
+        // Create networks
+        let mut waiters = Vec::new();
+        for (i, peer) in peers.iter().enumerate() {
+            // Derive port
+            let port = base_port + i as u16;
+
+            // Create bootstrappers
+            let mut bootstrappers = Vec::new();
+            if i > 0 {
+                bootstrappers.push((
+                    addresses[0].clone(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                ));
+            }
+
+            // Create network
+            let signer = peer.clone();
+            let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+            let config = Config::test(
+                signer.clone(),
+                registry,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                bootstrappers,
+            );
+            let (mut network, oracle) = Network::new(config);
+
+            // Register peers
+            oracle.register(0, addresses.clone()).await;
+
+            // Register basic application
+            let (sender, mut receiver) = network.register(
+                0,
+                Quota::per_second(NonZeroU32::new(1).unwrap()),
+                1_024,
+                128,
+            );
+
+            // Wait to connect to all peers, and then send messages to everyone
+            let network_handler = tokio::spawn(network.run());
+
+            // Send/Recieve messages
+            let peer_addresses = addresses.clone();
+            let peer_handler = tokio::spawn(async move {
+                // Send identity to all peers
+                let msg = signer.me();
+                for (j, recipient) in peer_addresses.iter().enumerate() {
+                    // Don't send message to self
+                    if i == j {
+                        continue;
+                    }
+
+                    // Send our identity
+                    let recipient = Some(vec![recipient.clone()]);
+
+                    // Loop until success
+                    loop {
+                        if sender
+                            .send(recipient.clone(), msg.clone(), true)
+                            .await
+                            .len()
+                            == 1
+                        {
+                            break;
+                        }
+
+                        // Sleep and try again (avoid busy loop)
+                        time::sleep(time::Duration::from_millis(100)).await;
+                    }
+                }
+
+                // Wait for all peers to send their identity
+                let mut received = HashSet::new();
+                while received.len() < n - 1 {
+                    // Ensure message equals sender identity
+                    let (sender, message) = receiver.recv().await.unwrap();
+                    assert_eq!(sender, message);
+
+                    // Add to received set
+                    received.insert(sender);
+                }
+
+                // Shutdown network
+                network_handler.abort();
+            });
+
+            // Add to waiters
+            waiters.push(peer_handler);
+        }
+
+        // Wait for all peers to finish
+        for waiter in waiters {
+            waiter.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_connectivity_small() {
+        test_connectivity(3000, 5).await;
+    }
+
+    #[tokio::test]
+    async fn test_connectivity_medium() {
+        test_connectivity(3100, 25).await;
+    }
+
+    #[tokio::test]
+    async fn test_connectivity_large() {
+        test_connectivity(3200, 50).await;
+    }
+
+    #[tokio::test]
+    async fn test_chunking() {
+        const N: usize = 2;
+        const BASE_PORT: u16 = 3300;
+
+        // Create peers
+        let mut peers = Vec::new();
+        for i in 0..N {
+            peers.push(ed25519::insecure_signer(i as u64));
+        }
+        let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+
+        // Create networks
+        let mut waiters = Vec::new();
+        for (i, peer) in peers.iter().enumerate() {
+            // Derive port
+            let port = BASE_PORT + i as u16;
+
+            // Create bootstrappers
+            let mut bootstrappers = Vec::new();
+            if i > 0 {
+                bootstrappers.push((
+                    addresses[0].clone(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), BASE_PORT),
+                ));
+            }
+
+            // Create network
+            let signer = peer.clone();
+            let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+            let config = Config::test(
+                signer.clone(),
+                registry,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                bootstrappers,
+            );
+            let (mut network, oracle) = Network::new(config);
+
+            // Register peers
+            oracle.register(0, addresses.clone()).await;
+
+            // Register basic application
+            let (sender, mut receiver) = network.register(
+                0,
+                Quota::per_second(NonZeroU32::new(10).unwrap()),
+                5 * 1_024 * 1_024, // 5MB
+                128,
+            );
+
+            // Wait to connect to all peers, and then send messages to everyone
+            let network_handler = tokio::spawn(network.run());
+
+            // Send/Recieve messages
+            let msg = vec![1u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
+            let msg = Bytes::from(msg.to_vec());
+            let msg_sender = addresses[0].clone();
+            let msg_recipient = addresses[1].clone();
+            let peer_handler = tokio::spawn(async move {
+                if i == 0 {
+                    // Loop until success
+                    let recipient = Some(vec![msg_recipient]);
+                    loop {
+                        if sender
+                            .send(recipient.clone(), msg.clone(), true)
+                            .await
+                            .len()
+                            == 1
+                        {
+                            break;
+                        }
+
+                        // Sleep and try again (avoid busy loop)
+                        time::sleep(time::Duration::from_millis(100)).await;
+                    }
+                } else {
+                    // Ensure message equals sender identity
+                    let (sender, message) = receiver.recv().await.unwrap();
+                    assert_eq!(sender, msg_sender);
+
+                    // Ensure message equals sent message
+                    assert_eq!(message, msg);
+                }
+
+                // Shutdown network
+                network_handler.abort();
+            });
+
+            // Add to waiters
+            waiters.push(peer_handler);
+        }
+
+        // Wait for waiters to finish (receiver before sender)
+        for waiter in waiters.into_iter().rev() {
+            waiter.await.unwrap();
+        }
+    }
+}

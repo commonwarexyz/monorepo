@@ -214,7 +214,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n_0 {
-            let signer = insecure_signer(i as u16).me();
+            let signer = insecure_signer(i as u64).me();
             contributors.push(signer);
         }
         contributors.sort();
@@ -349,7 +349,7 @@ mod tests {
         // Create reshare recipients (assume no overlap)
         let mut reshare_recipients = Vec::new();
         for i in 0..n_1 {
-            let recipient = insecure_signer((i + n_0) as u16).me();
+            let recipient = insecure_signer((i + n_0) as u64).me();
             reshare_recipients.push(recipient);
         }
         reshare_recipients.sort();
@@ -491,8 +491,8 @@ mod tests {
     }
 
     #[test]
-    fn test_dkg_and_reshare_all_active_large() {
-        run_dkg_and_reshare(20, 13, 15, 30, 21, 15, 4);
+    fn test_dkg_and_reshare_min_active_large() {
+        run_dkg_and_reshare(20, 13, 13, 100, 67, 13, 4);
     }
 
     #[test]
@@ -507,7 +507,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = insecure_signer(i as u16).me();
+            let signer = insecure_signer(i as u64).me();
             contributors.push(signer);
         }
         contributors.sort();
@@ -658,7 +658,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = insecure_signer(i as u16).me();
+            let signer = insecure_signer(i as u64).me();
             contributors.push(signer);
         }
         contributors.sort();

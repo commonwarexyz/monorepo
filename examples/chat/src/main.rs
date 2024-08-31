@@ -68,7 +68,7 @@ async fn main() {
                 .long("friends")
                 .required(true)
                 .value_delimiter(',')
-                .value_parser(value_parser!(u16)),
+                .value_parser(value_parser!(u64)),
         )
         .arg(
             Arg::new("bootstrappers")
@@ -93,7 +93,7 @@ async fn main() {
         .get_one::<String>("me")
         .expect("Please provide identity");
     let parts = me.split('@').collect::<Vec<&str>>();
-    let key = parts[0].parse::<u16>().expect("Key not well-formed");
+    let key = parts[0].parse::<u64>().expect("Key not well-formed");
     let signer = ed25519::insecure_signer(key);
     info!(key = hex::encode(signer.me()), "loaded signer");
 
@@ -104,7 +104,7 @@ async fn main() {
     // Configure allowed peers
     let mut recipients = Vec::new();
     let allowed_keys = matches
-        .get_many::<u16>("friends")
+        .get_many::<u64>("friends")
         .expect("Please provide friends to chat with")
         .copied();
     if allowed_keys.len() == 0 {
@@ -123,7 +123,7 @@ async fn main() {
         for bootstrapper in bootstrappers {
             let parts = bootstrapper.split('@').collect::<Vec<&str>>();
             let bootstrapper_key = parts[0]
-                .parse::<u16>()
+                .parse::<u64>()
                 .expect("Bootstrapper key not well-formed");
             let verifier = ed25519::insecure_signer(bootstrapper_key).me();
             let bootstrapper_address =
@@ -151,7 +151,7 @@ async fn main() {
     // Initialize chat
     let (chat_sender, chat_receiver) = network.register(
         handler::CHANNEL,
-        Quota::per_second(NonZeroU32::new(1).unwrap()),
+        Quota::per_second(NonZeroU32::new(128).unwrap()),
         1024, // 1 KB max message size
         128,  // 128 messages inflight
     );

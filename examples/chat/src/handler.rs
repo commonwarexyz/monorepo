@@ -15,9 +15,11 @@ use ratatui::{
 };
 use std::{
     io::stdout,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tracing::{debug, warn};
 
 pub const CHANNEL: u32 = 0;
 
@@ -93,8 +95,7 @@ pub async fn run(
                 let messages_text = Text::from(messages.clone());
                 let messages_block = Paragraph::new(messages_text)
                     .style(Style::default().fg(Color::Cyan))
-                    .block(Block::default().borders(Borders::ALL).title("Messages"))
-                    .scroll(((messages.len() as u16).saturating_sub(chunks[0].height), 0));
+                    .block(Block::default().borders(Borders::ALL).title("Messages"));
                 f.render_widget(messages_block, messages_chunks[0]);
 
                 // Display metrics
@@ -133,13 +134,13 @@ pub async fn run(
                         .collect::<Vec<Line>>(),
                 );
                 let logs_block = Paragraph::new(logs_text)
-                    .block(Block::default().borders(Borders::ALL).title("Logs"))
-                    .scroll(((logs.len() as u16).saturating_sub(chunks[1].height), 0));
+                    .block(Block::default().borders(Borders::ALL).title("Logs"));
                 f.render_widget(logs_block, chunks[1]);
             })
             .unwrap();
 
         // Handle input
+        let formatted_me = format!("{}**{}", &me[..4], &me[me.len() - 4..]);
         tokio::select! {
             Some(event) = rx.recv() => {
                 match event {
@@ -154,16 +155,28 @@ pub async fn run(
                             if input.is_empty() {
                                 continue;
                             }
-                            sender
+                            let mut successful = sender
                                 .send(None, input.clone().into_bytes().into(), false)
                                 .await;
+                            if !successful.is_empty() {
+                                successful.sort();
+                                let mut friends = String::from_str("[").unwrap();
+                                for friend in successful {
+                                    friends.push_str(&format!("{},", hex::encode(friend)));
+                                }
+                                friends.pop();
+                                friends.push(']');
+                                debug!(friends, input, "sent message");
+                            } else {
+                                warn!(input, "dropped message");
+                            }
                             let msg = Line::styled(format!(
                                 "[{}] {}: {}",
                                 chrono::Local::now().format("%m/%d %H:%M:%S"),
-                                me,
+                                formatted_me,
                                 input,
                             ), Style::default().fg(Color::Yellow));
-                            messages.push(msg);
+                            messages.insert(0, msg);
                             input = String::new();
                         }
                         KeyCode::Esc => {
@@ -180,10 +193,12 @@ pub async fn run(
                 }
             },
             Some((peer, msg)) = receiver.recv() => {
-                messages.push(format!(
-                    "[{}] {}: {}",
+                let peer = hex::encode(peer);
+                messages.insert(0, format!(
+                    "[{}] {}**{}: {}",
                     chrono::Local::now().format("%m/%d %H:%M:%S"),
-                    hex::encode(peer),
+                    &peer[..4],
+                    &peer[peer.len() - 4..],
                     String::from_utf8_lossy(&msg)
                 ).into());
             }

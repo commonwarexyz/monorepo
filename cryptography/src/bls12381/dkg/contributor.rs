@@ -369,7 +369,7 @@ mod tests {
     fn create_and_verify_shares(n: u32, t: u32, dealers: u32, concurrency: usize) {
         // Create contributors
         let mut contributors = (0..n)
-            .map(|i| insecure_signer(i as u16).me())
+            .map(|i| insecure_signer(i as u64).me())
             .collect::<Vec<_>>();
         contributors.sort();
 

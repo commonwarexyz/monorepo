@@ -26,7 +26,7 @@
 use crate::{utils::payload, PublicKey, Scheme, Signature};
 use ed25519_consensus;
 use rand::rngs::OsRng;
-use sha2::{Digest, Sha256};
+use rand::{Rng, SeedableRng};
 
 const SECRET_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
@@ -116,7 +116,9 @@ impl Scheme for Ed25519 {
 ///
 /// This function is intended for testing and demonstration purposes only.
 /// It should never be used in production.
-pub fn insecure_signer(seed: u16) -> Ed25519 {
-    let secret_key: [u8; SECRET_KEY_LENGTH] = Sha256::digest(seed.to_be_bytes()).into();
+pub fn insecure_signer(seed: u64) -> Ed25519 {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let mut secret_key = [0u8; SECRET_KEY_LENGTH];
+    rng.fill(&mut secret_key);
     Ed25519::from(secret_key)
 }

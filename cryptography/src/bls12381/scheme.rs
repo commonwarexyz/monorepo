@@ -76,8 +76,13 @@ impl Scheme for Bls12381 {
 }
 
 /// Creates a new BLS12-381 signer with a secret key derived from the provided seed.
-pub fn insecure_signer(seed: u16) -> Bls12381 {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed as u64);
+///
+/// # Warning
+///
+/// This function is intended for testing and demonstration purposes only.
+/// It should never be used in production.
+pub fn insecure_signer(seed: u64) -> Bls12381 {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let (private, public) = ops::keypair(&mut rng);
     Bls12381 { private, public }
 }

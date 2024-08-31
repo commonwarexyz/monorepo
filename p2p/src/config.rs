@@ -194,4 +194,38 @@ impl<C: Scheme> Config<C> {
             allowed_peers_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
         }
     }
+
+    #[cfg(test)]
+    pub fn test(
+        crypto: C,
+        registry: Arc<Mutex<Registry>>,
+        address: SocketAddr,
+        bootstrappers: Vec<Bootstrapper>,
+    ) -> Self {
+        Self {
+            crypto,
+            registry,
+            address,
+            bootstrappers,
+
+            allow_private_ips: true,
+            mailbox_size: 1_000,
+            max_frame_length: 1024 * 1024, // 1 MB
+            synchrony_bound: Duration::from_secs(5),
+            max_handshake_age: Duration::from_secs(10),
+            handshake_timeout: Duration::from_secs(5),
+            read_timeout: Duration::from_secs(10), // should be greater than gossip_bit_vec_frequency
+            write_timeout: Duration::from_secs(10),
+            tcp_nodelay: None,
+            allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
+            allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
+            dial_frequency: Duration::from_secs(1),
+            dial_rate: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
+            tracked_peer_sets: 4,
+            gossip_bit_vec_frequency: Duration::from_secs(1),
+            allowed_bit_vec_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
+            peer_gossip_max_count: 32,
+            allowed_peers_rate: Quota::per_second(NonZeroU32::new(5).unwrap()),
+        }
+    }
 }

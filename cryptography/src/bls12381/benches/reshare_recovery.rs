@@ -16,7 +16,7 @@ fn benchmark_reshare_recovery(c: &mut Criterion) {
 
         // Create contributors
         let mut contributors = (0..n)
-            .map(|i| insecure_signer(i as u16).me())
+            .map(|i| insecure_signer(i as u64).me())
             .collect::<Vec<_>>();
         contributors.sort();
 

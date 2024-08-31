@@ -114,14 +114,14 @@ async fn main() {
                 .long("participants")
                 .required(true)
                 .value_delimiter(',')
-                .value_parser(value_parser!(u16))
+                .value_parser(value_parser!(u64))
                 .help("All participants (arbiter and contributors)"),
         )
         .arg(
             Arg::new("arbiter")
                 .long("arbiter")
                 .required(false)
-                .value_parser(value_parser!(u16))
+                .value_parser(value_parser!(u64))
                 .help("If set, run as a contributor otherwise run as the arbiter"),
         )
         .arg(
@@ -129,7 +129,7 @@ async fn main() {
                 .long("contributors")
                 .required(true)
                 .value_delimiter(',')
-                .value_parser(value_parser!(u16))
+                .value_parser(value_parser!(u64))
                 .help("contributors"),
         )
         .arg(
@@ -162,7 +162,7 @@ async fn main() {
     if parts.len() != 2 {
         panic!("Identity not well-formed");
     }
-    let key = parts[0].parse::<u16>().expect("Key not well-formed");
+    let key = parts[0].parse::<u64>().expect("Key not well-formed");
     let signer = insecure_signer(key);
     tracing::info!(key = hex::encode(signer.me()), "loaded signer");
 
@@ -173,7 +173,7 @@ async fn main() {
     // Configure allowed peers
     let mut recipients = Vec::new();
     let participants = matches
-        .get_many::<u16>("participants")
+        .get_many::<u64>("participants")
         .expect("Please provide allowed keys")
         .copied();
     if participants.len() == 0 {
@@ -192,7 +192,7 @@ async fn main() {
         for bootstrapper in bootstrappers {
             let parts = bootstrapper.split('@').collect::<Vec<&str>>();
             let bootstrapper_key = parts[0]
-                .parse::<u16>()
+                .parse::<u64>()
                 .expect("Bootstrapper key not well-formed");
             let verifier = insecure_signer(bootstrapper_key).me();
             let bootstrapper_address =
@@ -220,7 +220,7 @@ async fn main() {
     // Parse contributors
     let mut contributors = Vec::new();
     let participants = matches
-        .get_many::<u16>("contributors")
+        .get_many::<u64>("contributors")
         .expect("Please provide contributors")
         .copied();
     if participants.len() == 0 {
@@ -239,7 +239,7 @@ async fn main() {
     info!(threshold, max_reveals, "inferred threshold");
 
     // Check if I am the arbiter
-    if let Some(arbiter) = matches.get_one::<u16>("arbiter") {
+    if let Some(arbiter) = matches.get_one::<u64>("arbiter") {
         // Create contributor
         let rogue = matches.get_flag("rogue");
         let lazy = matches.get_flag("lazy");
