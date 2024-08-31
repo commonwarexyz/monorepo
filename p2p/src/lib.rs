@@ -223,7 +223,7 @@ mod wire {
 }
 
 pub use actors::tracker::Oracle;
-pub use channels::{Message, Receiver, Sender};
+pub use channels::{Message, Receiver, Recipients, Sender};
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
 

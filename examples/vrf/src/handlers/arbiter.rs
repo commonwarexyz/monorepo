@@ -13,7 +13,7 @@ use commonware_cryptography::{
     utils::hex,
     PublicKey, Scheme,
 };
-use commonware_p2p::{Receiver, Sender};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use prost::Message;
 use std::{
     collections::{HashMap, HashSet},
@@ -76,7 +76,7 @@ impl Arbiter {
         }
         sender
             .send(
-                None,
+                Recipients::All,
                 wire::Dkg {
                     round,
                     payload: Some(wire::dkg::Payload::Start(wire::Start { group })),
@@ -143,7 +143,7 @@ impl Arbiter {
             None => {
                 sender
                     .send(
-                        None,
+                        Recipients::All,
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
@@ -178,7 +178,7 @@ impl Arbiter {
         }
         sender
             .send(
-                None,
+                Recipients::All,
                 wire::Dkg {
                     round,
                     payload: Some(wire::dkg::Payload::Commitments(wire::Commitments {
@@ -262,7 +262,7 @@ impl Arbiter {
             None => {
                 sender
                     .send(
-                        None,
+                        Recipients::All,
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
@@ -292,7 +292,7 @@ impl Arbiter {
                 warn!(round, error=?e, "unable to recover public key");
                 sender
                     .send(
-                        None,
+                        Recipients::All,
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
@@ -308,7 +308,7 @@ impl Arbiter {
             let result = result.unwrap();
             sender
                 .send(
-                    None,
+                    Recipients::All,
                     wire::Dkg {
                         round,
                         payload: Some(wire::dkg::Payload::Success(wire::Success {
@@ -335,7 +335,7 @@ impl Arbiter {
         debug!(round, missing = missing.len(), "requesting missing shares");
         sender
             .send(
-                None,
+                Recipients::All,
                 wire::Dkg {
                     round,
                     payload: Some(wire::dkg::Payload::Missing(wire::Missing {
@@ -418,7 +418,7 @@ impl Arbiter {
                 warn!(round, error=?e,  "unable to recover public key");
                 sender
                     .send(
-                        None,
+                        Recipients::All,
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
@@ -455,7 +455,7 @@ impl Arbiter {
         }
         sender
             .send(
-                None,
+                Recipients::All,
                 wire::Dkg {
                     round,
                     payload: Some(wire::dkg::Payload::Success(wire::Success {
