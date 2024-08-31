@@ -17,9 +17,6 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-    - name: Exclude paths from compilation
-      run: |
-        sed -i.bak '/\[workspace\]/a exclude = ["${{ env.EXCLUDE_PATHS }}"]' Cargo.toml 
     - name: Cache cargo-tarpaulin
       id: cargo-tarpaulin-cache
       uses: actions/cache@v3
@@ -30,7 +27,7 @@ jobs:
       if: steps.cargo-tarpaulin-cache.outputs.cache-hit != 'true'
       run: cargo install cargo-tarpaulin --version ${{ env.TARPAULIN_VERSION }}
     - name: Generate coverage report
-      run: cargo tarpaulin --out Xml --exclude-files ${{ env.EXCLUDE_PATHS }} 
+      run: cargo tarpaulin --out Xml --exclude-files ${{ env.EXCLUDE_PATHS }}
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
       with:
