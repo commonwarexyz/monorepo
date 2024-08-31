@@ -17,6 +17,7 @@ jobs:
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
     - name: Remove examples
+      # Reduces compilation time on code we exclude from coverage
       run: rm -rf examples
     - name: Remove examples from Cargo.toml
       run: |
