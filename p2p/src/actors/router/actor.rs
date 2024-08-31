@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     actors::peer::{self, Relay},
-    channels::Channels,
+    channels::{Channels, Recipients},
     metrics,
 };
 use bytes::Bytes;
@@ -67,6 +67,25 @@ impl Actor {
             .inc();
     }
 
+    async fn send_to_recipient(
+        &self,
+        recipient: &PublicKey,
+        channel: u32,
+        message: Bytes,
+        priority: bool,
+        sent: &mut Vec<PublicKey>,
+    ) {
+        if let Some(messenger) = self.connections.get(recipient) {
+            self.send_message(messenger, recipient, channel, message, priority)
+                .await;
+            sent.push(recipient.clone());
+        } else {
+            self.messages_dropped
+                .get_or_create(&metrics::Message::new_chunk(recipient, channel))
+                .inc();
+        }
+    }
+
     pub async fn run(mut self, routing: Channels) {
         while let Some(msg) = self.control.recv().await {
             match msg {
@@ -91,40 +110,37 @@ impl Actor {
                     success,
                 } => {
                     let mut sent = Vec::new();
-                    if let Some(recipients) = recipients {
-                        for recipient in recipients {
-                            let messenger = match self.connections.get(&recipient) {
-                                Some(messenger) => messenger,
-                                None => {
-                                    self.messages_dropped
-                                        .get_or_create(&metrics::Message::new_chunk(
-                                            &recipient, channel,
-                                        ))
-                                        .inc();
-                                    continue;
-                                }
-                            };
-                            self.send_message(
-                                messenger,
-                                &recipient,
-                                channel,
-                                message.clone(),
-                                priority,
+                    match recipients {
+                        Recipients::One(recipient) => {
+                            self.send_to_recipient(
+                                &recipient, channel, message, priority, &mut sent,
                             )
                             .await;
-                            sent.push(recipient);
                         }
-                    } else {
-                        for (recipient, messenger) in self.connections.iter() {
-                            self.send_message(
-                                messenger,
-                                recipient,
-                                channel,
-                                message.clone(),
-                                priority,
-                            )
-                            .await;
-                            sent.push(recipient.clone());
+                        Recipients::Some(recipients) => {
+                            for recipient in recipients {
+                                self.send_to_recipient(
+                                    &recipient,
+                                    channel,
+                                    message.clone(),
+                                    priority,
+                                    &mut sent,
+                                )
+                                .await;
+                            }
+                        }
+                        Recipients::All => {
+                            for (recipient, messenger) in self.connections.iter() {
+                                self.send_message(
+                                    messenger,
+                                    recipient,
+                                    channel,
+                                    message.clone(),
+                                    priority,
+                                )
+                                .await;
+                                sent.push(recipient.clone());
+                            }
                         }
                     }
 

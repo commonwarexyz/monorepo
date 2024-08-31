@@ -231,6 +231,7 @@ pub use network::Network;
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use channels::Recipients;
     use commonware_cryptography::{ed25519, Scheme};
     use governor::Quota;
     use prometheus_client::registry::Registry;
@@ -306,7 +307,7 @@ mod tests {
                     }
 
                     // Send our identity
-                    let recipient = Some(vec![recipient.clone()]);
+                    let recipient = Recipients::One(recipient.clone());
 
                     // Loop until success
                     loop {
@@ -419,7 +420,7 @@ mod tests {
             let peer_handler = tokio::spawn(async move {
                 if i == 0 {
                     // Loop until success
-                    let recipient = Some(vec![msg_recipient]);
+                    let recipient = Recipients::One(msg_recipient);
                     loop {
                         if sender
                             .send(recipient.clone(), msg.clone(), true)
