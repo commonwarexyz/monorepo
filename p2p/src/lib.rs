@@ -361,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_connectivity_large() {
-        test_connectivity(3200, 100).await;
+        test_connectivity(3200, 50).await;
     }
 
     #[tokio::test]
