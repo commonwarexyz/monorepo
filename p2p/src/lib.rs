@@ -256,7 +256,7 @@ mod tests {
 
         // Create networks
         let mut waiters = Vec::new();
-        for i in 0..n {
+        for (i, peer) in peers.iter().enumerate() {
             // Derive port
             let port = base_port + i as u16;
 
@@ -270,7 +270,7 @@ mod tests {
             }
 
             // Create network
-            let signer = peers[i].clone();
+            let signer = peer.clone();
             let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
             let config = Config::test(
                 signer.clone(),
@@ -299,14 +299,14 @@ mod tests {
             let peer_handler = tokio::spawn(async move {
                 // Send identity to all peers
                 let msg = signer.me();
-                for j in 0..n {
+                for (j, recipient) in peer_addresses.iter().enumerate() {
                     // Don't send message to self
                     if i == j {
                         continue;
                     }
 
                     // Send our identity
-                    let recipient = Some(vec![peer_addresses[j].clone()]);
+                    let recipient = Some(vec![recipient.clone()]);
 
                     // Loop until success
                     loop {
@@ -378,7 +378,7 @@ mod tests {
 
         // Create networks
         let mut waiters = Vec::new();
-        for i in 0..N {
+        for (i, peer) in peers.iter().enumerate() {
             // Derive port
             let port = BASE_PORT + i as u16;
 
@@ -392,7 +392,7 @@ mod tests {
             }
 
             // Create network
-            let signer = peers[i].clone();
+            let signer = peer.clone();
             let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
             let config = Config::test(
                 signer.clone(),
