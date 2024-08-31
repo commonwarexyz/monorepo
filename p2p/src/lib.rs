@@ -410,8 +410,8 @@ mod tests {
             // Register basic application
             let (sender, mut receiver) = network.register(
                 0,
-                Quota::per_second(NonZeroU32::new(1).unwrap()),
-                1_024,
+                Quota::per_second(NonZeroU32::new(10).unwrap()),
+                5 * 1_024 * 1_024, // 5MB
                 128,
             );
 
@@ -419,7 +419,7 @@ mod tests {
             let network_handler = tokio::spawn(network.run());
 
             // Send/Recieve messages
-            let msg = [1u8; 2 * 1024 * 1024]; // 2MB
+            let msg = vec![1u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
             let msg = Bytes::from(msg.to_vec());
             let msg_sender = addresses[0].clone();
             let msg_recipient = addresses[1].clone();
@@ -440,7 +440,6 @@ mod tests {
                         // Sleep and try again (avoid busy loop)
                         time::sleep(time::Duration::from_millis(100)).await;
                     }
-                    println!("sent message");
                 } else {
                     // Ensure message equals sender identity
                     let (sender, message) = receiver.recv().await.unwrap();
@@ -448,7 +447,6 @@ mod tests {
 
                     // Ensure message equals sent message
                     assert_eq!(message, msg);
-                    println!("received message");
                 }
 
                 // Shutdown network
