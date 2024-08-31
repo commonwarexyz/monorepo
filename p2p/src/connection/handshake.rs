@@ -174,7 +174,7 @@ mod tests {
     use x25519_dalek::PublicKey;
 
     #[test]
-    fn test_create_handshake() {
+    fn test_handshake_create_verify() {
         // Create participants
         let mut sender = ed25519::insecure_signer(0);
         let recipient = ed25519::insecure_signer(1);
