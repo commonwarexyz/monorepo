@@ -151,7 +151,7 @@ async fn main() {
     // Initialize chat
     let (chat_sender, chat_receiver) = network.register(
         handler::CHANNEL,
-        Quota::per_second(NonZeroU32::new(1).unwrap()),
+        Quota::per_second(NonZeroU32::new(128).unwrap()),
         1024, // 1 KB max message size
         128,  // 128 messages inflight
     );

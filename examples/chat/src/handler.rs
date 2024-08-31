@@ -19,7 +19,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub const CHANNEL: u32 = 0;
 
@@ -95,8 +95,7 @@ pub async fn run(
                 let messages_text = Text::from(messages.clone());
                 let messages_block = Paragraph::new(messages_text)
                     .style(Style::default().fg(Color::Cyan))
-                    .block(Block::default().borders(Borders::ALL).title("Messages"))
-                    .scroll(((messages.len() as u16).saturating_sub(chunks[0].height), 0));
+                    .block(Block::default().borders(Borders::ALL).title("Messages"));
                 f.render_widget(messages_block, messages_chunks[0]);
 
                 // Display metrics
@@ -167,7 +166,9 @@ pub async fn run(
                                 }
                                 friends.pop();
                                 friends.push(']');
-                                debug!(friends, "sent message");
+                                debug!(friends, input, "sent message");
+                            } else {
+                                warn!(input, "dropped message");
                             }
                             let msg = Line::styled(format!(
                                 "[{}] {}: {}",
@@ -175,7 +176,7 @@ pub async fn run(
                                 formatted_me,
                                 input,
                             ), Style::default().fg(Color::Yellow));
-                            messages.push(msg);
+                            messages.insert(0, msg);
                             input = String::new();
                         }
                         KeyCode::Esc => {
@@ -193,7 +194,7 @@ pub async fn run(
             },
             Some((peer, msg)) = receiver.recv() => {
                 let peer = hex::encode(peer);
-                messages.push(format!(
+                messages.insert(0, format!(
                     "[{}] {}**{}: {}",
                     chrono::Local::now().format("%m/%d %H:%M:%S"),
                     &peer[..4],
