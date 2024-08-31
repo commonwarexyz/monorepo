@@ -15,6 +15,15 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    - name: Cache cargo-tarpaulin
+      id: cargo-tarpaulin-cache
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/bin/cargo-tarpaulin
+        key: ${{ runner.os }}-cargo-tarpaulin-${{ hashFiles('**/Cargo.lock') }}
+    - name: Install cargo-tarpaulin
+      if: steps.cargo-tarpaulin-cache.outputs.cache-hit != 'true'
+      run: cargo install cargo-tarpaulin
     - name: Install cargo-tarpaulin
       run: cargo install cargo-tarpaulin
     - name: Generate coverage report
