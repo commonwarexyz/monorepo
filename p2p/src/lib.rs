@@ -463,7 +463,10 @@ mod tests {
                     assert_eq!(sender, msg_sender);
 
                     // Ensure message equals sent message
-                    assert_eq!(message, msg);
+                    assert_eq!(message.len(), msg.len());
+                    for (i, (&byte1, &byte2)) in message.iter().zip(msg.iter()).enumerate() {
+                        assert_eq!(byte1, byte2, "byte {} mismatch", i);
+                    }
                 }
 
                 // Shutdown network
