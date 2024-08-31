@@ -154,7 +154,7 @@ async fn main() {
         Quota::per_second(NonZeroU32::new(128).unwrap()),
         1024, // 1 KB max message size
         128,  // 128 messages inflight
-        None,
+        Some(3),
     );
 
     // Start network
