@@ -4,7 +4,7 @@ use commonware_cryptography::PublicKey;
 use governor::Quota;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use zstd::bulk::{compress, decompress_to_buffer};
+use zstd::bulk::{compress, decompress};
 
 /// Tuple representing a message received from a given public key.
 ///
@@ -119,8 +119,8 @@ impl Receiver {
 
         // If compression is enabled, decompress the message before returning.
         if self.compression {
-            let mut buf = Vec::with_capacity(self.max_size);
-            decompress_to_buffer(&message, &mut buf).map_err(|_| Error::DecompressionFailed)?;
+            let buf =
+                decompress(&message, self.max_size).map_err(|_| Error::DecompressionFailed)?;
             message = buf.into();
         }
 
@@ -168,5 +168,18 @@ impl Channels {
 
     pub fn collect(self) -> HashMap<u32, (Quota, usize, mpsc::Sender<Message>)> {
         self.receivers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compression() {
+        let message = b"hello world";
+        let compressed = compress(message, 3).unwrap();
+        let buf = decompress(&compressed, message.len()).unwrap();
+        assert_eq!(message, buf.as_slice());
     }
 }
