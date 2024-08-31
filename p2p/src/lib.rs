@@ -20,6 +20,7 @@
 //! * Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
 //! * Automatic Peer Discovery Using Bit Vectors (Used as Ping/Pongs)
 //! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
+//! * Optional Message Compression (using `zstd`)
 //! * Emebdded Message Chunking
 //!
 //! # Design
@@ -222,6 +223,20 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("message too large: {0}")]
+    MessageTooLarge(usize),
+    #[error("compression failed")]
+    CompressionFailed,
+    #[error("decompression failed")]
+    DecompressionFailed,
+    #[error("network closed")]
+    NetworkClosed,
+}
+
 pub use actors::tracker::Oracle;
 pub use channels::{Message, Receiver, Recipients, Sender};
 pub use config::{Bootstrapper, Config};
@@ -235,6 +250,7 @@ mod tests {
     use commonware_cryptography::{ed25519, Scheme};
     use governor::Quota;
     use prometheus_client::registry::Registry;
+    use rand::{thread_rng, Rng};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -290,6 +306,7 @@ mod tests {
                 Quota::per_second(NonZeroU32::new(1).unwrap()),
                 1_024,
                 128,
+                None,
             );
 
             // Wait to connect to all peers, and then send messages to everyone
@@ -314,6 +331,7 @@ mod tests {
                         if sender
                             .send(recipient.clone(), msg.clone(), true)
                             .await
+                            .unwrap()
                             .len()
                             == 1
                         {
@@ -360,8 +378,7 @@ mod tests {
         test_connectivity(3100, 35).await; // 35 is greater than the max number of peers per response
     }
 
-    #[tokio::test]
-    async fn test_chunking() {
+    async fn test_chunking(compression: Option<u8>) {
         const N: usize = 2;
         const BASE_PORT: u16 = 3300;
 
@@ -407,13 +424,18 @@ mod tests {
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
                 5 * 1_024 * 1_024, // 5MB
                 128,
+                compression,
             );
 
             // Wait to connect to all peers, and then send messages to everyone
             let network_handler = tokio::spawn(network.run());
 
+            // Crate random message
+            let mut msg = vec![0u8; 4 * 1024 * 1024]; // 4MB (greater than frame capacity)
+            let mut rng = thread_rng();
+            rng.fill(&mut msg[..]);
+
             // Send/Recieve messages
-            let msg = vec![1u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
             let msg = Bytes::from(msg.to_vec());
             let msg_sender = addresses[0].clone();
             let msg_recipient = addresses[1].clone();
@@ -425,6 +447,7 @@ mod tests {
                         if sender
                             .send(recipient.clone(), msg.clone(), true)
                             .await
+                            .unwrap()
                             .len()
                             == 1
                         {
@@ -455,5 +478,15 @@ mod tests {
         for waiter in waiters.into_iter().rev() {
             waiter.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn test_chunking_no_compression() {
+        test_chunking(None).await;
+    }
+
+    #[tokio::test]
+    async fn test_chunking_compression() {
+        test_chunking(Some(3)).await;
     }
 }

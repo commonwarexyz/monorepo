@@ -26,6 +26,7 @@ prost = "0.12"
 tracing = "0.1"
 bitvec = "1"
 prometheus-client = "0.22"
+zstd = "0.13"
 
 [dev-dependencies]
 tokio-test = "0.4"
