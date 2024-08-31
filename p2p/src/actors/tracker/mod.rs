@@ -8,6 +8,7 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use thiserror::Error;
 
 mod actor;
 mod address;
@@ -29,41 +30,24 @@ pub struct Config<C: Scheme> {
     pub peer_gossip_max_count: usize,
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
+    #[error("invalid IP length: {0}")]
     InvalidIPLength(usize),
+    #[error("too many peers: {0}")]
     TooManyPeers(usize),
+    #[error("private IPs not allowed: {0}")]
     PrivateIPsNotAllowed(IpAddr),
+    #[error("network peer unsigned")]
     PeerUnsigned,
+    #[error("invalid public key")]
     InvalidPublicKey,
+    #[error("received self")]
     ReceivedSelf,
+    #[error("invalid signature")]
     InvalidSignature,
+    #[error("peervec length mismatch: expected {0} bytes, got {1}")]
     BitVecLengthMismatch(usize, usize),
+    #[error("peervec has extra bit")]
     BitVecExtraBit,
 }
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Error::InvalidIPLength(size) => write!(f, "invalid IP length: {}", size),
-            Error::TooManyPeers(size) => write!(f, "too many peers: {}", size),
-            Error::PrivateIPsNotAllowed(ip) => write!(f, "private IPs not allowed: {}", ip),
-            Error::PeerUnsigned => write!(f, "network peer unsigned"),
-            Error::InvalidPublicKey => write!(f, "invalid public key"),
-            Error::ReceivedSelf => write!(f, "received self"),
-            Error::InvalidSignature => write!(f, "invalid signature"),
-            Error::BitVecLengthMismatch(expected, actual) => {
-                write!(
-                    f,
-                    "peervec length mismatch: expected {} bytes, got {}",
-                    expected, actual
-                )
-            }
-            Error::BitVecExtraBit => {
-                write!(f, "peervec has extra bit")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {}

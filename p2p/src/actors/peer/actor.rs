@@ -6,7 +6,7 @@ use crate::{
     metrics, wire,
 };
 use bytes::BytesMut;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use governor::{DefaultDirectRateLimiter, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
@@ -153,7 +153,7 @@ impl Actor {
                                     .inc();
                             }
                             Message::Kill => {
-                                return Err(Error::PeerKilled(send_peer))
+                                return Err(Error::PeerKilled(hex(&send_peer)))
                             }
                         }
                     }

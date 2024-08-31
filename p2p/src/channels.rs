@@ -10,8 +10,17 @@ use tokio::sync::mpsc;
 /// This message is guranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
 pub type Message = (PublicKey, Bytes);
+
 /// Channel to asynchronously receive messages from a channel.
 pub type Receiver = mpsc::Receiver<Message>;
+
+/// Enum indicating the set of recipients to send a message to.
+#[derive(Clone)]
+pub enum Recipients {
+    All,
+    Some(Vec<PublicKey>),
+    One(PublicKey),
+}
 
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
@@ -35,9 +44,7 @@ impl Sender {
     ///
     /// # Parameters
     ///
-    /// * `recipients` - If `Some`, the set of recipients to send the message to. If `None`,
-    ///   all connected peers that we are tracking across registered peer sets (that have
-    ///   yet to be pruned).
+    /// * `recipients` - The set of recipients to send the message to.
     /// * `message` - The message to send.
     /// * `priority` - Whether the message should be sent with priority (across
     ///   all channels).
@@ -49,7 +56,7 @@ impl Sender {
     /// we may not know that yet).
     pub async fn send(
         &self,
-        recipients: Option<Vec<PublicKey>>,
+        recipients: Recipients,
         message: Bytes,
         priority: bool,
     ) -> Vec<PublicKey> {

@@ -13,9 +13,10 @@ use commonware_cryptography::{
             poly,
         },
     },
+    utils::hex,
     PublicKey, Scheme,
 };
-use commonware_p2p::{Receiver, Sender};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use prost::Message;
 use rand::thread_rng;
 use std::collections::HashMap;
@@ -178,7 +179,7 @@ impl<C: Scheme> Contributor<C> {
             }
             sender
                 .send(
-                    Some(vec![self.arbiter.clone()]),
+                    Recipients::One(self.arbiter.clone()),
                     wire::Dkg {
                         round,
                         payload: Some(wire::dkg::Payload::Commitment(wire::Commitment {
@@ -262,7 +263,7 @@ impl<C: Scheme> Contributor<C> {
 
                         // Verify commitment is on public
                         if let Err(e) = p1.commitment(dealer.clone(), commitment) {
-                            warn!(round, dealer = hex::encode(dealer), error = ?e, "received invalid commitment");
+                            warn!(round, dealer = hex(dealer), error = ?e, "received invalid commitment");
                             return (round, None);
                         }
                     }
@@ -329,7 +330,7 @@ impl<C: Scheme> Contributor<C> {
                 let signature = self.crypto.sign(SHARE_NAMESPACE, &payload);
                 sender
                     .send(
-                        Some(vec![player.clone()]),
+                        Recipients::One(player.clone()),
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Share(wire::Share {
@@ -399,7 +400,7 @@ impl<C: Scheme> Contributor<C> {
                                     let signature = self.crypto.sign(SHARE_NAMESPACE, &payload);
                                     sender
                                         .send(
-                                            Some(vec![self.arbiter.clone()]),
+                                            Recipients::One(self.arbiter.clone()),
                                             wire::Dkg {
                                                 round,
                                                 payload: Some(wire::dkg::Payload::Reveal(
@@ -512,7 +513,7 @@ impl<C: Scheme> Contributor<C> {
                             // Send share ack
                             sender
                                 .send(
-                                    Some(vec![self.arbiter.clone()]),
+                                    Recipients::One(self.arbiter.clone()),
                                     wire::Dkg {
                                         round,
                                         payload: Some(wire::dkg::Payload::Ack(wire::Ack {
@@ -533,7 +534,7 @@ impl<C: Scheme> Contributor<C> {
                             // Send complaint
                             sender
                                 .send(
-                                    Some(vec![self.arbiter.clone()]),
+                                    Recipients::One(self.arbiter.clone()),
                                     wire::Dkg {
                                         round,
                                         payload: Some(wire::dkg::Payload::Complaint(

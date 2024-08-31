@@ -1,4 +1,7 @@
-use crate::{actors::peer, channels::Channels};
+use crate::{
+    actors::peer,
+    channels::{Channels, Recipients},
+};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use tokio::sync::{mpsc, oneshot};
@@ -13,7 +16,7 @@ pub enum Message {
         peer: PublicKey,
     },
     Content {
-        recipients: Option<Vec<PublicKey>>,
+        recipients: Recipients,
         channel: u32,
         message: Bytes,
         priority: bool,
@@ -61,7 +64,7 @@ impl Messenger {
 
     pub async fn content(
         &self,
-        recipients: Option<Vec<PublicKey>>,
+        recipients: Recipients,
         channel: u32,
         message: Bytes,
         priority: bool,

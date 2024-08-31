@@ -6,7 +6,7 @@ use crate::{
     actors::{peer, router, tracker},
     metrics,
 };
-use commonware_cryptography::Scheme;
+use commonware_cryptography::{utils::hex, Scheme};
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
@@ -83,7 +83,7 @@ impl<C: Scheme> Actor<C> {
                     // Spawn peer
                     tokio::spawn(async move {
                         // Create peer
-                        info!(peer = hex::encode(&peer), "peer started");
+                        info!(peer = hex(&peer), "peer started");
                         let (actor, messenger) = peer::Actor::new(
                             peer::Config {
                                 sent_messages,
@@ -101,7 +101,7 @@ impl<C: Scheme> Actor<C> {
 
                         // Run peer
                         let e = actor.run(peer.clone(), connection, tracker, channels).await;
-                        info!(error = ?e, peer=hex::encode(&peer), "peer shutdown");
+                        info!(error = ?e, peer=hex(&peer), "peer shutdown");
 
                         // Let the router know the peer has exited
                         router.release(peer).await;

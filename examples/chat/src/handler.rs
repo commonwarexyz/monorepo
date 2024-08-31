@@ -1,4 +1,5 @@
-use commonware_p2p::{Receiver, Sender};
+use commonware_cryptography::utils::hex;
+use commonware_p2p::{Receiver, Recipients, Sender};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
@@ -156,13 +157,13 @@ pub async fn run(
                                 continue;
                             }
                             let mut successful = sender
-                                .send(None, input.clone().into_bytes().into(), false)
+                                .send(Recipients::All, input.clone().into_bytes().into(), false)
                                 .await;
                             if !successful.is_empty() {
                                 successful.sort();
                                 let mut friends = String::from_str("[").unwrap();
                                 for friend in successful {
-                                    friends.push_str(&format!("{},", hex::encode(friend)));
+                                    friends.push_str(&format!("{},", hex(&friend)));
                                 }
                                 friends.pop();
                                 friends.push(']');
@@ -193,7 +194,7 @@ pub async fn run(
                 }
             },
             Some((peer, msg)) = receiver.recv() => {
-                let peer = hex::encode(peer);
+                let peer = hex(&peer);
                 messages.insert(0, format!(
                     "[{}] {}**{}: {}",
                     chrono::Local::now().format("%m/%d %H:%M:%S"),

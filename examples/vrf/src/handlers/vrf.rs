@@ -8,9 +8,10 @@ use commonware_cryptography::{
             poly::Eval,
         },
     },
+    utils::hex,
     PublicKey,
 };
-use commonware_p2p::{Receiver, Sender};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -66,7 +67,7 @@ impl Vrf {
         // Send partial signature to peers
         sender
             .send(
-                Some(self.contributors.clone()),
+                Recipients::Some(self.contributors.clone()),
                 wire::Vrf {
                     round,
                     signature: signature.serialize(),
@@ -161,7 +162,7 @@ impl Vrf {
                     let signature = signature.serialize();
                     info!(
                         round,
-                        siganture = hex::encode(signature),
+                        siganture = hex(&signature.into()),
                         "generated signature"
                     );
                 }

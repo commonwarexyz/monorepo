@@ -73,8 +73,9 @@ pub fn aggregate(
     threshold: u32,
     partials: Vec<Eval<group::Signature>>,
 ) -> Result<group::Signature, Error> {
-    if threshold as usize > partials.len() {
-        return Err(Error::NotEnoughPartialSignatures);
+    let sigs = partials.len() as u32;
+    if threshold > sigs {
+        return Err(Error::NotEnoughPartialSignatures(threshold, sigs));
     }
     poly::Signature::recover(threshold, partials)
 }

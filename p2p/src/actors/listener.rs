@@ -4,7 +4,7 @@ use crate::{
     actors::{spawner, tracker},
     connection::{self, IncomingHandshake, Stream},
 };
-use commonware_cryptography::Scheme;
+use commonware_cryptography::{utils::hex, Scheme};
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
@@ -67,10 +67,7 @@ impl<C: Scheme> Actor<C> {
         let reservation = match tracker.reserve(peer.clone()).await {
             Some(reservation) => reservation,
             None => {
-                debug!(
-                    peer = hex::encode(&peer),
-                    "unable to reserve connection to peer"
-                );
+                debug!(peer = hex(&peer), "unable to reserve connection to peer");
                 return;
             }
         };
@@ -79,11 +76,11 @@ impl<C: Scheme> Actor<C> {
         let stream = match Stream::upgrade_listener(connection, handshake).await {
             Ok(connection) => connection,
             Err(e) => {
-                debug!(error = ?e, peer=hex::encode(&peer), "failed to upgrade connection");
+                debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");
                 return;
             }
         };
-        debug!(peer = hex::encode(&peer), "upgraded connection");
+        debug!(peer = hex(&peer), "upgraded connection");
 
         // Start peer to handle messages
         supervisor.spawn(peer, stream, reservation).await;

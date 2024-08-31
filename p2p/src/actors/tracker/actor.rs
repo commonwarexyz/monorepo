@@ -5,7 +5,7 @@ pub use super::{
 };
 use crate::{ip, metrics, wire};
 use bitvec::prelude::*;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use governor::DefaultKeyedRateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -355,7 +355,7 @@ impl<C: Scheme> Actor<C> {
         let record = self.peers.get_mut(peer).unwrap();
         let wire_time = address.peer.timestamp;
         if !record.set_network(address) {
-            trace!(peer = hex::encode(peer), wire_time, "stored peer newer");
+            trace!(peer = hex(peer), wire_time, "stored peer newer");
             return false;
         }
         self.updated_peers
@@ -427,7 +427,7 @@ impl<C: Scheme> Actor<C> {
                     peer: peer.clone(),
                 },
             ) {
-                debug!(peer = hex::encode(public_key), "updated peer record");
+                debug!(peer = hex(public_key), "updated peer record");
                 updated = true;
             }
         }
@@ -598,7 +598,7 @@ impl<C: Scheme> Actor<C> {
                         // we don't need to worry about the case that this fails.
                         let _ = reservation.send(self.reserve(peer));
                     } else {
-                        debug!(peer = hex::encode(&peer), "peer not authorized to connect");
+                        debug!(peer = hex(&peer), "peer not authorized to connect");
                         let _ = reservation.send(None);
                     }
                 }

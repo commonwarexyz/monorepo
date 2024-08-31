@@ -10,9 +10,10 @@ use commonware_cryptography::{
             poly,
         },
     },
+    utils::hex,
     PublicKey, Scheme,
 };
-use commonware_p2p::{Receiver, Sender};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use prost::Message;
 use std::{
     collections::{HashMap, HashSet},
@@ -69,13 +70,13 @@ impl Arbiter {
         if let Some(previous) = &previous {
             group = Some(previous.serialize());
             let public = poly::public(previous).serialize();
-            info!(round, public = hex::encode(public), "starting reshare");
+            info!(round, public = hex(&public.into()), "starting reshare");
         } else {
             info!(round, "starting key generation");
         }
         sender
             .send(
-                None,
+                Recipients::All,
                 wire::Dkg {
                     round,
                     payload: Some(wire::dkg::Payload::Start(wire::Start { group })),
@@ -142,7 +143,7 @@ impl Arbiter {
             None => {
                 sender
                     .send(
-                        None,
+                        Recipients::All,
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
@@ -159,10 +160,10 @@ impl Arbiter {
         let commitments = p1.commitments();
         info!(
             round,
-            commitments = ?commitments.iter().map(|(_, pk, _)| hex::encode(pk)).collect::<Vec<_>>(),
+            commitments = ?commitments.iter().map(|(_, pk, _)| hex(pk)).collect::<Vec<_>>(),
             disqualified = ?disqualified
                 .into_iter()
-                .map(hex::encode)
+                .map(|pk| hex(&pk))
                 .collect::<Vec<_>>(),
             "commitment phase complete"
         );
@@ -177,7 +178,7 @@ impl Arbiter {
         }
         sender
             .send(
-                None,
+                Recipients::All,
                 wire::Dkg {
                     round,
                     payload: Some(wire::dkg::Payload::Commitments(wire::Commitments {
@@ -261,7 +262,7 @@ impl Arbiter {
             None => {
                 sender
                     .send(
-                        None,
+                        Recipients::All,
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
@@ -277,8 +278,8 @@ impl Arbiter {
         let commitments = p2.commitments();
         info!(
             round,
-            commitments = ?commitments.iter().map(|(_, pk, _)| hex::encode(pk)).collect::<Vec<_>>(),
-            disqualified = ?disqualified.into_iter().map(hex::encode).collect::<Vec<_>>(),
+            commitments = ?commitments.iter().map(|(_, pk, _)| hex(pk)).collect::<Vec<_>>(),
+            disqualified = ?disqualified.into_iter().map(|pk| hex(&pk)).collect::<Vec<_>>(),
             "ack phase complete"
         );
 
@@ -291,7 +292,7 @@ impl Arbiter {
                 warn!(round, error=?e, "unable to recover public key");
                 sender
                     .send(
-                        None,
+                        Recipients::All,
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
@@ -307,7 +308,7 @@ impl Arbiter {
             let result = result.unwrap();
             sender
                 .send(
-                    None,
+                    Recipients::All,
                     wire::Dkg {
                         round,
                         payload: Some(wire::dkg::Payload::Success(wire::Success {
@@ -334,7 +335,7 @@ impl Arbiter {
         debug!(round, missing = missing.len(), "requesting missing shares");
         sender
             .send(
-                None,
+                Recipients::All,
                 wire::Dkg {
                     round,
                     payload: Some(wire::dkg::Payload::Missing(wire::Missing {
@@ -417,7 +418,7 @@ impl Arbiter {
                 warn!(round, error=?e,  "unable to recover public key");
                 sender
                     .send(
-                        None,
+                        Recipients::All,
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
@@ -432,10 +433,10 @@ impl Arbiter {
         };
         info!(
             round,
-            commitments = ?commitments.iter().map(|(_, pk, _)| hex::encode(pk)).collect::<Vec<_>>(),
+            commitments = ?commitments.iter().map(|(_, pk, _)| hex(pk)).collect::<Vec<_>>(),
             disqualified = ?disqualified
                 .iter()
-                .map(hex::encode)
+                .map(hex)
                 .collect::<Vec<_>>(),
             "repair phase complete"
         );
@@ -454,7 +455,7 @@ impl Arbiter {
         }
         sender
             .send(
-                None,
+                Recipients::All,
                 wire::Dkg {
                     round,
                     payload: Some(wire::dkg::Payload::Success(wire::Success {
@@ -485,7 +486,7 @@ impl Arbiter {
                     info!(
                         round,
                         public = public_hex(&public),
-                        disqualified = ?disqualified.into_iter().map(hex::encode).collect::<Vec<_>>(),
+                        disqualified = ?disqualified.into_iter().map(|pk| hex(&pk)).collect::<Vec<_>>(),
                         "round complete"
                     );
 
@@ -493,7 +494,7 @@ impl Arbiter {
                     previous = Some(public);
                 }
                 None => {
-                    info!(round, disqualified = ?disqualified.into_iter().map(hex::encode).collect::<Vec<_>>(), "round aborted");
+                    info!(round, disqualified = ?disqualified.into_iter().map(|pk| hex(&pk)).collect::<Vec<_>>(), "round aborted");
                 }
             }
 

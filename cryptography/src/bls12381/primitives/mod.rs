@@ -44,25 +44,18 @@ pub mod group;
 pub mod ops;
 pub mod poly;
 
-#[derive(Debug)]
+use thiserror::Error;
+
+#[derive(Error, Debug)]
 pub enum Error {
-    NotEnoughPartialSignatures,
+    #[error("not enough partial signatures: {0}/{1}")]
+    NotEnoughPartialSignatures(u32, u32),
+    #[error("invalid signature")]
     InvalidSignature,
+    #[error("invalid recovery")]
     InvalidRecovery,
+    #[error("no inverse")]
     NoInverse,
+    #[error("duplicate eval")]
     DuplicateEval,
 }
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Error::NotEnoughPartialSignatures => write!(f, "not enough partial signatures"),
-            Error::InvalidSignature => write!(f, "invalid signature"),
-            Error::InvalidRecovery => write!(f, "invalid recovery"),
-            Error::NoInverse => write!(f, "no inverse"),
-            Error::DuplicateEval => write!(f, "duplicate eval"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}

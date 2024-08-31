@@ -1,10 +1,10 @@
 //! Peer
 
 use crate::{connection, metrics};
-use commonware_cryptography::PublicKey;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
+use thiserror::Error;
 use tokio::task::JoinError;
 
 mod actor;
@@ -23,37 +23,26 @@ pub struct Config {
     pub received_messages: Family<metrics::Message, Counter>,
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
-    PeerKilled(PublicKey),
+    #[error("peer killed: {0}")]
+    PeerKilled(String),
+    #[error("send failed: {0}")]
     SendFailed(connection::Error),
+    #[error("peer disconnected")]
     PeerDisconnected,
+    #[error("receive failed: {0}")]
     ReceiveFailed(connection::Error),
+    #[error("unexpected handshake message")]
     UnexpectedHandshake,
+    #[error("unexpected failure: {0}")]
     UnexpectedFailure(JoinError),
+    #[error("message dropped")]
     MessageDropped,
+    #[error("message too large: {0}")]
     MessageTooLarge(usize),
+    #[error("invalid chunk")]
     InvalidChunk,
+    #[error("invalid channel")]
     InvalidChannel,
 }
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Error::PeerKilled(peer) => {
-                write!(f, "peer killed: {}", hex::encode(peer))
-            }
-            Error::SendFailed(err) => write!(f, "send failed: {}", err),
-            Error::PeerDisconnected => write!(f, "peer disconnected"),
-            Error::ReceiveFailed(err) => write!(f, "receive failed: {}", err),
-            Error::UnexpectedHandshake => write!(f, "unexpected handshake message"),
-            Error::UnexpectedFailure(err) => write!(f, "unexpected failure: {}", err),
-            Error::MessageDropped => write!(f, "message dropped"),
-            Error::MessageTooLarge(size) => write!(f, "message too large: {}", size),
-            Error::InvalidChunk => write!(f, "invalid chunk"),
-            Error::InvalidChannel => write!(f, "invalid channel"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
