@@ -389,6 +389,11 @@ mod tests {
         }
         let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
 
+        // Create random message
+        let mut msg = vec![0u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
+        let mut rng = thread_rng();
+        rng.fill(&mut msg[..]);
+
         // Create networks
         let mut waiters = Vec::new();
         for (i, peer) in peers.iter().enumerate() {
@@ -430,13 +435,8 @@ mod tests {
             // Wait to connect to all peers, and then send messages to everyone
             let network_handler = tokio::spawn(network.run());
 
-            // Crate random message
-            let mut msg = vec![0u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
-            let mut rng = thread_rng();
-            rng.fill(&mut msg[..]);
-
             // Send/Recieve messages
-            let msg = Bytes::from(msg);
+            let msg = Bytes::from(msg.clone());
             let msg_sender = addresses[0].clone();
             let msg_recipient = addresses[1].clone();
             let peer_handler = tokio::spawn(async move {
