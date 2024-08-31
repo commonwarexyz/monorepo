@@ -19,3 +19,12 @@ jobs:
       run: cargo clippy -- -D warnings
     - name: Run tests
       run: cargo test --verbose
+    - name: Install cargo-tarpaulin
+      run: cargo install cargo-tarpaulin
+    - name: Generate coverage report
+      run: cargo tarpaulin --out Xml
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: true
