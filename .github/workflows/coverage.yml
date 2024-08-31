@@ -21,8 +21,7 @@ jobs:
       run: cargo tarpaulin --out Xml
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       with:
         file: ./coverage.xml
         fail_ci_if_error: true
+        token: ${{ secrets.CODECOV_TOKEN }}
