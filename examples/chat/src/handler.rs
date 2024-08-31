@@ -158,7 +158,7 @@ pub async fn run(
                             }
                             let mut successful = sender
                                 .send(Recipients::All, input.clone().into_bytes().into(), false)
-                                .await;
+                                .await.unwrap();
                             if !successful.is_empty() {
                                 successful.sort();
                                 let mut friends = String::from_str("[").unwrap();
@@ -193,15 +193,21 @@ pub async fn run(
                     }
                 }
             },
-            Some((peer, msg)) = receiver.recv() => {
-                let peer = hex(&peer);
-                messages.insert(0, format!(
-                    "[{}] {}**{}: {}",
-                    chrono::Local::now().format("%m/%d %H:%M:%S"),
-                    &peer[..4],
-                    &peer[peer.len() - 4..],
-                    String::from_utf8_lossy(&msg)
-                ).into());
+            result = receiver.recv() => match result {
+                Ok((peer, msg)) => {
+                    let peer = hex(&peer);
+                    messages.insert(0, format!(
+                        "[{}] {}**{}: {}",
+                        chrono::Local::now().format("%m/%d %H:%M:%S"),
+                        &peer[..4],
+                        &peer[peer.len() - 4..],
+                        String::from_utf8_lossy(&msg)
+                    ).into());
+                }
+                Err(err) => {
+                    debug!(?err, "failed to receive message");
+                    continue;
+                }
             }
         };
     }

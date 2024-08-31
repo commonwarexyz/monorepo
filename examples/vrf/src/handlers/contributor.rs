@@ -84,7 +84,7 @@ impl<C: Scheme> Contributor<C> {
         // Wait for start message from arbiter
         let (public, round) = loop {
             match receiver.recv().await {
-                Some((sender, msg)) => {
+                Ok((sender, msg)) => {
                     if sender != self.arbiter {
                         debug!("dropping messages until receive start message from arbiter");
                         continue;
@@ -114,8 +114,8 @@ impl<C: Scheme> Contributor<C> {
                     }
                     break (None, round);
                 }
-                None => {
-                    debug!("did not receive start message");
+                Err(err) => {
+                    debug!(?err, "did not receive start message");
                     continue;
                 }
             }
@@ -211,7 +211,7 @@ impl<C: Scheme> Contributor<C> {
         // Wait for other commitments
         loop {
             match receiver.recv().await {
-                Some((sender, msg)) => {
+                Ok((sender, msg)) => {
                     if sender != self.arbiter {
                         debug!("dropping messages until receive commitments from arbiter");
                         continue;
@@ -269,8 +269,8 @@ impl<C: Scheme> Contributor<C> {
                     }
                     break;
                 }
-                None => {
-                    debug!("did not receive commitments");
+                Err(err) => {
+                    debug!(?err, "did not receive commitments");
                     return (round, None);
                 }
             }
@@ -351,7 +351,7 @@ impl<C: Scheme> Contributor<C> {
         // Send acks to arbiter when receive shares from other contributors
         let dealers = loop {
             match receiver.recv().await {
-                Some((s, msg)) => {
+                Ok((s, msg)) => {
                     let msg = match wire::Dkg::decode(msg) {
                         Ok(msg) => msg,
                         Err(_) => {
@@ -559,8 +559,8 @@ impl<C: Scheme> Contributor<C> {
                         }
                     }
                 }
-                None => {
-                    debug!("did not receive shares");
+                Err(err) => {
+                    debug!(?err, "did not receive shares");
                     return (round, None);
                 }
             };

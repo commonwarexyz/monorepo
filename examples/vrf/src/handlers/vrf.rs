@@ -90,8 +90,8 @@ impl Vrf {
                     debug!(round, "signature timeout");
                     break;
                 }
-                msg = receiver.recv() => {
-                    if let Some((sender, msg)) = msg {
+                result = receiver.recv() => match result{
+                    Ok((sender, msg)) => {
                         let dealer = match self.ordered_contributors.get(&sender) {
                             Some(sender) => sender,
                             None => {
@@ -133,6 +133,10 @@ impl Vrf {
                                 warn!(round, dealer, "received invalid partial signature");
                             }
                         }
+                    },
+                    Err(err) => {
+                        warn!(round, ?err, "failed to receive signature");
+                        break;
                     }
                 }
             }
