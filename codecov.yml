@@ -5,5 +5,6 @@ comment:
   layout: "header, diff, files, footer"
   behavior: new 
   require_changes: false
+  require_head: false
   require_base: false
   hide_project_coverage: false
