@@ -1,4 +1,4 @@
-name: Rust
+name: Coverage 
 
 on:
   push:
@@ -9,16 +9,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  CI:
+  All:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-    - name: Lint with clippy
-      run: cargo clippy -- -D warnings
-    - name: Run tests
-      run: cargo test --verbose
     - name: Install cargo-tarpaulin
       run: cargo install cargo-tarpaulin
     - name: Generate coverage report
