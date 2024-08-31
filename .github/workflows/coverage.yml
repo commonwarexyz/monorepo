@@ -16,6 +16,12 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    - name: Remove examples
+      # Reduces compilation time on code we exclude from coverage
+      run: rm -rf examples
+    - name: Remove examples from Cargo.toml
+      run: |
+        sed -i.bak '/examples/d' Cargo.toml
     - name: Cache cargo-tarpaulin
       id: cargo-tarpaulin-cache
       uses: actions/cache@v3

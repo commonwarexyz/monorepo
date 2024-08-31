@@ -2,8 +2,9 @@ ignore:
   - "examples"
 
 comment:
-  layout: "reach, diff, files"
-  behavior: default
+  layout: "header, diff, files, footer"
+  behavior: new 
   require_changes: false
+  require_head: false
   require_base: false
-  verbose: true
+  hide_project_coverage: false

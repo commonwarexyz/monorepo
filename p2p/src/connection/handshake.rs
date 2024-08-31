@@ -2,7 +2,7 @@ use crate::{
     connection::{utils::codec, x25519, Error},
     wire,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use futures::StreamExt;
 use prost::Message;
@@ -14,7 +14,7 @@ use tokio_util::codec::LengthDelimitedCodec;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_HANDSHAKE_";
 
-pub async fn create_handshake<C: Scheme>(
+pub fn create_handshake<C: Scheme>(
     crypto: &mut C,
     recipient_public_key: PublicKey,
     ephemeral_public_key: x25519_dalek::PublicKey,
@@ -58,7 +58,7 @@ impl Handshake {
         crypto: &C,
         synchrony_bound: Duration,
         max_handshake_age: Duration,
-        msg: BytesMut,
+        msg: Bytes,
     ) -> Result<Self, Error> {
         // Parse handshake message
         let handshake = match wire::Message::decode(msg)
@@ -153,12 +153,192 @@ impl IncomingHandshake {
             .map_err(|_| Error::HandshakeTimeout)?
             .ok_or(Error::StreamClosed)?
             .map_err(|_| Error::ReadFailed)?;
-        let handshake = Handshake::verify(crypto, synchrony_bound, max_handshake_age, msg)?;
+        let handshake =
+            Handshake::verify(crypto, synchrony_bound, max_handshake_age, msg.freeze())?;
 
         Ok(Self {
             framed,
             peer_public_key: handshake.peer_public_key,
             ephemeral_public_key: handshake.ephemeral_public_key,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::utils;
+    use commonware_cryptography::{
+        ed25519::{self, Ed25519},
+        Scheme,
+    };
+    use futures::SinkExt;
+    use std::net::SocketAddr;
+    use tokio::io::AsyncWriteExt;
+    use x25519_dalek::PublicKey;
+
+    #[test]
+    fn test_handshake_create_verify() {
+        // Create participants
+        let mut sender = ed25519::insecure_signer(0);
+        let recipient = ed25519::insecure_signer(1);
+        let ephemeral_public_key = PublicKey::from([3u8; 32]);
+
+        // Create handshake message
+        let handshake_bytes =
+            create_handshake(&mut sender, recipient.me(), ephemeral_public_key).unwrap();
+
+        // Decode the handshake message
+        let message = wire::Message::decode(handshake_bytes.clone()).unwrap();
+        let handshake = match message.payload {
+            Some(wire::message::Payload::Handshake(handshake)) => handshake,
+            _ => panic!("unexpected message"),
+        };
+        // Verify the timestamp
+        let current_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("failed to get current time")
+            .as_secs();
+        assert!(handshake.timestamp <= current_timestamp);
+        assert!(handshake.timestamp >= current_timestamp - 5); // Allow a 5-second window
+
+        // Verify the signature
+        assert_eq!(handshake.recipient_public_key, recipient.me());
+        assert_eq!(
+            handshake.ephemeral_public_key,
+            x25519::encode_public_key(ephemeral_public_key)
+        );
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&handshake.recipient_public_key);
+        payload.extend_from_slice(&handshake.ephemeral_public_key);
+        payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
+
+        // Verify signature
+        assert!(Ed25519::verify(
+            NAMESPACE,
+            &payload,
+            &sender.me(),
+            &handshake.signature.unwrap().signature,
+        ));
+
+        // Verify using the handshake struct
+        let handshake = Handshake::verify(
+            &recipient,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            handshake_bytes,
+        )
+        .unwrap();
+        assert_eq!(handshake.peer_public_key, sender.me());
+        assert_eq!(handshake.ephemeral_public_key, ephemeral_public_key);
+    }
+
+    #[tokio::test]
+    async fn test_handshake() {
+        // Create participants
+        let mut sender = ed25519::insecure_signer(0);
+        let recipient = ed25519::insecure_signer(1);
+        let ephemeral_public_key = PublicKey::from([3u8; 32]);
+
+        // Create handshake message
+        let handshake_bytes =
+            create_handshake(&mut sender, recipient.me(), ephemeral_public_key).unwrap();
+
+        // Setup a mock TcpStream that will listen for the response
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Send message over stream
+        let max_frame_len = 1024;
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let codec = utils::codec(max_frame_len);
+            let mut stream = Framed::new(socket, codec);
+            stream.send(handshake_bytes).await.unwrap();
+        });
+
+        // Call the verify function
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let result = IncomingHandshake::verify(
+            &recipient,
+            max_frame_len,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            stream,
+        )
+        .await
+        .unwrap();
+
+        // Assert that the result is expected
+        assert_eq!(result.peer_public_key, sender.me());
+        assert_eq!(result.ephemeral_public_key, ephemeral_public_key);
+    }
+
+    #[tokio::test]
+    async fn test_incoming_handshake_invalid_data() {
+        // Setup a mock TcpStream that will listen for the response
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Send message over stream
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = socket.write_all(b"mock data").await;
+        });
+
+        // Parameters for the verify function
+        let crypto = ed25519::insecure_signer(0);
+        let max_frame_len = 1024;
+        let synchrony_bound = Duration::from_secs(1);
+        let max_handshake_age = Duration::from_secs(1);
+        let handshake_timeout = Duration::from_secs(500);
+
+        // Call the verify function
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let result = IncomingHandshake::verify(
+            &crypto,
+            max_frame_len,
+            synchrony_bound,
+            max_handshake_age,
+            handshake_timeout,
+            stream,
+        )
+        .await;
+
+        // Assert that the result is an Err of type Error::ReadFailed (no frame len)
+        assert!(matches!(result, Err(Error::ReadFailed)));
+    }
+
+    #[tokio::test]
+    async fn test_incoming_handshake_verify_timeout() {
+        // Setup a mock TcpStream
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Parameters for the verify function
+        let crypto = ed25519::insecure_signer(0);
+        let max_frame_len = 1024;
+        let synchrony_bound = Duration::from_secs(1);
+        let max_handshake_age = Duration::from_secs(1);
+        let handshake_timeout = Duration::from_millis(500); // Short timeout to trigger the error
+
+        // Call the verify function
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let result = IncomingHandshake::verify(
+            &crypto,
+            max_frame_len,
+            synchrony_bound,
+            max_handshake_age,
+            handshake_timeout,
+            stream,
+        )
+        .await;
+
+        // Assert that the result is an Err of type Error::HandshakeTimeout
+        assert!(matches!(result, Err(Error::HandshakeTimeout)));
     }
 }
