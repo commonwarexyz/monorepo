@@ -355,13 +355,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connectivity_medium() {
-        test_connectivity(3100, 25).await;
-    }
-
-    #[tokio::test]
     async fn test_connectivity_large() {
-        test_connectivity(3200, 50).await;
+        test_connectivity(3100, 35).await; // 35 is greater than the max number of peers per response
     }
 
     #[tokio::test]

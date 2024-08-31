@@ -210,7 +210,7 @@ impl<C: Scheme> Config<C> {
 
             allow_private_ips: true,
             mailbox_size: 1_000,
-            max_frame_length: 1024 * 1024, // 1 MB
+            max_frame_length: 128 * 1024, // 128 KB (more chunking)
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),

@@ -1,4 +1,4 @@
-name: Rust
+name: Tests 
 
 on:
   push:
@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  CI:
+  All:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
