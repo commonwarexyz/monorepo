@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  TARPAULIN_VERSION: 0.31.2
 
 jobs:
   All:
@@ -20,17 +21,15 @@ jobs:
       uses: actions/cache@v3
       with:
         path: ~/.cargo/bin/cargo-tarpaulin
-        key: ${{ runner.os }}-cargo-tarpaulin-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-${{ env.TARPAULIN_VERSION }}-cargo-tarpaulin
     - name: Install cargo-tarpaulin
       if: steps.cargo-tarpaulin-cache.outputs.cache-hit != 'true'
-      run: cargo install cargo-tarpaulin
-    - name: Install cargo-tarpaulin
-      run: cargo install cargo-tarpaulin
+      run: cargo install cargo-tarpaulin --version ${{ env.TARPAULIN_VERSION }}
     - name: Generate coverage report
       run: cargo tarpaulin --out Xml
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
       with:
-        file: ./coverage.xml
+        file: ./cobertura.xml
         fail_ci_if_error: true
         token: ${{ secrets.CODECOV_TOKEN }}
