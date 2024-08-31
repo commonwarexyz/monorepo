@@ -378,9 +378,8 @@ mod tests {
         test_connectivity(3100, 35).await; // 35 is greater than the max number of peers per response
     }
 
-    async fn test_chunking(compression: Option<u8>) {
+    async fn test_chunking(base_port: u16, compression: Option<u8>) {
         const N: usize = 2;
-        const BASE_PORT: u16 = 3200;
 
         // Create peers
         let mut peers = Vec::new();
@@ -398,14 +397,14 @@ mod tests {
         let mut waiters = Vec::new();
         for (i, peer) in peers.iter().enumerate() {
             // Derive port
-            let port = BASE_PORT + i as u16;
+            let port = base_port + i as u16;
 
             // Create bootstrappers
             let mut bootstrappers = Vec::new();
             if i > 0 {
                 bootstrappers.push((
                     addresses[0].clone(),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), BASE_PORT),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 ));
             }
 
@@ -485,17 +484,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_chunking_no_compression() {
-        test_chunking(None).await;
+        test_chunking(3200, None).await;
     }
 
     #[tokio::test]
     async fn test_chunking_compression() {
-        test_chunking(Some(3)).await;
+        test_chunking(3300, Some(3)).await;
     }
 
-    async fn test_message_too_large(compression: Option<u8>) {
+    async fn test_message_too_large(base_port: u16, compression: Option<u8>) {
         const N: usize = 2;
-        const BASE_PORT: u16 = 3300;
 
         // Create peers
         let mut peers = Vec::new();
@@ -510,7 +508,7 @@ mod tests {
         let config = Config::test(
             signer.clone(),
             registry,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), BASE_PORT),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
             Vec::new(),
         );
         let (mut network, oracle) = Network::new(config);
@@ -543,11 +541,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_message_too_large_no_compression() {
-        test_message_too_large(None).await;
+        test_message_too_large(3400, None).await;
     }
 
     #[tokio::test]
     async fn test_message_too_large_compression() {
-        test_message_too_large(Some(3)).await;
+        test_message_too_large(3500, Some(3)).await;
     }
 }
