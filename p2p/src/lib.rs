@@ -380,7 +380,7 @@ mod tests {
 
     async fn test_chunking(compression: Option<u8>) {
         const N: usize = 2;
-        const BASE_PORT: u16 = 3300;
+        const BASE_PORT: u16 = 3200;
 
         // Create peers
         let mut peers = Vec::new();
@@ -488,5 +488,62 @@ mod tests {
     #[tokio::test]
     async fn test_chunking_compression() {
         test_chunking(Some(3)).await;
+    }
+
+    async fn test_message_too_large(compression: Option<u8>) {
+        const N: usize = 2;
+        const BASE_PORT: u16 = 3300;
+
+        // Create peers
+        let mut peers = Vec::new();
+        for i in 0..N {
+            peers.push(ed25519::insecure_signer(i as u64));
+        }
+        let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+
+        // Create network
+        let signer = peers[0].clone();
+        let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+        let config = Config::test(
+            signer.clone(),
+            registry,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), BASE_PORT),
+            Vec::new(),
+        );
+        let (mut network, oracle) = Network::new(config);
+
+        // Register peers
+        oracle.register(0, addresses.clone()).await;
+
+        // Register basic application
+        let (sender, mut receiver) = network.register(
+            0,
+            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            1_024 * 1_024, // 1MB
+            128,
+            compression,
+        );
+
+        // Wait to connect to all peers, and then send messages to everyone
+        tokio::spawn(network.run());
+
+        // Crate random message
+        let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)
+        let mut rng = thread_rng();
+        rng.fill(&mut msg[..]);
+
+        // Send message
+        let recipient = Recipients::One(addresses[1].clone());
+        sender.send(recipient, msg.into(), true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_message_too_large_no_compression() {
+        test_message_too_large(None).await;
+    }
+
+    #[tokio::test]
+    async fn test_message_too_large_compression() {
+        test_message_too_large(Some(3)).await;
     }
 }
