@@ -71,6 +71,7 @@ impl<C: Scheme> Network<C> {
     /// * `rate` - Rate at which messages can be received over the channel.
     /// * `max_size` - Maximum size of a message that can be sent/received over the channel.
     /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
+    /// * `compression` - Optional compression level (using `zstd`) to use for messages on the channel.
     ///
     /// # Returns
     ///
@@ -82,8 +83,10 @@ impl<C: Scheme> Network<C> {
         rate: governor::Quota,
         max_size: usize,
         backlog: usize,
+        compression: Option<u8>,
     ) -> (channels::Sender, channels::Receiver) {
-        self.channels.register(channel, rate, max_size, backlog)
+        self.channels
+            .register(channel, rate, max_size, backlog, compression)
     }
 
     /// Starts the network.

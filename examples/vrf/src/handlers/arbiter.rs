@@ -85,7 +85,8 @@ impl Arbiter {
                 .into(),
                 true,
             )
-            .await;
+            .await
+            .expect("failed to send start message");
 
         // Collect commitments
         let mut p0 = P0::new(
@@ -103,8 +104,8 @@ impl Arbiter {
                     debug!("commitment phase timed out");
                     break
                 }
-                msg = receiver.recv() => {
-                    if let Some((sender, msg)) = msg {
+                result = receiver.recv() => match result {
+                    Ok((sender, msg)) =>{
                         let msg = match wire::Dkg::decode(msg) {
                             Ok(msg) => msg,
                             Err(_) => {
@@ -131,6 +132,10 @@ impl Arbiter {
                             }
                         };
                         let _ = p0.commitment(sender, commitment);
+                    },
+                    Err(err) => {
+                        warn!(round, ?err, "failed to receive commitment");
+                        break;
                     }
                 }
             }
@@ -152,7 +157,8 @@ impl Arbiter {
                         .into(),
                         true,
                     )
-                    .await;
+                    .await
+                    .expect("failed to send abort message");
                 return (None, disqualified);
             }
         };
@@ -189,7 +195,8 @@ impl Arbiter {
                 .into(),
                 false,
             )
-            .await;
+            .await
+            .expect("failed to send commitments");
 
         // Collect acks and complaints
         loop {
@@ -200,8 +207,8 @@ impl Arbiter {
                     debug!("ack phase timed out");
                     break
                 }
-                msg = receiver.recv() => {
-                    if let Some((sender, msg)) = msg {
+                result = receiver.recv() => match result {
+                    Ok((sender, msg)) =>{
                         // Parse message as Ack or Complaint
                         let msg = match wire::Dkg::decode(msg) {
                             Ok(msg) => msg,
@@ -249,6 +256,10 @@ impl Arbiter {
                             }
                         }
                     }
+                    Err(err) => {
+                        warn!(round, ?err, "failed to receive ack or complaint");
+                        break;
+                    }
                 }
             }
         }
@@ -271,7 +282,8 @@ impl Arbiter {
                         .into(),
                         true,
                     )
-                    .await;
+                    .await
+                    .expect("failed to send abort message");
                 return (None, disqualified);
             }
         };
@@ -301,7 +313,8 @@ impl Arbiter {
                         .into(),
                         true,
                     )
-                    .await;
+                    .await
+                    .expect("failed to send abort message");
                 return (None, disqualified);
             }
 
@@ -320,7 +333,8 @@ impl Arbiter {
                     .into(),
                     true,
                 )
-                .await;
+                .await
+                .expect("failed to send success message");
             return (Some(result.public), disqualified);
         }
 
@@ -346,7 +360,8 @@ impl Arbiter {
                 .into(),
                 false,
             )
-            .await;
+            .await
+            .expect("failed to send missing shares");
 
         // Collect missing shares
         let mut signatures = HashMap::new();
@@ -357,8 +372,8 @@ impl Arbiter {
                 _ = tokio::time::sleep_until(t_repair) => {
                     break
                 }
-                msg = receiver.recv() => {
-                    if let Some((sender, msg)) = msg {
+                result = receiver.recv() => match result {
+                    Ok((sender, msg)) => {
                         let msg = match wire::Dkg::decode(msg) {
                             Ok(msg) => msg,
                             Err(_) => {
@@ -406,6 +421,10 @@ impl Arbiter {
                             }
                         }
                     }
+                    Err(err) => {
+                        warn!(round, ?err, "failed to receive missing share");
+                        break;
+                    }
                 }
             };
         }
@@ -427,7 +446,8 @@ impl Arbiter {
                         .into(),
                         true,
                     )
-                    .await;
+                    .await
+                    .expect("failed to send abort message");
                 return (None, disqualified);
             }
         };
@@ -467,8 +487,8 @@ impl Arbiter {
                 .into(),
                 true,
             )
-            .await;
-
+            .await
+            .expect("failed to send success message");
         (Some(result.public), disqualified)
     }
 

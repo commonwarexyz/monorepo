@@ -20,6 +20,7 @@
 //! * Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
 //! * Automatic Peer Discovery Using Bit Vectors (Used as Ping/Pongs)
 //! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
+//! * Optional Message Compression (using `zstd`)
 //! * Emebdded Message Chunking
 //!
 //! # Design
@@ -149,6 +150,10 @@
 //! }  
 //! ```
 //!
+//! To minimize the number of chunks sent and to ensure each chunk is full (otherwise someone could send us a million chunks
+//! each 1 byte), content is compressed (if enabled) before chunking rather than after. As a result, the configuration
+//! chosen for frame size has no impact on compression efficiency.
+//!
 //! # Example
 //!
 //! ```rust
@@ -199,7 +204,13 @@
 //!     oracle.register(0, vec![signer.me(), peer1, peer2, peer3]);
 //!
 //!     // Register some channel
-//!     let (sender, receiver) = network.register(0, Quota::per_second(NonZeroU32::new(1).unwrap()), 1024, 128);
+//!     let (sender, receiver) = network.register(
+//!         0,
+//!         Quota::per_second(NonZeroU32::new(1).unwrap()),
+//!         1024, // max message size
+//!         128, // max backlog
+//!         Some(3), // compression level
+//!     );
 //!
 //!     // Run network
 //!     let network_handler = tokio::spawn(network.run());
@@ -222,6 +233,20 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("message too large: {0}")]
+    MessageTooLarge(usize),
+    #[error("compression failed")]
+    CompressionFailed,
+    #[error("decompression failed")]
+    DecompressionFailed,
+    #[error("network closed")]
+    NetworkClosed,
+}
+
 pub use actors::tracker::Oracle;
 pub use channels::{Message, Receiver, Recipients, Sender};
 pub use config::{Bootstrapper, Config};
@@ -235,6 +260,7 @@ mod tests {
     use commonware_cryptography::{ed25519, Scheme};
     use governor::Quota;
     use prometheus_client::registry::Registry;
+    use rand::{thread_rng, Rng};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -290,6 +316,7 @@ mod tests {
                 Quota::per_second(NonZeroU32::new(1).unwrap()),
                 1_024,
                 128,
+                None,
             );
 
             // Wait to connect to all peers, and then send messages to everyone
@@ -314,6 +341,7 @@ mod tests {
                         if sender
                             .send(recipient.clone(), msg.clone(), true)
                             .await
+                            .unwrap()
                             .len()
                             == 1
                         {
@@ -360,10 +388,8 @@ mod tests {
         test_connectivity(3100, 35).await; // 35 is greater than the max number of peers per response
     }
 
-    #[tokio::test]
-    async fn test_chunking() {
+    async fn test_chunking(base_port: u16, compression: Option<u8>) {
         const N: usize = 2;
-        const BASE_PORT: u16 = 3300;
 
         // Create peers
         let mut peers = Vec::new();
@@ -372,18 +398,23 @@ mod tests {
         }
         let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
 
+        // Create random message
+        let mut msg = vec![0u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
+        let mut rng = thread_rng();
+        rng.fill(&mut msg[..]);
+
         // Create networks
         let mut waiters = Vec::new();
         for (i, peer) in peers.iter().enumerate() {
             // Derive port
-            let port = BASE_PORT + i as u16;
+            let port = base_port + i as u16;
 
             // Create bootstrappers
             let mut bootstrappers = Vec::new();
             if i > 0 {
                 bootstrappers.push((
                     addresses[0].clone(),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), BASE_PORT),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 ));
             }
 
@@ -407,14 +438,14 @@ mod tests {
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
                 5 * 1_024 * 1_024, // 5MB
                 128,
+                compression,
             );
 
             // Wait to connect to all peers, and then send messages to everyone
             let network_handler = tokio::spawn(network.run());
 
             // Send/Recieve messages
-            let msg = vec![1u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
-            let msg = Bytes::from(msg.to_vec());
+            let msg = Bytes::from(msg.clone());
             let msg_sender = addresses[0].clone();
             let msg_recipient = addresses[1].clone();
             let peer_handler = tokio::spawn(async move {
@@ -425,6 +456,7 @@ mod tests {
                         if sender
                             .send(recipient.clone(), msg.clone(), true)
                             .await
+                            .unwrap()
                             .len()
                             == 1
                         {
@@ -440,7 +472,10 @@ mod tests {
                     assert_eq!(sender, msg_sender);
 
                     // Ensure message equals sent message
-                    assert_eq!(message, msg);
+                    assert_eq!(message.len(), msg.len());
+                    for (i, (&byte1, &byte2)) in message.iter().zip(msg.iter()).enumerate() {
+                        assert_eq!(byte1, byte2, "byte {} mismatch", i);
+                    }
                 }
 
                 // Shutdown network
@@ -455,5 +490,72 @@ mod tests {
         for waiter in waiters.into_iter().rev() {
             waiter.await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn test_chunking_no_compression() {
+        test_chunking(3200, None).await;
+    }
+
+    #[tokio::test]
+    async fn test_chunking_compression() {
+        test_chunking(3300, Some(3)).await;
+    }
+
+    async fn test_message_too_large(base_port: u16, compression: Option<u8>) {
+        const N: usize = 2;
+
+        // Create peers
+        let mut peers = Vec::new();
+        for i in 0..N {
+            peers.push(ed25519::insecure_signer(i as u64));
+        }
+        let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+
+        // Create network
+        let signer = peers[0].clone();
+        let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+        let config = Config::test(
+            signer.clone(),
+            registry,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+            Vec::new(),
+        );
+        let (mut network, oracle) = Network::new(config);
+
+        // Register peers
+        oracle.register(0, addresses.clone()).await;
+
+        // Register basic application
+        let (sender, _) = network.register(
+            0,
+            Quota::per_second(NonZeroU32::new(10).unwrap()),
+            1_024 * 1_024, // 1MB
+            128,
+            compression,
+        );
+
+        // Wait to connect to all peers, and then send messages to everyone
+        tokio::spawn(network.run());
+
+        // Crate random message
+        let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)
+        let mut rng = thread_rng();
+        rng.fill(&mut msg[..]);
+
+        // Send message
+        let recipient = Recipients::One(addresses[1].clone());
+        let result = sender.send(recipient, msg.into(), true).await;
+        assert!(matches!(result, Err(Error::MessageTooLarge(_))));
+    }
+
+    #[tokio::test]
+    async fn test_message_too_large_no_compression() {
+        test_message_too_large(3400, None).await;
+    }
+
+    #[tokio::test]
+    async fn test_message_too_large_compression() {
+        test_message_too_large(3500, Some(3)).await;
     }
 }
