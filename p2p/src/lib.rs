@@ -534,7 +534,8 @@ mod tests {
 
         // Send message
         let recipient = Recipients::One(addresses[1].clone());
-        sender.send(recipient, msg.into(), true).await.unwrap();
+        let result = sender.send(recipient, msg.into(), true).await;
+        assert!(matches!(result, Err(Error::MessageTooLarge(_))));
     }
 
     #[tokio::test]
