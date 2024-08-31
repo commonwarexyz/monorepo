@@ -200,7 +200,13 @@
 //!     oracle.register(0, vec![signer.me(), peer1, peer2, peer3]);
 //!
 //!     // Register some channel
-//!     let (sender, receiver) = network.register(0, Quota::per_second(NonZeroU32::new(1).unwrap()), 1024, 128);
+//!     let (sender, receiver) = network.register(
+//!         0,
+//!         Quota::per_second(NonZeroU32::new(1).unwrap()),
+//!         1024, // max message size
+//!         128, // max backlog
+//!         Some(3), // compression level
+//!     );
 //!
 //!     // Run network
 //!     let network_handler = tokio::spawn(network.run());
