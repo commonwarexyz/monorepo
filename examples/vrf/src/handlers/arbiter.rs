@@ -85,7 +85,8 @@ impl Arbiter {
                 .into(),
                 true,
             )
-            .await;
+            .await
+            .expect("failed to send start message");
 
         // Collect commitments
         let mut p0 = P0::new(
@@ -156,7 +157,8 @@ impl Arbiter {
                         .into(),
                         true,
                     )
-                    .await;
+                    .await
+                    .expect("failed to send abort message");
                 return (None, disqualified);
             }
         };
@@ -193,7 +195,8 @@ impl Arbiter {
                 .into(),
                 false,
             )
-            .await;
+            .await
+            .expect("failed to send commitments");
 
         // Collect acks and complaints
         loop {
@@ -279,7 +282,8 @@ impl Arbiter {
                         .into(),
                         true,
                     )
-                    .await;
+                    .await
+                    .expect("failed to send abort message");
                 return (None, disqualified);
             }
         };
@@ -309,7 +313,8 @@ impl Arbiter {
                         .into(),
                         true,
                     )
-                    .await;
+                    .await
+                    .expect("failed to send abort message");
                 return (None, disqualified);
             }
 
@@ -328,7 +333,8 @@ impl Arbiter {
                     .into(),
                     true,
                 )
-                .await;
+                .await
+                .expect("failed to send success message");
             return (Some(result.public), disqualified);
         }
 
@@ -354,7 +360,8 @@ impl Arbiter {
                 .into(),
                 false,
             )
-            .await;
+            .await
+            .expect("failed to send missing shares");
 
         // Collect missing shares
         let mut signatures = HashMap::new();
@@ -439,7 +446,8 @@ impl Arbiter {
                         .into(),
                         true,
                     )
-                    .await;
+                    .await
+                    .expect("failed to send abort message");
                 return (None, disqualified);
             }
         };
@@ -479,8 +487,8 @@ impl Arbiter {
                 .into(),
                 true,
             )
-            .await;
-
+            .await
+            .expect("failed to send success message");
         (Some(result.public), disqualified)
     }
 

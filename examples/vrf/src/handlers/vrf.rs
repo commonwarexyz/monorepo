@@ -76,7 +76,8 @@ impl Vrf {
                 .into(),
                 true,
             )
-            .await;
+            .await
+            .expect("failed to send signature");
 
         // Wait for partial signatures from peers or timeout
         let start = tokio::time::Instant::now();

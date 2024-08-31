@@ -190,7 +190,8 @@ impl<C: Scheme> Contributor<C> {
                     .into(),
                     true,
                 )
-                .await;
+                .await
+                .expect("could not send commitment");
             debug!(round, "sent commitment");
 
             (p1, Some(shares))
@@ -342,7 +343,8 @@ impl<C: Scheme> Contributor<C> {
                         .into(),
                         true,
                     )
-                    .await;
+                    .await
+                    .expect("could not send share");
                 debug!(round, player = idx, "sent share");
                 shares_sent += 1;
             }
@@ -411,7 +413,8 @@ impl<C: Scheme> Contributor<C> {
                                             .into(),
                                             true,
                                         )
-                                        .await;
+                                        .await
+                                        .expect("could not send reveal");
                                 }
                                 continue;
                             }
@@ -524,7 +527,8 @@ impl<C: Scheme> Contributor<C> {
                                     .into(),
                                     true,
                                 )
-                                .await;
+                                .await
+                                .expect("could not send ack");
                             debug!(round, dealer, "sent ack");
                         }
                         Err(dkg::Error::ShareWrongCommitment)
@@ -549,7 +553,8 @@ impl<C: Scheme> Contributor<C> {
                                     .into(),
                                     true,
                                 )
-                                .await;
+                                .await
+                                .expect("could not send complaint");
                             warn!(round, dealer, "sent complaint");
                         }
                         Err(e) => {

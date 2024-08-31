@@ -250,7 +250,7 @@ async fn main() {
             Quota::per_second(NonZeroU32::new(10).unwrap()),
             1024 * 1024, // 1 MB max message size
             256,         // 256 messages in flight
-            None,
+            Some(3),
         );
         let arbiter = insecure_signer(*arbiter).me();
         let (contributor, requests) = handlers::Contributor::new(
@@ -280,7 +280,7 @@ async fn main() {
             Quota::per_second(NonZeroU32::new(10).unwrap()),
             1024 * 1024, // 1 MB max message size
             256,         // 256 messages in flight
-            None,
+            Some(3),
         );
         let arbiter = handlers::Arbiter::new(
             Duration::from_secs(10),
