@@ -19,7 +19,7 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
     - name: Exclude paths from compilation
       run: |
-        sed -i.bak '/\[workspace\]/a exclude = [${{ env.EXCLUDE_PATHS }}]' Cargo.toml 
+        sed -i.bak '/\[workspace\]/a exclude = ["${{ env.EXCLUDE_PATHS }}"]' Cargo.toml 
     - name: Cache cargo-tarpaulin
       id: cargo-tarpaulin-cache
       uses: actions/cache@v3
