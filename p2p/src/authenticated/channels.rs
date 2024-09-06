@@ -6,20 +6,6 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use zstd::bulk::{compress, decompress};
 
-/// Tuple representing a message received from a given public key.
-///
-/// This message is guranteed to adhere to the configuration of the channel and
-/// will already be decrypted and authenticated.
-pub type Message = (PublicKey, Bytes);
-
-/// Enum indicating the set of recipients to send a message to.
-#[derive(Clone)]
-pub enum Recipients {
-    All,
-    Some(Vec<PublicKey>),
-    One(PublicKey),
-}
-
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
 #[derive(Clone)]
