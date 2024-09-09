@@ -56,8 +56,8 @@ impl Arbiter {
         &self,
         round: u64,
         previous: Option<poly::Public>,
-        sender: &Sender,
-        receiver: &mut Receiver,
+        sender: &impl Sender,
+        receiver: &mut impl Receiver,
     ) -> (Option<poly::Public>, HashSet<PublicKey>) {
         // Create a new round
         let start = tokio::time::Instant::now();
@@ -492,7 +492,7 @@ impl Arbiter {
         (Some(result.public), disqualified)
     }
 
-    pub async fn run<C: Scheme>(self, sender: Sender, mut receiver: Receiver) {
+    pub async fn run<C: Scheme>(self, sender: impl Sender, mut receiver: impl Receiver) {
         let mut round = 0;
         let mut previous = None;
         loop {

@@ -108,7 +108,8 @@ impl crate::Receiver for Receiver {
 
     /// Receives a message from the channel.
     ///
-    /// This method will block until a message is received.
+    /// This method will block until a message is received or the underlying
+    /// network shuts down.
     async fn recv(&mut self) -> Result<Message, Error> {
         let (sender, mut message) = self.receiver.recv().await.ok_or(Error::NetworkClosed)?;
 

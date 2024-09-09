@@ -1,5 +1,7 @@
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use std::error::Error as StdError;
+use std::fmt::Debug;
 use std::future::Future;
 
 pub mod authenticated;
@@ -23,8 +25,9 @@ pub enum Recipients {
 
 /// Separate from Receiver because clone-able.
 pub trait Sender: Clone {
-    type Error;
+    type Error: Debug + StdError;
 
+    /// TODO
     fn send(
         &self,
         recipients: Recipients,
@@ -34,7 +37,8 @@ pub trait Sender: Clone {
 }
 
 pub trait Receiver {
-    type Error;
+    type Error: Debug + StdError;
 
+    /// TODO
     fn recv(&mut self) -> impl Future<Output = Result<Message, Self::Error>> + Send;
 }

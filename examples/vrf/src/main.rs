@@ -86,7 +86,7 @@ use commonware_cryptography::{
     utils::hex,
     Scheme,
 };
-use commonware_p2p::{Config, Network};
+use commonware_p2p::authenticated::{Config, Network};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
