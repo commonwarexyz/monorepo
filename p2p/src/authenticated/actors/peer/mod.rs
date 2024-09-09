@@ -1,6 +1,6 @@
 //! Peer
 
-use crate::{connection, metrics};
+use crate::authenticated::{connection, metrics};
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;

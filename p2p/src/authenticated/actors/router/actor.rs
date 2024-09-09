@@ -3,9 +3,12 @@ use super::{
     Config,
 };
 use crate::{
-    actors::peer::{self, Relay},
-    channels::{Channels, Recipients},
-    metrics,
+    authenticated::{
+        actors::peer::{self, Relay},
+        channels::Channels,
+        metrics,
+    },
+    Recipients,
 };
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};

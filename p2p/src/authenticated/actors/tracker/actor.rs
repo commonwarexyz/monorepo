@@ -3,7 +3,7 @@ pub use super::{
     ingress::{Mailbox, Message, Oracle, Reservation},
     Config, Error,
 };
-use crate::{ip, metrics, wire};
+use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use governor::DefaultKeyedRateLimiter;
@@ -615,8 +615,7 @@ impl<C: Scheme> Actor<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actors::peer;
-    use crate::config::Bootstrapper;
+    use crate::authenticated::{actors::peer, config::Bootstrapper};
     use commonware_cryptography::ed25519;
     use governor::Quota;
     use std::net::{IpAddr, Ipv4Addr};

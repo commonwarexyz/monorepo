@@ -1,6 +1,6 @@
 //! Instance of a commonware-p2p network.
 
-use crate::{
+use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
     config::Config,

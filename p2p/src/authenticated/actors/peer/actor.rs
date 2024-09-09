@@ -1,5 +1,5 @@
 use super::{ingress::Data, Config, Error, Mailbox, Message, Relay};
-use crate::{
+use crate::authenticated::{
     actors::tracker,
     channels::Channels,
     connection::{Sender, Stream},

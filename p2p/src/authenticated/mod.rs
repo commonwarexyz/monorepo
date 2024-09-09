@@ -248,15 +248,15 @@ pub enum Error {
 }
 
 pub use actors::tracker::Oracle;
-pub use channels::{Message, Receiver, Recipients, Sender};
+pub use channels::{Receiver, Sender};
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Recipients;
     use bytes::Bytes;
-    use channels::Recipients;
     use commonware_cryptography::{ed25519, Scheme};
     use governor::Quota;
     use prometheus_client::registry::Registry;

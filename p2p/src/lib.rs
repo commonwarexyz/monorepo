@@ -2,6 +2,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 
 pub mod authenticated;
+pub mod simulated;
 
 /// Tuple representing a message received from a given public key.
 ///
@@ -21,5 +22,5 @@ pub enum Recipients {
 
 pub trait Network {
     fn send(&self, recipients: Recipients, message: Bytes);
-    fn recv(&self) -> (PublicKey, Bytes);
+    fn recv(&self) -> Message;
 }

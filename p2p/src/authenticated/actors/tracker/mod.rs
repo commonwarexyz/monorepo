@@ -1,6 +1,6 @@
 //! Tracker
 
-use crate::config::Bootstrapper;
+use crate::authenticated::config::Bootstrapper;
 use commonware_cryptography::Scheme;
 use governor::Quota;
 use prometheus_client::registry::Registry;
