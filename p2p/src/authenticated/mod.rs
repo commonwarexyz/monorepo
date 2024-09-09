@@ -255,7 +255,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Recipients;
+    use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, Scheme};
     use governor::Quota;

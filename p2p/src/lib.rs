@@ -36,5 +36,5 @@ pub trait Sender: Clone {
 pub trait Receiver {
     type Error;
 
-    fn recv(&self) -> impl Future<Output = Result<Message, Self::Error>> + Send;
+    fn recv(&mut self) -> impl Future<Output = Result<Message, Self::Error>> + Send;
 }

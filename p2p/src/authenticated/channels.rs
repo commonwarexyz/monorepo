@@ -31,6 +31,10 @@ impl Sender {
             messenger,
         }
     }
+}
+
+impl crate::Sender for Sender {
+    type Error = Error;
 
     /// Sends a message to a set of recipients.
     ///
@@ -51,7 +55,7 @@ impl Sender {
     /// If the message can be compressed (if enabled) and the message is `< max_size`, The set of recipients
     /// that the message was sent to. Note, a successful send does not mean that the recipient will
     /// receive the message (connection may no longer be active and we may not know that yet).
-    pub async fn send(
+    async fn send(
         &self,
         recipients: Recipients,
         mut message: Bytes,
@@ -97,11 +101,15 @@ impl Receiver {
             receiver,
         }
     }
+}
+
+impl crate::Receiver for Receiver {
+    type Error = Error;
 
     /// Receives a message from the channel.
     ///
     /// This method will block until a message is received.
-    pub async fn recv(&mut self) -> Result<Message, Error> {
+    async fn recv(&mut self) -> Result<Message, Error> {
         let (sender, mut message) = self.receiver.recv().await.ok_or(Error::NetworkClosed)?;
 
         // If compression is enabled, decompress the message before returning.
