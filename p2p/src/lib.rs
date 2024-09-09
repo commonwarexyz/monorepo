@@ -1,3 +1,5 @@
+//! TODO
+
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use std::error::Error as StdError;
