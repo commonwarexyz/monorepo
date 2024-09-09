@@ -1,4 +1,4 @@
-//! TODO
+//! TODO: Message peers identified by a public key...
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -26,6 +26,8 @@ pub enum Recipients {
 }
 
 /// Separate from Receiver because clone-able.
+///
+/// For each channel, provide a sender.
 pub trait Sender: Clone {
     type Error: Debug + StdError;
 
