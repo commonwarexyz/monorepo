@@ -20,6 +20,7 @@ pub enum Recipients {
     One(PublicKey),
 }
 
+/// TODO: does not work well for sender receiver construction?
 pub trait Network {
     fn send(&self, recipients: Recipients, message: Bytes);
     fn recv(&self) -> Message;
