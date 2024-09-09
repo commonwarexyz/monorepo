@@ -157,7 +157,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{Config, Network};
+//! use commonware_p2p::authenticated::{Config, Network};
 //! use commonware_cryptography::{ed25519, Scheme};
 //! use governor::Quota;
 //! use prometheus_client::registry::Registry;
