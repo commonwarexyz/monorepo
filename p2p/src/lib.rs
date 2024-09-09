@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use std::future::Future;
 
 pub mod authenticated;
 pub mod simulated;
@@ -20,8 +21,20 @@ pub enum Recipients {
     One(PublicKey),
 }
 
-/// TODO: does not work well for sender receiver construction?
-pub trait Network {
-    fn send(&self, recipients: Recipients, message: Bytes);
-    fn recv(&self) -> Message;
+/// Separate from Receiver because clone-able.
+pub trait Sender: Clone {
+    type Error;
+
+    fn send(
+        &self,
+        recipients: Recipients,
+        message: Bytes,
+        priority: bool,
+    ) -> impl Future<Output = Result<Vec<PublicKey>, Self::Error>> + Send;
+}
+
+pub trait Receiver {
+    type Error;
+
+    fn recv(&self) -> impl Future<Output = Result<Message, Self::Error>> + Send;
 }
