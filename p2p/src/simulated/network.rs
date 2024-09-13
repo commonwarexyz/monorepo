@@ -68,7 +68,13 @@ impl Network {
         )
     }
 
-    pub async fn run<R: RngCore + ?Sized>(mut self, rng: &mut R) {
+    pub async fn run(mut self) {
+        // Initialize RNG
+        //
+        // TODO: make message sending determinisitic using a single seed (look at video from research notes)
+        let mut rng = rand::thread_rng();
+
+        // Process messages
         while let Some((recipients, message, reply)) = self.receiver.recv().await {
             // Ensure message is valid
             if message.len() > self.cfg.max_size {
