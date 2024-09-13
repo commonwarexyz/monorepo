@@ -119,8 +119,14 @@ impl crate::Sender for Sender {
         &self,
         recipients: Recipients,
         message: Bytes,
-        priority: bool,
+        _: bool, // TODO: re-add support for priority
     ) -> Result<Vec<PublicKey>, Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send((recipients, message, sender))
+            .await
+            .map_err(|_| Error::NetworkClosed)?;
+        receiver.await.map_err(|_| Error::NetworkClosed)?
     }
 }
 
@@ -131,5 +137,7 @@ pub struct Receiver {
 impl crate::Receiver for Receiver {
     type Error = Error;
 
-    async fn recv(&mut self) -> Result<Message, Error> {}
+    async fn recv(&mut self) -> Result<Message, Error> {
+        self.receiver.recv().await.ok_or(Error::NetworkClosed)
+    }
 }
