@@ -51,7 +51,7 @@ impl Network {
     pub fn link(&mut self, sender: PublicKey, receiver: PublicKey, config: Link) {
         self.links
             .entry(sender)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(receiver, config);
     }
 
