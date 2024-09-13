@@ -27,6 +27,7 @@ tracing = "0.1"
 bitvec = "1"
 prometheus-client = "0.22"
 zstd = "0.13"
+rand_distr = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

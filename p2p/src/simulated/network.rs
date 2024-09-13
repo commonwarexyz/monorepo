@@ -2,6 +2,8 @@ use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
+use rand::RngCore;
+use rand_distr::{Distribution, Normal};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -66,7 +68,7 @@ impl Network {
         )
     }
 
-    pub async fn run(mut self) {
+    pub async fn run<R: RngCore + ?Sized>(mut self, rng: &mut R) {
         while let Some((recipients, message, reply)) = self.receiver.recv().await {
             // Ensure message is valid
             if message.len() > self.cfg.max_size {
@@ -87,6 +89,27 @@ impl Network {
             // Send to all recipients
             let mut sent = Vec::new();
             for recipient in recipients {
+                // Determine if there is a link between the sender and recipient
+                let link = match self
+                    .links
+                    .get(&recipient)
+                    .and_then(|links| links.get(&recipient))
+                {
+                    Some(link) => link,
+                    None => {
+                        continue;
+                    }
+                };
+
+                // TODO: Apply link settings
+                let delay = Normal::new(
+                    link.latency_mean.as_millis() as f64,
+                    link.latency_stddev.as_millis() as f64,
+                )
+                .unwrap()
+                .sample(rng);
+
+                // Send message
                 if let Some(sender) = self.agents.get(&recipient) {
                     // TODO: add message delay/corruption/backlog/priority/etc
                     if let Err(err) = sender.send((recipient.clone(), message.clone())).await {
