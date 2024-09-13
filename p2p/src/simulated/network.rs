@@ -71,7 +71,10 @@ impl Network {
         while let Some((recipients, message, reply)) = self.receiver.recv().await {
             // Ensure message is valid
             if message.len() > self.cfg.max_size {
-                let _ = reply.send(Err(Error::MessageTooLarge(message.len())));
+                if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
+                    // This can only happen if the sender exited.
+                    warn!("failed to send error: {:?}", err);
+                }
                 continue;
             }
 
@@ -83,20 +86,23 @@ impl Network {
             };
 
             // Send to all recipients
-            let mut sent_to = Vec::new();
+            let mut sent = Vec::new();
             for recipient in recipients {
                 if let Some(sender) = self.agents.get(&recipient) {
                     if let Err(err) = sender.send((recipient.clone(), message.clone())).await {
-                        // This would only happen if the receiver exited.
-                        warn!("failed to send message to {}: {:?}", hex(&recipient), err);
+                        // This can only happen if the receiver exited.
+                        warn!("failed to send to {}: {:?}", hex(&recipient), err);
                         continue;
                     }
-                    sent_to.push(recipient);
+                    sent.push(recipient);
                 }
             }
 
             // Notify sender of successful sends
-            let _ = reply.send(Ok(sent_to));
+            if let Err(err) = reply.send(Ok(sent)) {
+                // This can only happen if the sender exited.
+                warn!("failed to send ack: {:?}", err);
+            }
         }
     }
 }
