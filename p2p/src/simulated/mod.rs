@@ -9,6 +9,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("message too large: {0}")]
+    MessageTooLarge(usize),
     #[error("network closed")]
     NetworkClosed,
 }

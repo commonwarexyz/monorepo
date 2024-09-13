@@ -6,9 +6,15 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
-type Task = (Recipients, Bytes, oneshot::Sender<Vec<PublicKey>>);
+type Task = (
+    Recipients,
+    Bytes,
+    oneshot::Sender<Result<Vec<PublicKey>, Error>>,
+);
 
 pub struct Network {
+    cfg: Config,
+
     sender: mpsc::Sender<Task>,
     receiver: mpsc::Receiver<Task>,
     links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
@@ -16,16 +22,22 @@ pub struct Network {
 }
 
 pub struct Link {
-    pub latency: Duration,
+    pub latency_mean: Duration,
+    pub latency_stddev: Duration,
 
     /// Blocks after this amount (and priority will jump the queue).
     pub outstanding: usize,
 }
 
+pub struct Config {
+    pub max_size: usize,
+}
+
 impl Network {
-    pub fn new() -> Self {
+    pub fn new(cfg: Config) -> Self {
         let (sender, receiver) = mpsc::channel(1024);
         Self {
+            cfg,
             sender,
             receiver,
             links: HashMap::new(),
@@ -53,7 +65,36 @@ impl Network {
         )
     }
 
-    pub fn run(self) {}
+    pub async fn run(mut self) {
+        while let Some((recipients, message, reply)) = self.receiver.recv().await {
+            // Ensure message is valid
+            if message.len() > self.cfg.max_size {
+                let _ = reply.send(Err(Error::MessageTooLarge(message.len())));
+                continue;
+            }
+
+            // Collect recipients
+            let recipients = match recipients {
+                Recipients::All => self.agents.keys().cloned().collect(),
+                Recipients::Some(keys) => keys,
+                Recipients::One(key) => vec![key],
+            };
+
+            // Send to all recipients
+            let mut sent_to = Vec::new();
+            for recipient in recipients {
+                if let Some(sender) = self.agents.get(&recipient) {
+                    if let Err(_) = sender.send((recipient.clone(), message.clone())).await {
+                        continue;
+                    }
+                    sent_to.push(recipient);
+                }
+            }
+
+            // Notify sender of successful sends
+            let _ = reply.send(sent_to);
+        }
+    }
 }
 
 #[derive(Clone)]
