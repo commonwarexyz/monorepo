@@ -1,10 +1,12 @@
 use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{utils::hex, PublicKey};
+use core::panic;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+use tracing::warn;
 
 type Task = (
     Recipients,
@@ -84,7 +86,9 @@ impl Network {
             let mut sent_to = Vec::new();
             for recipient in recipients {
                 if let Some(sender) = self.agents.get(&recipient) {
-                    if let Err(_) = sender.send((recipient.clone(), message.clone())).await {
+                    if let Err(err) = sender.send((recipient.clone(), message.clone())).await {
+                        // This would only happen if the receiver exited.
+                        warn!("failed to send message to {}: {:?}", hex(&recipient), err);
                         continue;
                     }
                     sent_to.push(recipient);
@@ -92,7 +96,7 @@ impl Network {
             }
 
             // Notify sender of successful sends
-            let _ = reply.send(sent_to);
+            let _ = reply.send(Ok(sent_to));
         }
     }
 }
