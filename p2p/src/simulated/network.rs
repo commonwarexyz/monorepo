@@ -2,11 +2,10 @@ use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
-use core::panic;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tracing::warn;
+use tracing::error;
 
 type Task = (
     Recipients,
@@ -73,7 +72,7 @@ impl Network {
             if message.len() > self.cfg.max_size {
                 if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
                     // This can only happen if the sender exited.
-                    warn!("failed to send error: {:?}", err);
+                    error!("failed to send error: {:?}", err);
                 }
                 continue;
             }
@@ -91,7 +90,7 @@ impl Network {
                 if let Some(sender) = self.agents.get(&recipient) {
                     if let Err(err) = sender.send((recipient.clone(), message.clone())).await {
                         // This can only happen if the receiver exited.
-                        warn!("failed to send to {}: {:?}", hex(&recipient), err);
+                        error!("failed to send to {}: {:?}", hex(&recipient), err);
                         continue;
                     }
                     sent.push(recipient);
@@ -101,7 +100,7 @@ impl Network {
             // Notify sender of successful sends
             if let Err(err) = reply.send(Ok(sent)) {
                 // This can only happen if the sender exited.
-                warn!("failed to send ack: {:?}", err);
+                error!("failed to send ack: {:?}", err);
             }
         }
     }
