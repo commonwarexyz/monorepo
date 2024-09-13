@@ -88,6 +88,7 @@ impl Network {
             let mut sent = Vec::new();
             for recipient in recipients {
                 if let Some(sender) = self.agents.get(&recipient) {
+                    // TODO: add message delay/corruption/backlog/priority/etc
                     if let Err(err) = sender.send((recipient.clone(), message.clone())).await {
                         // This can only happen if the receiver exited.
                         error!("failed to send to {}: {:?}", hex(&recipient), err);
