@@ -1,22 +1,25 @@
 use super::Error;
-use crate::Recipients;
+use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
-type Message = (Recipients, Bytes);
+type Task = (Recipients, Bytes, oneshot::Sender<Vec<PublicKey>>);
 
 pub struct Network {
-    sender: mpsc::Sender<Message>,
-    receiver: mpsc::Receiver<Message>,
+    sender: mpsc::Sender<Task>,
+    receiver: mpsc::Receiver<Task>,
     links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
     agents: HashMap<PublicKey, mpsc::Sender<Message>>,
 }
 
 pub struct Link {
     pub latency: Duration,
+
+    /// Blocks after this amount (and priority will jump the queue).
+    pub outstanding: usize,
 }
 
 impl Network {
@@ -55,7 +58,7 @@ impl Network {
 
 #[derive(Clone)]
 pub struct Sender {
-    sender: mpsc::Sender<Message>,
+    sender: mpsc::Sender<Task>,
 }
 
 impl crate::Sender for Sender {
@@ -63,7 +66,7 @@ impl crate::Sender for Sender {
 
     async fn send(
         &self,
-        recipients: crate::Recipients,
+        recipients: Recipients,
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<PublicKey>, Error> {
@@ -77,5 +80,5 @@ pub struct Receiver {
 impl crate::Receiver for Receiver {
     type Error = Error;
 
-    async fn recv(&mut self) -> Result<crate::Message, Error> {}
+    async fn recv(&mut self) -> Result<Message, Error> {}
 }
