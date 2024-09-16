@@ -138,7 +138,7 @@ impl Network {
                 };
 
                 // Apply link settings
-                let success_odds = rng.gen_range(0.0..=1.0);
+                let should_deliver = rng.gen_bool(link.0.success_rate);
                 let delay = Normal::new(link.0.latency_mean, link.0.latency_stddev)
                     .unwrap()
                     .sample(&mut rng);
@@ -148,7 +148,6 @@ impl Network {
                 let task_sender = sender.clone();
                 let task_recipient = recipient.clone();
                 let task_message = message.clone();
-                let task_success_rate = link.0.success_rate;
                 let task_semaphore = link.1.clone();
                 let task_acquired_sender = acquired_sender.clone();
                 tokio::spawn(async move {
@@ -163,7 +162,7 @@ impl Network {
                     tokio::time::sleep(Duration::from_millis(delay as u64)).await;
 
                     // Drop message if success rate is too low
-                    if success_odds > task_success_rate {
+                    if !should_deliver {
                         debug!(
                             "dropping message to {}: random link failure",
                             hex(&task_recipient)

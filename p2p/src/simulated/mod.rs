@@ -29,7 +29,6 @@ mod tests {
     use rand::Rng;
     use rand::SeedableRng;
     use std::collections::HashMap;
-    use tracing::debug;
 
     async fn simulate_messages(size: usize) {
         // Create simulated network
@@ -45,38 +44,41 @@ mod tests {
             let pk = insecure_signer(i as u64).me();
             let (sender, mut receiver) = network.register(pk.clone());
             agents.insert(pk, sender);
-            let seen_sender = seen_sender.clone();
+            let agent_sender = seen_sender.clone();
             tokio::spawn(async move {
-                let mut seen = 0;
-                while let Ok(msg) = receiver.recv().await {
-                    debug!("{}: {:?}", i, msg);
-                    seen += 1;
-                    if seen == size {
-                        seen_sender.send(()).await.unwrap();
-                    }
+                for _ in 0..size {
+                    receiver.recv().await.unwrap();
                 }
+                agent_sender.send(()).await.unwrap();
+
+                // Exiting early here tests the case where the recipient end of an agent is dropped
             });
         }
 
-        // Link agents
+        // Randomly link agents
+        let only_inbound = insecure_signer(0).me();
         for agent in agents.keys() {
+            if agent == &only_inbound {
+                // Test that we can gracefully handle missing links
+                continue;
+            }
             for other in agents.keys() {
-                if agent != other {
-                    network
-                        .link(
-                            agent.clone(),
-                            other.clone(),
-                            network::Link {
-                                latency_mean: 5.0,
-                                latency_stddev: 2.5,
-                                success_rate: 0.25,
-                                capacity: 1,
-                            },
-                        )
-                        .unwrap();
+                let result = network.link(
+                    agent.clone(),
+                    other.clone(),
+                    network::Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 0.75,
+                        capacity: 1,
+                    },
+                );
+                if agent == other {
+                    assert!(result.is_err());
+                } else {
+                    assert!(result.is_ok());
                 }
             }
-            // TODO: add case where no link on some agents
         }
 
         // Send messages
@@ -92,7 +94,11 @@ mod tests {
                     .send(Recipients::All, msg.clone(), false)
                     .await
                     .unwrap();
-                assert_eq!(sent.len(), keys.len() - 1);
+                if sender == &only_inbound {
+                    assert_eq!(sent.len(), 0);
+                } else {
+                    assert_eq!(sent.len(), keys.len() - 1);
+                }
             }
         });
 
