@@ -2,7 +2,6 @@ use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
-use core::task;
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -10,6 +9,7 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{debug, error};
 
 type Task = (
+    PublicKey,
     Recipients,
     Bytes,
     oneshot::Sender<Result<Vec<PublicKey>, Error>>,
@@ -60,8 +60,11 @@ impl Network {
 
     pub fn register(&mut self, public_key: PublicKey) -> (Sender, Receiver) {
         let (sender, receiver) = mpsc::channel(1024);
-        self.agents.insert(public_key, sender);
-        (Sender::new(self.sender.clone()), Receiver { receiver })
+        self.agents.insert(public_key.clone(), sender);
+        (
+            Sender::new(public_key, self.sender.clone()),
+            Receiver { receiver },
+        )
     }
 
     pub async fn run(mut self) {
@@ -71,7 +74,7 @@ impl Network {
         let mut rng = rand::thread_rng();
 
         // Process messages
-        while let Some((recipients, message, reply)) = self.receiver.recv().await {
+        while let Some((origin, recipients, message, reply)) = self.receiver.recv().await {
             // Ensure message is valid
             if message.len() > self.cfg.max_message_len {
                 if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
@@ -90,7 +93,14 @@ impl Network {
 
             // Send to all recipients
             let mut sent = Vec::new();
+            let (acquired_sender, mut acquired_receiver) = mpsc::channel(1024);
             for recipient in recipients {
+                // Skip self
+                if recipient == origin {
+                    debug!("dropping message to {}: self", hex(&recipient));
+                    continue;
+                }
+
                 // Get sender
                 let sender = match self.agents.get(&recipient) {
                     Some(sender) => sender,
@@ -126,9 +136,11 @@ impl Network {
                 let task_message = message.clone();
                 let task_success_rate = link.0.success_rate;
                 let task_semaphore = link.1.clone();
+                let task_acquired_sender = acquired_sender.clone();
                 tokio::spawn(async move {
                     // Mark as sent as soon as acquire semaphore
                     let _permit = task_semaphore.acquire().await.unwrap();
+                    task_acquired_sender.send(()).await.unwrap();
 
                     // Apply delay to send (once link is not saturated)
                     //
@@ -159,7 +171,10 @@ impl Network {
 
             // Notify sender of successful sends
             tokio::spawn(async move {
-                // TODO: Wait for semaphore to be acquired on all sends
+                // Wait for semaphore to be acquired on all sends
+                for _ in 0..sent.len() {
+                    acquired_receiver.recv().await.unwrap();
+                }
 
                 // Notify sender of successful sends
                 if let Err(err) = reply.send(Ok(sent)) {
@@ -173,12 +188,13 @@ impl Network {
 
 #[derive(Clone)]
 pub struct Sender {
+    me: PublicKey,
     high: mpsc::Sender<Task>,
     low: mpsc::Sender<Task>,
 }
 
 impl Sender {
-    fn new(sender: mpsc::Sender<Task>) -> Self {
+    fn new(me: PublicKey, sender: mpsc::Sender<Task>) -> Self {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::channel(1024);
         let (low, mut low_receiver) = mpsc::channel(1024);
@@ -201,7 +217,7 @@ impl Sender {
         });
 
         // Return sender
-        Self { high, low }
+        Self { me, high, low }
     }
 }
 
@@ -217,7 +233,7 @@ impl crate::Sender for Sender {
         let (sender, receiver) = oneshot::channel();
         let channel = if priority { &self.high } else { &self.low };
         channel
-            .send((recipients, message, sender))
+            .send((self.me.clone(), recipients, message, sender))
             .await
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)?
