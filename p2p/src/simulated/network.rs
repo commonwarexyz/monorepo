@@ -2,7 +2,7 @@ use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
-use rand::Rng;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot, Semaphore};
@@ -28,17 +28,19 @@ pub struct Link {
     pub latency_mean: f64,   // as ms
     pub latency_stddev: f64, // as ms
     pub success_rate: f64,   // [0,1]
+
     /// Blocks after this amount (and priority will jump the queue).
     pub outstanding: usize,
 }
 
 pub struct Config {
     pub max_message_len: usize,
+    pub mailbox_size: usize,
 }
 
 impl Network {
     pub fn new(cfg: Config) -> Self {
-        let (sender, receiver) = mpsc::channel(1024);
+        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         Self {
             cfg,
             sender,
@@ -51,6 +53,12 @@ impl Network {
     /// Link can be called multiple times for the same sender/receiver. The latest
     /// setting will be used.
     pub fn link(&mut self, sender: PublicKey, receiver: PublicKey, config: Link) {
+        if sender == receiver {
+            panic!("sender and receiver must be different");
+        }
+        if config.success_rate < 0.0 || config.success_rate > 1.0 {
+            panic!("success rate must be in [0,1]");
+        }
         let outstanding = config.outstanding;
         self.links
             .entry(sender)
@@ -59,7 +67,7 @@ impl Network {
     }
 
     pub fn register(&mut self, public_key: PublicKey) -> (Sender, Receiver) {
-        let (sender, receiver) = mpsc::channel(1024);
+        let (sender, receiver) = mpsc::channel(self.cfg.mailbox_size);
         self.agents.insert(public_key.clone(), sender);
         (
             Sender::new(public_key, self.sender.clone()),
@@ -71,7 +79,7 @@ impl Network {
         // Initialize RNG
         //
         // TODO: make message sending determinisitic using a single seed (https://www.youtube.com/watch?v=ms8zKpS_dZE)
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::seed_from_u64(0);
 
         // Process messages
         while let Some((origin, recipients, message, reply)) = self.receiver.recv().await {
@@ -93,7 +101,7 @@ impl Network {
 
             // Send to all recipients
             let mut sent = Vec::new();
-            let (acquired_sender, mut acquired_receiver) = mpsc::channel(1024);
+            let (acquired_sender, mut acquired_receiver) = mpsc::channel(recipients.len());
             for recipient in recipients {
                 // Skip self
                 if recipient == origin {
@@ -113,7 +121,7 @@ impl Network {
                 // Determine if there is a link between the sender and recipient
                 let link = match self
                     .links
-                    .get(&recipient)
+                    .get(&origin)
                     .and_then(|links| links.get(&recipient))
                 {
                     Some(link) => link,
@@ -151,7 +159,7 @@ impl Network {
                     // Drop message if success rate is too low
                     if success_odds > task_success_rate {
                         debug!(
-                            "dropping message to {}: link success rate",
+                            "dropping message to {}: random link failure",
                             hex(&task_recipient)
                         );
                         return;
