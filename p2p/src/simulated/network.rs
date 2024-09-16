@@ -2,11 +2,12 @@ use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
+use core::task;
+use rand::Rng;
 use rand_distr::{Distribution, Normal};
-use std::time::Duration;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, oneshot, Semaphore};
-use tracing::error;
+use tracing::{debug, error};
 
 type Task = (
     Recipients,
@@ -19,14 +20,14 @@ pub struct Network {
 
     sender: mpsc::Sender<Task>,
     receiver: mpsc::Receiver<Task>,
-    links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
+    links: HashMap<PublicKey, HashMap<PublicKey, (Link, Arc<Semaphore>)>>,
     agents: HashMap<PublicKey, mpsc::Sender<Message>>,
 }
 
 pub struct Link {
-    pub latency_mean: Duration,
-    pub latency_stddev: Duration,
-
+    pub latency_mean: f64,   // as ms
+    pub latency_stddev: f64, // as ms
+    pub success_rate: f64,   // [0,1]
     /// Blocks after this amount (and priority will jump the queue).
     pub outstanding: usize,
 }
@@ -50,21 +51,17 @@ impl Network {
     /// Link can be called multiple times for the same sender/receiver. The latest
     /// setting will be used.
     pub fn link(&mut self, sender: PublicKey, receiver: PublicKey, config: Link) {
+        let outstanding = config.outstanding;
         self.links
             .entry(sender)
             .or_default()
-            .insert(receiver, config);
+            .insert(receiver, (config, Arc::new(Semaphore::new(outstanding))));
     }
 
     pub fn register(&mut self, public_key: PublicKey) -> (Sender, Receiver) {
         let (sender, receiver) = mpsc::channel(1024);
         self.agents.insert(public_key, sender);
-        (
-            Sender {
-                sender: self.sender.clone(),
-            },
-            Receiver { receiver },
-        )
+        (Sender::new(self.sender.clone()), Receiver { receiver })
     }
 
     pub async fn run(mut self) {
@@ -94,6 +91,15 @@ impl Network {
             // Send to all recipients
             let mut sent = Vec::new();
             for recipient in recipients {
+                // Get sender
+                let sender = match self.agents.get(&recipient) {
+                    Some(sender) => sender,
+                    None => {
+                        debug!("dropping message to {}: no agent", hex(&recipient));
+                        continue;
+                    }
+                };
+
                 // Determine if there is a link between the sender and recipient
                 let link = match self
                     .links
@@ -102,35 +108,67 @@ impl Network {
                 {
                     Some(link) => link,
                     None => {
+                        debug!("dropping message to {}: no link", hex(&recipient));
                         continue;
                     }
                 };
 
                 // Apply link settings
-                let delay = Normal::new(
-                    link.latency_mean.as_millis() as f64,
-                    link.latency_stddev.as_millis() as f64,
-                )
-                .unwrap()
-                .sample(rng);
+                let success_odds = rng.gen_range(0.0..=1.0);
+                let delay = Normal::new(link.0.latency_mean, link.0.latency_stddev)
+                    .unwrap()
+                    .sample(&mut rng);
+                let timeout =
+                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(delay as u64);
+                debug!("sending message to {}: delay={}ms", hex(&recipient), delay);
 
                 // Send message
-                if let Some(sender) = self.agents.get(&recipient) {
-                    // TODO: add message delay/corruption/backlog/priority/etc
-                    if let Err(err) = sender.send((recipient.clone(), message.clone())).await {
-                        // This can only happen if the receiver exited.
-                        error!("failed to send to {}: {:?}", hex(&recipient), err);
-                        continue;
+                let task_sender = sender.clone();
+                let task_recipient = recipient.clone();
+                let task_message = message.clone();
+                let task_success_rate = link.0.success_rate;
+                let task_semaphore = link.1.clone();
+                tokio::spawn(async move {
+                    // Mark as sent as soon as acquire semaphore
+                    let _permit = task_semaphore.acquire().await.unwrap();
+
+                    // Apply delay to send
+                    //
+                    // Note: messages can be sent out of order (will not occur when using a
+                    // stable TCP connection)
+                    tokio::time::sleep_until(timeout).await;
+
+                    // Drop message if success rate is too low
+                    if success_odds > task_success_rate {
+                        debug!(
+                            "dropping message to {}: link success rate",
+                            hex(&task_recipient)
+                        );
+                        return;
                     }
-                    sent.push(recipient);
-                }
+
+                    // Send message
+                    if let Err(err) = task_sender
+                        .send((task_recipient.clone(), task_message))
+                        .await
+                    {
+                        // This can only happen if the receiver exited.
+                        error!("failed to send to {}: {:?}", hex(&task_recipient), err);
+                    }
+                });
+                sent.push(recipient);
             }
 
             // Notify sender of successful sends
-            if let Err(err) = reply.send(Ok(sent)) {
-                // This can only happen if the sender exited.
-                error!("failed to send ack: {:?}", err);
-            }
+            tokio::spawn(async move {
+                // TODO: Wait for semaphore to be acquired on all sends
+
+                // Notify sender of successful sends
+                if let Err(err) = reply.send(Ok(sent)) {
+                    // This can only happen if the sender exited.
+                    error!("failed to send ack: {:?}", err);
+                }
+            });
         }
     }
 }
@@ -139,19 +177,15 @@ impl Network {
 pub struct Sender {
     high: mpsc::Sender<Task>,
     low: mpsc::Sender<Task>,
-    outstanding: Arc<Semaphore>,
 }
 
 impl Sender {
-    fn new(backlog: usize, sender: mpsc::Sender<Task>) -> Self {
+    fn new(sender: mpsc::Sender<Task>) -> Self {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::channel(1024);
         let (low, mut low_receiver) = mpsc::channel(1024);
-        let outstanding = Arc::new(Semaphore::new(backlog));
-        let outstanding_clone = outstanding.clone();
         tokio::spawn(async move {
             loop {
-                outstanding_clone.acquire().await.unwrap();
                 tokio::select! {
                     biased;
                     task = high_receiver.recv() => {
@@ -169,11 +203,7 @@ impl Sender {
         });
 
         // Return sender
-        Self {
-            high,
-            low,
-            outstanding,
-        }
+        Self { high, low }
     }
 }
 
@@ -192,9 +222,7 @@ impl crate::Sender for Sender {
             .send((recipients, message, sender))
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        let sent = receiver.await.map_err(|_| Error::NetworkClosed)?;
-        self.outstanding.add_permits(1);
-        sent
+        receiver.await.map_err(|_| Error::NetworkClosed)?
     }
 }
 
