@@ -73,7 +73,7 @@ mod tests {
                     },
                 );
                 if agent == other {
-                    assert!(result.is_err());
+                    assert!(matches!(result, Err(Error::LinkingSelf)));
                 } else {
                     assert!(result.is_ok());
                 }
@@ -123,5 +123,39 @@ mod tests {
     #[tokio::test]
     async fn test_large() {
         simulate_messages(500).await;
+    }
+
+    #[tokio::test]
+    async fn test_invalid_message() {
+        // Create simulated network
+        let mut network = network::Network::new(network::Config {
+            max_message_size: 1024 * 1024,
+        });
+
+        // Register agents
+        let mut agents = HashMap::new();
+        for i in 0..10 {
+            let pk = insecure_signer(i as u64).me();
+            let (sender, _) = network.register(pk.clone());
+            agents.insert(pk, sender);
+        }
+
+        // Start network
+        tokio::spawn(network.run());
+
+        // Send invalid message
+        let mut rng = StdRng::from_entropy();
+        let keys = agents.keys().collect::<Vec<_>>();
+        let sender = keys[rng.gen_range(0..keys.len())];
+        let message_sender = agents.get(sender).unwrap().clone();
+        let mut msg = vec![0u8; 1024 * 1024 + 1];
+        rng.fill(&mut msg[..]);
+        let result = message_sender
+            .send(Recipients::All, msg.into(), false)
+            .await
+            .unwrap_err();
+
+        // Confirm error is correct
+        assert!(matches!(result, Error::MessageTooLarge(_)));
     }
 }

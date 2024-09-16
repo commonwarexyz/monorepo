@@ -100,7 +100,7 @@ impl Network {
         // Initialize RNG
         //
         // TODO: make simulated deterministic (will also require mocking time for any
-        // user of network)
+        // user of network + careful handling of how tasks are triggered)
         let mut rng = StdRng::from_entropy();
 
         // Process messages
