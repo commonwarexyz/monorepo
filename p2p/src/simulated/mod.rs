@@ -63,9 +63,9 @@ mod tests {
                         other.clone(),
                         network::Link {
                             latency_mean: 5.0,
-                            latency_stddev: 5.0,
-                            success_rate: 0.5,
-                            outstanding: 32,
+                            latency_stddev: 2.5,
+                            success_rate: 0.25,
+                            outstanding: 1,
                         },
                     );
                 }
