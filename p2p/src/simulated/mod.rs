@@ -70,6 +70,7 @@ mod tests {
                     );
                 }
             }
+            // TODO: add case where no link on some agents
         }
 
         // Send messages
