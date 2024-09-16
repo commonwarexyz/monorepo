@@ -33,8 +33,7 @@ mod tests {
     async fn simulate_messages(size: usize) {
         // Create simulated network
         let mut network = network::Network::new(network::Config {
-            max_message_len: 1024 * 1024,
-            mailbox_size: 1024,
+            max_message_size: 1024 * 1024,
         });
 
         // Register agents

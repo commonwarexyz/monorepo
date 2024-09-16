@@ -18,29 +18,39 @@ type Task = (
 pub struct Network {
     cfg: Config,
 
-    sender: mpsc::Sender<Task>,
-    receiver: mpsc::Receiver<Task>,
+    sender: mpsc::UnboundedSender<Task>,
+    receiver: mpsc::UnboundedReceiver<Task>,
     links: HashMap<PublicKey, HashMap<PublicKey, (Link, Arc<Semaphore>)>>,
-    agents: HashMap<PublicKey, mpsc::Sender<Message>>,
+    agents: HashMap<PublicKey, mpsc::UnboundedSender<Message>>,
 }
 
+/// Describes a connection between two peers.
+///
+/// Links are unidirectional and must be set up in both directions for a bidirectional connection.
 pub struct Link {
-    pub latency_mean: f64,   // as ms
-    pub latency_stddev: f64, // as ms
-    pub success_rate: f64,   // [0,1]
+    /// Mean latency for the delivery of a message in milliseconds.
+    pub latency_mean: f64,
 
-    /// Blocks after this amount (and priority will jump the queue).
+    /// Standard deviation of the latency for the delivery of a message in milliseconds.
+    pub latency_stddev: f64,
+
+    /// Probability of a message being delivered successfully (in range [0,1]).
+    pub success_rate: f64,
+
+    /// Maximum number of messages that can be in-flight at once before blocking.
     pub capacity: usize,
 }
 
+/// Configuration for a simulated network.
 pub struct Config {
-    pub max_message_len: usize,
-    pub mailbox_size: usize,
+    /// Maximum size of a message in bytes.
+    pub max_message_size: usize,
 }
 
 impl Network {
+    /// Create a new simulated network.
     pub fn new(cfg: Config) -> Self {
-        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let (sender, receiver) = mpsc::unbounded_channel();
         Self {
             cfg,
             sender,
@@ -50,6 +60,20 @@ impl Network {
         }
     }
 
+    /// Register a new peer with the network.
+    ///
+    /// By default, the peer will not be linked to any other peers.
+    pub fn register(&mut self, public_key: PublicKey) -> (Sender, Receiver) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.agents.insert(public_key.clone(), sender);
+        (
+            Sender::new(public_key, self.sender.clone()),
+            Receiver { receiver },
+        )
+    }
+
+    /// Create a unidirectional link between two peers.
+    ///
     /// Link can be called multiple times for the same sender/receiver. The latest
     /// setting will be used.
     pub fn link(
@@ -72,25 +96,17 @@ impl Network {
         Ok(())
     }
 
-    pub fn register(&mut self, public_key: PublicKey) -> (Sender, Receiver) {
-        let (sender, receiver) = mpsc::channel(self.cfg.mailbox_size);
-        self.agents.insert(public_key.clone(), sender);
-        (
-            Sender::new(public_key, self.sender.clone()),
-            Receiver { receiver },
-        )
-    }
-
     pub async fn run(mut self) {
         // Initialize RNG
         //
-        // TODO: make message sending determinisitic using a single seed (https://www.youtube.com/watch?v=ms8zKpS_dZE)
-        let mut rng = StdRng::seed_from_u64(0);
+        // TODO: make simulated deterministic (will also require mocking time for any
+        // user of network)
+        let mut rng = StdRng::from_entropy();
 
         // Process messages
         while let Some((origin, recipients, message, reply)) = self.receiver.recv().await {
             // Ensure message is valid
-            if message.len() > self.cfg.max_message_len {
+            if message.len() > self.cfg.max_message_size {
                 if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
                     // This can only happen if the sender exited.
                     error!("failed to send error: {:?}", err);
@@ -115,7 +131,7 @@ impl Network {
                     continue;
                 }
 
-                // Get sender
+                // Determine if recipient exists
                 let sender = match self.agents.get(&recipient) {
                     Some(sender) => sender,
                     None => {
@@ -171,10 +187,7 @@ impl Network {
                     }
 
                     // Send message
-                    if let Err(err) = task_sender
-                        .send((task_recipient.clone(), task_message))
-                        .await
-                    {
+                    if let Err(err) = task_sender.send((task_recipient.clone(), task_message)) {
                         // This can only happen if the receiver exited.
                         error!("failed to send to {}: {:?}", hex(&task_recipient), err);
                     }
@@ -202,26 +215,26 @@ impl Network {
 #[derive(Clone)]
 pub struct Sender {
     me: PublicKey,
-    high: mpsc::Sender<Task>,
-    low: mpsc::Sender<Task>,
+    high: mpsc::UnboundedSender<Task>,
+    low: mpsc::UnboundedSender<Task>,
 }
 
 impl Sender {
-    fn new(me: PublicKey, sender: mpsc::Sender<Task>) -> Self {
+    fn new(me: PublicKey, sender: mpsc::UnboundedSender<Task>) -> Self {
         // Listen for messages
-        let (high, mut high_receiver) = mpsc::channel(1024);
-        let (low, mut low_receiver) = mpsc::channel(1024);
+        let (high, mut high_receiver) = mpsc::unbounded_channel();
+        let (low, mut low_receiver) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     biased;
                     task = high_receiver.recv() => {
-                        if let Err(err) = sender.send(task.unwrap()).await {
+                        if let Err(err) = sender.send(task.unwrap()) {
                             error!("failed to send high priority task: {:?}", err);
                         }
                     }
                     task = low_receiver.recv() => {
-                        if let Err(err) = sender.send(task.unwrap()).await {
+                        if let Err(err) = sender.send(task.unwrap()) {
                             error!("failed to send low priority task: {:?}", err);
                         }
                     }
@@ -247,14 +260,13 @@ impl crate::Sender for Sender {
         let channel = if priority { &self.high } else { &self.low };
         channel
             .send((self.me.clone(), recipients, message, sender))
-            .await
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)?
     }
 }
 
 pub struct Receiver {
-    receiver: mpsc::Receiver<Message>,
+    receiver: mpsc::UnboundedReceiver<Message>,
 }
 
 impl crate::Receiver for Receiver {
