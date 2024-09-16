@@ -5,7 +5,7 @@ use commonware_cryptography::{utils::hex, PublicKey};
 use core::task;
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{debug, error};
 
@@ -118,8 +118,6 @@ impl Network {
                 let delay = Normal::new(link.0.latency_mean, link.0.latency_stddev)
                     .unwrap()
                     .sample(&mut rng);
-                let timeout =
-                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(delay as u64);
                 debug!("sending message to {}: delay={}ms", hex(&recipient), delay);
 
                 // Send message
@@ -132,11 +130,11 @@ impl Network {
                     // Mark as sent as soon as acquire semaphore
                     let _permit = task_semaphore.acquire().await.unwrap();
 
-                    // Apply delay to send
+                    // Apply delay to send (once link is not saturated)
                     //
                     // Note: messages can be sent out of order (will not occur when using a
                     // stable TCP connection)
-                    tokio::time::sleep_until(timeout).await;
+                    tokio::time::sleep(Duration::from_millis(delay as u64)).await;
 
                     // Drop message if success rate is too low
                     if success_odds > task_success_rate {
