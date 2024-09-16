@@ -104,7 +104,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_large() {
+    async fn test_medium() {
         simulate_messages(100).await;
+    }
+
+    #[tokio::test]
+    async fn test_large() {
+        simulate_messages(500).await;
     }
 }
