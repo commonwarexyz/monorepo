@@ -13,6 +13,10 @@ pub enum Error {
     MessageTooLarge(usize),
     #[error("network closed")]
     NetworkClosed,
+    #[error("not valid to link self")]
+    LinkingSelf,
+    #[error("invalid success rate (must be in [0, 1]): {0}")]
+    InvalidSuccessRate(f64),
 }
 
 #[cfg(test)]
@@ -58,16 +62,18 @@ mod tests {
         for agent in agents.keys() {
             for other in agents.keys() {
                 if agent != other {
-                    network.link(
-                        agent.clone(),
-                        other.clone(),
-                        network::Link {
-                            latency_mean: 5.0,
-                            latency_stddev: 2.5,
-                            success_rate: 0.25,
-                            outstanding: 1,
-                        },
-                    );
+                    network
+                        .link(
+                            agent.clone(),
+                            other.clone(),
+                            network::Link {
+                                latency_mean: 5.0,
+                                latency_stddev: 2.5,
+                                success_rate: 0.25,
+                                capacity: 1,
+                            },
+                        )
+                        .unwrap();
                 }
             }
             // TODO: add case where no link on some agents

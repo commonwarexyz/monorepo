@@ -30,7 +30,7 @@ pub struct Link {
     pub success_rate: f64,   // [0,1]
 
     /// Blocks after this amount (and priority will jump the queue).
-    pub outstanding: usize,
+    pub capacity: usize,
 }
 
 pub struct Config {
@@ -52,18 +52,24 @@ impl Network {
 
     /// Link can be called multiple times for the same sender/receiver. The latest
     /// setting will be used.
-    pub fn link(&mut self, sender: PublicKey, receiver: PublicKey, config: Link) {
+    pub fn link(
+        &mut self,
+        sender: PublicKey,
+        receiver: PublicKey,
+        config: Link,
+    ) -> Result<(), Error> {
         if sender == receiver {
-            panic!("sender and receiver must be different");
+            return Err(Error::LinkingSelf);
         }
         if config.success_rate < 0.0 || config.success_rate > 1.0 {
-            panic!("success rate must be in [0,1]");
+            return Err(Error::InvalidSuccessRate(config.success_rate));
         }
-        let outstanding = config.outstanding;
+        let capacity = Arc::new(Semaphore::new(config.capacity));
         self.links
             .entry(sender)
             .or_default()
-            .insert(receiver, (config, Arc::new(Semaphore::new(outstanding))));
+            .insert(receiver, (config, capacity));
+        Ok(())
     }
 
     pub fn register(&mut self, public_key: PublicKey) -> (Sender, Receiver) {
