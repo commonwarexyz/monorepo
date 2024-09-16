@@ -83,7 +83,7 @@ mod tests {
 
         // Send messages
         tokio::spawn(async move {
-            let mut rng = StdRng::seed_from_u64(0);
+            let mut rng = StdRng::from_entropy();
             let keys = agents.keys().collect::<Vec<_>>();
             loop {
                 let sender = keys[rng.gen_range(0..keys.len())];
