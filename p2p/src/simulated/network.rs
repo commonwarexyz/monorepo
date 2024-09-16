@@ -2,11 +2,10 @@ use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
-use rand::RngCore;
 use rand_distr::{Distribution, Normal};
-use std::collections::HashMap;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::error;
 
 type Task = (
@@ -33,7 +32,7 @@ pub struct Link {
 }
 
 pub struct Config {
-    pub max_size: usize,
+    pub max_message_len: usize,
 }
 
 impl Network {
@@ -71,13 +70,13 @@ impl Network {
     pub async fn run(mut self) {
         // Initialize RNG
         //
-        // TODO: make message sending determinisitic using a single seed (look at video from research notes)
+        // TODO: make message sending determinisitic using a single seed (https://www.youtube.com/watch?v=ms8zKpS_dZE)
         let mut rng = rand::thread_rng();
 
         // Process messages
         while let Some((recipients, message, reply)) = self.receiver.recv().await {
             // Ensure message is valid
-            if message.len() > self.cfg.max_size {
+            if message.len() > self.cfg.max_message_len {
                 if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
                     // This can only happen if the sender exited.
                     error!("failed to send error: {:?}", err);
@@ -107,7 +106,7 @@ impl Network {
                     }
                 };
 
-                // TODO: Apply link settings
+                // Apply link settings
                 let delay = Normal::new(
                     link.latency_mean.as_millis() as f64,
                     link.latency_stddev.as_millis() as f64,
@@ -138,7 +137,44 @@ impl Network {
 
 #[derive(Clone)]
 pub struct Sender {
-    sender: mpsc::Sender<Task>,
+    high: mpsc::Sender<Task>,
+    low: mpsc::Sender<Task>,
+    outstanding: Arc<Semaphore>,
+}
+
+impl Sender {
+    fn new(backlog: usize, sender: mpsc::Sender<Task>) -> Self {
+        // Listen for messages
+        let (high, mut high_receiver) = mpsc::channel(1024);
+        let (low, mut low_receiver) = mpsc::channel(1024);
+        let outstanding = Arc::new(Semaphore::new(backlog));
+        let outstanding_clone = outstanding.clone();
+        tokio::spawn(async move {
+            loop {
+                outstanding_clone.acquire().await.unwrap();
+                tokio::select! {
+                    biased;
+                    task = high_receiver.recv() => {
+                        if let Err(err) = sender.send(task.unwrap()).await {
+                            error!("failed to send high priority task: {:?}", err);
+                        }
+                    }
+                    task = low_receiver.recv() => {
+                        if let Err(err) = sender.send(task.unwrap()).await {
+                            error!("failed to send low priority task: {:?}", err);
+                        }
+                    }
+                }
+            }
+        });
+
+        // Return sender
+        Self {
+            high,
+            low,
+            outstanding,
+        }
+    }
 }
 
 impl crate::Sender for Sender {
@@ -148,14 +184,17 @@ impl crate::Sender for Sender {
         &self,
         recipients: Recipients,
         message: Bytes,
-        _: bool, // TODO: re-add support for priority
+        priority: bool,
     ) -> Result<Vec<PublicKey>, Error> {
         let (sender, receiver) = oneshot::channel();
-        self.sender
+        let channel = if priority { &self.high } else { &self.low };
+        channel
             .send((recipients, message, sender))
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
+        let sent = receiver.await.map_err(|_| Error::NetworkClosed)?;
+        self.outstanding.add_permits(1);
+        sent
     }
 }
 
