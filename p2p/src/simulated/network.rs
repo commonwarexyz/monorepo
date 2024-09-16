@@ -96,12 +96,13 @@ impl Network {
         Ok(())
     }
 
-    pub async fn run(mut self) {
-        // Initialize RNG
-        //
-        // TODO: make simulated deterministic (will also require mocking time for any
-        // user of network + careful handling of how tasks are triggered)
-        let mut rng = StdRng::from_entropy();
+    /// Run the simulated network.
+    ///
+    /// As long as messages are sent deterministically, the network (latency, drops, etc) will be deterministic as well.
+    /// TODO: cleanup wording (not pure determinism because executor for tokio is random)
+    pub async fn run(mut self, seed: u64) {
+        // Initialize RNG with seed
+        let mut rng = StdRng::seed_from_u64(seed);
 
         // Process messages
         while let Some((origin, recipients, message, reply)) = self.receiver.recv().await {
@@ -115,11 +116,14 @@ impl Network {
             }
 
             // Collect recipients
-            let recipients = match recipients {
+            let mut recipients = match recipients {
                 Recipients::All => self.agents.keys().cloned().collect(),
                 Recipients::Some(keys) => keys,
                 Recipients::One(key) => vec![key],
             };
+
+            // Sort recipients to ensure same seed yields same latency/drop assignments
+            recipients.sort();
 
             // Send to all recipients
             let mut sent = Vec::new();
@@ -166,6 +170,8 @@ impl Network {
                 let task_message = message.clone();
                 let task_semaphore = link.1.clone();
                 let task_acquired_sender = acquired_sender.clone();
+
+                // TODO: use custom executor rather than tokio here
                 tokio::spawn(async move {
                     // Mark as sent as soon as acquire semaphore
                     let _permit = task_semaphore.acquire().await.unwrap();
