@@ -1,50 +1,29 @@
 //! A deterministic executor that randomly selects tasks to run based on a seed.
 //!
-//! # Example (Manual)
+//! # Example
 //! ```rust
 //! use commonware_executor::{utils, Executor, deterministic::Deterministic};
 //!
 //! let mut executor = Deterministic::new(42);
-//! executor.spawn(async move {
-//!     println!("Task 1 started");
-//!     for _ in 0..5 {
-//!       // Simulate work
-//!       utils::reschedule().await;
-//!     }
-//!     println!("Task 1 completed");
-//! });
-//! executor.spawn(async move {
-//!     println!("Task 2 started");
-//!     for _ in 0..5 {
-//!       // Simulate work
-//!       utils::reschedule().await;
-//!     }
-//!     println!("Task 2 completed");
-//! });
-//! executor.run();
-//! ```
+//! executor.run({
+//!     let executor = executor.clone();
+//!     async move {
+//!         executor.spawn(async move {
+//!             println!("Child started");
+//!             for _ in 0..5 {
+//!               // Simulate work
+//!               utils::reschedule().await;
+//!             }
+//!             println!("Child completed");
+//!         });
 //!
-//! # Example (Global)
-//! ```rust
-//! use commonware_executor::{utils, deterministic::{run, spawn}};
-//!
-//! run(42, async {
-//!    spawn(async {
-//!        println!("Task 1 started");
-//!        for _ in 0..5 {
-//!          // Simulate work
-//!          utils::reschedule().await;
-//!        }
-//!        println!("Task 1 completed");
-//!     });
-//!     spawn(async move {
-//!         println!("Task 2 started");
-//!         for _ in 0..5 {
+//!         println!("Parent started");
+//!         for _ in 0..3 {
 //!           // Simulate work
 //!           utils::reschedule().await;
 //!         }
-//!         println!("Task 2 completed");
-//!     });
+//!         println!("Parent completed");
+//!     }
 //! });
 //! ```
 
@@ -52,7 +31,6 @@ use crate::Executor;
 use futures::task::{waker_ref, ArcWake};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
-    cell::RefCell,
     collections::VecDeque,
     future::Future,
     pin::Pin,
@@ -116,7 +94,14 @@ impl Executor for Deterministic {
         queue.push_back(task);
     }
 
-    fn run(&mut self) {
+    fn run<F>(&mut self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        // Add root task to the queue
+        self.spawn(future);
+
+        // Run tasks until the queue is empty
         let mut rng = StdRng::seed_from_u64(self.seed);
         while let Some(task) = self.next_task(&mut rng) {
             let waker = waker_ref(&task);
@@ -128,45 +113,6 @@ impl Executor for Deterministic {
             }
         }
     }
-}
-
-thread_local! {
-    static DETERMINISTIC_INSTANCE: RefCell<Option<Deterministic>> = const {RefCell::new(None)};
-}
-
-pub fn spawn<F>(future: F)
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    DETERMINISTIC_INSTANCE.with(|executor| {
-        if let Some(executor) = executor.borrow().as_ref() {
-            executor.spawn(future);
-        } else {
-            panic!("Executor not initialized.");
-        }
-    });
-}
-
-pub fn run<F>(seed: u64, future: F)
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    // Initialize the executor
-    let mut executor = Deterministic::new(seed);
-    DETERMINISTIC_INSTANCE.with(|executor_cell| {
-        *executor_cell.borrow_mut() = Some(executor.clone());
-    });
-
-    // Spawn the initial future
-    spawn(future);
-
-    // Run the executor
-    executor.run();
-
-    // Clear the executor
-    DETERMINISTIC_INSTANCE.with(|executor_cell| {
-        *executor_cell.borrow_mut() = None;
-    });
 }
 
 #[cfg(test)]
@@ -194,35 +140,30 @@ mod tests {
 
     #[test]
     fn test_different_seeds_different_order() {
-        let seed1 = 12345;
-        let seed2 = 54321;
-
-        let output1 = run_with_seed(seed1);
-        let output2 = run_with_seed(seed2);
-
+        let output1 = run_with_seed(12345);
+        let output2 = run_with_seed(54321);
         assert_ne!(output1, output2);
     }
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
         let messages = Arc::new(Mutex::new(Vec::new()));
-        run(seed, {
+        let mut executor = Deterministic::new(seed);
+        executor.run({
             let messages = messages.clone();
+            let executor = executor.clone();
             async move {
-                spawn(task("Task 1", messages.clone()));
-                spawn(task("Task 2", messages.clone()));
-                spawn(task("Task 3", messages.clone()));
+                executor.spawn(task("Task 1", messages.clone()));
+                executor.spawn(task("Task 2", messages.clone()));
+                executor.spawn(task("Task 3", messages.clone()));
             }
         });
-        let messages = Arc::try_unwrap(messages).unwrap();
-        messages.into_inner().unwrap()
+        Arc::try_unwrap(messages).unwrap().into_inner().unwrap()
     }
 
     async fn task(name: &'static str, messages: Arc<Mutex<Vec<&'static str>>>) {
-        // Simulate work
         for _ in 0..5 {
             utils::reschedule().await;
         }
-        let mut msgs = messages.lock().unwrap();
-        msgs.push(name);
+        messages.lock().unwrap().push(name);
     }
 }
