@@ -54,29 +54,36 @@ struct TaskQueue {
     queue: Mutex<VecDeque<Arc<Task>>>,
 }
 
+impl TaskQueue {
+    fn push(&self, task: Arc<Task>) {
+        let mut queue = self.queue.lock().unwrap();
+        queue.push_back(task);
+    }
+
+    fn get(&self, rng: &mut StdRng) -> Option<Arc<Task>> {
+        let mut queue = self.queue.lock().unwrap();
+        if queue.is_empty() {
+            None
+        } else {
+            let idx = rng.gen_range(0..queue.len());
+            Some(queue.remove(idx).unwrap())
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Deterministic {
     seed: u64,
-    task_queue: Arc<TaskQueue>,
+    tasks: Arc<TaskQueue>,
 }
 
 impl Deterministic {
     pub fn new(seed: u64) -> Self {
         Self {
             seed,
-            task_queue: Arc::new(TaskQueue {
+            tasks: Arc::new(TaskQueue {
                 queue: Mutex::new(VecDeque::new()),
             }),
-        }
-    }
-
-    fn next_task(&mut self, rng: &mut StdRng) -> Option<Arc<Task>> {
-        let mut queue = self.task_queue.queue.lock().unwrap();
-        if queue.is_empty() {
-            None
-        } else {
-            let idx = rng.gen_range(0..queue.len());
-            Some(queue.remove(idx).unwrap())
         }
     }
 }
@@ -88,10 +95,9 @@ impl Executor for Deterministic {
     {
         let task = Arc::new(Task {
             future: Mutex::new(Box::pin(future)),
-            task_queue: self.task_queue.clone(),
+            task_queue: self.tasks.clone(),
         });
-        let mut queue = self.task_queue.queue.lock().unwrap();
-        queue.push_back(task);
+        self.tasks.push(task);
     }
 
     fn run<F>(&mut self, future: F)
@@ -103,7 +109,7 @@ impl Executor for Deterministic {
 
         // Run tasks until the queue is empty
         let mut rng = StdRng::seed_from_u64(self.seed);
-        while let Some(task) = self.next_task(&mut rng) {
+        while let Some(task) = self.tasks.get(&mut rng) {
             let waker = waker_ref(&task);
             let mut context = Context::from_waker(&waker);
 
@@ -120,6 +126,28 @@ mod tests {
     use super::*;
     use crate::utils;
     use std::sync::{Arc, Mutex};
+
+    fn run_with_seed(seed: u64) -> Vec<&'static str> {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let mut executor = Deterministic::new(seed);
+        executor.run({
+            let messages = messages.clone();
+            let executor = executor.clone();
+            async move {
+                executor.spawn(task("Task 1", messages.clone()));
+                executor.spawn(task("Task 2", messages.clone()));
+                executor.spawn(task("Task 3", messages.clone()));
+            }
+        });
+        Arc::try_unwrap(messages).unwrap().into_inner().unwrap()
+    }
+
+    async fn task(name: &'static str, messages: Arc<Mutex<Vec<&'static str>>>) {
+        for _ in 0..5 {
+            utils::reschedule().await;
+        }
+        messages.lock().unwrap().push(name);
+    }
 
     #[test]
     fn test_same_seed_same_order() {
@@ -143,27 +171,5 @@ mod tests {
         let output1 = run_with_seed(12345);
         let output2 = run_with_seed(54321);
         assert_ne!(output1, output2);
-    }
-
-    fn run_with_seed(seed: u64) -> Vec<&'static str> {
-        let messages = Arc::new(Mutex::new(Vec::new()));
-        let mut executor = Deterministic::new(seed);
-        executor.run({
-            let messages = messages.clone();
-            let executor = executor.clone();
-            async move {
-                executor.spawn(task("Task 1", messages.clone()));
-                executor.spawn(task("Task 2", messages.clone()));
-                executor.spawn(task("Task 3", messages.clone()));
-            }
-        });
-        Arc::try_unwrap(messages).unwrap().into_inner().unwrap()
-    }
-
-    async fn task(name: &'static str, messages: Arc<Mutex<Vec<&'static str>>>) {
-        for _ in 0..5 {
-            utils::reschedule().await;
-        }
-        messages.lock().unwrap().push(name);
     }
 }
