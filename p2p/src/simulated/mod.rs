@@ -25,14 +25,13 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::insecure_signer, utils::hex, Scheme};
-    use commonware_executor::utils::reschedule;
     use commonware_executor::{deterministic::Deterministic, Clock, Executor};
     use rand::rngs::StdRng;
     use rand::Rng;
     use rand::SeedableRng;
     use std::collections::HashMap;
+    use std::time::Duration;
     use tokio::sync::mpsc;
-    use tracing::debug;
 
     async fn simulate_messages(executor: Deterministic, size: usize) {
         tracing_subscriber::fmt()
@@ -57,8 +56,7 @@ mod tests {
             let agent_sender = seen_sender.clone();
             executor.spawn(async move {
                 for _ in 0..size {
-                    let msg = receiver.recv().await.unwrap();
-                    debug!("received: {}", String::from_utf8_lossy(&msg.0));
+                    receiver.recv().await.unwrap();
                 }
                 agent_sender.send(()).await.unwrap();
 
@@ -80,7 +78,7 @@ mod tests {
                     network::Link {
                         latency_mean: 5.0,
                         latency_stddev: 2.5,
-                        success_rate: 0.75,
+                        success_rate: 0.9,
                         capacity: 1,
                     },
                 );
@@ -93,22 +91,26 @@ mod tests {
         }
 
         // Send messages
-        executor.spawn(async move {
-            let mut rng = StdRng::from_entropy();
-            let keys = agents.keys().collect::<Vec<_>>();
-            loop {
-                let sender = keys[rng.gen_range(0..keys.len())];
-                let msg = format!("hello from {}", hex(sender));
-                let msg = Bytes::from(msg);
-                let message_sender = agents.get(sender).unwrap().clone();
-                let sent = message_sender
-                    .send(Recipients::All, msg.clone(), false)
-                    .await
-                    .unwrap();
-                if sender == &only_inbound {
-                    assert_eq!(sent.len(), 0);
-                } else {
-                    assert_eq!(sent.len(), keys.len() - 1);
+        executor.spawn({
+            let executor = executor.clone();
+            async move {
+                let mut rng = StdRng::from_entropy();
+                let keys = agents.keys().collect::<Vec<_>>();
+                loop {
+                    let sender = keys[rng.gen_range(0..keys.len())];
+                    let msg = format!("hello from {}", hex(sender));
+                    let msg = Bytes::from(msg);
+                    let message_sender = agents.get(sender).unwrap().clone();
+                    let sent = message_sender
+                        .send(Recipients::All, msg.clone(), false)
+                        .await
+                        .unwrap();
+                    if sender == &only_inbound {
+                        assert_eq!(sent.len(), 0);
+                    } else {
+                        assert_eq!(sent.len(), keys.len() - 1);
+                    }
+                    executor.sleep(Duration::from_millis(100)).await;
                 }
             }
         });

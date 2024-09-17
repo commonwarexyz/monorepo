@@ -162,7 +162,10 @@ impl Executor for Deterministic {
                 }
             }
             if revived > 0 {
-                debug!(revived, "tasks revived from time change");
+                debug!(
+                    current = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                    revived, "tasks revived from time change"
+                );
             }
         }
     }
