@@ -1,6 +1,6 @@
 //! A deterministic executor that randomly selects tasks to run based on a seed.
 //!
-//! # Example
+//! # Example (Manual)
 //! ```rust
 //! use commonware_executor::{utils, Executor, deterministic::Deterministic};
 //!
@@ -22,6 +22,30 @@
 //!     println!("Task 2 completed");
 //! });
 //! executor.run();
+//! ```
+//!
+//! # Example (Global)
+//! ```rust
+//! use commonware_executor::{utils, deterministic::{run, spawn}};
+//!
+//! run(42, async {
+//!    spawn(async {
+//!        println!("Task 1 started");
+//!        for _ in 0..5 {
+//!          // Simulate work
+//!          utils::reschedule().await;
+//!        }
+//!        println!("Task 1 completed");
+//!     });
+//!     spawn(async move {
+//!         println!("Task 2 started");
+//!         for _ in 0..5 {
+//!           // Simulate work
+//!           utils::reschedule().await;
+//!         }
+//!         println!("Task 2 completed");
+//!     });
+//! });
 //! ```
 
 use crate::Executor;
@@ -107,14 +131,14 @@ impl Executor for Deterministic {
 }
 
 thread_local! {
-    static EXECUTOR_INSTANCE: RefCell<Option<Deterministic>> = RefCell::new(None);
+    static DETERMINISTIC_INSTANCE: RefCell<Option<Deterministic>> = const {RefCell::new(None)};
 }
 
 pub fn spawn<F>(future: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    EXECUTOR_INSTANCE.with(|executor| {
+    DETERMINISTIC_INSTANCE.with(|executor| {
         if let Some(executor) = executor.borrow().as_ref() {
             executor.spawn(future);
         } else {
@@ -129,7 +153,7 @@ where
 {
     // Initialize the executor
     let mut executor = Deterministic::new(seed);
-    EXECUTOR_INSTANCE.with(|executor_cell| {
+    DETERMINISTIC_INSTANCE.with(|executor_cell| {
         *executor_cell.borrow_mut() = Some(executor.clone());
     });
 
@@ -140,7 +164,7 @@ where
     executor.run();
 
     // Clear the executor
-    EXECUTOR_INSTANCE.with(|executor_cell| {
+    DETERMINISTIC_INSTANCE.with(|executor_cell| {
         *executor_cell.borrow_mut() = None;
     });
 }
@@ -153,18 +177,19 @@ mod tests {
 
     #[test]
     fn test_same_seed_same_order() {
-        let seed = 12345;
+        // Generate initial outputs
+        let mut outputs = Vec::new();
+        for seed in 0..1000 {
+            let output = run_with_seed(seed);
+            assert_eq!(output.len(), 3);
+            outputs.push(output);
+        }
 
-        // First run
-        let output1 = run_executor_with_seed(seed);
-
-        // Second run
-        let output2 = run_executor_with_seed(seed);
-
-        assert_eq!(
-            output1, output2,
-            "Outputs should be the same with the same seed"
-        );
+        // Ensure they match
+        for seed in 0..1000 {
+            let output = run_with_seed(seed);
+            assert_eq!(output, outputs[seed as usize]);
+        }
     }
 
     #[test]
@@ -172,38 +197,13 @@ mod tests {
         let seed1 = 12345;
         let seed2 = 54321;
 
-        let output1 = run_executor_with_seed(seed1);
-        let output2 = run_executor_with_seed(seed2);
+        let output1 = run_with_seed(seed1);
+        let output2 = run_with_seed(seed2);
 
-        assert_ne!(
-            output1, output2,
-            "Outputs should differ with different seeds"
-        );
+        assert_ne!(output1, output2);
     }
 
-    #[test]
-    fn test_tasks_complete() {
-        let seed = 42;
-
-        let output = run_executor_with_seed(seed);
-
-        let expected_tasks = vec!["Task 1", "Task 2", "Task 3"];
-        assert_eq!(
-            output.len(),
-            expected_tasks.len(),
-            "All tasks should have completed"
-        );
-
-        for task_name in expected_tasks {
-            assert!(
-                output.contains(&task_name),
-                "Output should contain {}",
-                task_name
-            );
-        }
-    }
-
-    fn run_executor_with_seed(seed: u64) -> Vec<&'static str> {
+    fn run_with_seed(seed: u64) -> Vec<&'static str> {
         let messages = Arc::new(Mutex::new(Vec::new()));
         run(seed, {
             let messages = messages.clone();
@@ -213,8 +213,8 @@ mod tests {
                 spawn(task("Task 3", messages.clone()));
             }
         });
-        let messages = Arc::try_unwrap(messages).expect("Failed to unwrap Arc");
-        messages.into_inner().expect("Failed to get messages")
+        let messages = Arc::try_unwrap(messages).unwrap();
+        messages.into_inner().unwrap()
     }
 
     async fn task(name: &'static str, messages: Arc<Mutex<Vec<&'static str>>>) {
