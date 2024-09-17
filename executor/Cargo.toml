@@ -13,3 +13,4 @@ documentation = "https://docs.rs/commonware-executor"
 [dependencies]
 futures = { workspace = true }
 rand = { workspace = true }
+tracing = "0.1"

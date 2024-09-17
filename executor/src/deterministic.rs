@@ -27,17 +27,18 @@
 //! });
 //! ```
 
-use crate::{utils::reschedule, Clock, Executor};
+use crate::{Clock, Executor};
 use futures::task::{waker_ref, ArcWake};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
-    task::Context,
+    task::{Context, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tracing::debug;
 
 struct Task {
     future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
@@ -78,6 +79,7 @@ pub struct Deterministic {
     rng: Arc<Mutex<StdRng>>,
     time: Arc<Mutex<SystemTime>>,
     tasks: Arc<TaskQueue>,
+    sleeping: Arc<Mutex<BTreeMap<SystemTime, Vec<Waker>>>>,
 }
 
 impl Deterministic {
@@ -88,6 +90,7 @@ impl Deterministic {
             tasks: Arc::new(TaskQueue {
                 queue: Mutex::new(VecDeque::new()),
             }),
+            sleeping: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -111,36 +114,107 @@ impl Executor for Deterministic {
         // Add root task to the queue
         self.spawn(f);
 
-        // Run tasks until the queue is empty
-        while let Some(task) = self.tasks.get(self.rng.clone()) {
-            let waker = waker_ref(&task);
-            let mut context = Context::from_waker(&waker);
-
-            let mut future = task.future.lock().unwrap();
-            if future.as_mut().poll(&mut context).is_pending() {
-                // Task is re-queued in its `wake_by_ref` implementation.
+        loop {
+            // Run tasks until the queue is empty
+            while let Some(task) = self.tasks.get(self.rng.clone()) {
+                let waker = waker_ref(&task);
+                let mut context = Context::from_waker(&waker);
+                let mut future = task.future.lock().unwrap();
+                if future.as_mut().poll(&mut context).is_pending() {
+                    // Task is re-queued in its `wake_by_ref` implementation.
+                }
             }
+
+            // Check to see if there are any sleeping tasks
+            let mut sleeping = self.sleeping.lock().unwrap();
+            if sleeping.is_empty() {
+                break;
+            }
+
+            // Advance time to the next sleeping task
+            let current;
+            let next = sleeping.iter().next().unwrap().0;
+            {
+                let mut time = self.time.lock().unwrap();
+                if *time < *next {
+                    let old = *time;
+                    *time = *next;
+                    debug!(
+                        old = old.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                        new = time.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                        "time advanced"
+                    );
+                }
+                current = *time;
+            }
+
+            // Remove all sleeping tasks that are ready
+            let mut revived = 0;
+            let to_remove = sleeping
+                .range(..=current)
+                .map(&|(&time, _)| time)
+                .collect::<Vec<_>>();
+            for key in to_remove {
+                let wakers = sleeping.remove(&key).unwrap();
+                for waker in wakers {
+                    waker.wake();
+                    revived += 1;
+                }
+            }
+            if revived > 0 {
+                debug!(revived, "tasks revived from time change");
+            }
+        }
+    }
+}
+
+struct SleepFuture {
+    wake: SystemTime,
+    executor: Deterministic,
+    registered: bool,
+}
+
+impl Future for SleepFuture {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let current_time = self.executor.current();
+        if current_time >= self.wake {
+            Poll::Ready(())
+        } else {
+            if !self.registered {
+                {
+                    let mut sleeping = self.executor.sleeping.lock().unwrap();
+                    sleeping
+                        .entry(self.wake)
+                        .or_default()
+                        .push(cx.waker().clone());
+                }
+                self.registered = true;
+            }
+            Poll::Pending
         }
     }
 }
 
 impl Clock for Deterministic {
     fn current(&self) -> SystemTime {
-        let mut time = self.time.lock().unwrap();
-        let current = *time;
-        *time += Duration::from_millis(1);
-        current
+        *self.time.lock().unwrap()
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        let self_clone = self.clone();
-        async move {
-            let end = self_clone.current() + duration;
-            while self_clone.current() < end {
-                reschedule().await;
-            }
+        let wake = self
+            .current()
+            .checked_add(duration)
+            .expect("overflow when setting wake time");
+        SleepFuture {
+            wake,
+            executor: self.clone(),
+            registered: false,
         }
     }
+
+    // TODO: add sleep_until
 }
 
 impl RngCore for Deterministic {
