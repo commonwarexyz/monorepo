@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "cryptography",
+    "executor",
     "p2p",
     "examples/chat",
     "examples/vrf",
@@ -14,3 +15,4 @@ thiserror = "1.0.63"
 bytes = "1.7.1"
 sha2 = "0.10.8"
 rand = "0.8.5"
+futures = "0.3.30"

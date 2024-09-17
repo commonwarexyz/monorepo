@@ -1,0 +1,15 @@
+[package]
+name = "commonware-executor"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "TBD"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo"
+documentation = "https://docs.rs/commonware-executor"
+
+[dependencies]
+futures = { workspace = true }
+rand = { workspace = true }

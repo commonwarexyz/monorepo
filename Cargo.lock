@@ -442,6 +442,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-executor"
+version = "0.0.2"
+dependencies = [
+ "futures",
+ "rand",
+]
+
+[[package]]
 name = "commonware-p2p"
 version = "0.0.16"
 dependencies = [
