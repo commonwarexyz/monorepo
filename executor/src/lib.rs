@@ -5,6 +5,7 @@ use std::future::Future;
 
 pub trait Clock: Clone {
     fn current(&self) -> u128;
+    fn set(&self, milliseconds: u128);
     fn advance(&self, milliseconds: u128);
 }
 

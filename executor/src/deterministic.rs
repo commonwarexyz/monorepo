@@ -40,12 +40,12 @@ use std::{
 
 struct Task {
     future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-    task_queue: Arc<TaskQueue>,
+    tasks: Arc<TaskQueue>,
 }
 
 impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        let mut queue = arc_self.task_queue.queue.lock().unwrap();
+        let mut queue = arc_self.tasks.queue.lock().unwrap();
         queue.push_back(arc_self.clone());
     }
 }
@@ -91,23 +91,23 @@ impl Deterministic {
 }
 
 impl Executor for Deterministic {
-    fn spawn<F>(&self, future: F)
+    fn spawn<F>(&self, f: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
         let task = Arc::new(Task {
-            future: Mutex::new(Box::pin(future)),
-            task_queue: self.tasks.clone(),
+            future: Mutex::new(Box::pin(f)),
+            tasks: self.tasks.clone(),
         });
         self.tasks.push(task);
     }
 
-    fn run<F>(&self, future: F)
+    fn run<F>(&self, f: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
         // Add root task to the queue
-        self.spawn(future);
+        self.spawn(f);
 
         // Run tasks until the queue is empty
         let mut rng = StdRng::seed_from_u64(self.seed);
@@ -126,6 +126,10 @@ impl Executor for Deterministic {
 impl Clock for Deterministic {
     fn current(&self) -> u128 {
         *self.time.read().unwrap()
+    }
+
+    fn set(&self, milliseconds: u128) {
+        *self.time.write().unwrap() = milliseconds;
     }
 
     fn advance(&self, milliseconds: u128) {
