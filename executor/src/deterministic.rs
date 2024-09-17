@@ -27,15 +27,16 @@
 //! });
 //! ```
 
-use crate::{Clock, Executor};
+use crate::{utils::reschedule, Clock, Executor};
 use futures::task::{waker_ref, ArcWake};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
     collections::VecDeque,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     task::Context,
+    time::{self, Duration},
 };
 
 struct Task {
@@ -60,7 +61,8 @@ impl TaskQueue {
         queue.push_back(task);
     }
 
-    fn get(&self, rng: &mut StdRng) -> Option<Arc<Task>> {
+    fn get(&self, rng: Arc<Mutex<StdRng>>) -> Option<Arc<Task>> {
+        let mut rng = rng.lock().unwrap();
         let mut queue = self.queue.lock().unwrap();
         if queue.is_empty() {
             None
@@ -73,16 +75,16 @@ impl TaskQueue {
 
 #[derive(Clone)]
 pub struct Deterministic {
-    seed: u64,
-    time: Arc<RwLock<u128>>,
+    rng: Arc<Mutex<StdRng>>,
+    time: Arc<Mutex<u128>>,
     tasks: Arc<TaskQueue>,
 }
 
 impl Deterministic {
     pub fn new(seed: u64) -> Self {
         Self {
-            seed,
-            time: Arc::new(RwLock::new(0)),
+            rng: Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
+            time: Arc::new(Mutex::new(0)),
             tasks: Arc::new(TaskQueue {
                 queue: Mutex::new(VecDeque::new()),
             }),
@@ -110,8 +112,7 @@ impl Executor for Deterministic {
         self.spawn(f);
 
         // Run tasks until the queue is empty
-        let mut rng = StdRng::seed_from_u64(self.seed);
-        while let Some(task) = self.tasks.get(&mut rng) {
+        while let Some(task) = self.tasks.get(self.rng.clone()) {
             let waker = waker_ref(&task);
             let mut context = Context::from_waker(&waker);
 
@@ -125,15 +126,38 @@ impl Executor for Deterministic {
 
 impl Clock for Deterministic {
     fn current(&self) -> u128 {
-        *self.time.read().unwrap()
+        let mut time = self.time.lock().unwrap();
+        let current = *time;
+        *time += 1;
+        current
     }
 
-    fn set(&self, milliseconds: u128) {
-        *self.time.write().unwrap() = milliseconds;
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+        let self_clone = self.clone();
+        async move {
+            let end = self_clone.current() + duration.as_millis();
+            while self_clone.current() < end {
+                reschedule().await;
+            }
+        }
+    }
+}
+
+impl RngCore for Deterministic {
+    fn next_u32(&mut self) -> u32 {
+        self.rng.lock().unwrap().next_u32()
     }
 
-    fn advance(&self, milliseconds: u128) {
-        *self.time.write().unwrap() += milliseconds;
+    fn next_u64(&mut self) -> u64 {
+        self.rng.lock().unwrap().next_u64()
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.rng.lock().unwrap().fill_bytes(dest)
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        self.rng.lock().unwrap().try_fill_bytes(dest)
     }
 }
 
@@ -196,10 +220,7 @@ mod tests {
         // Check initial time
         assert_eq!(clock.current(), 0);
 
-        // Advance time by 1300 milliseconds
-        clock.advance(1300);
-
         // Check time after advancing
-        assert_eq!(clock.current(), 1300);
+        assert_eq!(clock.current(), 1);
     }
 }

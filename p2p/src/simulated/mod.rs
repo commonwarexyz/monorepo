@@ -25,28 +25,40 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::insecure_signer, utils::hex, Scheme};
+    use commonware_executor::utils::reschedule;
+    use commonware_executor::{deterministic::Deterministic, Clock, Executor};
     use rand::rngs::StdRng;
     use rand::Rng;
     use rand::SeedableRng;
     use std::collections::HashMap;
+    use tokio::sync::mpsc;
+    use tracing::debug;
 
-    async fn simulate_messages(size: usize) {
+    async fn simulate_messages(executor: Deterministic, size: usize) {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .init();
+
         // Create simulated network
-        let mut network = network::Network::new(network::Config {
-            max_message_size: 1024 * 1024,
-        });
+        let mut network = network::Network::new(
+            executor.clone(),
+            network::Config {
+                max_message_size: 1024 * 1024,
+            },
+        );
 
         // Register agents
         let mut agents = HashMap::new();
-        let (seen_sender, mut seen_receiver) = tokio::sync::mpsc::channel(1024);
+        let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
         for i in 0..size {
             let pk = insecure_signer(i as u64).me();
             let (sender, mut receiver) = network.register(pk.clone());
             agents.insert(pk, sender);
             let agent_sender = seen_sender.clone();
-            tokio::spawn(async move {
+            executor.spawn(async move {
                 for _ in 0..size {
-                    receiver.recv().await.unwrap();
+                    let msg = receiver.recv().await.unwrap();
+                    debug!("received: {}", String::from_utf8_lossy(&msg.0));
                 }
                 agent_sender.send(()).await.unwrap();
 
@@ -81,7 +93,7 @@ mod tests {
         }
 
         // Send messages
-        tokio::spawn(async move {
+        executor.spawn(async move {
             let mut rng = StdRng::from_entropy();
             let keys = agents.keys().collect::<Vec<_>>();
             loop {
@@ -102,7 +114,7 @@ mod tests {
         });
 
         // Start network
-        tokio::spawn(network.run());
+        executor.spawn(network.run());
 
         // Wait for all recipients
         for _ in 0..size {
@@ -110,52 +122,64 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_small() {
-        simulate_messages(10).await;
+    #[test]
+    fn test_small() {
+        let executor = Deterministic::new(0);
+        executor.run(simulate_messages(executor.clone(), 10));
     }
 
-    #[tokio::test]
-    async fn test_medium() {
-        simulate_messages(100).await;
+    #[test]
+    fn test_medium() {
+        let executor = Deterministic::new(0);
+        executor.run(simulate_messages(executor.clone(), 100));
     }
 
-    #[tokio::test]
-    async fn test_large() {
-        simulate_messages(500).await;
+    #[test]
+    fn test_large() {
+        let executor = Deterministic::new(0);
+        executor.run(simulate_messages(executor.clone(), 500));
     }
 
-    #[tokio::test]
-    async fn test_invalid_message() {
-        // Create simulated network
-        let mut network = network::Network::new(network::Config {
-            max_message_size: 1024 * 1024,
+    #[test]
+    fn test_invalid_message() {
+        let executor = Deterministic::new(0);
+        executor.run({
+            let executor = executor.clone();
+            async move {
+                // Create simulated network
+                let mut network = network::Network::new(
+                    executor.clone(),
+                    network::Config {
+                        max_message_size: 1024 * 1024,
+                    },
+                );
+
+                // Register agents
+                let mut agents = HashMap::new();
+                for i in 0..10 {
+                    let pk = insecure_signer(i as u64).me();
+                    let (sender, _) = network.register(pk.clone());
+                    agents.insert(pk, sender);
+                }
+
+                // Start network
+                executor.spawn(network.run());
+
+                // Send invalid message
+                let mut rng = StdRng::from_entropy();
+                let keys = agents.keys().collect::<Vec<_>>();
+                let sender = keys[rng.gen_range(0..keys.len())];
+                let message_sender = agents.get(sender).unwrap().clone();
+                let mut msg = vec![0u8; 1024 * 1024 + 1];
+                rng.fill(&mut msg[..]);
+                let result = message_sender
+                    .send(Recipients::All, msg.into(), false)
+                    .await
+                    .unwrap_err();
+
+                // Confirm error is correct
+                assert!(matches!(result, Error::MessageTooLarge(_)));
+            }
         });
-
-        // Register agents
-        let mut agents = HashMap::new();
-        for i in 0..10 {
-            let pk = insecure_signer(i as u64).me();
-            let (sender, _) = network.register(pk.clone());
-            agents.insert(pk, sender);
-        }
-
-        // Start network
-        tokio::spawn(network.run());
-
-        // Send invalid message
-        let mut rng = StdRng::from_entropy();
-        let keys = agents.keys().collect::<Vec<_>>();
-        let sender = keys[rng.gen_range(0..keys.len())];
-        let message_sender = agents.get(sender).unwrap().clone();
-        let mut msg = vec![0u8; 1024 * 1024 + 1];
-        rng.fill(&mut msg[..]);
-        let result = message_sender
-            .send(Recipients::All, msg.into(), false)
-            .await
-            .unwrap_err();
-
-        // Confirm error is correct
-        assert!(matches!(result, Error::MessageTooLarge(_)));
     }
 }

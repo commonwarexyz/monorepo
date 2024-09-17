@@ -12,6 +12,7 @@ documentation = "https://docs.rs/commonware-p2p"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
+commonware-executor = { workspace = true }
 bytes = { workspace = true } 
 sha2 = { workspace = true }
 rand = { workspace = true }
@@ -28,6 +29,7 @@ bitvec = "1"
 prometheus-client = "0.22"
 zstd = "0.13"
 rand_distr = "0.4"
+tracing-subscriber = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
