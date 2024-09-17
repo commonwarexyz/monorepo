@@ -5,7 +5,11 @@ use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_executor::{Clock, Executor};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{self, Duration},
+};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{debug, error};
 

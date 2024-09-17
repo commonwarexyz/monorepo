@@ -1,10 +1,13 @@
 pub mod deterministic;
 pub mod utils;
 
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    time::{Duration, SystemTime},
+};
 
 pub trait Clock: Clone + Send + 'static {
-    fn current(&self) -> u128;
+    fn current(&self) -> SystemTime;
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
 }
 

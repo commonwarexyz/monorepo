@@ -36,7 +36,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex},
     task::Context,
-    time::{self, Duration},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 struct Task {
@@ -76,7 +76,7 @@ impl TaskQueue {
 #[derive(Clone)]
 pub struct Deterministic {
     rng: Arc<Mutex<StdRng>>,
-    time: Arc<Mutex<u128>>,
+    time: Arc<Mutex<SystemTime>>,
     tasks: Arc<TaskQueue>,
 }
 
@@ -84,7 +84,7 @@ impl Deterministic {
     pub fn new(seed: u64) -> Self {
         Self {
             rng: Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
-            time: Arc::new(Mutex::new(0)),
+            time: Arc::new(Mutex::new(UNIX_EPOCH)),
             tasks: Arc::new(TaskQueue {
                 queue: Mutex::new(VecDeque::new()),
             }),
@@ -125,17 +125,17 @@ impl Executor for Deterministic {
 }
 
 impl Clock for Deterministic {
-    fn current(&self) -> u128 {
+    fn current(&self) -> SystemTime {
         let mut time = self.time.lock().unwrap();
         let current = *time;
-        *time += 1;
+        *time += Duration::from_millis(1);
         current
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
         let self_clone = self.clone();
         async move {
-            let end = self_clone.current() + duration.as_millis();
+            let end = self_clone.current() + duration;
             while self_clone.current() < end {
                 reschedule().await;
             }
@@ -218,9 +218,9 @@ mod tests {
         let clock = Deterministic::new(0);
 
         // Check initial time
-        assert_eq!(clock.current(), 0);
+        assert_eq!(clock.current(), UNIX_EPOCH);
 
         // Check time after advancing
-        assert_eq!(clock.current(), 1);
+        assert_eq!(clock.current(), UNIX_EPOCH + Duration::from_millis(1));
     }
 }
