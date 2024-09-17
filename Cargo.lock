@@ -472,7 +472,6 @@ dependencies = [
  "tokio-test",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "x25519-dalek",
  "zstd",
 ]

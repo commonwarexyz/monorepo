@@ -30,15 +30,9 @@ mod tests {
     use rand::Rng;
     use rand::SeedableRng;
     use std::collections::HashMap;
-    use std::time::Duration;
     use tokio::sync::mpsc;
-    use tracing::warn;
 
     async fn simulate_messages(executor: Deterministic, size: usize) {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .init();
-
         // Create simulated network
         let mut network = network::Network::new(
             executor.clone(),
@@ -92,26 +86,22 @@ mod tests {
         }
 
         // Send messages
-        executor.spawn({
-            let executor = executor.clone();
-            async move {
-                let mut rng = StdRng::from_entropy();
-                let keys = agents.keys().collect::<Vec<_>>();
-                loop {
-                    let sender = keys[rng.gen_range(0..keys.len())];
-                    let msg = format!("hello from {}", hex(sender));
-                    let msg = Bytes::from(msg);
-                    let message_sender = agents.get(sender).unwrap().clone();
-                    let sent = message_sender
-                        .send(Recipients::All, msg.clone(), false)
-                        .await
-                        .unwrap();
-                    if sender == &only_inbound {
-                        assert_eq!(sent.len(), 0);
-                    } else {
-                        assert_eq!(sent.len(), keys.len() - 1);
-                    }
-                    executor.sleep(Duration::from_millis(100)).await;
+        executor.spawn(async move {
+            let mut rng = StdRng::from_entropy();
+            let keys = agents.keys().collect::<Vec<_>>();
+            loop {
+                let sender = keys[rng.gen_range(0..keys.len())];
+                let msg = format!("hello from {}", hex(sender));
+                let msg = Bytes::from(msg);
+                let message_sender = agents.get(sender).unwrap().clone();
+                let sent = message_sender
+                    .send(Recipients::All, msg.clone(), false)
+                    .await
+                    .unwrap();
+                if sender == &only_inbound {
+                    assert_eq!(sent.len(), 0);
+                } else {
+                    assert_eq!(sent.len(), keys.len() - 1);
                 }
             }
         });
