@@ -166,17 +166,17 @@ impl<E: Executor + Rng + Clock + Send> Network<E> {
                 debug!("sending message to {}: delay={}ms", hex(&recipient), delay);
 
                 // Send message
-                let task_sender = sender.clone();
-                let task_recipient = recipient.clone();
-                let task_message = message.clone();
-                let task_semaphore = link.1.clone();
-                let task_acquired_sender = acquired_sender.clone();
                 self.executor.spawn({
                     let executor = self.executor.clone();
+                    let sender = sender.clone();
+                    let recipient = recipient.clone();
+                    let message = message.clone();
+                    let semaphore = link.1.clone();
+                    let acquired_sender = acquired_sender.clone();
                     async move {
                         // Mark as sent as soon as acquire semaphore
-                        let _permit = task_semaphore.acquire().await.unwrap();
-                        task_acquired_sender.send(()).await.unwrap();
+                        let _permit = semaphore.acquire().await.unwrap();
+                        acquired_sender.send(()).await.unwrap();
 
                         // Apply delay to send (once link is not saturated)
                         //
@@ -188,15 +188,15 @@ impl<E: Executor + Rng + Clock + Send> Network<E> {
                         if !should_deliver {
                             debug!(
                                 "dropping message to {}: random link failure",
-                                hex(&task_recipient)
+                                hex(&recipient)
                             );
                             return;
                         }
 
                         // Send message
-                        if let Err(err) = task_sender.send((task_recipient.clone(), task_message)) {
+                        if let Err(err) = sender.send((recipient.clone(), message)) {
                             // This can only happen if the receiver exited.
-                            error!("failed to send to {}: {:?}", hex(&task_recipient), err);
+                            error!("failed to send to {}: {:?}", hex(&recipient), err);
                         }
                     }
                 });

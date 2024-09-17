@@ -32,6 +32,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
     use tokio::sync::mpsc;
+    use tracing::warn;
 
     async fn simulate_messages(executor: Deterministic, size: usize) {
         tracing_subscriber::fmt()
@@ -78,7 +79,7 @@ mod tests {
                     network::Link {
                         latency_mean: 5.0,
                         latency_stddev: 2.5,
-                        success_rate: 0.9,
+                        success_rate: 0.75,
                         capacity: 1,
                     },
                 );
@@ -127,7 +128,7 @@ mod tests {
     #[test]
     fn test_small() {
         let executor = Deterministic::new(0);
-        executor.run(simulate_messages(executor.clone(), 10));
+        executor.run(simulate_messages(executor.clone(), 100));
     }
 
     #[test]

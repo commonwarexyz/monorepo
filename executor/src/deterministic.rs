@@ -28,6 +28,7 @@
 //! ```
 
 use crate::{Clock, Executor};
+use core::task;
 use futures::task::{waker_ref, ArcWake};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
@@ -41,6 +42,7 @@ use std::{
 use tracing::debug;
 
 struct Task {
+    root: bool,
     future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
     tasks: Arc<TaskQueue>,
 }
@@ -101,6 +103,7 @@ impl Executor for Deterministic {
         F: Future<Output = ()> + Send + 'static,
     {
         let task = Arc::new(Task {
+            root: false,
             future: Mutex::new(Box::pin(f)),
             tasks: self.tasks.clone(),
         });
@@ -112,7 +115,12 @@ impl Executor for Deterministic {
         F: Future<Output = ()> + Send + 'static,
     {
         // Add root task to the queue
-        self.spawn(f);
+        let task = Arc::new(Task {
+            root: true,
+            future: Mutex::new(Box::pin(f)),
+            tasks: self.tasks.clone(),
+        });
+        self.tasks.push(task);
 
         loop {
             // Run tasks until the queue is empty
@@ -122,6 +130,9 @@ impl Executor for Deterministic {
                 let mut future = task.future.lock().unwrap();
                 if future.as_mut().poll(&mut context).is_pending() {
                     // Task is re-queued in its `wake_by_ref` implementation.
+                } else if task.root {
+                    // Root task completed
+                    return;
                 }
             }
 
