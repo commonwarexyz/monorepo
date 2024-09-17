@@ -27,14 +27,14 @@
 //! });
 //! ```
 
-use crate::Executor;
+use crate::{Clock, Executor};
 use futures::task::{waker_ref, ArcWake};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
     collections::VecDeque,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     task::Context,
 };
 
@@ -74,6 +74,7 @@ impl TaskQueue {
 #[derive(Clone)]
 pub struct Deterministic {
     seed: u64,
+    time: Arc<RwLock<u128>>,
     tasks: Arc<TaskQueue>,
 }
 
@@ -81,6 +82,7 @@ impl Deterministic {
     pub fn new(seed: u64) -> Self {
         Self {
             seed,
+            time: Arc::new(RwLock::new(0)),
             tasks: Arc::new(TaskQueue {
                 queue: Mutex::new(VecDeque::new()),
             }),
@@ -100,7 +102,7 @@ impl Executor for Deterministic {
         self.tasks.push(task);
     }
 
-    fn run<F>(&mut self, future: F)
+    fn run<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -121,6 +123,16 @@ impl Executor for Deterministic {
     }
 }
 
+impl Clock for Deterministic {
+    fn current(&self) -> u128 {
+        *self.time.read().unwrap()
+    }
+
+    fn advance(&self, milliseconds: u128) {
+        *self.time.write().unwrap() += milliseconds;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,7 +141,7 @@ mod tests {
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
         let messages = Arc::new(Mutex::new(Vec::new()));
-        let mut executor = Deterministic::new(seed);
+        let executor = Deterministic::new(seed);
         executor.run({
             let messages = messages.clone();
             let executor = executor.clone();
@@ -171,5 +183,19 @@ mod tests {
         let output1 = run_with_seed(12345);
         let output2 = run_with_seed(54321);
         assert_ne!(output1, output2);
+    }
+
+    #[test]
+    fn test_clock() {
+        let clock = Deterministic::new(0);
+
+        // Check initial time
+        assert_eq!(clock.current(), 0);
+
+        // Advance time by 1300 milliseconds
+        clock.advance(1300);
+
+        // Check time after advancing
+        assert_eq!(clock.current(), 1300);
     }
 }

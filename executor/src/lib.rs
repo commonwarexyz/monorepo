@@ -3,14 +3,17 @@ pub mod utils;
 
 use std::future::Future;
 
-pub trait Executor: Clone {
-    // TODO: add support for getting time
+pub trait Clock: Clone {
+    fn current(&self) -> u128;
+    fn advance(&self, milliseconds: u128);
+}
 
+pub trait Executor: Clone {
     fn spawn<F>(&self, f: F)
     where
         F: Future<Output = ()> + Send + 'static;
 
-    fn run<F>(&mut self, f: F)
+    fn run<F>(&self, f: F)
     where
         F: Future<Output = ()> + Send + 'static;
 }
