@@ -1,3 +1,11 @@
+//! A deterministic executor that randomly selects tasks to run based on a seed.
+//!
+//! # Example
+//! ```rust
+//!
+//! ```
+
+use crate::Executor;
 use futures::task::{waker_ref, ArcWake};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::{
@@ -24,14 +32,14 @@ struct TaskQueue {
     queue: Mutex<VecDeque<Arc<Task>>>,
 }
 
-pub struct Executor {
+pub struct Deterministic {
     task_queue: Arc<TaskQueue>,
     rng: StdRng,
 }
 
-impl Executor {
+impl Deterministic {
     pub fn new(seed: u64) -> Self {
-        Executor {
+        Self {
             task_queue: Arc::new(TaskQueue {
                 queue: Mutex::new(VecDeque::new()),
             }),
@@ -50,7 +58,7 @@ impl Executor {
     }
 }
 
-impl crate::Executor for Executor {
+impl Executor for Deterministic {
     fn spawn<F>(&self, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -73,5 +81,48 @@ impl crate::Executor for Executor {
                 // Task is re-queued in its `wake_by_ref` implementation.
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn test_same_seed_same_order() {
+        let seed = 12345;
+
+        // First run
+        let output1 = run_executor_with_seed(seed);
+
+        // Second run
+        let output2 = run_executor_with_seed(seed);
+
+        assert_eq!(
+            output1, output2,
+            "Outputs should be the same with the same seed"
+        );
+    }
+
+    fn run_executor_with_seed(seed: u64) -> Vec<&'static str> {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let mut executor = Deterministic::new(seed);
+        executor.spawn(task("Task 1", messages.clone()));
+        executor.spawn(task("Task 2", messages.clone()));
+        executor.spawn(task("Task 3", messages.clone()));
+        executor.run();
+        let messages = Arc::try_unwrap(messages).expect("Failed to unwrap Arc");
+        messages.into_inner().expect("Failed to get messages")
+    }
+
+    async fn task(name: &'static str, messages: Arc<Mutex<Vec<&'static str>>>) {
+        // Simulate work
+        for _ in 0..5 {
+            utils::reschedule().await;
+        }
+        let mut msgs = messages.lock().unwrap();
+        msgs.push(name);
     }
 }
