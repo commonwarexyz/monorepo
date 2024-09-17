@@ -2,7 +2,26 @@
 //!
 //! # Example
 //! ```rust
+//! use commonware_executor::{utils, Executor, deterministic::Deterministic};
 //!
+//! let mut executor = Deterministic::new(42);
+//! executor.spawn(async move {
+//!     println!("Task 1 started");
+//!     for _ in 0..5 {
+//!       // Simulate work
+//!       utils::reschedule().await;
+//!     }
+//!     println!("Task 1 completed");
+//! });
+//! executor.spawn(async move {
+//!     println!("Task 2 started");
+//!     for _ in 0..5 {
+//!       // Simulate work
+//!       utils::reschedule().await;
+//!     }
+//!     println!("Task 2 completed");
+//! });
+//! executor.run();
 //! ```
 
 use crate::Executor;
@@ -104,6 +123,42 @@ mod tests {
             output1, output2,
             "Outputs should be the same with the same seed"
         );
+    }
+
+    #[test]
+    fn test_different_seeds_different_order() {
+        let seed1 = 12345;
+        let seed2 = 54321;
+
+        let output1 = run_executor_with_seed(seed1);
+        let output2 = run_executor_with_seed(seed2);
+
+        assert_ne!(
+            output1, output2,
+            "Outputs should differ with different seeds"
+        );
+    }
+
+    #[test]
+    fn test_tasks_complete() {
+        let seed = 42;
+
+        let output = run_executor_with_seed(seed);
+
+        let expected_tasks = vec!["Task 1", "Task 2", "Task 3"];
+        assert_eq!(
+            output.len(),
+            expected_tasks.len(),
+            "All tasks should have completed"
+        );
+
+        for task_name in expected_tasks {
+            assert!(
+                output.contains(&task_name),
+                "Output should contain {}",
+                task_name
+            );
+        }
     }
 
     fn run_executor_with_seed(seed: u64) -> Vec<&'static str> {
