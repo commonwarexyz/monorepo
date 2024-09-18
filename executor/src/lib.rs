@@ -7,7 +7,7 @@ use std::{
 };
 
 pub trait Runner {
-    fn run<F>(self, f: F) -> F::Output
+    fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static;

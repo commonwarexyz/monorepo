@@ -34,7 +34,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
-    task::{Context, Poll, Waker},
+    task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::debug;
@@ -83,7 +83,7 @@ pub struct Executor {
 }
 
 impl Executor {
-    pub fn new(seed: u64) -> (Runner, Spawner) {
+    pub fn init(seed: u64) -> (Runner, Context) {
         let e = Self {
             rng: Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
             time: Arc::new(Mutex::new(UNIX_EPOCH)),
@@ -96,7 +96,7 @@ impl Executor {
             Runner {
                 executor: e.clone(),
             },
-            Spawner { executor: e },
+            Context { executor: e },
         )
     }
 }
@@ -106,7 +106,7 @@ pub struct Runner {
 }
 
 impl crate::Runner for Runner {
-    fn run<F>(self, f: F) -> F::Output
+    fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
@@ -121,15 +121,15 @@ impl crate::Runner for Runner {
                     *output.lock().unwrap() = Some(f.await);
                 }
             })),
-            tasks: self.tasks.clone(),
+            tasks: self.executor.tasks.clone(),
         });
-        self.tasks.push(task);
+        self.executor.tasks.push(task);
 
         loop {
             // Run tasks until the queue is empty
-            while let Some(task) = self.tasks.get(self.rng.clone()) {
+            while let Some(task) = self.executor.tasks.get(self.executor.rng.clone()) {
                 let waker = waker_ref(&task);
-                let mut context = Context::from_waker(&waker);
+                let mut context = task::Context::from_waker(&waker);
                 let mut future = task.future.lock().unwrap();
                 if future.as_mut().poll(&mut context).is_pending() {
                     // Task is re-queued in its `wake_by_ref` implementation.
@@ -140,7 +140,7 @@ impl crate::Runner for Runner {
             }
 
             // Check to see if there are any sleeping tasks
-            let mut sleeping = self.sleeping.lock().unwrap();
+            let mut sleeping = self.executor.sleeping.lock().unwrap();
             if sleeping.is_empty() {
                 panic!("executor stalled");
             }
@@ -149,7 +149,7 @@ impl crate::Runner for Runner {
             let current;
             let next = sleeping.iter().next().unwrap().0;
             {
-                let mut time = self.time.lock().unwrap();
+                let mut time = self.executor.time.lock().unwrap();
                 if *time < *next {
                     let old = *time;
                     *time = *next;
@@ -186,11 +186,11 @@ impl crate::Runner for Runner {
 }
 
 #[derive(Clone)]
-pub struct Spawner {
+pub struct Context {
     executor: Executor,
 }
 
-impl crate::Spawner for Spawner {
+impl crate::Spawner for Context {
     fn spawn<F>(&self, f: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -198,9 +198,9 @@ impl crate::Spawner for Spawner {
         let task = Arc::new(Task {
             root: false,
             future: Mutex::new(Box::pin(f)),
-            tasks: self.tasks.clone(),
+            tasks: self.executor.tasks.clone(),
         });
-        self.tasks.push(task);
+        self.executor.tasks.push(task);
     }
 }
 
@@ -213,29 +213,30 @@ struct Sleeper {
 impl Future for Sleeper {
     type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let current_time = self.executor.current();
-        if current_time >= self.wake {
-            Poll::Ready(())
-        } else {
-            if !self.registered {
-                {
-                    let mut sleeping = self.executor.sleeping.lock().unwrap();
-                    sleeping
-                        .entry(self.wake)
-                        .or_default()
-                        .push(cx.waker().clone());
-                }
-                self.registered = true;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        {
+            let current_time = *self.executor.time.lock().unwrap();
+            if current_time >= self.wake {
+                return Poll::Ready(());
             }
-            Poll::Pending
         }
+        if !self.registered {
+            {
+                let mut sleeping = self.executor.sleeping.lock().unwrap();
+                sleeping
+                    .entry(self.wake)
+                    .or_default()
+                    .push(cx.waker().clone());
+            }
+            self.registered = true;
+        }
+        Poll::Pending
     }
 }
 
-impl crate::Clock for Spawner {
+impl crate::Clock for Context {
     fn current(&self) -> SystemTime {
-        *self.time.lock().unwrap()
+        *self.executor.time.lock().unwrap()
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
@@ -259,21 +260,21 @@ impl crate::Clock for Spawner {
     }
 }
 
-impl RngCore for Spawner {
+impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
-        self.rng.lock().unwrap().next_u32()
+        self.executor.rng.lock().unwrap().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.rng.lock().unwrap().next_u64()
+        self.executor.rng.lock().unwrap().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.rng.lock().unwrap().fill_bytes(dest)
+        self.executor.rng.lock().unwrap().fill_bytes(dest)
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.rng.lock().unwrap().try_fill_bytes(dest)
+        self.executor.rng.lock().unwrap().try_fill_bytes(dest)
     }
 }
 
@@ -285,7 +286,7 @@ pub async fn reschedule() {
     impl Future for Reschedule {
         type Output = ();
 
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
             if self.yielded {
                 Poll::Ready(())
             } else {
@@ -301,19 +302,18 @@ pub async fn reschedule() {
 
 #[cfg(test)]
 mod tests {
-    use crate::Runner;
-
     use super::*;
+    use crate::{Clock, Runner, Spawner};
     use tokio::sync::mpsc;
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
-        let (runner, spawner) = Executor::new(seed);
-        runner.run(async move {
+        let (runner, context) = Executor::init(seed);
+        runner.start(async move {
             // Randomly schedule tasks
             let (sender, mut receiver) = mpsc::unbounded_channel();
-            spawner.spawn(task("Task 1", sender.clone()));
-            spawner.spawn(task("Task 2", sender.clone()));
-            spawner.spawn(task("Task 3", sender));
+            context.spawn(task("Task 1", sender.clone()));
+            context.spawn(task("Task 2", sender.clone()));
+            context.spawn(task("Task 3", sender));
 
             // Collect output order
             let mut outputs = Vec::new();
@@ -358,29 +358,28 @@ mod tests {
 
     #[test]
     fn test_clock() {
-        let (runner, spawner) = Executor::new(0);
+        let (runner, context) = Executor::init(0);
 
         // Check initial time
-        assert_eq!(spawner.current(), SystemTime::UNIX_EPOCH);
+        assert_eq!(context.current(), SystemTime::UNIX_EPOCH);
 
         // Simulate sleeping task
         let sleep_duration = Duration::from_millis(10);
-        runner.run(async move {
-            spawner.sleep(sleep_duration).await;
+        runner.start(async move {
+            context.sleep(sleep_duration).await;
+            // After run, time should have advanced
+            let expected_time = SystemTime::UNIX_EPOCH + sleep_duration;
+            assert_eq!(context.current(), expected_time);
         });
-
-        // After run, time should have advanced
-        let expected_time = SystemTime::UNIX_EPOCH + sleep_duration;
-        assert_eq!(spawner.current(), expected_time);
     }
 
     #[test]
     #[allow(clippy::empty_loop)]
     fn test_run_stops_when_root_task_ends() {
-        let (runner, spawner) = Executor::new(0);
-        runner.run(async move {
-            spawner.spawn(async { loop {} });
-            spawner.spawn(async { loop {} });
+        let (runner, context) = Executor::init(0);
+        runner.start(async move {
+            context.spawn(async { loop {} });
+            context.spawn(async { loop {} });
             // Root task ends here without waiting for other tasks
         });
     }
