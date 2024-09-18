@@ -2,7 +2,7 @@ use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
-use commonware_executor::{Clock, Executor};
+use commonware_executor::{Clock, Spawner};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -16,8 +16,8 @@ type Task = (
     oneshot::Sender<Result<Vec<PublicKey>, Error>>,
 );
 
-pub struct Network<E: Executor + Rng + Clock> {
-    executor: E,
+pub struct Network<E: Spawner + Rng + Clock> {
+    context: E,
     cfg: Config,
 
     sender: mpsc::UnboundedSender<Task>,
@@ -49,12 +49,12 @@ pub struct Config {
     pub max_message_size: usize,
 }
 
-impl<E: Executor + Rng + Clock> Network<E> {
+impl<E: Spawner + Rng + Clock> Network<E> {
     /// Create a new simulated network.
-    pub fn new(executor: E, cfg: Config) -> Self {
+    pub fn new(context: E, cfg: Config) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
-            executor,
+            context,
             cfg,
             sender,
             receiver,
@@ -70,7 +70,7 @@ impl<E: Executor + Rng + Clock> Network<E> {
         let (sender, receiver) = mpsc::unbounded_channel();
         self.agents.insert(public_key.clone(), sender);
         (
-            Sender::new(self.executor.clone(), public_key, self.sender.clone()),
+            Sender::new(self.context.clone(), public_key, self.sender.clone()),
             Receiver { receiver },
         )
     }
@@ -155,15 +155,15 @@ impl<E: Executor + Rng + Clock> Network<E> {
                 };
 
                 // Apply link settings
-                let should_deliver = self.executor.gen_bool(link.0.success_rate);
+                let should_deliver = self.context.gen_bool(link.0.success_rate);
                 let delay = Normal::new(link.0.latency_mean, link.0.latency_stddev)
                     .unwrap()
-                    .sample(&mut self.executor);
+                    .sample(&mut self.context);
                 debug!("sending message to {}: delay={}ms", hex(&recipient), delay);
 
                 // Send message
-                self.executor.spawn({
-                    let executor = self.executor.clone();
+                self.context.spawn({
+                    let context = self.context.clone();
                     let sender = sender.clone();
                     let recipient = recipient.clone();
                     let message = message.clone();
@@ -178,7 +178,7 @@ impl<E: Executor + Rng + Clock> Network<E> {
                         //
                         // Note: messages can be sent out of order (will not occur when using a
                         // stable TCP connection)
-                        executor.sleep(Duration::from_millis(delay as u64)).await;
+                        context.sleep(Duration::from_millis(delay as u64)).await;
 
                         // Drop message if success rate is too low
                         if !should_deliver {
@@ -200,7 +200,7 @@ impl<E: Executor + Rng + Clock> Network<E> {
             }
 
             // Notify sender of successful sends
-            self.executor.spawn(async move {
+            self.context.spawn(async move {
                 // Wait for semaphore to be acquired on all sends
                 for _ in 0..sent.len() {
                     acquired_receiver.recv().await.unwrap();
@@ -224,11 +224,11 @@ pub struct Sender {
 }
 
 impl Sender {
-    fn new(executor: impl Executor, me: PublicKey, sender: mpsc::UnboundedSender<Task>) -> Self {
+    fn new(context: impl Spawner, me: PublicKey, sender: mpsc::UnboundedSender<Task>) -> Self {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded_channel();
         let (low, mut low_receiver) = mpsc::unbounded_channel();
-        executor.spawn(async move {
+        context.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
