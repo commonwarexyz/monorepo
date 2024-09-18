@@ -3,8 +3,9 @@
 //! # Example
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::{Executor, reschedule}};
+//! use std::time::Duration;
 //!
-//! let (runner, context) = Executor::init(42);
+//! let (runner, context) = Executor::init(42, Duration::from_millis(1));
 //! runner.start(async move {
 //!     context.spawn(async move {
 //!         println!("Child started");
@@ -25,10 +26,12 @@
 //! ```
 
 use futures::task::{waker_ref, ArcWake};
-use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+use rand::prelude::SliceRandom;
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     collections::BinaryHeap,
     future::Future,
+    mem::replace,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
@@ -50,7 +53,6 @@ impl ArcWake for Task {
 }
 
 struct Tasks {
-    rng: Arc<Mutex<StdRng>>,
     queue: Mutex<Vec<Arc<Task>>>,
 }
 
@@ -73,35 +75,32 @@ impl Tasks {
         queue.push(task);
     }
 
-    fn get(&self) -> Option<Arc<Task>> {
+    fn drain(&self) -> Vec<Arc<Task>> {
         let mut queue = self.queue.lock().unwrap();
-        if queue.is_empty() {
-            None
-        } else {
-            let idx = {
-                let mut rng = self.rng.lock().unwrap();
-                rng.gen_range(0..queue.len())
-            };
-            Some(queue.swap_remove(idx))
-        }
+        let len = queue.len();
+        replace(&mut *queue, Vec::with_capacity(len))
+    }
+
+    fn len(&self) -> usize {
+        self.queue.lock().unwrap().len()
     }
 }
 
 pub struct Executor {
-    rng: Arc<Mutex<StdRng>>,
+    cycle: Duration,
+    rng: Mutex<StdRng>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
 }
 
 impl Executor {
-    pub fn init(seed: u64) -> (Runner, Context) {
-        let rng = Arc::new(Mutex::new(StdRng::seed_from_u64(seed)));
+    pub fn init(seed: u64, cycle: Duration) -> (Runner, Context) {
         let e = Self {
-            rng: rng.clone(),
+            cycle,
+            rng: Mutex::new(StdRng::seed_from_u64(seed)),
             time: Mutex::new(UNIX_EPOCH),
             tasks: Arc::new(Tasks {
-                rng,
                 queue: Mutex::new(Vec::new()),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -141,8 +140,21 @@ impl crate::Runner for Runner {
 
         // Process tasks until root task completes or progress stalls
         loop {
-            // Run tasks until the queue is empty
-            while let Some(task) = self.executor.tasks.get() {
+            // Snapshot available tasks
+            let mut tasks = self.executor.tasks.drain();
+
+            // Shuffle tasks
+            {
+                let mut rng = self.executor.rng.lock().unwrap();
+                tasks.shuffle(&mut *rng);
+            }
+
+            // Run all snapshotted tasks
+            //
+            // This approach is more efficient than randomly selecting a task one-at-a-time
+            // because it ensures we don't pull the same pending task multiple times in a row (without
+            // processing a different task required for other tasks to make progress).
+            for task in tasks {
                 let waker = waker_ref(&task);
                 let mut context = task::Context::from_waker(&waker);
                 let mut future = task.future.lock().unwrap();
@@ -154,34 +166,50 @@ impl crate::Runner for Runner {
                 }
             }
 
-            // Check to see if there are any sleeping tasks to wake
-            let mut to_wake = Vec::new();
+            // Advance time by cycle
+            //
+            // This approach prevents starvation if some task never yields (to approximate this,
+            // duration can be set to 1ns).
+            let mut current;
             {
-                // If there are no tasks to run and no tasks sleeping, the executor is stalled
-                // and will never finish.
-                let mut sleeping = self.executor.sleeping.lock().unwrap();
-                if sleeping.is_empty() {
-                    panic!("executor stalled");
-                }
+                let mut time = self.executor.time.lock().unwrap();
+                *time += self.executor.cycle;
+                current = *time;
+            }
+            debug!(
+                now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                "time advanced",
+            );
 
-                // Advance time to the next sleeping task.
-                let current;
-                let next = sleeping.peek().unwrap().time;
+            // Skip time if there is nothing to do
+            if self.executor.tasks.len() == 0 {
+                let mut skip = None;
                 {
-                    let mut time = self.executor.time.lock().unwrap();
-                    if *time < next {
-                        let old = *time;
-                        *time = next;
-                        debug!(
-                            old = old.duration_since(UNIX_EPOCH).unwrap().as_millis(),
-                            new = next.duration_since(UNIX_EPOCH).unwrap().as_millis(),
-                            "time advanced"
-                        );
+                    let sleeping = self.executor.sleeping.lock().unwrap();
+                    if let Some(next) = sleeping.peek() {
+                        if next.time > current {
+                            skip = Some(next.time);
+                        }
                     }
-                    current = *time;
                 }
+                if skip.is_some() {
+                    {
+                        let mut time = self.executor.time.lock().unwrap();
+                        *time = skip.unwrap();
+                        current = *time;
+                    }
+                    debug!(
+                        now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                        "time skipped",
+                    );
+                }
+            }
 
-                // Remove all sleeping tasks that are ready.
+            // Wake all sleeping tasks that are ready
+            let mut to_wake = Vec::new();
+            let mut remaining;
+            {
+                let mut sleeping = self.executor.sleeping.lock().unwrap();
                 while let Some(next) = sleeping.peek() {
                     if next.time <= current {
                         let sleeper = sleeping.pop().unwrap();
@@ -190,12 +218,21 @@ impl crate::Runner for Runner {
                         break;
                     }
                 }
+                remaining = sleeping.len();
             }
-
-            // Wake sleeping tasks.
             for waker in to_wake {
                 waker.wake();
             }
+
+            // Account for remaining tasks
+            remaining += self.executor.tasks.len();
+
+            // If there are no tasks to run and no tasks sleeping, the executor is stalled
+            // and will never finish.
+            if remaining == 0 {
+                panic!("runtime stalled");
+            }
+            debug!(remaining, "tasks remaining");
         }
     }
 }
@@ -343,7 +380,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
-        let (runner, context) = Executor::init(seed);
+        let (runner, context) = Executor::init(seed, Duration::from_millis(1));
         runner.start(async move {
             // Randomly schedule tasks
             let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -394,15 +431,16 @@ mod tests {
 
     #[test]
     fn test_clock() {
-        let (runner, context) = Executor::init(0);
+        let (runner, context) = Executor::init(0, Duration::from_millis(1));
 
         // Check initial time
         assert_eq!(context.current(), SystemTime::UNIX_EPOCH);
 
-        // Simulate sleeping task
-        let sleep_duration = Duration::from_millis(10);
+        // Run task that sleeps
         runner.start(async move {
+            let sleep_duration = Duration::from_millis(10);
             context.sleep(sleep_duration).await;
+
             // After run, time should have advanced
             let expected_time = SystemTime::UNIX_EPOCH + sleep_duration;
             assert_eq!(context.current(), expected_time);
@@ -412,7 +450,7 @@ mod tests {
     #[test]
     #[allow(clippy::empty_loop)]
     fn test_run_stops_when_root_task_ends() {
-        let (runner, context) = Executor::init(0);
+        let (runner, context) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             context.spawn(async { loop {} });
             context.spawn(async { loop {} });
