@@ -2,7 +2,7 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_executor::{utils, Executor, deterministic::Deterministic};
+//! use commonware_executor::{Executor, deterministic::{Deterministic, reschedule}};
 //!
 //! let mut executor = Deterministic::new(42);
 //! executor.run({
@@ -12,7 +12,7 @@
 //!             println!("Child started");
 //!             for _ in 0..5 {
 //!               // Simulate work
-//!               utils::reschedule().await;
+//!               reschedule().await;
 //!             }
 //!             println!("Child completed");
 //!         });
@@ -20,7 +20,7 @@
 //!         println!("Parent started");
 //!         for _ in 0..3 {
 //!           // Simulate work
-//!           utils::reschedule().await;
+//!           reschedule().await;
 //!         }
 //!         println!("Parent completed");
 //!     }
@@ -109,14 +109,21 @@ impl Executor for Deterministic {
         self.tasks.push(task);
     }
 
-    fn run<F>(&self, f: F)
+    fn run<F>(&self, f: F) -> F::Output
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
     {
         // Add root task to the queue
+        let output = Arc::new(Mutex::new(None));
         let task = Arc::new(Task {
             root: true,
-            future: Mutex::new(Box::pin(f)),
+            future: Mutex::new(Box::pin({
+                let output = output.clone();
+                async move {
+                    *output.lock().unwrap() = Some(f.await);
+                }
+            })),
             tasks: self.tasks.clone(),
         });
         self.tasks.push(task);
@@ -131,14 +138,14 @@ impl Executor for Deterministic {
                     // Task is re-queued in its `wake_by_ref` implementation.
                 } else if task.root {
                     // Root task completed
-                    return;
+                    return output.lock().unwrap().take().unwrap();
                 }
             }
 
             // Check to see if there are any sleeping tasks
             let mut sleeping = self.sleeping.lock().unwrap();
             if sleeping.is_empty() {
-                break;
+                panic!("executor stalled");
             }
 
             // Advance time to the next sleeping task
@@ -282,30 +289,25 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
         let executor = Deterministic::new(seed);
-        let output = Arc::new(Mutex::new(None));
         executor.run({
             let executor = executor.clone();
-            let output = output.clone();
             async move {
+                // Randomly schedule tasks
+                let (sender, mut receiver) = mpsc::unbounded_channel();
                 executor.spawn(task("Task 1", sender.clone()));
                 executor.spawn(task("Task 2", sender.clone()));
                 executor.spawn(task("Task 3", sender));
 
+                // Collect output order
                 let mut outputs = Vec::new();
                 while let Some(message) = receiver.recv().await {
                     outputs.push(message);
                 }
                 assert_eq!(outputs.len(), 3);
-                *output.lock().unwrap() = Some(outputs);
+                outputs
             }
-        });
-        Arc::try_unwrap(output)
-            .unwrap()
-            .into_inner()
-            .unwrap()
-            .unwrap()
+        })
     }
 
     async fn task(name: &'static str, messages: mpsc::UnboundedSender<&'static str>) {

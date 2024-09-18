@@ -30,110 +30,128 @@ mod tests {
     use std::collections::HashMap;
     use tokio::sync::mpsc;
 
-    async fn simulate_messages(executor: Deterministic, size: usize) {
+    fn simulate_messages(seed: u64, size: usize) -> Vec<usize> {
         // Create simulated network
-        let mut network = network::Network::new(
-            executor.clone(),
-            network::Config {
-                max_message_size: 1024 * 1024,
-            },
-        );
-
-        // Register agents
-        let mut agents = HashMap::new();
-        let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
-        for i in 0..size {
-            let pk = insecure_signer(i as u64).me();
-            let (sender, mut receiver) = network.register(pk.clone());
-            agents.insert(pk, sender);
-            let agent_sender = seen_sender.clone();
-            executor.spawn(async move {
-                for _ in 0..size {
-                    receiver.recv().await.unwrap();
-                }
-                agent_sender.send(()).await.unwrap();
-
-                // Exiting early here tests the case where the recipient end of an agent is dropped
-                println!("exited: {}", i);
-                // TODO: not yet deterministic
-            });
-        }
-
-        // Randomly link agents
-        let only_inbound = insecure_signer(0).me();
-        for agent in agents.keys() {
-            if agent == &only_inbound {
-                // Test that we can gracefully handle missing links
-                continue;
-            }
-            for other in agents.keys() {
-                let result = network.link(
-                    agent.clone(),
-                    other.clone(),
-                    network::Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 2.5,
-                        success_rate: 0.75,
-                        capacity: 1,
+        let executor = Deterministic::new(seed);
+        executor.run({
+            let executor = executor.clone();
+            async move {
+                let mut network = network::Network::new(
+                    executor.clone(),
+                    network::Config {
+                        max_message_size: 1024 * 1024,
                     },
                 );
-                if agent == other {
-                    assert!(matches!(result, Err(Error::LinkingSelf)));
-                } else {
-                    assert!(result.is_ok());
-                }
-            }
-        }
 
-        // Send messages
-        executor.spawn({
-            let mut executor = executor.clone();
-            async move {
-                let keys = agents.keys().collect::<Vec<_>>();
-                loop {
-                    let index = executor.gen_range(0..keys.len());
-                    let sender = keys[index];
-                    let msg = format!("hello from {}", hex(sender));
-                    let msg = Bytes::from(msg);
-                    let message_sender = agents.get(sender).unwrap().clone();
-                    let sent = message_sender
-                        .send(Recipients::All, msg.clone(), false)
-                        .await
-                        .unwrap();
-                    if sender == &only_inbound {
-                        assert_eq!(sent.len(), 0);
-                    } else {
-                        assert_eq!(sent.len(), keys.len() - 1);
+                // Register agents
+                let mut agents = HashMap::new();
+                let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
+                for i in 0..size {
+                    let pk = insecure_signer(i as u64).me();
+                    let (sender, mut receiver) = network.register(pk.clone());
+                    agents.insert(pk, sender);
+                    let agent_sender = seen_sender.clone();
+                    executor.spawn(async move {
+                        for _ in 0..size {
+                            receiver.recv().await.unwrap();
+                        }
+                        agent_sender.send(i).await.unwrap();
+
+                        // Exiting early here tests the case where the recipient end of an agent is dropped
+                    });
+                }
+
+                // Randomly link agents
+                let only_inbound = insecure_signer(0).me();
+                for agent in agents.keys() {
+                    if agent == &only_inbound {
+                        // Test that we can gracefully handle missing links
+                        continue;
+                    }
+                    for other in agents.keys() {
+                        let result = network.link(
+                            agent.clone(),
+                            other.clone(),
+                            network::Link {
+                                latency_mean: 5.0,
+                                latency_stddev: 2.5,
+                                success_rate: 0.75,
+                                capacity: 1,
+                            },
+                        );
+                        if agent == other {
+                            assert!(matches!(result, Err(Error::LinkingSelf)));
+                        } else {
+                            assert!(result.is_ok());
+                        }
                     }
                 }
+
+                // Send messages
+                executor.spawn({
+                    let mut executor = executor.clone();
+                    async move {
+                        let mut keys = agents.keys().collect::<Vec<_>>();
+                        keys.sort();
+                        loop {
+                            let index = executor.gen_range(0..keys.len());
+                            let sender = keys[index];
+                            let msg = format!("hello from {}", hex(sender));
+                            let msg = Bytes::from(msg);
+                            let message_sender = agents.get(sender).unwrap().clone();
+                            let sent = message_sender
+                                .send(Recipients::All, msg.clone(), false)
+                                .await
+                                .unwrap();
+                            if sender == &only_inbound {
+                                assert_eq!(sent.len(), 0);
+                            } else {
+                                assert_eq!(sent.len(), keys.len() - 1);
+                            }
+                        }
+                    }
+                });
+
+                // Start network
+                executor.spawn(network.run());
+
+                // Wait for all recipients
+                let mut results = Vec::new();
+                for _ in 0..size {
+                    results.push(seen_receiver.recv().await.unwrap());
+                }
+                results
             }
-        });
+        })
+    }
 
-        // Start network
-        executor.spawn(network.run());
+    fn compare_outputs(seeds: u64, size: usize) {
+        // Collect outputs
+        let mut outputs = Vec::new();
+        for seed in 0..seeds {
+            outputs.push(simulate_messages(seed, size));
+        }
 
-        // Wait for all recipients
-        for _ in 0..size {
-            seen_receiver.recv().await.unwrap();
+        // Confirm outputs are deterministic
+        for seed in 0..seeds {
+            let output = simulate_messages(seed, size);
+            assert_eq!(output, outputs[seed as usize]);
         }
     }
 
     #[test]
     fn test_small() {
-        let executor = Deterministic::new(0);
-        executor.run(simulate_messages(executor.clone(), 100));
+        compare_outputs(25, 10);
     }
 
     #[test]
     fn test_medium() {
-        let executor = Deterministic::new(0);
-        executor.run(simulate_messages(executor.clone(), 100));
+        compare_outputs(10, 100);
     }
 
     #[test]
     fn test_large() {
-        let executor = Deterministic::new(0);
-        executor.run(simulate_messages(executor.clone(), 500));
+        compare_outputs(5, 250);
     }
 
     #[test]

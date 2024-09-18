@@ -49,7 +49,7 @@ pub struct Config {
     pub max_message_size: usize,
 }
 
-impl<E: Executor + Rng + Clock + Send> Network<E> {
+impl<E: Executor + Rng + Clock> Network<E> {
     /// Create a new simulated network.
     pub fn new(executor: E, cfg: Config) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -265,9 +265,7 @@ impl crate::Sender for Sender {
         channel
             .send((self.me.clone(), recipients, message, sender))
             .map_err(|_| Error::NetworkClosed)?;
-        let result = receiver.await.map_err(|_| Error::NetworkClosed)?;
-        println!("sent message from {}", hex(&self.me));
-        result
+        receiver.await.map_err(|_| Error::NetworkClosed)?
     }
 }
 

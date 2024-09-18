@@ -35,11 +35,12 @@ impl Executor for Tokio {
         self.runtime.spawn(f);
     }
 
-    fn run<F>(&self, f: F)
+    fn run<F>(&self, f: F) -> F::Output
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
     {
-        self.runtime.block_on(f);
+        self.runtime.block_on(f)
     }
 }
 
@@ -99,15 +100,17 @@ mod tests {
 
     #[test]
     fn test_executor_runs_tasks() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
         let executor = Tokio::new(1);
         executor.run({
             let executor = executor.clone();
             async move {
+                // Randomly schedule tasks
+                let (sender, mut receiver) = mpsc::unbounded_channel();
                 executor.spawn(task("Task 1", sender.clone()));
                 executor.spawn(task("Task 2", sender.clone()));
                 executor.spawn(task("Task 3", sender));
 
+                // Collect output order
                 let mut output = Vec::new();
                 while let Some(message) = receiver.recv().await {
                     output.push(message);
