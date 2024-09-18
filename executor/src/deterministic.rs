@@ -2,32 +2,28 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_executor::{Executor, deterministic::{Deterministic, reschedule}};
+//! use commonware_executor::{Spawner, Runner, deterministic::{Executor, reschedule}};
 //!
-//! let mut executor = Deterministic::new(42);
-//! executor.run({
-//!     let executor = executor.clone();
-//!     async move {
-//!         executor.spawn(async move {
-//!             println!("Child started");
-//!             for _ in 0..5 {
-//!               // Simulate work
-//!               reschedule().await;
-//!             }
-//!             println!("Child completed");
-//!         });
-//!
-//!         println!("Parent started");
-//!         for _ in 0..3 {
+//! let (runner, context) = Executor::init(42);
+//! runner.start(async move {
+//!     context.spawn(async move {
+//!         println!("Child started");
+//!         for _ in 0..5 {
 //!           // Simulate work
 //!           reschedule().await;
 //!         }
-//!         println!("Parent completed");
+//!         println!("Child completed");
+//!     });
+//!
+//!     println!("Parent started");
+//!     for _ in 0..3 {
+//!       // Simulate work
+//!       reschedule().await;
 //!     }
+//!     println!("Parent completed");
 //! });
 //! ```
 
-use crate::{Clock, Executor};
 use futures::task::{waker_ref, ArcWake};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
@@ -35,7 +31,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
-    task::{Context, Poll, Waker},
+    task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::debug;
@@ -76,40 +72,38 @@ impl TaskQueue {
 }
 
 #[derive(Clone)]
-pub struct Deterministic {
+pub struct Executor {
     rng: Arc<Mutex<StdRng>>,
     time: Arc<Mutex<SystemTime>>,
     tasks: Arc<TaskQueue>,
     sleeping: Arc<Mutex<BTreeMap<SystemTime, Vec<Waker>>>>,
 }
 
-impl Deterministic {
-    pub fn new(seed: u64) -> Self {
-        Self {
+impl Executor {
+    pub fn init(seed: u64) -> (Runner, Context) {
+        let e = Self {
             rng: Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
             time: Arc::new(Mutex::new(UNIX_EPOCH)),
             tasks: Arc::new(TaskQueue {
                 queue: Mutex::new(VecDeque::new()),
             }),
             sleeping: Arc::new(Mutex::new(BTreeMap::new())),
-        }
+        };
+        (
+            Runner {
+                executor: e.clone(),
+            },
+            Context { executor: e },
+        )
     }
 }
 
-impl Executor for Deterministic {
-    fn spawn<F>(&self, f: F)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let task = Arc::new(Task {
-            root: false,
-            future: Mutex::new(Box::pin(f)),
-            tasks: self.tasks.clone(),
-        });
-        self.tasks.push(task);
-    }
+pub struct Runner {
+    executor: Executor,
+}
 
-    fn run<F>(&self, f: F) -> F::Output
+impl crate::Runner for Runner {
+    fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
@@ -124,15 +118,15 @@ impl Executor for Deterministic {
                     *output.lock().unwrap() = Some(f.await);
                 }
             })),
-            tasks: self.tasks.clone(),
+            tasks: self.executor.tasks.clone(),
         });
-        self.tasks.push(task);
+        self.executor.tasks.push(task);
 
         loop {
             // Run tasks until the queue is empty
-            while let Some(task) = self.tasks.get(self.rng.clone()) {
+            while let Some(task) = self.executor.tasks.get(self.executor.rng.clone()) {
                 let waker = waker_ref(&task);
-                let mut context = Context::from_waker(&waker);
+                let mut context = task::Context::from_waker(&waker);
                 let mut future = task.future.lock().unwrap();
                 if future.as_mut().poll(&mut context).is_pending() {
                     // Task is re-queued in its `wake_by_ref` implementation.
@@ -143,7 +137,7 @@ impl Executor for Deterministic {
             }
 
             // Check to see if there are any sleeping tasks
-            let mut sleeping = self.sleeping.lock().unwrap();
+            let mut sleeping = self.executor.sleeping.lock().unwrap();
             if sleeping.is_empty() {
                 panic!("executor stalled");
             }
@@ -152,7 +146,7 @@ impl Executor for Deterministic {
             let current;
             let next = sleeping.iter().next().unwrap().0;
             {
-                let mut time = self.time.lock().unwrap();
+                let mut time = self.executor.time.lock().unwrap();
                 if *time < *next {
                     let old = *time;
                     *time = *next;
@@ -188,38 +182,58 @@ impl Executor for Deterministic {
     }
 }
 
-struct SleepFuture {
-    wake: SystemTime,
-    executor: Deterministic,
-    registered: bool,
+#[derive(Clone)]
+pub struct Context {
+    executor: Executor,
 }
 
-impl Future for SleepFuture {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let current_time = self.executor.current();
-        if current_time >= self.wake {
-            Poll::Ready(())
-        } else {
-            if !self.registered {
-                {
-                    let mut sleeping = self.executor.sleeping.lock().unwrap();
-                    sleeping
-                        .entry(self.wake)
-                        .or_default()
-                        .push(cx.waker().clone());
-                }
-                self.registered = true;
-            }
-            Poll::Pending
-        }
+impl crate::Spawner for Context {
+    fn spawn<F>(&self, f: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let task = Arc::new(Task {
+            root: false,
+            future: Mutex::new(Box::pin(f)),
+            tasks: self.executor.tasks.clone(),
+        });
+        self.executor.tasks.push(task);
     }
 }
 
-impl Clock for Deterministic {
+struct Sleeper {
+    wake: SystemTime,
+    executor: Executor,
+    registered: bool,
+}
+
+impl Future for Sleeper {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        {
+            let current_time = *self.executor.time.lock().unwrap();
+            if current_time >= self.wake {
+                return Poll::Ready(());
+            }
+        }
+        if !self.registered {
+            {
+                let mut sleeping = self.executor.sleeping.lock().unwrap();
+                sleeping
+                    .entry(self.wake)
+                    .or_default()
+                    .push(cx.waker().clone());
+            }
+            self.registered = true;
+        }
+        Poll::Pending
+    }
+}
+
+impl crate::Clock for Context {
     fn current(&self) -> SystemTime {
-        *self.time.lock().unwrap()
+        *self.executor.time.lock().unwrap()
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
@@ -227,37 +241,37 @@ impl Clock for Deterministic {
             .current()
             .checked_add(duration)
             .expect("overflow when setting wake time");
-        SleepFuture {
+        Sleeper {
             wake,
-            executor: self.clone(),
+            executor: self.executor.clone(),
             registered: false,
         }
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        SleepFuture {
+        Sleeper {
             wake: deadline,
-            executor: self.clone(),
+            executor: self.executor.clone(),
             registered: false,
         }
     }
 }
 
-impl RngCore for Deterministic {
+impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
-        self.rng.lock().unwrap().next_u32()
+        self.executor.rng.lock().unwrap().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.rng.lock().unwrap().next_u64()
+        self.executor.rng.lock().unwrap().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.rng.lock().unwrap().fill_bytes(dest)
+        self.executor.rng.lock().unwrap().fill_bytes(dest)
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.rng.lock().unwrap().try_fill_bytes(dest)
+        self.executor.rng.lock().unwrap().try_fill_bytes(dest)
     }
 }
 
@@ -269,7 +283,7 @@ pub async fn reschedule() {
     impl Future for Reschedule {
         type Output = ();
 
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
             if self.yielded {
                 Poll::Ready(())
             } else {
@@ -286,27 +300,25 @@ pub async fn reschedule() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Clock, Runner, Spawner};
     use tokio::sync::mpsc;
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
-        let executor = Deterministic::new(seed);
-        executor.run({
-            let executor = executor.clone();
-            async move {
-                // Randomly schedule tasks
-                let (sender, mut receiver) = mpsc::unbounded_channel();
-                executor.spawn(task("Task 1", sender.clone()));
-                executor.spawn(task("Task 2", sender.clone()));
-                executor.spawn(task("Task 3", sender));
+        let (runner, context) = Executor::init(seed);
+        runner.start(async move {
+            // Randomly schedule tasks
+            let (sender, mut receiver) = mpsc::unbounded_channel();
+            context.spawn(task("Task 1", sender.clone()));
+            context.spawn(task("Task 2", sender.clone()));
+            context.spawn(task("Task 3", sender));
 
-                // Collect output order
-                let mut outputs = Vec::new();
-                while let Some(message) = receiver.recv().await {
-                    outputs.push(message);
-                }
-                assert_eq!(outputs.len(), 3);
-                outputs
+            // Collect output order
+            let mut outputs = Vec::new();
+            while let Some(message) = receiver.recv().await {
+                outputs.push(message);
             }
+            assert_eq!(outputs.len(), 3);
+            outputs
         })
     }
 
@@ -343,35 +355,28 @@ mod tests {
 
     #[test]
     fn test_clock() {
-        let executor = Deterministic::new(0);
+        let (runner, context) = Executor::init(0);
 
         // Check initial time
-        assert_eq!(executor.current(), SystemTime::UNIX_EPOCH);
+        assert_eq!(context.current(), SystemTime::UNIX_EPOCH);
 
         // Simulate sleeping task
         let sleep_duration = Duration::from_millis(10);
-        executor.run({
-            let executor = executor.clone();
-            async move {
-                executor.sleep(sleep_duration).await;
-            }
+        runner.start(async move {
+            context.sleep(sleep_duration).await;
+            // After run, time should have advanced
+            let expected_time = SystemTime::UNIX_EPOCH + sleep_duration;
+            assert_eq!(context.current(), expected_time);
         });
-
-        // After run, time should have advanced
-        let expected_time = SystemTime::UNIX_EPOCH + sleep_duration;
-        assert_eq!(executor.current(), expected_time);
     }
 
     #[test]
     #[allow(clippy::empty_loop)]
     fn test_run_stops_when_root_task_ends() {
-        let executor = Deterministic::new(0);
-        executor.run({
-            let executor = executor.clone();
-            async move {
-                executor.spawn(async { loop {} });
-                executor.spawn(async { loop {} });
-            }
+        let (runner, context) = Executor::init(0);
+        runner.start(async move {
+            context.spawn(async { loop {} });
+            context.spawn(async { loop {} });
             // Root task ends here without waiting for other tasks
         });
     }
