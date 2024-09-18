@@ -1,4 +1,4 @@
-//! A non-deterministic runtime based on Tokio.
+//! A non-deterministic runtime based on Tokio with secure randomness.
 //!
 //! # Example
 //! ```rust
