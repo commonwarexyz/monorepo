@@ -26,9 +26,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::insecure_signer, utils::hex, Scheme};
     use commonware_executor::{deterministic::Deterministic, Executor};
-    use rand::rngs::StdRng;
     use rand::Rng;
-    use rand::SeedableRng;
     use std::collections::HashMap;
     use tokio::sync::mpsc;
 
@@ -56,6 +54,8 @@ mod tests {
                 agent_sender.send(()).await.unwrap();
 
                 // Exiting early here tests the case where the recipient end of an agent is dropped
+                println!("exited: {}", i);
+                // TODO: not yet deterministic
             });
         }
 
@@ -86,22 +86,25 @@ mod tests {
         }
 
         // Send messages
-        executor.spawn(async move {
-            let mut rng = StdRng::from_entropy();
-            let keys = agents.keys().collect::<Vec<_>>();
-            loop {
-                let sender = keys[rng.gen_range(0..keys.len())];
-                let msg = format!("hello from {}", hex(sender));
-                let msg = Bytes::from(msg);
-                let message_sender = agents.get(sender).unwrap().clone();
-                let sent = message_sender
-                    .send(Recipients::All, msg.clone(), false)
-                    .await
-                    .unwrap();
-                if sender == &only_inbound {
-                    assert_eq!(sent.len(), 0);
-                } else {
-                    assert_eq!(sent.len(), keys.len() - 1);
+        executor.spawn({
+            let mut executor = executor.clone();
+            async move {
+                let keys = agents.keys().collect::<Vec<_>>();
+                loop {
+                    let index = executor.gen_range(0..keys.len());
+                    let sender = keys[index];
+                    let msg = format!("hello from {}", hex(sender));
+                    let msg = Bytes::from(msg);
+                    let message_sender = agents.get(sender).unwrap().clone();
+                    let sent = message_sender
+                        .send(Recipients::All, msg.clone(), false)
+                        .await
+                        .unwrap();
+                    if sender == &only_inbound {
+                        assert_eq!(sent.len(), 0);
+                    } else {
+                        assert_eq!(sent.len(), keys.len() - 1);
+                    }
                 }
             }
         });
@@ -137,7 +140,7 @@ mod tests {
     fn test_invalid_message() {
         let executor = Deterministic::new(0);
         executor.run({
-            let executor = executor.clone();
+            let mut executor = executor.clone();
             async move {
                 // Create simulated network
                 let mut network = network::Network::new(
@@ -159,12 +162,12 @@ mod tests {
                 executor.spawn(network.run());
 
                 // Send invalid message
-                let mut rng = StdRng::from_entropy();
                 let keys = agents.keys().collect::<Vec<_>>();
-                let sender = keys[rng.gen_range(0..keys.len())];
+                let index = executor.gen_range(0..keys.len());
+                let sender = keys[index];
                 let message_sender = agents.get(sender).unwrap().clone();
                 let mut msg = vec![0u8; 1024 * 1024 + 1];
-                rng.fill(&mut msg[..]);
+                executor.fill(&mut msg[..]);
                 let result = message_sender
                     .send(Recipients::All, msg.into(), false)
                     .await

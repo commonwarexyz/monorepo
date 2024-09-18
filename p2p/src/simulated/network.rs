@@ -5,11 +5,7 @@ use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_executor::{Clock, Executor};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{self, Duration},
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{debug, error};
 
@@ -269,7 +265,9 @@ impl crate::Sender for Sender {
         channel
             .send((self.me.clone(), recipients, message, sender))
             .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
+        let result = receiver.await.map_err(|_| Error::NetworkClosed)?;
+        println!("sent message from {}", hex(&self.me));
+        result
     }
 }
 
