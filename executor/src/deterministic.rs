@@ -27,7 +27,7 @@
 use futures::task::{waker_ref, ArcWake};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
-    collections::BTreeMap,
+    collections::BinaryHeap,
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -91,7 +91,7 @@ pub struct Executor {
     rng: Arc<Mutex<StdRng>>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
-    sleeping: Mutex<BTreeMap<SystemTime, Vec<Waker>>>,
+    sleeping: Mutex<BinaryHeap<Alarm>>,
 }
 
 impl Executor {
@@ -104,7 +104,7 @@ impl Executor {
                 rng,
                 queue: Mutex::new(Vec::new()),
             }),
-            sleeping: Mutex::new(BTreeMap::new()),
+            sleeping: Mutex::new(BinaryHeap::new()),
         };
         let e = Arc::new(e);
         (
@@ -166,12 +166,12 @@ impl crate::Runner for Runner {
 
                 // Advance time to the next sleeping task.
                 let current;
-                let next = sleeping.iter().next().unwrap().0;
+                let next = sleeping.peek().unwrap().time;
                 {
                     let mut time = self.executor.time.lock().unwrap();
-                    if *time < *next {
+                    if *time < next {
                         let old = *time;
-                        *time = *next;
+                        *time = next;
                         debug!(
                             old = old.duration_since(UNIX_EPOCH).unwrap().as_millis(),
                             new = time.duration_since(UNIX_EPOCH).unwrap().as_millis(),
@@ -182,13 +182,13 @@ impl crate::Runner for Runner {
                 }
 
                 // Remove all sleeping tasks that are ready.
-                let to_remove = sleeping
-                    .range(..=current)
-                    .map(&|(&time, _)| time)
-                    .collect::<Vec<_>>();
-                for key in to_remove {
-                    let wakers = sleeping.remove(&key).unwrap();
-                    to_wake.extend(wakers);
+                while let Some(next) = sleeping.peek() {
+                    if next.time <= current {
+                        let sleeper = sleeping.pop().unwrap();
+                        to_wake.push(sleeper.waker);
+                    } else {
+                        break;
+                    }
                 }
             }
 
@@ -216,9 +216,34 @@ impl crate::Spawner for Context {
 
 struct Sleeper {
     executor: Arc<Executor>,
-
-    wake: SystemTime,
+    time: SystemTime,
     registered: bool,
+}
+
+struct Alarm {
+    time: SystemTime,
+    waker: Waker,
+}
+
+impl PartialEq for Alarm {
+    fn eq(&self, other: &Self) -> bool {
+        self.time.eq(&other.time)
+    }
+}
+
+impl Eq for Alarm {}
+
+impl PartialOrd for Alarm {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Alarm {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reverse the ordering for min-heap
+        other.time.cmp(&self.time)
+    }
 }
 
 impl Future for Sleeper {
@@ -227,19 +252,16 @@ impl Future for Sleeper {
     fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         {
             let current_time = *self.executor.time.lock().unwrap();
-            if current_time >= self.wake {
+            if current_time >= self.time {
                 return Poll::Ready(());
             }
         }
         if !self.registered {
-            {
-                let mut sleeping = self.executor.sleeping.lock().unwrap();
-                sleeping
-                    .entry(self.wake)
-                    .or_default()
-                    .push(cx.waker().clone());
-            }
             self.registered = true;
+            self.executor.sleeping.lock().unwrap().push(Alarm {
+                time: self.time,
+                waker: cx.waker().clone(),
+            });
         }
         Poll::Pending
     }
@@ -251,14 +273,14 @@ impl crate::Clock for Context {
     }
 
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
-        let wake = self
+        let time = self
             .current()
             .checked_add(duration)
             .expect("overflow when setting wake time");
         Sleeper {
             executor: self.executor.clone(),
 
-            wake,
+            time,
             registered: false,
         }
     }
@@ -267,7 +289,7 @@ impl crate::Clock for Context {
         Sleeper {
             executor: self.executor.clone(),
 
-            wake: deadline,
+            time: deadline,
             registered: false,
         }
     }
@@ -317,6 +339,7 @@ pub async fn reschedule() {
 mod tests {
     use super::*;
     use crate::{Clock, Runner, Spawner};
+    use futures::task::noop_waker;
     use tokio::sync::mpsc;
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
@@ -395,5 +418,48 @@ mod tests {
             context.spawn(async { loop {} });
             // Root task ends here without waiting for other tasks
         });
+    }
+
+    #[test]
+    fn test_alarm_min_heap() {
+        let now = SystemTime::now();
+        let alarms = vec![
+            Alarm {
+                time: now + Duration::new(10, 0),
+                waker: noop_waker(),
+            },
+            Alarm {
+                time: now + Duration::new(5, 0),
+                waker: noop_waker(),
+            },
+            Alarm {
+                time: now + Duration::new(15, 0),
+                waker: noop_waker(),
+            },
+            Alarm {
+                time: now + Duration::new(5, 0),
+                waker: noop_waker(),
+            },
+        ];
+
+        let mut heap = BinaryHeap::new();
+        for alarm in alarms {
+            heap.push(alarm);
+        }
+
+        let mut sorted_times = vec![];
+        while let Some(alarm) = heap.pop() {
+            sorted_times.push(alarm.time);
+        }
+
+        assert_eq!(
+            sorted_times,
+            vec![
+                now + Duration::new(5, 0),
+                now + Duration::new(5, 0),
+                now + Duration::new(10, 0),
+                now + Duration::new(15, 0),
+            ]
+        );
     }
 }
