@@ -37,9 +37,10 @@ use std::{
 use tracing::debug;
 
 struct Task {
+    tasks: Arc<Tasks>,
+
     root: bool,
     future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
-    tasks: Arc<TaskQueue>,
 }
 
 impl ArcWake for Task {
@@ -48,46 +49,64 @@ impl ArcWake for Task {
     }
 }
 
-struct TaskQueue {
+struct Tasks {
+    rng: Arc<Mutex<StdRng>>,
     queue: Mutex<Vec<Arc<Task>>>,
 }
 
-impl TaskQueue {
+impl Tasks {
+    fn register(
+        arc_self: &Arc<Self>,
+        root: bool,
+        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    ) {
+        let mut queue = arc_self.queue.lock().unwrap();
+        queue.push(Arc::new(Task {
+            root,
+            future: Mutex::new(future),
+            tasks: arc_self.clone(),
+        }));
+    }
+
     fn enqueue(&self, task: Arc<Task>) {
         let mut queue = self.queue.lock().unwrap();
         queue.push(task);
     }
 
-    fn get(&self, rng: Arc<Mutex<StdRng>>) -> Option<Arc<Task>> {
-        let mut rng = rng.lock().unwrap();
+    fn get(&self) -> Option<Arc<Task>> {
         let mut queue = self.queue.lock().unwrap();
         if queue.is_empty() {
             None
         } else {
-            let idx = rng.gen_range(0..queue.len());
+            let idx = {
+                let mut rng = self.rng.lock().unwrap();
+                rng.gen_range(0..queue.len())
+            };
             Some(queue.swap_remove(idx))
         }
     }
 }
 
-#[derive(Clone)]
 pub struct Executor {
     rng: Arc<Mutex<StdRng>>,
-    time: Arc<Mutex<SystemTime>>,
-    tasks: Arc<TaskQueue>,
-    sleeping: Arc<Mutex<BTreeMap<SystemTime, Vec<Waker>>>>,
+    time: Mutex<SystemTime>,
+    tasks: Arc<Tasks>,
+    sleeping: Mutex<BTreeMap<SystemTime, Vec<Waker>>>,
 }
 
 impl Executor {
     pub fn init(seed: u64) -> (Runner, Context) {
+        let rng = Arc::new(Mutex::new(StdRng::seed_from_u64(seed)));
         let e = Self {
-            rng: Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
-            time: Arc::new(Mutex::new(UNIX_EPOCH)),
-            tasks: Arc::new(TaskQueue {
+            rng: rng.clone(),
+            time: Mutex::new(UNIX_EPOCH),
+            tasks: Arc::new(Tasks {
+                rng,
                 queue: Mutex::new(Vec::new()),
             }),
-            sleeping: Arc::new(Mutex::new(BTreeMap::new())),
+            sleeping: Mutex::new(BTreeMap::new()),
         };
+        let e = Arc::new(e);
         (
             Runner {
                 executor: e.clone(),
@@ -98,7 +117,7 @@ impl Executor {
 }
 
 pub struct Runner {
-    executor: Executor,
+    executor: Arc<Executor>,
 }
 
 impl crate::Runner for Runner {
@@ -109,21 +128,21 @@ impl crate::Runner for Runner {
     {
         // Add root task to the queue
         let output = Arc::new(Mutex::new(None));
-        let task = Arc::new(Task {
-            root: true,
-            future: Mutex::new(Box::pin({
+        Tasks::register(
+            &self.executor.tasks,
+            true,
+            Box::pin({
                 let output = output.clone();
                 async move {
                     *output.lock().unwrap() = Some(f.await);
                 }
-            })),
-            tasks: self.executor.tasks.clone(),
-        });
-        self.executor.tasks.enqueue(task);
+            }),
+        );
 
+        // Process tasks until root task completes or progress stalls
         loop {
             // Run tasks until the queue is empty
-            while let Some(task) = self.executor.tasks.get(self.executor.rng.clone()) {
+            while let Some(task) = self.executor.tasks.get() {
                 let waker = waker_ref(&task);
                 let mut context = task::Context::from_waker(&waker);
                 let mut future = task.future.lock().unwrap();
@@ -135,47 +154,47 @@ impl crate::Runner for Runner {
                 }
             }
 
-            // Check to see if there are any sleeping tasks
-            let mut sleeping = self.executor.sleeping.lock().unwrap();
-            if sleeping.is_empty() {
-                panic!("executor stalled");
-            }
-
-            // Advance time to the next sleeping task
-            let current;
-            let next = sleeping.iter().next().unwrap().0;
+            // Check to see if there are any sleeping tasks to wake
+            let mut to_wake = Vec::new();
             {
-                let mut time = self.executor.time.lock().unwrap();
-                if *time < *next {
-                    let old = *time;
-                    *time = *next;
-                    debug!(
-                        old = old.duration_since(UNIX_EPOCH).unwrap().as_millis(),
-                        new = time.duration_since(UNIX_EPOCH).unwrap().as_millis(),
-                        "time advanced"
-                    );
+                // If there are no tasks to run and no tasks sleeping, the executor is stalled
+                // and will never finish.
+                let mut sleeping = self.executor.sleeping.lock().unwrap();
+                if sleeping.is_empty() {
+                    panic!("executor stalled");
                 }
-                current = *time;
+
+                // Advance time to the next sleeping task.
+                let current;
+                let next = sleeping.iter().next().unwrap().0;
+                {
+                    let mut time = self.executor.time.lock().unwrap();
+                    if *time < *next {
+                        let old = *time;
+                        *time = *next;
+                        debug!(
+                            old = old.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                            new = time.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                            "time advanced"
+                        );
+                    }
+                    current = *time;
+                }
+
+                // Remove all sleeping tasks that are ready.
+                let to_remove = sleeping
+                    .range(..=current)
+                    .map(&|(&time, _)| time)
+                    .collect::<Vec<_>>();
+                for key in to_remove {
+                    let wakers = sleeping.remove(&key).unwrap();
+                    to_wake.extend(wakers);
+                }
             }
 
-            // Remove all sleeping tasks that are ready
-            let mut revived = 0;
-            let to_remove = sleeping
-                .range(..=current)
-                .map(&|(&time, _)| time)
-                .collect::<Vec<_>>();
-            for key in to_remove {
-                let wakers = sleeping.remove(&key).unwrap();
-                for waker in wakers {
-                    waker.wake();
-                    revived += 1;
-                }
-            }
-            if revived > 0 {
-                debug!(
-                    current = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
-                    revived, "tasks revived from time change"
-                );
+            // Wake sleeping tasks.
+            for waker in to_wake {
+                waker.wake();
             }
         }
     }
@@ -183,7 +202,7 @@ impl crate::Runner for Runner {
 
 #[derive(Clone)]
 pub struct Context {
-    executor: Executor,
+    executor: Arc<Executor>,
 }
 
 impl crate::Spawner for Context {
@@ -191,18 +210,14 @@ impl crate::Spawner for Context {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let task = Arc::new(Task {
-            root: false,
-            future: Mutex::new(Box::pin(f)),
-            tasks: self.executor.tasks.clone(),
-        });
-        self.executor.tasks.enqueue(task);
+        Tasks::register(&self.executor.tasks, false, Box::pin(f));
     }
 }
 
 struct Sleeper {
+    executor: Arc<Executor>,
+
     wake: SystemTime,
-    executor: Executor,
     registered: bool,
 }
 
@@ -241,16 +256,18 @@ impl crate::Clock for Context {
             .checked_add(duration)
             .expect("overflow when setting wake time");
         Sleeper {
-            wake,
             executor: self.executor.clone(),
+
+            wake,
             registered: false,
         }
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
         Sleeper {
-            wake: deadline,
             executor: self.executor.clone(),
+
+            wake: deadline,
             registered: false,
         }
     }
