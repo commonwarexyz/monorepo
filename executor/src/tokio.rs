@@ -88,30 +88,33 @@ pub async fn reschedule() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
 
-    async fn task(name: &'static str, messages: Arc<Mutex<Vec<&'static str>>>) {
+    async fn task(name: &'static str, messages: mpsc::UnboundedSender<&'static str>) {
         for _ in 0..5 {
             reschedule().await;
         }
-        messages.lock().unwrap().push(name);
+        messages.send(name).unwrap();
     }
 
     #[test]
     fn test_executor_runs_tasks() {
-        let messages = Arc::new(Mutex::new(Vec::new()));
+        let (sender, mut receiver) = mpsc::unbounded_channel();
         let executor = Tokio::new(1);
         executor.run({
-            let messages = messages.clone();
             let executor = executor.clone();
             async move {
-                executor.spawn(task("Task 1", messages.clone()));
-                executor.spawn(task("Task 2", messages.clone()));
-                executor.spawn(task("Task 3", messages.clone()));
+                executor.spawn(task("Task 1", sender.clone()));
+                executor.spawn(task("Task 2", sender.clone()));
+                executor.spawn(task("Task 3", sender));
+
+                let mut output = Vec::new();
+                while let Some(message) = receiver.recv().await {
+                    output.push(message);
+                }
+                assert_eq!(output.len(), 3);
             }
         });
-        let output = Arc::try_unwrap(messages).unwrap().into_inner().unwrap();
-        assert_eq!(output.len(), 3);
     }
 
     #[test]
