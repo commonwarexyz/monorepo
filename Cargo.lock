@@ -442,16 +442,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-executor"
-version = "0.0.2"
-dependencies = [
- "futures",
- "rand",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "commonware-p2p"
 version = "0.0.16"
 dependencies = [
@@ -459,7 +449,7 @@ dependencies = [
  "bytes",
  "chacha20poly1305",
  "commonware-cryptography",
- "commonware-executor",
+ "commonware-runtime",
  "futures",
  "governor",
  "prometheus-client",
@@ -475,6 +465,16 @@ dependencies = [
  "tracing",
  "x25519-dalek",
  "zstd",
+]
+
+[[package]]
+name = "commonware-runtime"
+version = "0.0.2"
+dependencies = [
+ "futures",
+ "rand",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@ use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
-use commonware_executor::{Clock, Spawner};
+use commonware_runtime::{Clock, Spawner};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{collections::HashMap, sync::Arc, time::Duration};

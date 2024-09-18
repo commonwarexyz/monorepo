@@ -2,7 +2,7 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_executor::{Spawner, Runner, tokio::{Executor, reschedule}};
+//! use commonware_runtime::{Spawner, Runner, tokio::{Executor, reschedule}};
 //!
 //! let (runner, context) = Executor::init(2);
 //! runner.start(async move {

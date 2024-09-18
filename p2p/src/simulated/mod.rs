@@ -25,7 +25,7 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::insecure_signer, utils::hex, Scheme};
-    use commonware_executor::{deterministic::Executor, Runner, Spawner};
+    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use rand::Rng;
     use std::collections::HashMap;
     use tokio::sync::mpsc;
