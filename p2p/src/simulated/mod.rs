@@ -27,12 +27,12 @@ mod tests {
     use commonware_cryptography::{ed25519::insecure_signer, utils::hex, Scheme};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use rand::Rng;
-    use std::collections::HashMap;
+    use std::{collections::HashMap, time::Duration};
     use tokio::sync::mpsc;
 
     fn simulate_messages(seed: u64, size: usize) -> Vec<usize> {
         // Create simulated network
-        let (runner, context) = Executor::init(seed);
+        let (runner, context) = Executor::init(seed, Duration::from_millis(1));
         runner.start(async move {
             let mut network = network::Network::new(
                 context.clone(),
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn test_invalid_message() {
-        let (runner, mut context) = Executor::init(0);
+        let (runner, mut context) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
