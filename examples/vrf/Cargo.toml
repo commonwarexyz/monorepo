@@ -15,13 +15,13 @@ commonware-cryptography = { workspace = true }
 commonware-p2p = { workspace = true } 
 bytes = { workspace = true } 
 rand = { workspace = true }
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true } 
+prost = { workspace = true } 
 clap = "4" 
 tracing-subscriber = "0.3"
-tracing = "0.1"
 prometheus-client = "0.22"
-prost = "0.12"
 governor = "0.6"
 
 [build-dependencies]
-prost-build = "0.12"
+prost-build = { workspace = true } 

@@ -10,9 +10,14 @@ resolver = "2"
 
 [workspace.dependencies]
 commonware-cryptography = { version = "0.0.7", path = "cryptography" }
+commonware-executor = { version = "0.0.2", path = "executor" }
 commonware-p2p = { version = "0.0.16", path = "p2p" }
 thiserror = "1.0.63"
 bytes = "1.7.1"
 sha2 = "0.10.8"
 rand = "0.8.5"
 futures = "0.3.30"
+tokio = "1.40.0"
+tracing = "0.1.40"
+prost = "0.13.2"
+prost-build = "0.13.2"

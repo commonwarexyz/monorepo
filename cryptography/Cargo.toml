@@ -25,7 +25,7 @@ proptest = "1"
 criterion = "0.5.1"
 
 [build-dependencies]
-prost-build = "0.12"
+prost-build = { workspace = true } 
 
 [features]
 portable = ["blst/portable"]

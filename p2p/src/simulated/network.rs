@@ -2,7 +2,8 @@ use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use commonware_executor::{Clock, Executor};
+use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot, Semaphore};
@@ -15,7 +16,8 @@ type Task = (
     oneshot::Sender<Result<Vec<PublicKey>, Error>>,
 );
 
-pub struct Network {
+pub struct Network<E: Executor + Rng + Clock> {
+    executor: E,
     cfg: Config,
 
     sender: mpsc::UnboundedSender<Task>,
@@ -47,11 +49,12 @@ pub struct Config {
     pub max_message_size: usize,
 }
 
-impl Network {
+impl<E: Executor + Rng + Clock> Network<E> {
     /// Create a new simulated network.
-    pub fn new(cfg: Config) -> Self {
+    pub fn new(executor: E, cfg: Config) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
+            executor,
             cfg,
             sender,
             receiver,
@@ -67,7 +70,7 @@ impl Network {
         let (sender, receiver) = mpsc::unbounded_channel();
         self.agents.insert(public_key.clone(), sender);
         (
-            Sender::new(public_key, self.sender.clone()),
+            Sender::new(self.executor.clone(), public_key, self.sender.clone()),
             Receiver { receiver },
         )
     }
@@ -97,13 +100,7 @@ impl Network {
     }
 
     /// Run the simulated network.
-    ///
-    /// As long as messages are sent deterministically, the network (latency, drops, etc) will be deterministic as well.
-    /// TODO: cleanup wording (not pure determinism because executor for tokio is random)
-    pub async fn run(mut self, seed: u64) {
-        // Initialize RNG with seed
-        let mut rng = StdRng::seed_from_u64(seed);
-
+    pub async fn run(mut self) {
         // Process messages
         while let Some((origin, recipients, message, reply)) = self.receiver.recv().await {
             // Ensure message is valid
@@ -158,51 +155,52 @@ impl Network {
                 };
 
                 // Apply link settings
-                let should_deliver = rng.gen_bool(link.0.success_rate);
+                let should_deliver = self.executor.gen_bool(link.0.success_rate);
                 let delay = Normal::new(link.0.latency_mean, link.0.latency_stddev)
                     .unwrap()
-                    .sample(&mut rng);
+                    .sample(&mut self.executor);
                 debug!("sending message to {}: delay={}ms", hex(&recipient), delay);
 
                 // Send message
-                let task_sender = sender.clone();
-                let task_recipient = recipient.clone();
-                let task_message = message.clone();
-                let task_semaphore = link.1.clone();
-                let task_acquired_sender = acquired_sender.clone();
+                self.executor.spawn({
+                    let executor = self.executor.clone();
+                    let sender = sender.clone();
+                    let recipient = recipient.clone();
+                    let message = message.clone();
+                    let semaphore = link.1.clone();
+                    let acquired_sender = acquired_sender.clone();
+                    async move {
+                        // Mark as sent as soon as acquire semaphore
+                        let _permit = semaphore.acquire().await.unwrap();
+                        acquired_sender.send(()).await.unwrap();
 
-                // TODO: use custom executor rather than tokio here
-                tokio::spawn(async move {
-                    // Mark as sent as soon as acquire semaphore
-                    let _permit = task_semaphore.acquire().await.unwrap();
-                    task_acquired_sender.send(()).await.unwrap();
+                        // Apply delay to send (once link is not saturated)
+                        //
+                        // Note: messages can be sent out of order (will not occur when using a
+                        // stable TCP connection)
+                        executor.sleep(Duration::from_millis(delay as u64)).await;
 
-                    // Apply delay to send (once link is not saturated)
-                    //
-                    // Note: messages can be sent out of order (will not occur when using a
-                    // stable TCP connection)
-                    tokio::time::sleep(Duration::from_millis(delay as u64)).await;
+                        // Drop message if success rate is too low
+                        if !should_deliver {
+                            debug!(
+                                "dropping message to {}: random link failure",
+                                hex(&recipient)
+                            );
+                            return;
+                        }
 
-                    // Drop message if success rate is too low
-                    if !should_deliver {
-                        debug!(
-                            "dropping message to {}: random link failure",
-                            hex(&task_recipient)
-                        );
-                        return;
-                    }
-
-                    // Send message
-                    if let Err(err) = task_sender.send((task_recipient.clone(), task_message)) {
-                        // This can only happen if the receiver exited.
-                        error!("failed to send to {}: {:?}", hex(&task_recipient), err);
+                        // Send message
+                        if let Err(err) = sender.send((recipient.clone(), message)) {
+                            // This can only happen if the receiver exited.
+                            error!("failed to send to {}: {:?}", hex(&recipient), err);
+                        }
                     }
                 });
                 sent.push(recipient);
             }
 
             // Notify sender of successful sends
-            tokio::spawn(async move {
+            self.executor.spawn(async move {
                 // Wait for semaphore to be acquired on all sends
                 for _ in 0..sent.len() {
                     acquired_receiver.recv().await.unwrap();
@@ -226,11 +224,11 @@ pub struct Sender {
 }
 
 impl Sender {
-    fn new(me: PublicKey, sender: mpsc::UnboundedSender<Task>) -> Self {
+    fn new(executor: impl Executor, me: PublicKey, sender: mpsc::UnboundedSender<Task>) -> Self {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded_channel();
         let (low, mut low_receiver) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
+        executor.spawn(async move {
             loop {
                 tokio::select! {
                     biased;

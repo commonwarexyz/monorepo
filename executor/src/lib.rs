@@ -1,20 +1,23 @@
 pub mod deterministic;
-pub mod utils;
+pub mod tokio;
 
-use std::future::Future;
+use std::{
+    future::Future,
+    time::{Duration, SystemTime},
+};
 
-pub trait Clock: Clone {
-    fn current(&self) -> u128;
-    fn set(&self, milliseconds: u128);
-    fn advance(&self, milliseconds: u128);
-}
-
-pub trait Executor: Clone {
+pub trait Executor: Clone + Send + 'static {
     fn spawn<F>(&self, f: F)
     where
         F: Future<Output = ()> + Send + 'static;
 
-    fn run<F>(&self, f: F)
+    fn run<F>(&self, f: F) -> F::Output
     where
-        F: Future<Output = ()> + Send + 'static;
+        F: Future + Send + 'static,
+        F::Output: Send + 'static;
+}
+pub trait Clock: Executor {
+    fn current(&self) -> SystemTime;
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
