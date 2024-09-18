@@ -10,6 +10,7 @@
 _Crates in this repository are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify untrusted signatures.
+* [runtime](./runtime/README.md): TBD 
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections. 
 
 ## Examples
