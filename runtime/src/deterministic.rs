@@ -170,7 +170,7 @@ impl crate::Runner for Runner {
             //
             // This approach prevents starvation if some task never yields (to approximate this,
             // duration can be set to 1ns).
-            let current;
+            let mut current;
             {
                 let mut time = self.executor.time.lock().unwrap();
                 *time += self.executor.cycle;
@@ -180,6 +180,30 @@ impl crate::Runner for Runner {
                 now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
                 "time advanced",
             );
+
+            // Skip time if there is nothing to do
+            if self.executor.tasks.len() == 0 {
+                let mut skip = None;
+                {
+                    let sleeping = self.executor.sleeping.lock().unwrap();
+                    if let Some(next) = sleeping.peek() {
+                        if next.time > current {
+                            skip = Some(next.time);
+                        }
+                    }
+                }
+                if skip.is_some() {
+                    {
+                        let mut time = self.executor.time.lock().unwrap();
+                        *time = skip.unwrap();
+                        current = *time;
+                    }
+                    debug!(
+                        now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                        "time skipped",
+                    );
+                }
+            }
 
             // Wake all sleeping tasks that are ready
             let mut to_wake = Vec::new();
@@ -200,7 +224,7 @@ impl crate::Runner for Runner {
                 waker.wake();
             }
 
-            // Account for all tasks that are now awake
+            // Account for remaining tasks
             remaining += self.executor.tasks.len();
 
             // If there are no tasks to run and no tasks sleeping, the executor is stalled
