@@ -1,5 +1,4 @@
 pub mod deterministic;
-pub mod utils;
 
 use std::{
     future::Future,
@@ -9,6 +8,7 @@ use std::{
 pub trait Clock: Clone + Send + 'static {
     fn current(&self) -> SystemTime;
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
 pub trait Executor: Clone + Send + 'static {

@@ -28,7 +28,6 @@
 //! ```
 
 use crate::{Clock, Executor};
-use core::task;
 use futures::task::{waker_ref, ArcWake};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
@@ -228,7 +227,13 @@ impl Clock for Deterministic {
         }
     }
 
-    // TODO: add sleep_until
+    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+        SleepFuture {
+            wake: deadline,
+            executor: self.clone(),
+            registered: false,
+        }
+    }
 }
 
 impl RngCore for Deterministic {
@@ -249,10 +254,31 @@ impl RngCore for Deterministic {
     }
 }
 
+pub async fn reschedule() {
+    struct Reschedule {
+        yielded: bool,
+    }
+
+    impl Future for Reschedule {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.yielded {
+                Poll::Ready(())
+            } else {
+                self.yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    Reschedule { yielded: false }.await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils;
     use std::sync::{Arc, Mutex};
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
@@ -272,7 +298,7 @@ mod tests {
 
     async fn task(name: &'static str, messages: Arc<Mutex<Vec<&'static str>>>) {
         for _ in 0..5 {
-            utils::reschedule().await;
+            reschedule().await;
         }
         messages.lock().unwrap().push(name);
     }
@@ -303,12 +329,36 @@ mod tests {
 
     #[test]
     fn test_clock() {
-        let clock = Deterministic::new(0);
+        let executor = Deterministic::new(0);
 
         // Check initial time
-        assert_eq!(clock.current(), UNIX_EPOCH);
+        assert_eq!(executor.current(), SystemTime::UNIX_EPOCH);
 
-        // Check time after advancing
-        assert_eq!(clock.current(), UNIX_EPOCH + Duration::from_millis(1));
+        // Simulate sleeping task
+        let sleep_duration = Duration::from_millis(10);
+        executor.run({
+            let executor = executor.clone();
+            async move {
+                executor.sleep(sleep_duration).await;
+            }
+        });
+
+        // After run, time should have advanced
+        let expected_time = SystemTime::UNIX_EPOCH + sleep_duration;
+        assert_eq!(executor.current(), expected_time);
+    }
+
+    #[test]
+    #[allow(clippy::empty_loop)]
+    fn test_run_stops_when_root_task_ends() {
+        let executor = Deterministic::new(0);
+        executor.run({
+            let executor = executor.clone();
+            async move {
+                executor.spawn(async { loop {} });
+                executor.spawn(async { loop {} });
+            }
+            // Root task ends here without waiting for other tasks
+        });
     }
 }

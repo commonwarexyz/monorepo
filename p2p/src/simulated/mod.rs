@@ -25,7 +25,7 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::insecure_signer, utils::hex, Scheme};
-    use commonware_executor::{deterministic::Deterministic, Clock, Executor};
+    use commonware_executor::{deterministic::Deterministic, Executor};
     use rand::rngs::StdRng;
     use rand::Rng;
     use rand::SeedableRng;
