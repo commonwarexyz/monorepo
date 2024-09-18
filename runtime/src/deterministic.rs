@@ -1,4 +1,4 @@
-//! A deterministic executor that randomly selects tasks to run based on a seed.
+//! A deterministic runtime that randomly selects tasks to run based on a seed.
 //!
 //! # Example
 //! ```rust

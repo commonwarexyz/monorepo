@@ -1,4 +1,4 @@
-//! A non-deterministic executor based on Tokio.
+//! A non-deterministic runtime based on Tokio.
 //!
 //! # Example
 //! ```rust
