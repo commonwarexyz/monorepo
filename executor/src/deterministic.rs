@@ -27,7 +27,7 @@
 use futures::task::{waker_ref, ArcWake};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -44,19 +44,18 @@ struct Task {
 
 impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        let mut queue = arc_self.tasks.queue.lock().unwrap();
-        queue.push_back(arc_self.clone());
+        arc_self.tasks.enqueue(arc_self.clone());
     }
 }
 
 struct TaskQueue {
-    queue: Mutex<VecDeque<Arc<Task>>>,
+    queue: Mutex<Vec<Arc<Task>>>,
 }
 
 impl TaskQueue {
-    fn push(&self, task: Arc<Task>) {
+    fn enqueue(&self, task: Arc<Task>) {
         let mut queue = self.queue.lock().unwrap();
-        queue.push_back(task);
+        queue.push(task);
     }
 
     fn get(&self, rng: Arc<Mutex<StdRng>>) -> Option<Arc<Task>> {
@@ -66,7 +65,7 @@ impl TaskQueue {
             None
         } else {
             let idx = rng.gen_range(0..queue.len());
-            Some(queue.remove(idx).unwrap())
+            Some(queue.swap_remove(idx))
         }
     }
 }
@@ -85,7 +84,7 @@ impl Executor {
             rng: Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
             time: Arc::new(Mutex::new(UNIX_EPOCH)),
             tasks: Arc::new(TaskQueue {
-                queue: Mutex::new(VecDeque::new()),
+                queue: Mutex::new(Vec::new()),
             }),
             sleeping: Arc::new(Mutex::new(BTreeMap::new())),
         };
@@ -120,7 +119,7 @@ impl crate::Runner for Runner {
             })),
             tasks: self.executor.tasks.clone(),
         });
-        self.executor.tasks.push(task);
+        self.executor.tasks.enqueue(task);
 
         loop {
             // Run tasks until the queue is empty
@@ -197,7 +196,7 @@ impl crate::Spawner for Context {
             future: Mutex::new(Box::pin(f)),
             tasks: self.executor.tasks.clone(),
         });
-        self.executor.tasks.push(task);
+        self.executor.tasks.enqueue(task);
     }
 }
 
