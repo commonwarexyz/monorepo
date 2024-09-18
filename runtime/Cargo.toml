@@ -1,5 +1,5 @@
 [package]
-name = "commonware-executor"
+name = "commonware-runtime"
 edition = "2021"
 publish = true
 version = "0.0.2"

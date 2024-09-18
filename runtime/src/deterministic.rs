@@ -2,7 +2,7 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_executor::{Spawner, Runner, deterministic::{Executor, reschedule}};
+//! use commonware_runtime::{Spawner, Runner, deterministic::{Executor, reschedule}};
 //!
 //! let (runner, context) = Executor::init(42);
 //! runner.start(async move {
