@@ -96,7 +96,7 @@ pub struct Executor {
 
 impl Executor {
     pub fn init(seed: u64, cycle: Duration) -> (Runner, Context) {
-        let e = Self {
+        let executor = Arc::new(Self {
             cycle,
             rng: Mutex::new(StdRng::seed_from_u64(seed)),
             time: Mutex::new(UNIX_EPOCH),
@@ -104,13 +104,12 @@ impl Executor {
                 queue: Mutex::new(Vec::new()),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
-        };
-        let e = Arc::new(e);
+        });
         (
             Runner {
-                executor: e.clone(),
+                executor: executor.clone(),
             },
-            Context { executor: e },
+            Context { executor },
         )
     }
 }

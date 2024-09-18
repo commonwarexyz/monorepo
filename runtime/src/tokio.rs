@@ -32,9 +32,8 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 
-#[derive(Clone)]
 pub struct Executor {
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
 }
 
 impl Executor {
@@ -44,20 +43,18 @@ impl Executor {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let e = Self {
-            runtime: Arc::new(runtime),
-        };
+        let executor = Arc::new(Self { runtime });
         (
             Runner {
-                executor: e.clone(),
+                executor: executor.clone(),
             },
-            Context { executor: e },
+            Context { executor },
         )
     }
 }
 
 pub struct Runner {
-    executor: Executor,
+    executor: Arc<Executor>,
 }
 
 impl crate::Runner for Runner {
@@ -72,7 +69,7 @@ impl crate::Runner for Runner {
 
 #[derive(Clone)]
 pub struct Context {
-    executor: Executor,
+    executor: Arc<Executor>,
 }
 
 impl crate::Spawner for Context {
