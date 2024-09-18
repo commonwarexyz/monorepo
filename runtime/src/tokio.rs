@@ -159,8 +159,11 @@ mod tests {
     fn test_clock_sleep() {
         let (runner, context) = Executor::init(1);
         runner.start(async move {
+            // Capture initial time
             let start = context.current();
             context.sleep(Duration::from_millis(100)).await;
+
+            // Ensure sleep duration is at least 100ms
             let end = context.current();
             assert!(end.duration_since(start).unwrap() >= Duration::from_millis(100));
         });
