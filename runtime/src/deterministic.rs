@@ -422,6 +422,7 @@ mod tests {
 
     #[test]
     fn test_alarm_min_heap() {
+        // Populate heap
         let now = SystemTime::now();
         let alarms = vec![
             Alarm {
@@ -441,17 +442,16 @@ mod tests {
                 waker: noop_waker(),
             },
         ];
-
         let mut heap = BinaryHeap::new();
         for alarm in alarms {
             heap.push(alarm);
         }
 
+        // Verify min-heap
         let mut sorted_times = vec![];
         while let Some(alarm) = heap.pop() {
             sorted_times.push(alarm.time);
         }
-
         assert_eq!(
             sorted_times,
             vec![
