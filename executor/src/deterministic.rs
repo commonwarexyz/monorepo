@@ -2,28 +2,25 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_executor::{Executor, deterministic::{Deterministic, reschedule}};
+//! use commonware_executor::{Spawner, Runner, deterministic::{Executor, reschedule}};
 //!
-//! let mut executor = Deterministic::new(42);
-//! executor.run({
-//!     let executor = executor.clone();
-//!     async move {
-//!         executor.spawn(async move {
-//!             println!("Child started");
-//!             for _ in 0..5 {
-//!               // Simulate work
-//!               reschedule().await;
-//!             }
-//!             println!("Child completed");
-//!         });
-//!
-//!         println!("Parent started");
-//!         for _ in 0..3 {
+//! let (runner, context) = Executor::init(42);
+//! runner.start(async move {
+//!     context.spawn(async move {
+//!         println!("Child started");
+//!         for _ in 0..5 {
 //!           // Simulate work
 //!           reschedule().await;
 //!         }
-//!         println!("Parent completed");
+//!         println!("Child completed");
+//!     });
+//!
+//!     println!("Parent started");
+//!     for _ in 0..3 {
+//!       // Simulate work
+//!       reschedule().await;
 //!     }
+//!     println!("Parent completed");
 //! });
 //! ```
 
