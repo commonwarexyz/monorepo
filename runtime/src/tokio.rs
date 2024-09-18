@@ -24,7 +24,7 @@
 //! });
 //! ```
 
-use rand::RngCore;
+use rand::{rngs::OsRng, RngCore};
 use std::{
     future::Future,
     sync::Arc,
@@ -103,19 +103,19 @@ impl crate::Clock for Context {
 
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
-        rand::thread_rng().next_u32()
+        OsRng.next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
-        rand::thread_rng().next_u64()
+        OsRng.next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        rand::thread_rng().fill_bytes(dest);
+        OsRng.fill_bytes(dest);
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        rand::thread_rng().try_fill_bytes(dest)
+        OsRng.try_fill_bytes(dest)
     }
 }
 
