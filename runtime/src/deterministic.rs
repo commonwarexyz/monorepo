@@ -25,10 +25,12 @@
 //! ```
 
 use futures::task::{waker_ref, ArcWake};
-use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+use rand::prelude::SliceRandom;
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     collections::BinaryHeap,
     future::Future,
+    mem::replace,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
@@ -50,7 +52,6 @@ impl ArcWake for Task {
 }
 
 struct Tasks {
-    rng: Arc<Mutex<StdRng>>,
     queue: Mutex<Vec<Arc<Task>>>,
 }
 
@@ -73,22 +74,19 @@ impl Tasks {
         queue.push(task);
     }
 
-    fn get(&self) -> Option<Arc<Task>> {
+    fn drain(&self) -> Vec<Arc<Task>> {
         let mut queue = self.queue.lock().unwrap();
-        if queue.is_empty() {
-            None
-        } else {
-            let idx = {
-                let mut rng = self.rng.lock().unwrap();
-                rng.gen_range(0..queue.len())
-            };
-            Some(queue.swap_remove(idx))
-        }
+        let len = queue.len();
+        replace(&mut *queue, Vec::with_capacity(len))
+    }
+
+    fn len(&self) -> usize {
+        self.queue.lock().unwrap().len()
     }
 }
 
 pub struct Executor {
-    rng: Arc<Mutex<StdRng>>,
+    rng: Mutex<StdRng>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
@@ -96,12 +94,10 @@ pub struct Executor {
 
 impl Executor {
     pub fn init(seed: u64) -> (Runner, Context) {
-        let rng = Arc::new(Mutex::new(StdRng::seed_from_u64(seed)));
         let e = Self {
-            rng: rng.clone(),
+            rng: Mutex::new(StdRng::seed_from_u64(seed)),
             time: Mutex::new(UNIX_EPOCH),
             tasks: Arc::new(Tasks {
-                rng,
                 queue: Mutex::new(Vec::new()),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
@@ -141,8 +137,17 @@ impl crate::Runner for Runner {
 
         // Process tasks until root task completes or progress stalls
         loop {
-            // Run tasks until the queue is empty
-            while let Some(task) = self.executor.tasks.get() {
+            // Snapshot available tasks
+            let mut tasks = self.executor.tasks.drain();
+
+            // Shuffle tasks
+            {
+                let mut rng = self.executor.rng.lock().unwrap();
+                tasks.shuffle(&mut *rng);
+            }
+
+            // Run all snapshotted tasks at least once
+            for task in tasks {
                 let waker = waker_ref(&task);
                 let mut context = task::Context::from_waker(&waker);
                 let mut future = task.future.lock().unwrap();
@@ -154,6 +159,11 @@ impl crate::Runner for Runner {
                 }
             }
 
+            // If there are still tasks to run, try to run them again
+            if self.executor.tasks.len() > 0 {
+                continue;
+            }
+
             // Check to see if there are any sleeping tasks to wake
             let mut to_wake = Vec::new();
             {
@@ -161,7 +171,7 @@ impl crate::Runner for Runner {
                 // and will never finish.
                 let mut sleeping = self.executor.sleeping.lock().unwrap();
                 if sleeping.is_empty() {
-                    panic!("executor stalled");
+                    panic!("runtime stalled");
                 }
 
                 // Advance time to the next sleeping task.
