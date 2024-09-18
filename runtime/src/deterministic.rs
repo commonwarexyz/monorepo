@@ -146,7 +146,11 @@ impl crate::Runner for Runner {
                 tasks.shuffle(&mut *rng);
             }
 
-            // Run all snapshotted tasks at least once
+            // Run all snapshotted tasks
+            //
+            // This approach is more efficient than randomly selecting a task one-at-a-time
+            // because it ensures we don't pull the same pending task multiple times in a row (without
+            // processing a different task required for other tasks to make progress).
             for task in tasks {
                 let waker = waker_ref(&task);
                 let mut context = task::Context::from_waker(&waker);
