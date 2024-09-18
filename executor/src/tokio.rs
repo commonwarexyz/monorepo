@@ -1,4 +1,31 @@
 //! A non-deterministic executor based on Tokio.
+//!
+//! # Example
+//! ```rust
+//! use commonware_executor::{Executor, tokio::{Tokio, reschedule}};
+//!
+//! let mut executor = Tokio::new(4);
+//! executor.run({
+//!     let executor = executor.clone();
+//!     async move {
+//!         executor.spawn(async move {
+//!             println!("Child started");
+//!             for _ in 0..5 {
+//!               // Simulate work
+//!               reschedule().await;
+//!             }
+//!             println!("Child completed");
+//!         });
+//!
+//!         println!("Parent started");
+//!         for _ in 0..3 {
+//!           // Simulate work
+//!           reschedule().await;
+//!         }
+//!         println!("Parent completed");
+//!     }
+//! });
+//! ```
 
 use crate::{Clock, Executor};
 use rand::RngCore;
