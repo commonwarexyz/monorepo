@@ -208,6 +208,7 @@ impl crate::Runner for Runner {
             if remaining == 0 {
                 panic!("runtime stalled");
             }
+            debug!(remaining, "tasks remaining");
         }
     }
 }
