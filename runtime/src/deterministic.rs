@@ -174,7 +174,7 @@ impl crate::Runner for Runner {
                         *time = next;
                         debug!(
                             old = old.duration_since(UNIX_EPOCH).unwrap().as_millis(),
-                            new = time.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                            new = next.duration_since(UNIX_EPOCH).unwrap().as_millis(),
                             "time advanced"
                         );
                     }
