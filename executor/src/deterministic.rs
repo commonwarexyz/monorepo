@@ -27,7 +27,6 @@
 //! });
 //! ```
 
-use crate::{Clock, Executor};
 use futures::task::{waker_ref, ArcWake};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
@@ -76,40 +75,38 @@ impl TaskQueue {
 }
 
 #[derive(Clone)]
-pub struct Deterministic {
+pub struct Executor {
     rng: Arc<Mutex<StdRng>>,
     time: Arc<Mutex<SystemTime>>,
     tasks: Arc<TaskQueue>,
     sleeping: Arc<Mutex<BTreeMap<SystemTime, Vec<Waker>>>>,
 }
 
-impl Deterministic {
-    pub fn new(seed: u64) -> Self {
-        Self {
+impl Executor {
+    pub fn new(seed: u64) -> (Runner, Spawner) {
+        let e = Self {
             rng: Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
             time: Arc::new(Mutex::new(UNIX_EPOCH)),
             tasks: Arc::new(TaskQueue {
                 queue: Mutex::new(VecDeque::new()),
             }),
             sleeping: Arc::new(Mutex::new(BTreeMap::new())),
-        }
+        };
+        (
+            Runner {
+                executor: e.clone(),
+            },
+            Spawner { executor: e },
+        )
     }
 }
 
-impl Executor for Deterministic {
-    fn spawn<F>(&self, f: F)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let task = Arc::new(Task {
-            root: false,
-            future: Mutex::new(Box::pin(f)),
-            tasks: self.tasks.clone(),
-        });
-        self.tasks.push(task);
-    }
+pub struct Runner {
+    executor: Executor,
+}
 
-    fn run<F>(&self, f: F) -> F::Output
+impl crate::Runner for Runner {
+    fn run<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
@@ -188,9 +185,28 @@ impl Executor for Deterministic {
     }
 }
 
+#[derive(Clone)]
+pub struct Spawner {
+    executor: Executor,
+}
+
+impl crate::Spawner for Spawner {
+    fn spawn<F>(&self, f: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let task = Arc::new(Task {
+            root: false,
+            future: Mutex::new(Box::pin(f)),
+            tasks: self.tasks.clone(),
+        });
+        self.tasks.push(task);
+    }
+}
+
 struct SleepFuture {
     wake: SystemTime,
-    executor: Deterministic,
+    executor: Executor,
     registered: bool,
 }
 
@@ -217,7 +233,7 @@ impl Future for SleepFuture {
     }
 }
 
-impl Clock for Deterministic {
+impl crate::Clock for Spawner {
     fn current(&self) -> SystemTime {
         *self.time.lock().unwrap()
     }
@@ -229,7 +245,7 @@ impl Clock for Deterministic {
             .expect("overflow when setting wake time");
         SleepFuture {
             wake,
-            executor: self.clone(),
+            executor: self.executor.clone(),
             registered: false,
         }
     }
@@ -237,13 +253,13 @@ impl Clock for Deterministic {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
         SleepFuture {
             wake: deadline,
-            executor: self.clone(),
+            executor: self.executor.clone(),
             registered: false,
         }
     }
 }
 
-impl RngCore for Deterministic {
+impl RngCore for Spawner {
     fn next_u32(&mut self) -> u32 {
         self.rng.lock().unwrap().next_u32()
     }
@@ -285,28 +301,27 @@ pub async fn reschedule() {
 
 #[cfg(test)]
 mod tests {
+    use crate::Runner;
+
     use super::*;
     use tokio::sync::mpsc;
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
-        let executor = Deterministic::new(seed);
-        executor.run({
-            let executor = executor.clone();
-            async move {
-                // Randomly schedule tasks
-                let (sender, mut receiver) = mpsc::unbounded_channel();
-                executor.spawn(task("Task 1", sender.clone()));
-                executor.spawn(task("Task 2", sender.clone()));
-                executor.spawn(task("Task 3", sender));
+        let (runner, spawner) = Executor::new(seed);
+        runner.run(async move {
+            // Randomly schedule tasks
+            let (sender, mut receiver) = mpsc::unbounded_channel();
+            spawner.spawn(task("Task 1", sender.clone()));
+            spawner.spawn(task("Task 2", sender.clone()));
+            spawner.spawn(task("Task 3", sender));
 
-                // Collect output order
-                let mut outputs = Vec::new();
-                while let Some(message) = receiver.recv().await {
-                    outputs.push(message);
-                }
-                assert_eq!(outputs.len(), 3);
-                outputs
+            // Collect output order
+            let mut outputs = Vec::new();
+            while let Some(message) = receiver.recv().await {
+                outputs.push(message);
             }
+            assert_eq!(outputs.len(), 3);
+            outputs
         })
     }
 
@@ -343,35 +358,29 @@ mod tests {
 
     #[test]
     fn test_clock() {
-        let executor = Deterministic::new(0);
+        let (runner, spawner) = Executor::new(0);
 
         // Check initial time
-        assert_eq!(executor.current(), SystemTime::UNIX_EPOCH);
+        assert_eq!(spawner.current(), SystemTime::UNIX_EPOCH);
 
         // Simulate sleeping task
         let sleep_duration = Duration::from_millis(10);
-        executor.run({
-            let executor = executor.clone();
-            async move {
-                executor.sleep(sleep_duration).await;
-            }
+        runner.run(async move {
+            spawner.sleep(sleep_duration).await;
         });
 
         // After run, time should have advanced
         let expected_time = SystemTime::UNIX_EPOCH + sleep_duration;
-        assert_eq!(executor.current(), expected_time);
+        assert_eq!(spawner.current(), expected_time);
     }
 
     #[test]
     #[allow(clippy::empty_loop)]
     fn test_run_stops_when_root_task_ends() {
-        let executor = Deterministic::new(0);
-        executor.run({
-            let executor = executor.clone();
-            async move {
-                executor.spawn(async { loop {} });
-                executor.spawn(async { loop {} });
-            }
+        let (runner, spawner) = Executor::new(0);
+        runner.run(async move {
+            spawner.spawn(async { loop {} });
+            spawner.spawn(async { loop {} });
             // Root task ends here without waiting for other tasks
         });
     }
