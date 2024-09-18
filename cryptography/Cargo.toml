@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 description = "Generate keys, sign arbitrary messages, and deterministically verify untrusted signatures."
 readme = "README.md"
 homepage = "https://commonware.xyz"
-repository = "https://github.com/commonwarexyz/monorepo"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/cryptography"
 documentation = "https://docs.rs/commonware-cryptography"
 
 [dependencies]

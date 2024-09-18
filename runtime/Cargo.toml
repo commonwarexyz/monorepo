@@ -7,8 +7,8 @@ license = "MIT OR Apache-2.0"
 description = "TBD"
 readme = "README.md"
 homepage = "https://commonware.xyz"
-repository = "https://github.com/commonwarexyz/monorepo"
-documentation = "https://docs.rs/commonware-executor"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/runtime"
+documentation = "https://docs.rs/commonware-runtime"
 
 [dependencies]
 futures = { workspace = true }

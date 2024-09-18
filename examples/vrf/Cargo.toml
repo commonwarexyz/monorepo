@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 description = "Generate bias-resistant randomness with untrusted contributors using commonware-cryptography and commonware-p2p."
 readme = "README.md"
 homepage = "https://commonware.xyz"
-repository = "https://github.com/commonwarexyz/monorepo"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"
 documentation = "https://docs.rs/commonware-vrf"
 
 [dependencies]
