@@ -1,4 +1,5 @@
 pub mod deterministic;
+pub mod tokio;
 
 use std::{
     future::Future,
