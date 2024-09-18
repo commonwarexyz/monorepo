@@ -204,13 +204,13 @@ impl crate::Spawner for Spawner {
     }
 }
 
-struct SleepFuture {
+struct Sleeper {
     wake: SystemTime,
     executor: Executor,
     registered: bool,
 }
 
-impl Future for SleepFuture {
+impl Future for Sleeper {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -243,7 +243,7 @@ impl crate::Clock for Spawner {
             .current()
             .checked_add(duration)
             .expect("overflow when setting wake time");
-        SleepFuture {
+        Sleeper {
             wake,
             executor: self.executor.clone(),
             registered: false,
@@ -251,7 +251,7 @@ impl crate::Clock for Spawner {
     }
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
-        SleepFuture {
+        Sleeper {
             wake: deadline,
             executor: self.executor.clone(),
             registered: false,
