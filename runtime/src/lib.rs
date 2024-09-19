@@ -4,12 +4,22 @@ pub mod deterministic;
 pub mod tokio;
 
 mod utils;
-pub use utils::reschedule;
+pub use utils::{reschedule, Handle};
 
 use std::{
+    any::Any,
     future::Future,
     time::{Duration, SystemTime},
 };
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("exited: {0:?}")]
+    Exited(Box<dyn Any + Send + 'static>),
+    #[error("closed")]
+    Closed,
+}
 
 pub trait Runner {
     fn start<F>(self, f: F) -> F::Output
@@ -19,9 +29,12 @@ pub trait Runner {
 }
 
 pub trait Spawner: Clone + Send + 'static {
-    fn spawn<F>(&self, f: F)
+    /// Unlike a future, a spawned task will start executing immediately (even if the caller
+    /// does not await the handle).
+    fn spawn<F, T>(&self, f: F) -> Handle<T>
     where
-        F: Future<Output = ()> + Send + 'static;
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
 }
 
 pub trait Clock: Clone + Send + 'static {
@@ -32,9 +45,9 @@ pub trait Clock: Clone + Send + 'static {
 
 #[cfg(test)]
 mod tests {
-    use utils::reschedule;
-
     use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use utils::reschedule;
 
     fn test_error_future(runner: impl Runner) {
         async fn error_future() -> Result<&'static str, &'static str> {
@@ -69,7 +82,7 @@ mod tests {
         });
     }
 
-    fn test_root_aborts(runner: impl Runner, context: impl Spawner) {
+    fn test_root_finishes(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
             context.spawn(async move {
                 loop {
@@ -77,6 +90,28 @@ mod tests {
                 }
             });
         });
+    }
+
+    fn test_panic_aborts_root(runner: impl Runner) {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            runner.start(async move {
+                panic!("blah");
+            });
+        }));
+        result.unwrap_err();
+    }
+
+    fn test_panic_aborts_spawn(runner: impl Runner, context: impl Spawner) {
+        let result = runner.start(async move {
+            let result = context.spawn(async move {
+                panic!("blah");
+            });
+            result.await.unwrap_err();
+            Result::<(), Error>::Ok(())
+        });
+
+        // Ensure panic was caught
+        result.unwrap();
     }
 
     #[test]
@@ -96,7 +131,15 @@ mod tests {
         }
         {
             let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
-            test_root_aborts(runner, context);
+            test_root_finishes(runner, context);
+        }
+        {
+            let (runner, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+            test_panic_aborts_root(runner);
+        }
+        {
+            let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
+            test_panic_aborts_spawn(runner, context);
         }
     }
 
@@ -116,7 +159,15 @@ mod tests {
         }
         {
             let (runner, context) = tokio::Executor::init(1);
-            test_root_aborts(runner, context);
+            test_root_finishes(runner, context);
+        }
+        {
+            let (runner, _) = tokio::Executor::init(1);
+            test_panic_aborts_root(runner);
+        }
+        {
+            let (runner, context) = tokio::Executor::init(1);
+            test_panic_aborts_spawn(runner, context);
         }
     }
 }

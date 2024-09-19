@@ -1,14 +1,17 @@
 //! Utility functions for interacting with any runtime.
 
+use crate::Error;
 #[cfg(test)]
 use crate::{Runner, Spawner};
+#[cfg(test)]
+use futures::stream::{FuturesUnordered, StreamExt};
+use futures::{channel::oneshot, FutureExt};
 use std::{
     future::Future,
+    panic::AssertUnwindSafe,
     pin::Pin,
     task::{Context, Poll},
 };
-#[cfg(test)]
-use tokio::sync::mpsc;
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {
@@ -33,28 +36,77 @@ pub async fn reschedule() {
     Reschedule { yielded: false }.await
 }
 
-#[cfg(test)]
-async fn task(name: String, messages: mpsc::UnboundedSender<String>) {
-    for _ in 0..5 {
-        reschedule().await;
+pub struct Handle<T>
+where
+    T: Send + 'static,
+{
+    receiver: oneshot::Receiver<Result<T, Error>>,
+}
+
+impl<T> Handle<T>
+where
+    T: Send + 'static,
+{
+    pub(crate) fn init<F>(f: F) -> (impl Future<Output = ()>, Self)
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        let (sender, receiver) = oneshot::channel();
+        let wrapped = async move {
+            let result = AssertUnwindSafe(f).catch_unwind().await;
+            let result = match result {
+                Ok(result) => Ok(result),
+                Err(err) => Err(Error::Exited(err)),
+            };
+            let _ = sender.send(result);
+        };
+        (wrapped, Self { receiver })
     }
-    messages.send(name).unwrap();
+
+    pub async fn join(self) -> Result<T, Error> {
+        match self.receiver.await {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(Error::Closed),
+        }
+    }
+}
+
+impl<T> Future for Handle<T>
+where
+    T: Send + 'static,
+{
+    type Output = Result<T, Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.receiver)
+            .poll(cx)
+            .map(|res| res.map_err(|_| Error::Closed).and_then(|r| r))
+    }
 }
 
 #[cfg(test)]
-pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Vec<String> {
+async fn task(i: usize) -> usize {
+    for _ in 0..5 {
+        reschedule().await;
+    }
+    i
+}
+
+#[cfg(test)]
+pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Vec<usize> {
     runner.start(async move {
         // Randomly schedule tasks
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut handles = FuturesUnordered::new();
         for i in 0..tasks - 1 {
-            context.spawn(task(format!("Task {}", i), sender.clone()));
+            handles.push(context.spawn(task(i)));
         }
-        context.spawn(task(format!("Task {}", tasks - 1), sender));
+        handles.push(context.spawn(task(tasks - 1)));
 
         // Collect output order
         let mut outputs = Vec::new();
-        while let Some(message) = receiver.recv().await {
-            outputs.push(message);
+        while let Some(result) = handles.next().await {
+            outputs.push(result.unwrap());
         }
         assert_eq!(outputs.len(), tasks);
         outputs

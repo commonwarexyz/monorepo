@@ -3,22 +3,20 @@
 //! # Example
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, tokio::Executor};
-//! use tokio::sync::oneshot;
 //!
 //! let (runner, context) = Executor::init(2);
 //! runner.start(async move {
 //!     println!("Parent started");
-//!     let (sender, mut receiver) = oneshot::channel();
-//!     context.spawn(async move {
+//!     let result = context.spawn(async move {
 //!         println!("Child started");
-//!         sender.send(()).unwrap();
-//!         println!("Child exited");
+//!         "hello"
 //!     });
-//!     receiver.await.unwrap();
+//!     println!("Child result: {:?}", result.await);
 //!     println!("Parent exited");
 //! });
 //! ```
 
+use crate::Handle;
 use rand::{rngs::OsRng, RngCore};
 use std::{
     future::Future,
@@ -68,11 +66,14 @@ pub struct Context {
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F>(&self, f: F)
+    fn spawn<F, T>(&self, f: F) -> Handle<T>
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
     {
+        let (f, handle) = Handle::init(f);
         self.executor.runtime.spawn(f);
+        handle
     }
 }
 

@@ -1,8 +1,8 @@
 # commonware-runtime
 
-[![Crates.io](https://img.shields.io/crates/v/commonware-executor.svg)](https://crates.io/crates/commonware-executor)
+[![Crates.io](https://img.shields.io/crates/v/commonware-runtime.svg)](https://crates.io/crates/commonware-runtime)
 
-TBD
+TODO: Execute asynchronous code with a compile-time scheduling configuration.
 
 ## Status 
 

@@ -4,25 +4,22 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use std::time::Duration;
-//! use tokio::sync::oneshot;
 //!
 //! let (runner, context) = Executor::init(42, Duration::from_millis(1));
 //! runner.start(async move {
 //!     println!("Parent started");
-//!     let (sender, mut receiver) = oneshot::channel();
-//!     context.spawn(async move {
+//!     let result = context.spawn(async move {
 //!         println!("Child started");
-//!         sender.send(()).unwrap();
-//!         println!("Child exited");
+//!         "hello"
 //!     });
-//!     receiver.await.unwrap();
+//!     println!("Child result: {:?}", result.await);
 //!     println!("Parent exited");
 //! });
 //! ```
 
+use crate::Handle;
 use futures::task::{waker_ref, ArcWake};
-use rand::prelude::SliceRandom;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{prelude::SliceRandom, rngs::StdRng, RngCore, SeedableRng};
 use std::{
     collections::BinaryHeap,
     future::Future,
@@ -237,11 +234,14 @@ pub struct Context {
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F>(&self, f: F)
+    fn spawn<F, T>(&self, f: F) -> Handle<T>
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
     {
+        let (f, handle) = Handle::init(f);
         Tasks::register(&self.executor.tasks, false, Box::pin(f));
+        handle
     }
 }
 
@@ -350,7 +350,7 @@ mod tests {
     use crate::utils::run_tasks;
     use futures::task::noop_waker;
 
-    fn run_with_seed(seed: u64) -> Vec<String> {
+    fn run_with_seed(seed: u64) -> Vec<usize> {
         let (runner, context) = Executor::init(seed, Duration::from_millis(1));
         run_tasks(30, runner, context)
     }
@@ -406,7 +406,7 @@ mod tests {
         }
 
         // Verify min-heap
-        let mut sorted_times = vec![];
+        let mut sorted_times = Vec::new();
         while let Some(alarm) = heap.pop() {
             sorted_times.push(alarm.time);
         }
