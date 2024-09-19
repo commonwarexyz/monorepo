@@ -3,18 +3,15 @@
 //! # Example
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, tokio::Executor};
-//! use tokio::sync::oneshot;
 //!
 //! let (runner, context) = Executor::init(2);
 //! runner.start(async move {
 //!     println!("Parent started");
-//!     let (sender, mut receiver) = oneshot::channel();
-//!     context.spawn(async move {
+//!     let result = context.spawn(async move {
 //!         println!("Child started");
-//!         sender.send(()).unwrap();
-//!         println!("Child exited");
+//!         "hello"
 //!     });
-//!     receiver.await.unwrap();
+//!     println!("Child result: {:?}", result.await);
 //!     println!("Parent exited");
 //! });
 //! ```

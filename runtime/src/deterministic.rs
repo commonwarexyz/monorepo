@@ -4,18 +4,15 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use std::time::Duration;
-//! use tokio::sync::oneshot;
 //!
 //! let (runner, context) = Executor::init(42, Duration::from_millis(1));
 //! runner.start(async move {
 //!     println!("Parent started");
-//!     let (sender, mut receiver) = oneshot::channel();
-//!     context.spawn(async move {
+//!     let result = context.spawn(async move {
 //!         println!("Child started");
-//!         sender.send(()).unwrap();
-//!         println!("Child exited");
+//!         "hello"
 //!     });
-//!     receiver.await.unwrap();
+//!     println!("Child result: {:?}", result.await);
 //!     println!("Parent exited");
 //! });
 //! ```
