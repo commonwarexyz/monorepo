@@ -354,7 +354,7 @@ mod tests {
     use crate::utils::run_tasks;
     use futures::task::noop_waker;
 
-    fn run_with_seed(seed: u64) -> Vec<String> {
+    fn run_with_seed(seed: u64) -> Vec<usize> {
         let (runner, context) = Executor::init(seed, Duration::from_millis(1));
         run_tasks(30, runner, context)
     }
