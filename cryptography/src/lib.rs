@@ -1,4 +1,9 @@
-//! Generate keys, sign arbitrary messages, and deterministically verify untrusted signatures.
+//! Generate keys, sign arbitrary messages, and deterministically verify signatures.
+//!
+//! # Status
+//!
+//! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
+//! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
 

@@ -1,7 +1,5 @@
-use crate::{
-    connection::{utils::codec, x25519, Error},
-    wire,
-};
+use super::{utils::codec, x25519, Error};
+use crate::authenticated::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use futures::StreamExt;
@@ -167,7 +165,6 @@ impl IncomingHandshake {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connection::utils;
     use commonware_cryptography::{
         ed25519::{self, Ed25519},
         Scheme,
@@ -253,7 +250,7 @@ mod tests {
         let max_frame_len = 1024;
         tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            let codec = utils::codec(max_frame_len);
+            let codec = codec(max_frame_len);
             let mut stream = Framed::new(socket, codec);
             stream.send(handshake_bytes).await.unwrap();
         });

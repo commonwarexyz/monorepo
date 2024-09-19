@@ -33,8 +33,8 @@ pub async fn run(
     me: String,
     registry: Arc<Mutex<Registry>>,
     logs: Arc<Mutex<Vec<String>>>,
-    sender: Sender,
-    mut receiver: Receiver,
+    sender: impl Sender,
+    mut receiver: impl Receiver,
 ) {
     // Setup terminal
     enable_raw_mode().unwrap();

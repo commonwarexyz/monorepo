@@ -1,5 +1,5 @@
 use super::Error;
-use crate::wire;
+use crate::authenticated::wire;
 use bytes::Bytes;
 use tokio::sync::mpsc;
 

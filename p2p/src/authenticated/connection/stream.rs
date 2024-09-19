@@ -1,11 +1,9 @@
-use crate::{
-    connection::{
-        handshake::{create_handshake, Handshake, IncomingHandshake},
-        utils::{codec, nonce_bytes},
-        Config, Error,
-    },
-    wire,
+use super::{
+    handshake::{create_handshake, Handshake, IncomingHandshake},
+    utils::{codec, nonce_bytes},
+    Config, Error,
 };
+use crate::authenticated::wire;
 use bytes::Bytes;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},

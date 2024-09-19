@@ -54,8 +54,8 @@ impl Vrf {
         &self,
         output: &Output,
         round: u64,
-        sender: &Sender,
-        receiver: &mut Receiver,
+        sender: &impl Sender,
+        receiver: &mut impl Receiver,
     ) -> Option<group::Signature> {
         // Construct payload
         let payload = round.to_be_bytes();
@@ -153,7 +153,7 @@ impl Vrf {
         }
     }
 
-    pub async fn run(mut self, sender: Sender, mut receiver: Receiver) {
+    pub async fn run(mut self, sender: impl Sender, mut receiver: impl Receiver) {
         loop {
             let (round, output) = match self.requests.recv().await {
                 Some(request) => request,

@@ -1,0 +1,18 @@
+[package]
+name = "commonware-runtime"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "Execute asynchronous tasks with a configurable scheduler."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/runtime"
+documentation = "https://docs.rs/commonware-runtime"
+
+[dependencies]
+futures = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true } 
+tokio = { workspace = true, features = ["full"] }
+thiserror = { workspace = true }

@@ -47,7 +47,7 @@ mod logger;
 
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, utils::hex, Scheme};
-use commonware_p2p::{Config, Network};
+use commonware_p2p::authenticated::{Config, Network};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

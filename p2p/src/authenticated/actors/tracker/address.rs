@@ -1,5 +1,5 @@
 use super::Error;
-use crate::wire::Peer;
+use crate::authenticated::wire::Peer;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[derive(Clone)]

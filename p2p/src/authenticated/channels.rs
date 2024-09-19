@@ -1,24 +1,11 @@
-use crate::{actors::Messenger, Error};
+use super::{actors::Messenger, Error};
+use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use governor::Quota;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use zstd::bulk::{compress, decompress};
-
-/// Tuple representing a message received from a given public key.
-///
-/// This message is guranteed to adhere to the configuration of the channel and
-/// will already be decrypted and authenticated.
-pub type Message = (PublicKey, Bytes);
-
-/// Enum indicating the set of recipients to send a message to.
-#[derive(Clone)]
-pub enum Recipients {
-    All,
-    Some(Vec<PublicKey>),
-    One(PublicKey),
-}
 
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
@@ -44,6 +31,10 @@ impl Sender {
             messenger,
         }
     }
+}
+
+impl crate::Sender for Sender {
+    type Error = Error;
 
     /// Sends a message to a set of recipients.
     ///
@@ -64,7 +55,7 @@ impl Sender {
     /// If the message can be compressed (if enabled) and the message is `< max_size`, The set of recipients
     /// that the message was sent to. Note, a successful send does not mean that the recipient will
     /// receive the message (connection may no longer be active and we may not know that yet).
-    pub async fn send(
+    async fn send(
         &self,
         recipients: Recipients,
         mut message: Bytes,
@@ -110,11 +101,16 @@ impl Receiver {
             receiver,
         }
     }
+}
+
+impl crate::Receiver for Receiver {
+    type Error = Error;
 
     /// Receives a message from the channel.
     ///
-    /// This method will block until a message is received.
-    pub async fn recv(&mut self) -> Result<Message, Error> {
+    /// This method will block until a message is received or the underlying
+    /// network shuts down.
+    async fn recv(&mut self) -> Result<Message, Error> {
         let (sender, mut message) = self.receiver.recv().await.ok_or(Error::NetworkClosed)?;
 
         // If compression is enabled, decompress the message before returning.

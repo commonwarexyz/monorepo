@@ -7,16 +7,16 @@ license = "MIT OR Apache-2.0"
 description = "Send encrypted messages to a group of friends using commonware-cryptography and commonware-p2p."
 readme = "README.md"
 homepage = "https://commonware.xyz"
-repository = "https://github.com/commonwarexyz/monorepo"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/chat"
 documentation = "https://docs.rs/commonware-chat"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
 commonware-p2p = { workspace = true } 
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true } 
 clap = "4"
 chrono = "0.4"
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
 ratatui = "0.27"
 crossterm = "0.22"

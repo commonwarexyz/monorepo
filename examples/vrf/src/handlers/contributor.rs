@@ -74,8 +74,8 @@ impl<C: Scheme> Contributor<C> {
     async fn run_round(
         &mut self,
         previous: Option<&Output>,
-        sender: &Sender,
-        receiver: &mut Receiver,
+        sender: &impl Sender,
+        receiver: &mut impl Receiver,
     ) -> (u64, Option<Output>) {
         // Configure me
         let me = self.crypto.me();
@@ -582,7 +582,7 @@ impl<C: Scheme> Contributor<C> {
         (round, output)
     }
 
-    pub async fn run(mut self, sender: Sender, mut receiver: Receiver) {
+    pub async fn run(mut self, sender: impl Sender, mut receiver: impl Receiver) {
         if self.rogue {
             warn!("running as rogue player");
         }

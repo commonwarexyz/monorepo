@@ -7,29 +7,31 @@ license = "MIT OR Apache-2.0"
 description = "Communicate with authenticated peers over encrypted connections."
 readme = "README.md"
 homepage = "https://commonware.xyz"
-repository = "https://github.com/commonwarexyz/monorepo"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/p2p"
 documentation = "https://docs.rs/commonware-p2p"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
+commonware-runtime = { workspace = true }
 bytes = { workspace = true } 
 sha2 = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true }
+tracing = { workspace = true } 
+prost = { workspace = true }
 tokio-util = { version = "0.7", features = ["codec"] }
-futures = "0.3"
 governor = "0.6"
 x25519-dalek = { version = "2", features = ["getrandom"] }
 chacha20poly1305 = "0.10"
-prost = "0.12"
-tracing = "0.1"
 bitvec = "1"
 prometheus-client = "0.22"
 zstd = "0.13"
+rand_distr = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"
 
 [build-dependencies]
-prost-build = "0.12"
+prost-build = { workspace = true } 

@@ -1,6 +1,6 @@
 //! Listener
 
-use crate::{
+use crate::authenticated::{
     actors::{spawner, tracker},
     connection::{self, IncomingHandshake, Stream},
 };

@@ -1,6 +1,6 @@
 use crate::{
-    actors::peer,
-    channels::{Channels, Recipients},
+    authenticated::{actors::peer, channels::Channels},
+    Recipients,
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;

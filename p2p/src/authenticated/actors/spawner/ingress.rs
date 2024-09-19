@@ -1,4 +1,4 @@
-use crate::{actors::tracker, connection::Stream};
+use crate::authenticated::{actors::tracker, connection::Stream};
 use commonware_cryptography::{PublicKey, Scheme};
 use tokio::sync::mpsc;
 

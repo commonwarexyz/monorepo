@@ -1,6 +1,6 @@
-//! Instance of a commonware-p2p network.
+//! Implementation of an `authenticated` network.
 
-use crate::{
+use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
     config::Config,
@@ -9,7 +9,7 @@ use crate::{
 use commonware_cryptography::Scheme;
 use tracing::info;
 
-/// Instance of a commonware-p2p network.
+/// Implementation of an `authenticated` network.
 pub struct Network<C: Scheme> {
     cfg: Config<C>,
 
@@ -21,7 +21,7 @@ pub struct Network<C: Scheme> {
 }
 
 impl<C: Scheme> Network<C> {
-    /// Create a new instance of a commonware-p2p network.
+    /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
     ///
