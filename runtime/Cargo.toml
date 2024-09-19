@@ -15,3 +15,4 @@ futures = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true } 
 tokio = { workspace = true, features = ["full"] }
+thiserror = { workspace = true }

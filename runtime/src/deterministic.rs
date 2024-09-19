@@ -21,18 +21,23 @@
 //! ```
 
 use futures::task::{waker_ref, ArcWake};
+use futures::FutureExt;
 use rand::prelude::SliceRandom;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     collections::BinaryHeap,
     future::Future,
     mem::replace,
+    panic::AssertUnwindSafe,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::oneshot;
 use tracing::debug;
+
+use crate::{Error, Handle};
 
 struct Task {
     tasks: Arc<Tasks>,
@@ -237,11 +242,22 @@ pub struct Context {
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F>(&self, f: F)
+    fn spawn<F, T>(&self, f: F) -> Handle<T>
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
     {
-        Tasks::register(&self.executor.tasks, false, Box::pin(f));
+        let (sender, receiver) = oneshot::channel();
+        let wrapped = async move {
+            let result = AssertUnwindSafe(f).catch_unwind().await;
+            let result = match result {
+                Ok(result) => Ok(result),
+                Err(err) => Err(Error::Exited(err)),
+            };
+            let _ = sender.send(result);
+        };
+        Tasks::register(&self.executor.tasks, false, Box::pin(wrapped));
+        Handle::new(receiver)
     }
 }
 
@@ -406,7 +422,7 @@ mod tests {
         }
 
         // Verify min-heap
-        let mut sorted_times = vec![];
+        let mut sorted_times = Vec::new();
         while let Some(alarm) = heap.pop() {
             sorted_times.push(alarm.time);
         }

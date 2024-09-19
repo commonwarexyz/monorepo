@@ -4,12 +4,22 @@ pub mod deterministic;
 pub mod tokio;
 
 mod utils;
-pub use utils::reschedule;
+pub use utils::{reschedule, Handle};
 
 use std::{
+    any::Any,
     future::Future,
     time::{Duration, SystemTime},
 };
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("exited: {0:?}")]
+    Exited(Box<dyn Any + Send + 'static>),
+    #[error("closed")]
+    Closed,
+}
 
 pub trait Runner {
     fn start<F>(self, f: F) -> F::Output
@@ -19,9 +29,10 @@ pub trait Runner {
 }
 
 pub trait Spawner: Clone + Send + 'static {
-    fn spawn<F>(&self, f: F)
+    fn spawn<F, T>(&self, f: F) -> Handle<T>
     where
-        F: Future<Output = ()> + Send + 'static;
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static;
 }
 
 pub trait Clock: Clone + Send + 'static {

@@ -473,6 +473,7 @@ version = "0.0.2"
 dependencies = [
  "futures",
  "rand",
+ "thiserror",
  "tokio",
  "tracing",
 ]

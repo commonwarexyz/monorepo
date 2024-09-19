@@ -1,5 +1,6 @@
 //! Utility functions for interacting with any runtime.
 
+use crate::Error;
 #[cfg(test)]
 use crate::{Runner, Spawner};
 use std::{
@@ -9,6 +10,7 @@ use std::{
 };
 #[cfg(test)]
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {
@@ -31,6 +33,30 @@ pub async fn reschedule() {
     }
 
     Reschedule { yielded: false }.await
+}
+
+pub struct Handle<T>
+where
+    T: Send + 'static,
+{
+    receiver: oneshot::Receiver<Result<T, Error>>,
+}
+
+impl<T> Handle<T>
+where
+    T: Send + 'static,
+{
+    pub(crate) fn new(receiver: oneshot::Receiver<Result<T, Error>>) -> Self {
+        Self { receiver }
+    }
+
+    pub async fn join(self) -> Result<T, Error> {
+        match self.receiver.await {
+            Ok(Ok(val)) => Ok(val),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(Error::Closed),
+        }
+    }
 }
 
 #[cfg(test)]
