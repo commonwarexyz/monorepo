@@ -80,7 +80,7 @@ mod tests {
         });
     }
 
-    fn test_root_aborts(runner: impl Runner, context: impl Spawner) {
+    fn test_root_finishes(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
             context.spawn(async move {
                 loop {
@@ -129,7 +129,7 @@ mod tests {
         }
         {
             let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
-            test_root_aborts(runner, context);
+            test_root_finishes(runner, context);
         }
         {
             let (runner, _) = deterministic::Executor::init(1, Duration::from_millis(1));
@@ -157,7 +157,7 @@ mod tests {
         }
         {
             let (runner, context) = tokio::Executor::init(1);
-            test_root_aborts(runner, context);
+            test_root_finishes(runner, context);
         }
         {
             let (runner, _) = tokio::Executor::init(1);
