@@ -1,4 +1,9 @@
-//! TODO: Message peers identified by a public key...
+//! Communicate with authenticated peers over encrypted connections.
+//!
+//! # Status
+//!
+//! `commonware-p2p` is **ALPHA** software and is not yet recommended for production use. Developers should
+//! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -16,8 +21,6 @@ pub mod simulated;
 pub type Message = (PublicKey, Bytes);
 
 /// Enum indicating the set of recipients to send a message to.
-///
-/// TODO: message never sent to self
 #[derive(Clone)]
 pub enum Recipients {
     All,
@@ -25,13 +28,11 @@ pub enum Recipients {
     One(PublicKey),
 }
 
-/// Separate from Receiver because clone-able.
-///
-/// For each channel, provide a sender.
+/// Interface for sending messages to a set of recipients.
 pub trait Sender: Clone {
     type Error: Debug + StdError;
 
-    /// TODO
+    /// Send a message to a set of recipients.
     fn send(
         &self,
         recipients: Recipients,
@@ -40,9 +41,10 @@ pub trait Sender: Clone {
     ) -> impl Future<Output = Result<Vec<PublicKey>, Self::Error>> + Send;
 }
 
+/// Interface for receiving messages from arbitrary recipients.
 pub trait Receiver {
     type Error: Debug + StdError;
 
-    /// TODO
+    /// Receive a message from an arbitrary recipient.
     fn recv(&mut self) -> impl Future<Output = Result<Message, Self::Error>> + Send;
 }

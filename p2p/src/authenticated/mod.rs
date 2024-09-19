@@ -1,17 +1,12 @@
-//! Communicate with authenticated peers over encrypted connections.
+//! Communicate with a fixed set of authenticated peers over encrypted connections.
 //!
-//! commonware-p2p provides encrypted, multiplexed communication between fully-connected peers
+//! `authenticated` provides encrypted, multiplexed communication between fully-connected peers
 //! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.). Unlike
-//! most p2p crates, commonware-p2p implements its own encrypted transport layer (no TLS) that
+//! most p2p crates, `authenticated` implements its own encrypted transport layer (no TLS) that
 //! exclusively uses said cryptographic identities to authenticate incoming connections (dropping
 //! any that aren't explicitly authorized). Peer discovery occurs automatically using ordered bit
 //! vectors (sorted by authorized cryptographic identities) to efficiently communicate knowledge
 //! of dialable peers.
-//!
-//! # Status
-//!
-//! `commonware-p2p` is **ALPHA** software and is not yet recommended for production use. Developers should
-//! expect breaking changes and occasional instability.
 //!
 //! # Features
 //!
