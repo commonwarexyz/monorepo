@@ -32,7 +32,7 @@ pub struct Executor {
 }
 
 impl Executor {
-    /// Initialize a new Tokio runtime with the given number of threads.
+    /// Initialize a new `tokio` runtime with the given number of threads.
     pub fn init(threads: usize) -> (Runner, Context) {
         let runtime = Builder::new_multi_thread()
             .worker_threads(threads)

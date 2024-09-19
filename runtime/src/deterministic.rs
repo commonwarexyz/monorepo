@@ -88,7 +88,7 @@ pub struct Executor {
 }
 
 impl Executor {
-    /// Initialize a new deterministic runtime with the given seed and cycle duration.
+    /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
     ///
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
