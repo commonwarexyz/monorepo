@@ -47,7 +47,7 @@ impl<E: Clock, C: Scheme> Stream<E, C> {
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
-        let msg = create_handshake(&mut config.crypto, peer.clone(), ephemeral)?;
+        let msg = create_handshake(context.clone(), &mut config.crypto, peer.clone(), ephemeral)?;
         time::timeout(config.handshake_timeout, framed.send(msg))
             .await
             .map_err(|_| Error::HandshakeTimeout)?
@@ -60,6 +60,7 @@ impl<E: Clock, C: Scheme> Stream<E, C> {
             .ok_or(Error::StreamClosed)?
             .map_err(|_| Error::ReadFailed)?;
         let handshake = Handshake::verify(
+            context.clone(),
             &config.crypto,
             config.synchrony_bound,
             config.max_handshake_age,
@@ -97,6 +98,7 @@ impl<E: Clock, C: Scheme> Stream<E, C> {
 
         // Send handshake
         let msg = create_handshake(
+            context.clone(),
             &mut config.crypto,
             handshake.peer_public_key.clone(),
             ephemeral,

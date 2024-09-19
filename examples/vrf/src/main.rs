@@ -278,8 +278,13 @@ fn main() {
                 256,         // 256 messages in flight
                 None,
             );
-            let signer =
-                handlers::Vrf::new(Duration::from_secs(5), threshold, contributors, requests);
+            let signer = handlers::Vrf::new(
+                context.clone(),
+                Duration::from_secs(5),
+                threshold,
+                contributors,
+                requests,
+            );
             context.spawn(signer.run(vrf_sender, vrf_receiver));
         } else {
             let (arbiter_sender, arbiter_receiver) = network.register(
@@ -290,6 +295,7 @@ fn main() {
                 Some(3),
             );
             let arbiter = handlers::Arbiter::new(
+                context.clone(),
                 Duration::from_secs(10),
                 Duration::from_secs(5),
                 contributors,

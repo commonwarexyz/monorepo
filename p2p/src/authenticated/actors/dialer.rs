@@ -11,10 +11,7 @@ use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
-use std::{
-    net::SocketAddr,
-    time::{Duration, SystemTime},
-};
+use std::{net::SocketAddr, time::Duration};
 use std::{
     ops::Add,
     sync::{Arc, Mutex},
@@ -80,6 +77,7 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
                 .get_or_create(&metrics::Peer::new(&peer))
                 .inc();
             self.context.spawn(Self::dial(
+                self.context.clone(),
                 self.connection.clone(),
                 peer.clone(),
                 address,
@@ -90,6 +88,7 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
     }
 
     async fn dial(
+        context: E,
         config: connection::Config<C>,
         peer: PublicKey,
         address: SocketAddr,
@@ -118,7 +117,7 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
         }
 
         // Upgrade connection
-        let stream = match Stream::upgrade_dialer(config, connection, peer.clone()).await {
+        let stream = match Stream::upgrade_dialer(context, config, connection, peer.clone()).await {
             Ok(stream) => stream,
             Err(e) => {
                 debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
@@ -132,7 +131,7 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
     }
 
     pub async fn run(self, tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, C>) {
-        let mut next_update = SystemTime::now();
+        let mut next_update = self.context.current();
         loop {
             self.context.sleep_until(next_update).await;
 
@@ -141,7 +140,7 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
 
             // Ensure we reset the timer with a new jitter
             let jitter = Jitter::up_to(self.dial_frequency);
-            next_update = SystemTime::now().add(jitter + self.dial_frequency);
+            next_update = self.context.current().add(jitter + self.dial_frequency);
         }
     }
 }

@@ -5,7 +5,7 @@ use crate::authenticated::{
     connection::{self, IncomingHandshake, Stream},
 };
 use commonware_cryptography::{utils::hex, Scheme};
-use commonware_runtime::Spawner;
+use commonware_runtime::{Clock, Spawner};
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
@@ -18,7 +18,7 @@ pub struct Config<C: Scheme> {
     pub allowed_incoming_connectioned_rate: Quota,
 }
 
-pub struct Actor<E: Spawner, C: Scheme> {
+pub struct Actor<E: Spawner + Clock, C: Scheme> {
     context: E,
 
     port: u16,
@@ -27,7 +27,7 @@ pub struct Actor<E: Spawner, C: Scheme> {
     rate_limiter: DefaultDirectRateLimiter,
 }
 
-impl<E: Spawner, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         Self {
             context,
@@ -38,6 +38,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
     }
 
     async fn handshake(
+        context: E,
         connection: connection::Config<C>,
         stream: TcpStream,
         tracker: tracker::Mailbox<E>,
@@ -48,6 +49,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
         // PartialHandshake limits how long we will wait for the peer to send us their public key
         // to ensure an adversary can't force us to hold many pending connections open.
         let handshake = match IncomingHandshake::verify(
+            context.clone(),
             &connection.crypto,
             connection.max_frame_length,
             connection.synchrony_bound,
@@ -77,7 +79,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
         };
 
         // Perform handshake
-        let stream = match Stream::upgrade_listener(connection, handshake).await {
+        let stream = match Stream::upgrade_listener(context, connection, handshake).await {
             Ok(connection) => connection,
             Err(e) => {
                 debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");
@@ -120,6 +122,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
 
             // Spawn a new handshaker to upgrade connection
             self.context.spawn(Self::handshake(
+                self.context.clone(),
                 self.connection.clone(),
                 stream,
                 tracker.clone(),

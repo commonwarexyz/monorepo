@@ -1,22 +1,22 @@
 use crate::authenticated::{actors::tracker, connection::Stream};
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::Spawner;
+use commonware_runtime::{Clock, Spawner};
 use tokio::sync::mpsc;
 
-pub enum Message<E: Spawner, C: Scheme> {
+pub enum Message<E: Spawner + Clock, C: Scheme> {
     Spawn {
         peer: PublicKey,
-        connection: Stream<C>,
+        connection: Stream<E, C>,
         reservation: tracker::Reservation<E>,
     },
 }
 
 #[derive(Clone)]
-pub struct Mailbox<E: Spawner, C: Scheme> {
+pub struct Mailbox<E: Spawner + Clock, C: Scheme> {
     sender: mpsc::Sender<Message<E, C>>,
 }
 
-impl<E: Spawner, C: Scheme> Mailbox<E, C> {
+impl<E: Spawner + Clock, C: Scheme> Mailbox<E, C> {
     pub fn new(sender: mpsc::Sender<Message<E, C>>) -> Self {
         Self { sender }
     }
@@ -24,7 +24,7 @@ impl<E: Spawner, C: Scheme> Mailbox<E, C> {
     pub async fn spawn(
         &self,
         peer: PublicKey,
-        connection: Stream<C>,
+        connection: Stream<E, C>,
         reservation: tracker::Reservation<E>,
     ) {
         self.sender

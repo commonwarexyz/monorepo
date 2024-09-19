@@ -7,14 +7,14 @@ use crate::authenticated::{
 };
 use bytes::BytesMut;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{Clock, Handle, Spawner};
 use futures::try_join;
 use governor::{DefaultDirectRateLimiter, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 
-pub struct Actor<E: Spawner> {
+pub struct Actor<E: Spawner + Clock> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -33,7 +33,7 @@ pub struct Actor<E: Spawner> {
     _reservation: tracker::Reservation<E>,
 }
 
-impl<E: Spawner> Actor<E> {
+impl<E: Spawner + Clock> Actor<E> {
     pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -110,7 +110,7 @@ impl<E: Spawner> Actor<E> {
     pub async fn run<C: Scheme>(
         mut self,
         peer: PublicKey,
-        connection: Stream<C>,
+        connection: Stream<E, C>,
         tracker: tracker::Mailbox<E>,
         channels: Channels,
     ) -> Error {

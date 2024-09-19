@@ -6,13 +6,13 @@ pub use super::{
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
-use commonware_runtime::Spawner;
+use commonware_runtime::{Clock, Spawner};
 use governor::DefaultKeyedRateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use rand::{prelude::IteratorRandom, seq::SliceRandom, Rng};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
@@ -148,10 +148,11 @@ pub struct Actor<E: Spawner + Rng, C: Scheme> {
     ip_signature: wire::Peer,
 }
 
-impl<E: Spawner + Rng, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
     pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
         // Construct IP signature
-        let current_time = SystemTime::now()
+        let current_time = context
+            .current()
             .duration_since(UNIX_EPOCH)
             .expect("failed to get current time")
             .as_secs();
@@ -414,7 +415,9 @@ impl<E: Spawner + Rng, C: Scheme> Actor<E, C> {
             }
 
             // If any timestamp is too far into the future, disconnect from the peer
-            let current_time = SystemTime::now()
+            let current_time = self
+                .context
+                .current()
                 .duration_since(UNIX_EPOCH)
                 .expect("failed to get current time")
                 .as_secs();

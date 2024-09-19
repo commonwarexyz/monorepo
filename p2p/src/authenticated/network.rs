@@ -8,10 +8,11 @@ use super::{
 };
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Spawner};
+use rand::Rng;
 use tracing::info;
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + Clock, C: Scheme> {
+pub struct Network<E: Spawner + Clock + Rng, C: Scheme> {
     context: E,
     cfg: Config<C>,
 
@@ -22,7 +23,7 @@ pub struct Network<E: Spawner + Clock, C: Scheme> {
     router_mailbox: router::Mailbox,
 }
 
-impl<E: Spawner + Clock, C: Scheme> Network<E, C> {
+impl<E: Spawner + Clock + Rng, C: Scheme> Network<E, C> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters

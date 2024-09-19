@@ -84,7 +84,7 @@ impl<E: Clock> Vrf<E> {
             .expect("failed to send signature");
 
         // Wait for partial signatures from peers or timeout
-        let start = tokio::time::Instant::now();
+        let start = self.context.current();
         let t_signature = start + self.timeout;
         let mut received = HashSet::new();
         loop {

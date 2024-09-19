@@ -7,14 +7,14 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::{utils::hex, Scheme};
-use commonware_runtime::Spawner;
+use commonware_runtime::{Clock, Spawner};
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner, C: Scheme> {
+pub struct Actor<E: Spawner + Clock, C: Scheme> {
     context: E,
 
     mailbox_size: usize,
@@ -28,7 +28,7 @@ pub struct Actor<E: Spawner, C: Scheme> {
     received_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();

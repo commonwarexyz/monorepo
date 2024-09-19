@@ -20,7 +20,7 @@ use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
-use tokio::{select, time};
+use tokio::select;
 use tracing::{debug, info, warn};
 
 pub struct Arbiter<E: Clock> {
@@ -66,7 +66,7 @@ impl<E: Clock> Arbiter<E> {
         receiver: &mut impl Receiver,
     ) -> (Option<poly::Public>, HashSet<PublicKey>) {
         // Create a new round
-        let start = tokio::time::Instant::now();
+        let start = self.context.current();
         let t_commitment = start + self.dkg_phase_timeout;
         let t_ack = start + self.dkg_phase_timeout * 2;
         let t_repair = start + self.dkg_phase_timeout * 3;
@@ -106,7 +106,7 @@ impl<E: Clock> Arbiter<E> {
             select! {
                 biased;
 
-                _ = self.sleep_until(t_commitment) => {
+                _ = self.context.sleep_until(t_commitment) => {
                     debug!("commitment phase timed out");
                     break
                 }
@@ -209,7 +209,7 @@ impl<E: Clock> Arbiter<E> {
             select! {
                 biased;
 
-                _ = self.sleep_until(t_ack) => {
+                _ = self.context.sleep_until(t_ack) => {
                     debug!("ack phase timed out");
                     break
                 }
@@ -375,7 +375,7 @@ impl<E: Clock> Arbiter<E> {
             select! {
                 biased;
 
-                _ = self.sleep_until(t_repair) => {
+                _ = self.context.sleep_until(t_repair) => {
                     break
                 }
                 result = receiver.recv() => match result {
@@ -528,7 +528,7 @@ impl<E: Clock> Arbiter<E> {
             round += 1;
 
             // Wait for next round
-            self.sleep(self.dkg_frequency).await;
+            self.context.sleep(self.dkg_frequency).await;
         }
     }
 }
