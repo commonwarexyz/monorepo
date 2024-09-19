@@ -22,14 +22,14 @@ pub struct Actor<E: Spawner, C: Scheme> {
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
 
-    receiver: mpsc::Receiver<Message<C>>,
+    receiver: mpsc::Receiver<Message<E, C>>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
 }
 
 impl<E: Spawner, C: Scheme> Actor<E, C> {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<C>) {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         {
@@ -58,7 +58,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
         )
     }
 
-    pub async fn run(mut self, tracker: tracker::Mailbox, router: router::Mailbox) {
+    pub async fn run(mut self, tracker: tracker::Mailbox<E>, router: router::Mailbox) {
         while let Some(msg) = self.receiver.recv().await {
             match msg {
                 Message::Spawn {

@@ -44,7 +44,7 @@ pub trait Runner {
 
 /// Interface that any task scheduler must implement to spawn
 /// sub-tasks in a given root task.
-pub trait Spawner: Clone + Send + 'static {
+pub trait Spawner: Clone + Send + Sync + 'static {
     /// Enqueues a task to be executed.
     ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
@@ -60,7 +60,7 @@ pub trait Spawner: Clone + Send + 'static {
 ///
 /// It is necessary to mock time to provide deterministic execution
 /// of arbitrary tasks.
-pub trait Clock: Clone + Send + 'static {
+pub trait Clock: Clone + Send + Sync + 'static {
     /// Returns the current time.
     fn current(&self) -> SystemTime;
 

@@ -13,6 +13,7 @@ documentation = "https://docs.rs/commonware-vrf"
 [dependencies]
 commonware-cryptography = { workspace = true }
 commonware-p2p = { workspace = true } 
+commonware-runtime = { workspace = true }
 bytes = { workspace = true } 
 rand = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

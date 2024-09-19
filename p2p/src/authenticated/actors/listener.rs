@@ -40,8 +40,8 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
     async fn handshake(
         connection: connection::Config<C>,
         stream: TcpStream,
-        tracker: tracker::Mailbox,
-        supervisor: spawner::Mailbox<C>,
+        tracker: tracker::Mailbox<E>,
+        supervisor: spawner::Mailbox<E, C>,
     ) {
         // Wait for the peer to send us their public key
         //
@@ -90,7 +90,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
         supervisor.spawn(peer, stream, reservation).await;
     }
 
-    pub async fn run(self, tracker: tracker::Mailbox, supervisor: spawner::Mailbox<C>) {
+    pub async fn run(self, tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, C>) {
         // Configure the listener on the specified port
         let address = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.port);
         let listener = TcpListener::bind(address).await.unwrap();

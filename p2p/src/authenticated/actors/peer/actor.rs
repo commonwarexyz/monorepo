@@ -30,11 +30,11 @@ pub struct Actor<E: Spawner> {
     received_messages: Family<metrics::Message, Counter>,
 
     // When reservation goes out-of-scope, the tracker will be notified.
-    _reservation: tracker::Reservation,
+    _reservation: tracker::Reservation<E>,
 }
 
 impl<E: Spawner> Actor<E> {
-    pub fn new(context: E, cfg: Config, reservation: tracker::Reservation) -> (Self, Relay) {
+    pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -111,7 +111,7 @@ impl<E: Spawner> Actor<E> {
         mut self,
         peer: PublicKey,
         connection: Stream<C>,
-        tracker: tracker::Mailbox,
+        tracker: tracker::Mailbox<E>,
         channels: Channels,
     ) -> Error {
         // Instantiate rate limiters for each message type

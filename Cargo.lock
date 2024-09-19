@@ -481,6 +481,7 @@ dependencies = [
  "clap",
  "commonware-cryptography",
  "commonware-p2p",
+ "commonware-runtime",
  "governor",
  "prometheus-client",
  "prost",

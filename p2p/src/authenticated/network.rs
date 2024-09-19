@@ -16,8 +16,8 @@ pub struct Network<E: Spawner + Clock, C: Scheme> {
     cfg: Config<C>,
 
     channels: Channels,
-    tracker: tracker::Actor<C>,
-    tracker_mailbox: tracker::Mailbox,
+    tracker: tracker::Actor<E, C>,
+    tracker_mailbox: tracker::Mailbox<E>,
     router: router::Actor,
     router_mailbox: router::Mailbox,
 }
@@ -33,19 +33,22 @@ impl<E: Spawner + Clock, C: Scheme> Network<E, C> {
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle) {
-        let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(tracker::Config {
-            crypto: cfg.crypto.clone(),
-            registry: cfg.registry.clone(),
-            address: cfg.address,
-            bootstrappers: cfg.bootstrappers.clone(),
-            allow_private_ips: cfg.allow_private_ips,
-            mailbox_size: cfg.mailbox_size,
-            synchrony_bound: cfg.synchrony_bound,
-            tracked_peer_sets: cfg.tracked_peer_sets,
-            allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
-            peer_gossip_max_count: cfg.peer_gossip_max_count,
-        });
+    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E>) {
+        let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
+            context.clone(),
+            tracker::Config {
+                crypto: cfg.crypto.clone(),
+                registry: cfg.registry.clone(),
+                address: cfg.address,
+                bootstrappers: cfg.bootstrappers.clone(),
+                allow_private_ips: cfg.allow_private_ips,
+                mailbox_size: cfg.mailbox_size,
+                synchrony_bound: cfg.synchrony_bound,
+                tracked_peer_sets: cfg.tracked_peer_sets,
+                allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
+                peer_gossip_max_count: cfg.peer_gossip_max_count,
+            },
+        );
         let (router, router_mailbox, messenger) = router::Actor::new(router::Config {
             registry: cfg.registry.clone(),
             mailbox_size: cfg.mailbox_size,

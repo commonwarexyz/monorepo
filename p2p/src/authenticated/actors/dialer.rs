@@ -58,7 +58,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
         }
     }
 
-    async fn dial_peers(&self, tracker: &tracker::Mailbox, supervisor: &spawner::Mailbox<C>) {
+    async fn dial_peers(&self, tracker: &tracker::Mailbox<E>, supervisor: &spawner::Mailbox<E, C>) {
         for (peer, address, reservation) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
             // want to block the loop)
@@ -92,7 +92,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
         peer: PublicKey,
         address: SocketAddr,
         reservation: tracker::Reservation<E>,
-        supervisor: spawner::Mailbox<C>,
+        supervisor: spawner::Mailbox<E, C>,
     ) {
         // Attempt to dial peer
         let connection = match TcpStream::connect(address).await {
@@ -129,7 +129,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
         supervisor.spawn(peer, stream, reservation).await;
     }
 
-    pub async fn run(self, tracker: tracker::Mailbox, supervisor: spawner::Mailbox<C>) {
+    pub async fn run(self, tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, C>) {
         let mut next_update = Instant::now();
         loop {
             time::sleep_until(next_update).await;
