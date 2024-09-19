@@ -13,6 +13,7 @@ documentation = "https://docs.rs/commonware-chat"
 [dependencies]
 commonware-cryptography = { workspace = true }
 commonware-p2p = { workspace = true } 
+commonware-runtime = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true } 
 clap = "4"

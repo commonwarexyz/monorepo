@@ -48,6 +48,7 @@ mod logger;
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, utils::hex, Scheme};
 use commonware_p2p::authenticated::{Config, Network};
+use commonware_runtime::tokio::Executor;
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -57,8 +58,10 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 #[doc(hidden)]
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Initialize runtime
+    let (runner, context) = Executor::init(4);
+
     // Parse arguments
     let matches = Command::new("commonware-chat")
         .about("send encrypted messages to a group of friends")
@@ -140,36 +143,42 @@ async fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
     );
-    let (mut network, oracle) = Network::new(config);
 
-    // Provide authorized peers
-    //
-    // In a real-world scenario, this would be updated as new peer sets are created (like when
-    // the composition of a validator set changes).
-    oracle.register(0, recipients).await;
+    // Start runtime
+    runner.start(async move {
+        // Initialize network
+        let (mut network, oracle) = Network::new(context.clone(), config);
 
-    // Initialize chat
-    let (chat_sender, chat_receiver) = network.register(
-        handler::CHANNEL,
-        Quota::per_second(NonZeroU32::new(128).unwrap()),
-        1024, // 1 KB max message size
-        128,  // 128 messages inflight
-        Some(3),
-    );
+        // Provide authorized peers
+        //
+        // In a real-world scenario, this would be updated as new peer sets are created (like when
+        // the composition of a validator set changes).
+        oracle.register(0, recipients).await;
 
-    // Start network
-    let network_handler = tokio::spawn(network.run());
+        // Initialize chat
+        let (chat_sender, chat_receiver) = network.register(
+            handler::CHANNEL,
+            Quota::per_second(NonZeroU32::new(128).unwrap()),
+            1024, // 1 KB max message size
+            128,  // 128 messages inflight
+            Some(3),
+        );
 
-    // Start chat
-    handler::run(
-        hex(&signer.me()),
-        registry,
-        logs,
-        chat_sender,
-        chat_receiver,
-    )
-    .await;
+        // Start network
+        let network_handler = context.spawn(network.run());
 
-    // Abort network
-    network_handler.abort();
+        // Start chat
+        handler::run(
+            context,
+            hex(&signer.me()),
+            registry,
+            logs,
+            chat_sender,
+            chat_receiver,
+        )
+        .await;
+
+        // Abort network
+        network_handler.abort();
+    });
 }

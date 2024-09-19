@@ -103,13 +103,16 @@ impl<E: Spawner + Clock, C: Scheme> Network<E, C> {
         let mut router_task = self.context.spawn(self.router.run(self.channels));
 
         // Start spawner
-        let (spawner, spawner_mailbox) = spawner::Actor::new(spawner::Config {
-            registry: self.cfg.registry.clone(),
-            mailbox_size: self.cfg.mailbox_size,
-            gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
-            allowed_bit_vec_rate: self.cfg.allowed_bit_vec_rate,
-            allowed_peers_rate: self.cfg.allowed_peers_rate,
-        });
+        let (spawner, spawner_mailbox) = spawner::Actor::new(
+            self.context.clone(),
+            spawner::Config {
+                registry: self.cfg.registry.clone(),
+                mailbox_size: self.cfg.mailbox_size,
+                gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
+                allowed_bit_vec_rate: self.cfg.allowed_bit_vec_rate,
+                allowed_peers_rate: self.cfg.allowed_peers_rate,
+            },
+        );
         let mut spawner_task = self
             .context
             .spawn(spawner.run(self.tracker_mailbox.clone(), self.router_mailbox));
@@ -125,22 +128,28 @@ impl<E: Spawner + Clock, C: Scheme> Network<E, C> {
             write_timeout: self.cfg.write_timeout,
             tcp_nodelay: self.cfg.tcp_nodelay,
         };
-        let listener = listener::Actor::new(listener::Config {
-            port: self.cfg.address.port(),
-            connection: connection.clone(),
-            allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
-        });
+        let listener = listener::Actor::new(
+            self.context.clone(),
+            listener::Config {
+                port: self.cfg.address.port(),
+                connection: connection.clone(),
+                allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
+            },
+        );
         let mut listener_task = self
             .context
             .spawn(listener.run(self.tracker_mailbox.clone(), spawner_mailbox.clone()));
 
         // Start dialer
-        let dialer = dialer::Actor::new(dialer::Config {
-            registry: self.cfg.registry,
-            connection,
-            dial_frequency: self.cfg.dial_frequency,
-            dial_rate: self.cfg.dial_rate,
-        });
+        let dialer = dialer::Actor::new(
+            self.context.clone(),
+            dialer::Config {
+                registry: self.cfg.registry,
+                connection,
+                dial_frequency: self.cfg.dial_frequency,
+                dial_rate: self.cfg.dial_rate,
+            },
+        );
         let mut dialer_task = self
             .context
             .spawn(dialer.run(self.tracker_mailbox, spawner_mailbox));

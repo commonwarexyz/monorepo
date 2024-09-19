@@ -91,7 +91,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
         config: connection::Config<C>,
         peer: PublicKey,
         address: SocketAddr,
-        reservation: tracker::Reservation,
+        reservation: tracker::Reservation<E>,
         supervisor: spawner::Mailbox<C>,
     ) {
         // Attempt to dial peer

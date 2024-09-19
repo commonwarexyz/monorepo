@@ -408,6 +408,7 @@ dependencies = [
  "clap",
  "commonware-cryptography",
  "commonware-p2p",
+ "commonware-runtime",
  "crossterm 0.28.1",
  "governor",
  "prometheus-client",

@@ -7,13 +7,16 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::{utils::hex, Scheme};
+use commonware_runtime::Spawner;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-pub struct Actor<C: Scheme> {
+pub struct Actor<E: Spawner, C: Scheme> {
+    context: E,
+
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
@@ -25,8 +28,8 @@ pub struct Actor<C: Scheme> {
     received_messages: Family<metrics::Message, Counter>,
 }
 
-impl<C: Scheme> Actor<C> {
-    pub fn new(cfg: Config) -> (Self, Mailbox<C>) {
+impl<E: Spawner, C: Scheme> Actor<E, C> {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<C>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         {
@@ -42,6 +45,7 @@ impl<C: Scheme> Actor<C> {
 
         (
             Self {
+                context,
                 mailbox_size: cfg.mailbox_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -81,30 +85,34 @@ impl<C: Scheme> Actor<C> {
                         .inc();
 
                     // Spawn peer
-                    tokio::spawn(async move {
-                        // Create peer
-                        info!(peer = hex(&peer), "peer started");
-                        let (actor, messenger) = peer::Actor::new(
-                            peer::Config {
-                                sent_messages,
-                                received_messages,
-                                mailbox_size: self.mailbox_size,
-                                gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
-                                allowed_bit_vec_rate: self.allowed_bit_vec_rate,
-                                allowed_peers_rate: self.allowed_peers_rate,
-                            },
-                            reservation,
-                        );
+                    self.context.spawn({
+                        let context = self.context.clone();
+                        async move {
+                            // Create peer
+                            info!(peer = hex(&peer), "peer started");
+                            let (actor, messenger) = peer::Actor::new(
+                                context,
+                                peer::Config {
+                                    sent_messages,
+                                    received_messages,
+                                    mailbox_size: self.mailbox_size,
+                                    gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
+                                    allowed_bit_vec_rate: self.allowed_bit_vec_rate,
+                                    allowed_peers_rate: self.allowed_peers_rate,
+                                },
+                                reservation,
+                            );
 
-                        // Register peer with the router
-                        let channels = router.ready(peer.clone(), messenger).await;
+                            // Register peer with the router
+                            let channels = router.ready(peer.clone(), messenger).await;
 
-                        // Run peer
-                        let e = actor.run(peer.clone(), connection, tracker, channels).await;
-                        info!(error = ?e, peer=hex(&peer), "peer shutdown");
+                            // Run peer
+                            let e = actor.run(peer.clone(), connection, tracker, channels).await;
+                            info!(error = ?e, peer=hex(&peer), "peer shutdown");
 
-                        // Let the router know the peer has exited
-                        router.release(peer).await;
+                            // Let the router know the peer has exited
+                            router.release(peer).await;
+                        }
                     });
                 }
             }
