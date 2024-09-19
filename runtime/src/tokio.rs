@@ -26,7 +26,7 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 
-/// Runtime based on Tokio.
+/// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
     runtime: Runtime,
 }

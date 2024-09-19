@@ -36,6 +36,7 @@ pub async fn reschedule() {
     Reschedule { yielded: false }.await
 }
 
+/// Handle to a spawned task.
 pub struct Handle<T>
 where
     T: Send + 'static,
@@ -63,6 +64,7 @@ where
         (wrapped, Self { receiver })
     }
 
+    /// Wait for the task to complete and return the result.
     pub async fn join(self) -> Result<T, Error> {
         match self.receiver.await {
             Ok(Ok(val)) => Ok(val),
