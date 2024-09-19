@@ -3,10 +3,9 @@
 use crate::Error;
 #[cfg(test)]
 use crate::{Runner, Spawner};
-use futures::channel::oneshot;
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
-use futures::FutureExt;
+use futures::{channel::oneshot, FutureExt};
 use std::{
     future::Future,
     panic::AssertUnwindSafe,
