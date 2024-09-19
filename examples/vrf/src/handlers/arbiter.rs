@@ -14,6 +14,7 @@ use commonware_cryptography::{
     PublicKey, Scheme,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_runtime::Clock;
 use prost::Message;
 use std::{
     collections::{HashMap, HashSet},
@@ -22,7 +23,9 @@ use std::{
 use tokio::{select, time};
 use tracing::{debug, info, warn};
 
-pub struct Arbiter {
+pub struct Arbiter<E: Clock> {
+    context: E,
+
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
 
@@ -35,8 +38,9 @@ pub struct Arbiter {
 ///
 /// Following the release of `commonware-consensus`, this will be
 /// updated to use the "replicated arbiter" pattern.
-impl Arbiter {
+impl<E: Clock> Arbiter<E> {
     pub fn new(
+        context: E,
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,
         mut players: Vec<PublicKey>,
@@ -44,6 +48,8 @@ impl Arbiter {
     ) -> Self {
         players.sort();
         Self {
+            context,
+
             dkg_frequency,
             dkg_phase_timeout,
 
@@ -100,7 +106,7 @@ impl Arbiter {
             select! {
                 biased;
 
-                _ = tokio::time::sleep_until(t_commitment) => {
+                _ = self.sleep_until(t_commitment) => {
                     debug!("commitment phase timed out");
                     break
                 }
@@ -203,7 +209,7 @@ impl Arbiter {
             select! {
                 biased;
 
-                _ = tokio::time::sleep_until(t_ack) => {
+                _ = self.sleep_until(t_ack) => {
                     debug!("ack phase timed out");
                     break
                 }
@@ -369,7 +375,7 @@ impl Arbiter {
             select! {
                 biased;
 
-                _ = tokio::time::sleep_until(t_repair) => {
+                _ = self.sleep_until(t_repair) => {
                     break
                 }
                 result = receiver.recv() => match result {
@@ -522,7 +528,7 @@ impl Arbiter {
             round += 1;
 
             // Wait for next round
-            time::sleep(self.dkg_frequency).await;
+            self.sleep(self.dkg_frequency).await;
         }
     }
 }

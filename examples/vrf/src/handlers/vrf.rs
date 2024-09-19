@@ -12,6 +12,7 @@ use commonware_cryptography::{
     PublicKey,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_runtime::Clock;
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -20,7 +21,8 @@ use tracing::{debug, info, warn};
 
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
-pub struct Vrf {
+pub struct Vrf<E: Clock> {
+    context: E,
     timeout: Duration,
     threshold: u32,
     contributors: Vec<PublicKey>,
@@ -28,8 +30,9 @@ pub struct Vrf {
     requests: mpsc::Receiver<(u64, Output)>,
 }
 
-impl Vrf {
+impl<E: Clock> Vrf<E> {
     pub fn new(
+        context: E,
         timeout: Duration,
         threshold: u32,
         mut contributors: Vec<PublicKey>,
@@ -42,6 +45,7 @@ impl Vrf {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
+            context,
             timeout,
             threshold,
             contributors,
@@ -87,7 +91,7 @@ impl Vrf {
             select! {
                 biased;
 
-                _ = tokio::time::sleep_until(t_signature) => {
+                _ = self.context.sleep_until(t_signature) => {
                     debug!(round, "signature timeout");
                     break;
                 }

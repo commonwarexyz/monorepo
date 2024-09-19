@@ -10,6 +10,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use commonware_cryptography::{PublicKey, Scheme};
+use commonware_runtime::Clock;
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
@@ -23,15 +24,17 @@ use tokio_util::codec::LengthDelimitedCodec;
 
 const CHUNK_PADDING: usize = 32 /* protobuf padding*/ + 12 /* chunk info */ + 16 /* encryption tag */;
 
-pub struct Stream<C: Scheme> {
+pub struct Stream<E: Clock, C: Scheme> {
+    context: E,
     config: Config<C>,
     dialer: bool,
     framed: Framed<TcpStream, LengthDelimitedCodec>,
     cipher: ChaCha20Poly1305,
 }
 
-impl<C: Scheme> Stream<C> {
+impl<E: Clock, C: Scheme> Stream<E, C> {
     pub async fn upgrade_dialer(
+        context: E,
         mut config: Config<C>,
         stream: TcpStream,
         peer: PublicKey,
@@ -75,6 +78,7 @@ impl<C: Scheme> Stream<C> {
 
         // We keep track of dialer to determine who adds a bit to their nonce (to prevent reuse)
         Ok(Self {
+            context,
             config,
             dialer: true,
             framed,
@@ -83,6 +87,7 @@ impl<C: Scheme> Stream<C> {
     }
 
     pub async fn upgrade_listener(
+        context: E,
         mut config: Config<C>,
         mut handshake: IncomingHandshake,
     ) -> Result<Self, Error> {
@@ -107,6 +112,7 @@ impl<C: Scheme> Stream<C> {
             .map_err(|_| Error::CipherCreationFailed)?;
 
         Ok(Stream {
+            context,
             config,
             dialer: false,
             framed: handshake.framed,
@@ -114,7 +120,7 @@ impl<C: Scheme> Stream<C> {
         })
     }
 
-    pub fn split(self) -> (usize, Sender, Receiver) {
+    pub fn split(self) -> (usize, Sender, Receiver<E>) {
         let (sink, stream) = self.framed.split();
         (
             self.config.max_frame_length - CHUNK_PADDING,
@@ -128,6 +134,7 @@ impl<C: Scheme> Stream<C> {
                 seq: 0,
             },
             Receiver {
+                context: self.context,
                 read_timeout: self.config.read_timeout,
                 cipher: self.cipher,
                 stream,
@@ -181,7 +188,9 @@ impl Sender {
     }
 }
 
-pub struct Receiver {
+pub struct Receiver<E: Clock> {
+    context: E,
+
     read_timeout: Duration,
     cipher: ChaCha20Poly1305,
     stream: SplitStream<Framed<TcpStream, LengthDelimitedCodec>>,
@@ -191,7 +200,7 @@ pub struct Receiver {
     seq: u64,
 }
 
-impl Receiver {
+impl<E: Clock> Receiver<E> {
     fn peer_nonce(&mut self) -> Result<Nonce, Error> {
         if self.seq == u64::MAX {
             if self.iter == u16::MAX {
@@ -221,7 +230,7 @@ impl Receiver {
                 // Deserialize data
                 Ok(wire::Message::decode(msg.as_ref()).map_err(Error::UnableToDecode)?)
             },
-            _ = time::sleep(self.read_timeout) => Err(Error::ReadTimeout),
+            _ = self.context.sleep(self.read_timeout) => Err(Error::ReadTimeout),
             else => Err(Error::StreamClosed),
         }
     }

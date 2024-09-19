@@ -6,18 +6,20 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
-use commonware_runtime::Spawner;
+use commonware_runtime::{Clock, Spawner};
 use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    net::SocketAddr,
+    time::{Duration, SystemTime},
+};
 use std::{
     ops::Add,
     sync::{Arc, Mutex},
 };
 use tokio::net::TcpStream;
-use tokio::time::{self, Instant};
 use tracing::debug;
 
 pub struct Config<C: Scheme> {
@@ -27,7 +29,7 @@ pub struct Config<C: Scheme> {
     pub dial_rate: Quota,
 }
 
-pub struct Actor<E: Spawner, C: Scheme> {
+pub struct Actor<E: Spawner + Clock, C: Scheme> {
     context: E,
 
     connection: connection::Config<C>,
@@ -38,7 +40,7 @@ pub struct Actor<E: Spawner, C: Scheme> {
     dial_attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<E: Spawner, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let dial_attempts = Family::<metrics::Peer, Counter>::default();
         {
@@ -130,16 +132,16 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
     }
 
     pub async fn run(self, tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, C>) {
-        let mut next_update = Instant::now();
+        let mut next_update = SystemTime::now();
         loop {
-            time::sleep_until(next_update).await;
+            self.context.sleep_until(next_update).await;
 
             // Attempt to dial peers we know about
             self.dial_peers(&tracker, &supervisor).await;
 
             // Ensure we reset the timer with a new jitter
             let jitter = Jitter::up_to(self.dial_frequency);
-            next_update = Instant::now().add(jitter + self.dial_frequency);
+            next_update = SystemTime::now().add(jitter + self.dial_frequency);
         }
     }
 }

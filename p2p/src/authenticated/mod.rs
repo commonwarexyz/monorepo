@@ -257,7 +257,7 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use governor::Quota;
     use prometheus_client::registry::Registry;
     use rand::Rng;
@@ -328,48 +328,51 @@ mod tests {
 
                 // Send/Recieve messages
                 let peer_addresses = addresses.clone();
-                let peer_handler = context.spawn(async move {
-                    // Send identity to all peers
-                    let msg = signer.me();
-                    for (j, recipient) in peer_addresses.iter().enumerate() {
-                        // Don't send message to self
-                        if i == j {
-                            continue;
-                        }
-
-                        // Send our identity
-                        let recipient = Recipients::One(recipient.clone());
-
-                        // Loop until success
-                        loop {
-                            if sender
-                                .send(recipient.clone(), msg.clone(), true)
-                                .await
-                                .unwrap()
-                                .len()
-                                == 1
-                            {
-                                break;
+                let peer_handler = context.spawn({
+                    let context = context.clone();
+                    async move {
+                        // Send identity to all peers
+                        let msg = signer.me();
+                        for (j, recipient) in peer_addresses.iter().enumerate() {
+                            // Don't send message to self
+                            if i == j {
+                                continue;
                             }
 
-                            // Sleep and try again (avoid busy loop)
-                            time::sleep(time::Duration::from_millis(100)).await;
+                            // Send our identity
+                            let recipient = Recipients::One(recipient.clone());
+
+                            // Loop until success
+                            loop {
+                                if sender
+                                    .send(recipient.clone(), msg.clone(), true)
+                                    .await
+                                    .unwrap()
+                                    .len()
+                                    == 1
+                                {
+                                    break;
+                                }
+
+                                // Sleep and try again (avoid busy loop)
+                                context.sleep(time::Duration::from_millis(100)).await;
+                            }
                         }
+
+                        // Wait for all peers to send their identity
+                        let mut received = HashSet::new();
+                        while received.len() < n - 1 {
+                            // Ensure message equals sender identity
+                            let (sender, message) = receiver.recv().await.unwrap();
+                            assert_eq!(sender, message);
+
+                            // Add to received set
+                            received.insert(sender);
+                        }
+
+                        // Shutdown network
+                        network_handler.abort();
                     }
-
-                    // Wait for all peers to send their identity
-                    let mut received = HashSet::new();
-                    while received.len() < n - 1 {
-                        // Ensure message equals sender identity
-                        let (sender, message) = receiver.recv().await.unwrap();
-                        assert_eq!(sender, message);
-
-                        // Add to received set
-                        received.insert(sender);
-                    }
-
-                    // Shutdown network
-                    network_handler.abort();
                 });
 
                 // Add to waiters
@@ -454,38 +457,42 @@ mod tests {
                 let msg = Bytes::from(msg.clone());
                 let msg_sender = addresses[0].clone();
                 let msg_recipient = addresses[1].clone();
-                let peer_handler = context.spawn(async move {
-                    if i == 0 {
-                        // Loop until success
-                        let recipient = Recipients::One(msg_recipient);
-                        loop {
-                            if sender
-                                .send(recipient.clone(), msg.clone(), true)
-                                .await
-                                .unwrap()
-                                .len()
-                                == 1
-                            {
-                                break;
+                let peer_handler = context.spawn({
+                    let context = context.clone();
+                    async move {
+                        if i == 0 {
+                            // Loop until success
+                            let recipient = Recipients::One(msg_recipient);
+                            loop {
+                                if sender
+                                    .send(recipient.clone(), msg.clone(), true)
+                                    .await
+                                    .unwrap()
+                                    .len()
+                                    == 1
+                                {
+                                    break;
+                                }
+
+                                // Sleep and try again (avoid busy loop)
+                                context.sleep(time::Duration::from_millis(100)).await;
                             }
+                        } else {
+                            // Ensure message equals sender identity
+                            let (sender, message) = receiver.recv().await.unwrap();
+                            assert_eq!(sender, msg_sender);
 
-                            // Sleep and try again (avoid busy loop)
-                            time::sleep(time::Duration::from_millis(100)).await;
+                            // Ensure message equals sent message
+                            assert_eq!(message.len(), msg.len());
+                            for (i, (&byte1, &byte2)) in message.iter().zip(msg.iter()).enumerate()
+                            {
+                                assert_eq!(byte1, byte2, "byte {} mismatch", i);
+                            }
                         }
-                    } else {
-                        // Ensure message equals sender identity
-                        let (sender, message) = receiver.recv().await.unwrap();
-                        assert_eq!(sender, msg_sender);
 
-                        // Ensure message equals sent message
-                        assert_eq!(message.len(), msg.len());
-                        for (i, (&byte1, &byte2)) in message.iter().zip(msg.iter()).enumerate() {
-                            assert_eq!(byte1, byte2, "byte {} mismatch", i);
-                        }
+                        // Shutdown network
+                        network_handler.abort();
                     }
-
-                    // Shutdown network
-                    network_handler.abort();
                 });
 
                 // Add to waiters
