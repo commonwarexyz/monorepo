@@ -1,4 +1,10 @@
 //! Execute asynchronous tasks with a configurable scheduler.
+//!
+//! This crate provides a collection of runtimes that can be
+//! used to execute asynchronous tasks in a variety of ways. For production use,
+//! the `tokio` module provides a runtime backed by [Tokio](https://tokio.rs).
+//! For testing and simulation, the `deterministic` module provides a runtime
+//! that allows for deterministic execution of tasks (given a fixed seed).
 
 pub mod deterministic;
 pub mod tokio;
@@ -21,14 +27,21 @@ pub enum Error {
     Closed,
 }
 
+/// Interface that any task scheduler must implement to start
+/// running tasks.
 pub trait Runner {
+    /// Start running a root task.
     fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static;
 }
 
+/// Interface that any task scheduler must implement to spawn
+/// sub-tasks in a given root task.
 pub trait Spawner: Clone + Send + 'static {
+    /// Enqueues a task to be executed.
+    ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
     /// does not await the handle).
     fn spawn<F, T>(&self, f: F) -> Handle<T>
@@ -37,9 +50,19 @@ pub trait Spawner: Clone + Send + 'static {
         T: Send + 'static;
 }
 
+/// Interface that any task scheduler must implement to provide
+/// time-based operations.
+///
+/// It is necessary to mock time to provide deterministic execution
+/// of arbitrary tasks.
 pub trait Clock: Clone + Send + 'static {
+    /// Returns the current time.
     fn current(&self) -> SystemTime;
+
+    /// Sleep for the given duration.
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+
+    /// Sleep until the given deadline.
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
