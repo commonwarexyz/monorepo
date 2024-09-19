@@ -430,11 +430,9 @@ mod tests {
 
     #[test]
     fn test_runner_with_error_future() {
-        // Define a future that returns a Result
         async fn error_future() -> Result<&'static str, &'static str> {
             Err("An error occurred")
         }
-
         let (runner, _context) = Executor::init(1, Duration::from_millis(1));
         let result = runner.start(error_future());
         assert_eq!(result, Err("An error occurred"));
@@ -459,13 +457,15 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::empty_loop)]
     fn test_run_stops_when_root_task_ends() {
         let (runner, context) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
-            context.spawn(async { loop {} });
-            context.spawn(async { loop {} });
-            // Root task ends here without waiting for other tasks
+            context.spawn(async {
+                loop {
+                    // Simulate work
+                    reschedule().await;
+                }
+            });
         });
     }
 
