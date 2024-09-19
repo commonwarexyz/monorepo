@@ -29,6 +29,8 @@ pub trait Runner {
 }
 
 pub trait Spawner: Clone + Send + 'static {
+    /// Unlike a future, a spawned task will start executing immediately (even if the caller
+    /// does not await the handle).
     fn spawn<F, T>(&self, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
