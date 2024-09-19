@@ -3,8 +3,10 @@
 use crate::Error;
 #[cfg(test)]
 use crate::{Runner, Spawner};
+use futures::FutureExt;
 use std::{
     future::Future,
+    panic::AssertUnwindSafe,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -46,8 +48,20 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn new(receiver: oneshot::Receiver<Result<T, Error>>) -> Self {
-        Self { receiver }
+    pub(crate) fn init<F>(f: F) -> (impl Future<Output = ()>, Self)
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        let (sender, receiver) = oneshot::channel();
+        let wrapped = async move {
+            let result = AssertUnwindSafe(f).catch_unwind().await;
+            let result = match result {
+                Ok(result) => Ok(result),
+                Err(err) => Err(Error::Exited(err)),
+            };
+            let _ = sender.send(result);
+        };
+        (wrapped, Self { receiver })
     }
 
     pub async fn join(self) -> Result<T, Error> {

@@ -20,24 +20,20 @@
 //! });
 //! ```
 
+use crate::Handle;
 use futures::task::{waker_ref, ArcWake};
-use futures::FutureExt;
 use rand::prelude::SliceRandom;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::{
     collections::BinaryHeap,
     future::Future,
     mem::replace,
-    panic::AssertUnwindSafe,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::oneshot;
 use tracing::debug;
-
-use crate::{Error, Handle};
 
 struct Task {
     tasks: Arc<Tasks>,
@@ -247,17 +243,9 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (sender, receiver) = oneshot::channel();
-        let wrapped = async move {
-            let result = AssertUnwindSafe(f).catch_unwind().await;
-            let result = match result {
-                Ok(result) => Ok(result),
-                Err(err) => Err(Error::Exited(err)),
-            };
-            let _ = sender.send(result);
-        };
-        Tasks::register(&self.executor.tasks, false, Box::pin(wrapped));
-        Handle::new(receiver)
+        let (f, handle) = Handle::init(f);
+        Tasks::register(&self.executor.tasks, false, Box::pin(f));
+        handle
     }
 }
 

@@ -19,6 +19,7 @@
 //! });
 //! ```
 
+use crate::Handle;
 use rand::{rngs::OsRng, RngCore};
 use std::{
     future::Future,
@@ -68,11 +69,14 @@ pub struct Context {
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F>(&self, f: F)
+    fn spawn<F, T>(&self, f: F) -> Handle<T>
     where
-        F: Future<Output = ()> + Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
     {
+        let (f, handle) = Handle::init(f);
         self.executor.runtime.spawn(f);
+        handle
     }
 }
 
