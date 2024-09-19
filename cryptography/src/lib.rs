@@ -1,4 +1,4 @@
-//! Generate keys, sign arbitrary messages, and deterministically verify untrusted signatures.
+//! Generate keys, sign arbitrary messages, and deterministically verify signatures.
 
 use bytes::Bytes;
 

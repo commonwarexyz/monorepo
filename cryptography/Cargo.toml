@@ -4,10 +4,10 @@ edition = "2021"
 publish = true
 version = "0.0.7"
 license = "MIT OR Apache-2.0"
-description = "Generate keys, sign arbitrary messages, and deterministically verify untrusted signatures."
+description = "Generate keys, sign arbitrary messages, and deterministically verify signatures."
 readme = "README.md"
 homepage = "https://commonware.xyz"
-repository = "https://github.com/commonwarexyz/monorepo"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/cryptography"
 documentation = "https://docs.rs/commonware-cryptography"
 
 [dependencies]
@@ -25,7 +25,7 @@ proptest = "1"
 criterion = "0.5.1"
 
 [build-dependencies]
-prost-build = "0.12"
+prost-build = { workspace = true } 
 
 [features]
 portable = ["blst/portable"]
