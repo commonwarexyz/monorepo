@@ -19,8 +19,7 @@
 
 use crate::Handle;
 use futures::task::{waker_ref, ArcWake};
-use rand::prelude::SliceRandom;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{prelude::SliceRandom, rngs::StdRng, RngCore, SeedableRng};
 use std::{
     collections::BinaryHeap,
     future::Future,
