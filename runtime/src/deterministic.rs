@@ -429,6 +429,18 @@ mod tests {
     }
 
     #[test]
+    fn test_runner_with_error_future() {
+        // Define a future that returns a Result
+        async fn error_future() -> Result<&'static str, &'static str> {
+            Err("An error occurred")
+        }
+
+        let (runner, _context) = Executor::init(1, Duration::from_millis(1));
+        let result = runner.start(error_future());
+        assert_eq!(result, Err("An error occurred"));
+    }
+
+    #[test]
     fn test_clock() {
         let (runner, context) = Executor::init(0, Duration::from_millis(1));
 

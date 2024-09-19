@@ -156,6 +156,18 @@ mod tests {
     }
 
     #[test]
+    fn test_runner_with_error_future() {
+        // Define a future that returns a Result
+        async fn error_future() -> Result<&'static str, &'static str> {
+            Err("An error occurred")
+        }
+
+        let (runner, _context) = Executor::init(1);
+        let result = runner.start(error_future());
+        assert_eq!(result, Err("An error occurred"));
+    }
+
+    #[test]
     fn test_clock_sleep() {
         let (runner, context) = Executor::init(1);
         runner.start(async move {
@@ -166,6 +178,20 @@ mod tests {
             // Ensure sleep duration is at least 100ms
             let end = context.current();
             assert!(end.duration_since(start).unwrap() >= Duration::from_millis(100));
+        });
+    }
+
+    #[test]
+    fn test_clock_sleep_until_future() {
+        let (runner, context) = Executor::init(1);
+        runner.start(async move {
+            // Trigger sleep
+            let now = SystemTime::now();
+            context.sleep_until(now + Duration::from_millis(100)).await;
+
+            // Ensure slept duration has elapsed
+            let elapsed = now.elapsed().unwrap();
+            assert!(elapsed >= Duration::from_millis(100));
         });
     }
 }
