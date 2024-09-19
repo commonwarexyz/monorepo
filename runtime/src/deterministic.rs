@@ -347,12 +347,12 @@ impl RngCore for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::run_work;
+    use crate::utils::run_tasks;
     use futures::task::noop_waker;
 
-    fn run_with_seed(seed: u64) -> Vec<&'static str> {
+    fn run_with_seed(seed: u64) -> Vec<String> {
         let (runner, context) = Executor::init(seed, Duration::from_millis(1));
-        run_work(runner, context)
+        run_tasks(30, runner, context)
     }
 
     #[test]
@@ -361,7 +361,6 @@ mod tests {
         let mut outputs = Vec::new();
         for seed in 0..1000 {
             let output = run_with_seed(seed);
-            assert_eq!(output.len(), 3);
             outputs.push(output);
         }
 

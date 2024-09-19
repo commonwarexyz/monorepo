@@ -31,7 +31,7 @@ pub async fn reschedule() {
 }
 
 #[cfg(test)]
-async fn work(name: &'static str, messages: mpsc::UnboundedSender<&'static str>) {
+async fn task(name: String, messages: mpsc::UnboundedSender<String>) {
     for _ in 0..5 {
         reschedule().await;
     }
@@ -39,20 +39,21 @@ async fn work(name: &'static str, messages: mpsc::UnboundedSender<&'static str>)
 }
 
 #[cfg(test)]
-pub fn run_work(runner: impl Runner, context: impl Spawner) -> Vec<&'static str> {
+pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Vec<String> {
     runner.start(async move {
         // Randomly schedule tasks
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        context.spawn(work("Task 1", sender.clone()));
-        context.spawn(work("Task 2", sender.clone()));
-        context.spawn(work("Task 3", sender));
+        for i in 0..tasks - 1 {
+            context.spawn(task(format!("Task {}", i), sender.clone()));
+        }
+        context.spawn(task(format!("Task {}", tasks - 1), sender));
 
         // Collect output order
         let mut outputs = Vec::new();
         while let Some(message) = receiver.recv().await {
             outputs.push(message);
         }
-        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs.len(), tasks);
         outputs
     })
 }

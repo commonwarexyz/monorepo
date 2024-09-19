@@ -117,11 +117,11 @@ impl RngCore for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::run_work;
+    use crate::utils::run_tasks;
 
     #[test]
     fn test_runs_tasks() {
         let (runner, context) = Executor::init(1);
-        run_work(runner, context);
+        run_tasks(10, runner, context);
     }
 }
