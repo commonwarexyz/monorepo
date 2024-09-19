@@ -1,6 +1,4 @@
 //! Actor responsible for dialing peers and establishing connections.
-//!
-//! TODO: add more documentation
 
 use crate::authenticated::{
     actors::{spawner, tracker},
