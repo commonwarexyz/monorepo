@@ -1,3 +1,5 @@
+//! Implementation of a `simulated` network.
+
 use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
@@ -16,6 +18,7 @@ type Task = (
     oneshot::Sender<Result<Vec<PublicKey>, Error>>,
 );
 
+/// Implementation of a `simulated` network.
 pub struct Network<E: Spawner + Rng + Clock> {
     context: E,
     cfg: Config,
@@ -28,7 +31,8 @@ pub struct Network<E: Spawner + Rng + Clock> {
 
 /// Describes a connection between two peers.
 ///
-/// Links are unidirectional and must be set up in both directions for a bidirectional connection.
+/// Links are unidirectional (and must be set up in both directions
+/// for a bidirectional connection).
 pub struct Link {
     /// Mean latency for the delivery of a message in milliseconds.
     pub latency_mean: f64,
@@ -43,14 +47,14 @@ pub struct Link {
     pub capacity: usize,
 }
 
-/// Configuration for a simulated network.
+/// Configuration for a `simulated` network.
 pub struct Config {
     /// Maximum size of a message in bytes.
     pub max_message_size: usize,
 }
 
 impl<E: Spawner + Rng + Clock> Network<E> {
-    /// Create a new simulated network.
+    /// Create a new simulated network with a given context and configuration.
     pub fn new(context: E, cfg: Config) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
@@ -216,6 +220,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     }
 }
 
+/// Implementation of a [`crate::Sender`] for the simulated network.
 #[derive(Clone)]
 pub struct Sender {
     me: PublicKey,
@@ -269,6 +274,7 @@ impl crate::Sender for Sender {
     }
 }
 
+/// Implementation of a [`crate::Receiver`] for the simulated network.
 pub struct Receiver {
     receiver: mpsc::UnboundedReceiver<Message>,
 }

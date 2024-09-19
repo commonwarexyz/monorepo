@@ -5,6 +5,11 @@
 //! the `tokio` module provides a runtime backed by [Tokio](https://tokio.rs).
 //! For testing and simulation, the `deterministic` module provides a runtime
 //! that allows for deterministic execution of tasks (given a fixed seed).
+//!
+//! # Status
+//!
+//! `commonware-runtime` is **ALPHA** software and is not yet recommended for production use. Developers should
+//! expect breaking changes and occasional instability.
 
 pub mod deterministic;
 pub mod tokio;
