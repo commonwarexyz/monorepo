@@ -7,12 +7,16 @@ use crate::authenticated::{
 };
 use bytes::BytesMut;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
+use commonware_runtime::{Handle, Spawner};
+use futures::try_join;
 use governor::{DefaultDirectRateLimiter, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::sync::mpsc;
 
-pub struct Actor {
+pub struct Actor<E: Spawner> {
+    context: E,
+
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
@@ -29,14 +33,15 @@ pub struct Actor {
     _reservation: tracker::Reservation,
 }
 
-impl Actor {
-    pub fn new(cfg: Config, reservation: tracker::Reservation) -> (Self, Relay) {
+impl<E: Spawner> Actor<E> {
+    pub fn new(context: E, cfg: Config, reservation: tracker::Reservation) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
 
         (
             Self {
+                context,
                 mailbox: Mailbox::new(control_sender),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -123,7 +128,7 @@ impl Actor {
         let send_peer = peer.clone();
         let send_mailbox = self.mailbox.clone();
         let send_rate_limits = rate_limits.clone();
-        let mut send_handler: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+        let mut send_handler: Handle<Result<(), Error>> = self.context.spawn(async move {
             let mut ticker = tokio::time::interval(self.gossip_bit_vec_frequency);
             loop {
                 tokio::select! {
@@ -177,7 +182,7 @@ impl Actor {
                 }
             }
         });
-        let mut receive_handler: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+        let mut receive_handler: Handle<Result<(), Error>> = self.context.spawn(async move {
             let bit_vec_rate_limiter = DefaultDirectRateLimiter::direct(self.allowed_bit_vec_rate);
             let peers_rate_limiter = DefaultDirectRateLimiter::direct(self.allowed_peers_rate);
             loop {
@@ -299,7 +304,7 @@ impl Actor {
         // Wait for one of the handlers to finish
         //
         // It is only possible for a handler to exit if there is an error.
-        let result = tokio::try_join!(&mut send_handler, &mut receive_handler);
+        let result = try_join!(&mut send_handler, &mut receive_handler);
 
         // Ensure both handlers are aborted when one of them exits
         send_handler.abort();

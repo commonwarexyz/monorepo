@@ -5,6 +5,7 @@ use crate::authenticated::{
     connection::{self, IncomingHandshake, Stream},
 };
 use commonware_cryptography::{utils::hex, Scheme};
+use commonware_runtime::Spawner;
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
@@ -17,16 +18,19 @@ pub struct Config<C: Scheme> {
     pub allowed_incoming_connectioned_rate: Quota,
 }
 
-pub struct Actor<C: Scheme> {
+pub struct Actor<E: Spawner, C: Scheme> {
+    context: E,
+
     port: u16,
     connection: connection::Config<C>,
 
     rate_limiter: DefaultDirectRateLimiter,
 }
 
-impl<C: Scheme> Actor<C> {
-    pub fn new(cfg: Config<C>) -> Self {
+impl<E: Spawner, C: Scheme> Actor<E, C> {
+    pub fn new(context: E, cfg: Config<C>) -> Self {
         Self {
+            context,
             port: cfg.port,
             connection: cfg.connection,
             rate_limiter: RateLimiter::direct(cfg.allowed_incoming_connectioned_rate),
@@ -115,7 +119,7 @@ impl<C: Scheme> Actor<C> {
             }
 
             // Spawn a new handshaker to upgrade connection
-            tokio::spawn(Self::handshake(
+            self.context.spawn(Self::handshake(
                 self.connection.clone(),
                 stream,
                 tracker.clone(),

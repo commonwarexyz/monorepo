@@ -6,6 +6,7 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
+use commonware_runtime::Spawner;
 use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -26,7 +27,9 @@ pub struct Config<C: Scheme> {
     pub dial_rate: Quota,
 }
 
-pub struct Actor<C: Scheme> {
+pub struct Actor<E: Spawner, C: Scheme> {
+    context: E,
+
     connection: connection::Config<C>,
     dial_frequency: Duration,
 
@@ -35,8 +38,8 @@ pub struct Actor<C: Scheme> {
     dial_attempts: Family<metrics::Peer, Counter>,
 }
 
-impl<C: Scheme> Actor<C> {
-    pub fn new(cfg: Config<C>) -> Self {
+impl<E: Spawner, C: Scheme> Actor<E, C> {
+    pub fn new(context: E, cfg: Config<C>) -> Self {
         let dial_attempts = Family::<metrics::Peer, Counter>::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
@@ -47,6 +50,7 @@ impl<C: Scheme> Actor<C> {
             );
         }
         Self {
+            context,
             connection: cfg.connection,
             dial_frequency: cfg.dial_frequency,
             dial_limiter: RateLimiter::direct(cfg.dial_rate),
@@ -73,7 +77,7 @@ impl<C: Scheme> Actor<C> {
             self.dial_attempts
                 .get_or_create(&metrics::Peer::new(&peer))
                 .inc();
-            tokio::spawn(Self::dial(
+            self.context.spawn(Self::dial(
                 self.connection.clone(),
                 peer.clone(),
                 address,

@@ -5,7 +5,6 @@ use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::task::JoinError;
 
 mod actor;
 pub use actor::Actor;
@@ -36,7 +35,7 @@ pub enum Error {
     #[error("unexpected handshake message")]
     UnexpectedHandshake,
     #[error("unexpected failure: {0}")]
-    UnexpectedFailure(JoinError),
+    UnexpectedFailure(commonware_runtime::Error),
     #[error("message dropped")]
     MessageDropped,
     #[error("message too large: {0}")]
