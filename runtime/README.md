@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-runtime.svg)](https://crates.io/crates/commonware-runtime)
 
-TODO: Execute asynchronous code with a compile-time scheduling configuration.
+Execute asynchronous tasks with a configurable scheduler.
 
 ## Status 
 

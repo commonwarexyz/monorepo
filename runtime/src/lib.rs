@@ -1,4 +1,4 @@
-//! TBD
+//! Execute asynchronous tasks with a configurable scheduler.
 
 pub mod deterministic;
 pub mod tokio;
