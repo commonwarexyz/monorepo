@@ -7,10 +7,12 @@ use super::{
     connection,
 };
 use commonware_cryptography::Scheme;
+use commonware_runtime::{Clock, Spawner};
 use tracing::info;
 
 /// Implementation of an `authenticated` network.
-pub struct Network<C: Scheme> {
+pub struct Network<E: Spawner + Clock, C: Scheme> {
+    context: E,
     cfg: Config<C>,
 
     channels: Channels,
@@ -20,7 +22,7 @@ pub struct Network<C: Scheme> {
     router_mailbox: router::Mailbox,
 }
 
-impl<C: Scheme> Network<C> {
+impl<E: Spawner + Clock, C: Scheme> Network<E, C> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -31,7 +33,7 @@ impl<C: Scheme> Network<C> {
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(cfg: Config<C>) -> (Self, tracker::Oracle) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(tracker::Config {
             crypto: cfg.crypto.clone(),
             registry: cfg.registry.clone(),
@@ -51,6 +53,7 @@ impl<C: Scheme> Network<C> {
 
         (
             Self {
+                context,
                 cfg,
 
                 channels: Channels::new(messenger),
@@ -94,10 +97,10 @@ impl<C: Scheme> Network<C> {
     /// After the network is started, it is not possible to add more channels.
     pub async fn run(self) {
         // Start tracker
-        let mut tracker_task = tokio::spawn(self.tracker.run());
+        let mut tracker_task = self.context.spawn(self.tracker.run());
 
         // Start router
-        let mut router_task = tokio::spawn(self.router.run(self.channels));
+        let mut router_task = self.context.spawn(self.router.run(self.channels));
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(spawner::Config {
@@ -107,8 +110,9 @@ impl<C: Scheme> Network<C> {
             allowed_bit_vec_rate: self.cfg.allowed_bit_vec_rate,
             allowed_peers_rate: self.cfg.allowed_peers_rate,
         });
-        let mut spawner_task =
-            tokio::spawn(spawner.run(self.tracker_mailbox.clone(), self.router_mailbox));
+        let mut spawner_task = self
+            .context
+            .spawn(spawner.run(self.tracker_mailbox.clone(), self.router_mailbox));
 
         // Start listener
         let connection = connection::Config {
@@ -126,8 +130,9 @@ impl<C: Scheme> Network<C> {
             connection: connection.clone(),
             allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
         });
-        let mut listener_task =
-            tokio::spawn(listener.run(self.tracker_mailbox.clone(), spawner_mailbox.clone()));
+        let mut listener_task = self
+            .context
+            .spawn(listener.run(self.tracker_mailbox.clone(), spawner_mailbox.clone()));
 
         // Start dialer
         let dialer = dialer::Actor::new(dialer::Config {
@@ -136,11 +141,13 @@ impl<C: Scheme> Network<C> {
             dial_frequency: self.cfg.dial_frequency,
             dial_rate: self.cfg.dial_rate,
         });
-        let mut dialer_task = tokio::spawn(dialer.run(self.tracker_mailbox, spawner_mailbox));
+        let mut dialer_task = self
+            .context
+            .spawn(dialer.run(self.tracker_mailbox, spawner_mailbox));
 
         // Wait for actors
         info!("network started");
-        let err = tokio::try_join!(
+        let err = futures::try_join!(
             &mut tracker_task,
             &mut router_task,
             &mut spawner_task,

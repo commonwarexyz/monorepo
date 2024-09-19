@@ -120,6 +120,18 @@ mod tests {
         });
     }
 
+    fn test_spawn_abort(runner: impl Runner, context: impl Spawner) {
+        runner.start(async move {
+            let handle = context.spawn(async move {
+                loop {
+                    reschedule().await;
+                }
+            });
+            handle.abort();
+            handle.await.unwrap_err();
+        });
+    }
+
     fn test_panic_aborts_root(runner: impl Runner) {
         let result = catch_unwind(AssertUnwindSafe(|| {
             runner.start(async move {
@@ -162,6 +174,10 @@ mod tests {
             test_root_finishes(runner, context);
         }
         {
+            let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
+            test_spawn_abort(runner, context);
+        }
+        {
             let (runner, _) = deterministic::Executor::init(1, Duration::from_millis(1));
             test_panic_aborts_root(runner);
         }
@@ -188,6 +204,10 @@ mod tests {
         {
             let (runner, context) = tokio::Executor::init(1);
             test_root_finishes(runner, context);
+        }
+        {
+            let (runner, context) = tokio::Executor::init(1);
+            test_spawn_abort(runner, context);
         }
         {
             let (runner, _) = tokio::Executor::init(1);

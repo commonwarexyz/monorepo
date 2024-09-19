@@ -5,7 +5,11 @@ use crate::Error;
 use crate::{Runner, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
-use futures::{channel::oneshot, FutureExt};
+use futures::{
+    channel::oneshot,
+    stream::{AbortHandle, Abortable},
+    FutureExt,
+};
 use std::{
     future::Future,
     panic::AssertUnwindSafe,
@@ -41,6 +45,7 @@ pub struct Handle<T>
 where
     T: Send + 'static,
 {
+    aborter: AbortHandle,
     receiver: oneshot::Receiver<Result<T, Error>>,
 }
 
@@ -52,7 +57,11 @@ where
     where
         F: Future<Output = T> + Send + 'static,
     {
+        // Initialize channels to handle result/abort
         let (sender, receiver) = oneshot::channel();
+        let (aborter, abort_registration) = AbortHandle::new_pair();
+
+        // Wrap the future to handle panics
         let wrapped = async move {
             let result = AssertUnwindSafe(f).catch_unwind().await;
             let result = match result {
@@ -61,16 +70,14 @@ where
             };
             let _ = sender.send(result);
         };
-        (wrapped, Self { receiver })
+
+        // Make the future abortable
+        let abortable = Abortable::new(wrapped, abort_registration);
+        (abortable.map(|_| ()), Self { aborter, receiver })
     }
 
-    /// Wait for the task to complete and return the result.
-    pub async fn join(self) -> Result<T, Error> {
-        match self.receiver.await {
-            Ok(Ok(val)) => Ok(val),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(Error::Closed),
-        }
+    pub fn abort(&self) {
+        self.aborter.abort();
     }
 }
 
