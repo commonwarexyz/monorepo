@@ -43,6 +43,8 @@ pub trait Clock: Clone + Send + 'static {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
     use utils::reschedule;
 
     use super::*;
@@ -90,6 +92,28 @@ mod tests {
         });
     }
 
+    fn test_panic_aborts_root(runner: impl Runner) {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            runner.start(async move {
+                panic!("blah");
+            });
+        }));
+        result.unwrap_err();
+    }
+
+    fn test_panic_aborts_spawn(runner: impl Runner, context: impl Spawner) {
+        let result = runner.start(async move {
+            let result = context.spawn(async move {
+                panic!("blah");
+            });
+            result.await.unwrap_err();
+            Result::<(), Error>::Ok(())
+        });
+
+        // Ensure panic was caught
+        result.unwrap();
+    }
+
     #[test]
     fn test_deterministic() {
         {
@@ -108,6 +132,14 @@ mod tests {
         {
             let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
             test_root_aborts(runner, context);
+        }
+        {
+            let (runner, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+            test_panic_aborts_root(runner);
+        }
+        {
+            let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
+            test_panic_aborts_spawn(runner, context);
         }
     }
 
@@ -128,6 +160,14 @@ mod tests {
         {
             let (runner, context) = tokio::Executor::init(1);
             test_root_aborts(runner, context);
+        }
+        {
+            let (runner, _) = tokio::Executor::init(1);
+            test_panic_aborts_root(runner);
+        }
+        {
+            let (runner, context) = tokio::Executor::init(1);
+            test_panic_aborts_spawn(runner, context);
         }
     }
 }
