@@ -18,7 +18,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
 use prost::Message;
-use rand::thread_rng;
+use rand::rngs::OsRng;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -317,7 +317,7 @@ impl<C: Scheme> Contributor<C> {
                     // If we are rogue, randomly modify the share.
                     share_bytes = group::Share {
                         index: share.index,
-                        private: Private::rand(&mut thread_rng()),
+                        private: Private::rand(&mut OsRng),
                     }
                     .serialize();
                     warn!(round, player = idx, "modified share");

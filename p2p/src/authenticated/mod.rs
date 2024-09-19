@@ -260,7 +260,7 @@ mod tests {
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use governor::Quota;
     use prometheus_client::registry::Registry;
-    use rand::{thread_rng, Rng};
+    use rand::Rng;
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -395,7 +395,7 @@ mod tests {
 
     fn test_chunking(base_port: u16, compression: Option<u8>) {
         // Initialize runtime
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, mut context) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
             const N: usize = 2;
@@ -407,8 +407,7 @@ mod tests {
 
             // Create random message
             let mut msg = vec![0u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
-            let mut rng = thread_rng();
-            rng.fill(&mut msg[..]);
+            context.fill(&mut msg[..]);
 
             // Create networks
             let mut waiters = Vec::new();

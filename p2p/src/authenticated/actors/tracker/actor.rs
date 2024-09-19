@@ -11,8 +11,7 @@ use governor::DefaultKeyedRateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::prelude::IteratorRandom;
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{prelude::IteratorRandom, seq::SliceRandom, Rng};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -125,7 +124,7 @@ impl AddressCount {
     }
 }
 
-pub struct Actor<E: Spawner, C: Scheme> {
+pub struct Actor<E: Spawner + Rng, C: Scheme> {
     context: E,
 
     crypto: C,
@@ -149,7 +148,7 @@ pub struct Actor<E: Spawner, C: Scheme> {
     ip_signature: wire::Peer,
 }
 
-impl<E: Spawner, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Rng, C: Scheme> Actor<E, C> {
     pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
         // Construct IP signature
         let current_time = SystemTime::now()
@@ -445,7 +444,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
         Ok(())
     }
 
-    fn handle_bit_vec(&self, bit_vec: wire::BitVec) -> Result<Option<wire::Peers>, Error> {
+    fn handle_bit_vec(&mut self, bit_vec: wire::BitVec) -> Result<Option<wire::Peers>, Error> {
         // Ensure we have the peerset requested
         let set = match self.sets.get(&bit_vec.index) {
             Some(set) => set,
@@ -510,7 +509,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
         // select a subset to send (this increases the likelihood that
         // the recipient will hear about different peers from different sources)
         if peers.len() > self.peer_gossip_max_count {
-            peers.shuffle(&mut thread_rng());
+            peers.shuffle(&mut self.context);
             peers.truncate(self.peer_gossip_max_count);
         }
         Ok(Some(wire::Peers { peers }))
@@ -554,7 +553,7 @@ impl<E: Spawner, C: Scheme> Actor<E, C> {
 
                     // Select a random peer set (we want to learn about all peers in
                     // our tracked sets)
-                    let set = match self.sets.values().choose(&mut thread_rng()) {
+                    let set = match self.sets.values().choose(&mut self.context) {
                         Some(set) => set,
                         None => {
                             debug!("no peer sets available");
