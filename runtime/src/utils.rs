@@ -3,6 +3,7 @@
 use crate::Error;
 #[cfg(test)]
 use crate::{Runner, Spawner};
+use futures::channel::oneshot;
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::FutureExt;
@@ -12,7 +13,6 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use tokio::sync::oneshot;
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {
