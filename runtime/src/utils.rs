@@ -31,13 +31,15 @@ pub async fn reschedule() {
 }
 
 #[cfg(test)]
-pub fn run_work(runner: impl Runner, context: impl Spawner) -> Vec<&'static str> {
-    async fn work(name: &'static str, messages: mpsc::UnboundedSender<&'static str>) {
-        for _ in 0..5 {
-            reschedule().await;
-        }
-        messages.send(name).unwrap();
+async fn work(name: &'static str, messages: mpsc::UnboundedSender<&'static str>) {
+    for _ in 0..5 {
+        reschedule().await;
     }
+    messages.send(name).unwrap();
+}
+
+#[cfg(test)]
+pub fn run_work(runner: impl Runner, context: impl Spawner) -> Vec<&'static str> {
     runner.start(async move {
         // Randomly schedule tasks
         let (sender, mut receiver) = mpsc::unbounded_channel();
