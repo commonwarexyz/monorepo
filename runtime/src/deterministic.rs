@@ -347,56 +347,12 @@ impl RngCore for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Runner, Spawner};
+    use crate::utils::run_work;
     use futures::task::noop_waker;
-    use tokio::sync::mpsc;
-
-    async fn reschedule() {
-        struct Reschedule {
-            yielded: bool,
-        }
-
-        impl Future for Reschedule {
-            type Output = ();
-
-            fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
-                if self.yielded {
-                    Poll::Ready(())
-                } else {
-                    self.yielded = true;
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
-            }
-        }
-
-        Reschedule { yielded: false }.await
-    }
-
-    async fn task(name: &'static str, messages: mpsc::UnboundedSender<&'static str>) {
-        for _ in 0..5 {
-            reschedule().await;
-        }
-        messages.send(name).unwrap();
-    }
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
         let (runner, context) = Executor::init(seed, Duration::from_millis(1));
-        runner.start(async move {
-            // Randomly schedule tasks
-            let (sender, mut receiver) = mpsc::unbounded_channel();
-            context.spawn(task("Task 1", sender.clone()));
-            context.spawn(task("Task 2", sender.clone()));
-            context.spawn(task("Task 3", sender));
-
-            // Collect output order
-            let mut outputs = Vec::new();
-            while let Some(message) = receiver.recv().await {
-                outputs.push(message);
-            }
-            assert_eq!(outputs.len(), 3);
-            outputs
-        })
+        run_work(runner, context)
     }
 
     #[test]

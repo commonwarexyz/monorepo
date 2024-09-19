@@ -3,6 +3,9 @@
 pub mod deterministic;
 pub mod tokio;
 
+mod utils;
+pub use utils::reschedule;
+
 use std::{
     future::Future,
     time::{Duration, SystemTime},
@@ -29,6 +32,8 @@ pub trait Clock: Clone + Send + 'static {
 
 #[cfg(test)]
 mod tests {
+    use utils::reschedule;
+
     use super::*;
 
     fn test_error_future(runner: impl Runner) {
@@ -64,14 +69,11 @@ mod tests {
         });
     }
 
-    fn test_root_aborts(runner: impl Runner, context: impl Spawner + Clock) {
+    fn test_root_aborts(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            context.spawn({
-                let context = context.clone();
-                async move {
-                    loop {
-                        context.sleep(Duration::from_millis(1)).await;
-                    }
+            context.spawn(async move {
+                loop {
+                    reschedule().await;
                 }
             });
         });

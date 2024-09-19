@@ -117,36 +117,11 @@ impl RngCore for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Runner, Spawner};
-    use tokio::sync::mpsc;
-
-    async fn reschedule() {
-        tokio::task::yield_now().await;
-    }
-
-    async fn task(name: &'static str, messages: mpsc::UnboundedSender<&'static str>) {
-        for _ in 0..5 {
-            reschedule().await;
-        }
-        messages.send(name).unwrap();
-    }
+    use crate::utils::run_work;
 
     #[test]
-    fn test_executor_runs_tasks() {
+    fn test_runs_tasks() {
         let (runner, context) = Executor::init(1);
-        runner.start(async move {
-            // Randomly schedule tasks
-            let (sender, mut receiver) = mpsc::unbounded_channel();
-            context.spawn(task("Task 1", sender.clone()));
-            context.spawn(task("Task 2", sender.clone()));
-            context.spawn(task("Task 3", sender));
-
-            // Collect output order
-            let mut output = Vec::new();
-            while let Some(message) = receiver.recv().await {
-                output.push(message);
-            }
-            assert_eq!(output.len(), 3);
-        });
+        run_work(runner, context);
     }
 }
