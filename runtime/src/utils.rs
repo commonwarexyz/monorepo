@@ -1,3 +1,5 @@
+//! Utility functions for interacting with any runtime.
+
 #[cfg(test)]
 use crate::{Runner, Spawner};
 use std::{
@@ -8,6 +10,7 @@ use std::{
 #[cfg(test)]
 use tokio::sync::mpsc;
 
+/// Yield control back to the runtime.
 pub async fn reschedule() {
     struct Reschedule {
         yielded: bool,
