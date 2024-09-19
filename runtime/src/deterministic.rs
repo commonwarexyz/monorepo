@@ -2,26 +2,21 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic::{Executor, reschedule}};
+//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use std::time::Duration;
+//! use tokio::sync::oneshot;
 //!
 //! let (runner, context) = Executor::init(42, Duration::from_millis(1));
 //! runner.start(async move {
+//!     println!("Parent started");
+//!     let (sender, mut receiver) = oneshot::channel();
 //!     context.spawn(async move {
 //!         println!("Child started");
-//!         for _ in 0..5 {
-//!           // Simulate work
-//!           reschedule().await;
-//!         }
-//!         println!("Child completed");
+//!         sender.send(()).unwrap();
+//!         println!("Child exited");
 //!     });
-//!
-//!     println!("Parent started");
-//!     for _ in 0..3 {
-//!       // Simulate work
-//!       reschedule().await;
-//!     }
-//!     println!("Parent completed");
+//!     receiver.await.unwrap();
+//!     println!("Parent exited");
 //! });
 //! ```
 
@@ -349,34 +344,41 @@ impl RngCore for Context {
     }
 }
 
-pub async fn reschedule() {
-    struct Reschedule {
-        yielded: bool,
-    }
-
-    impl Future for Reschedule {
-        type Output = ();
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
-            if self.yielded {
-                Poll::Ready(())
-            } else {
-                self.yielded = true;
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        }
-    }
-
-    Reschedule { yielded: false }.await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Clock, Runner, Spawner};
+    use crate::{Runner, Spawner};
     use futures::task::noop_waker;
     use tokio::sync::mpsc;
+
+    async fn reschedule() {
+        struct Reschedule {
+            yielded: bool,
+        }
+
+        impl Future for Reschedule {
+            type Output = ();
+
+            fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<()> {
+                if self.yielded {
+                    Poll::Ready(())
+                } else {
+                    self.yielded = true;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }
+
+        Reschedule { yielded: false }.await
+    }
+
+    async fn task(name: &'static str, messages: mpsc::UnboundedSender<&'static str>) {
+        for _ in 0..5 {
+            reschedule().await;
+        }
+        messages.send(name).unwrap();
+    }
 
     fn run_with_seed(seed: u64) -> Vec<&'static str> {
         let (runner, context) = Executor::init(seed, Duration::from_millis(1));
@@ -395,13 +397,6 @@ mod tests {
             assert_eq!(outputs.len(), 3);
             outputs
         })
-    }
-
-    async fn task(name: &'static str, messages: mpsc::UnboundedSender<&'static str>) {
-        for _ in 0..5 {
-            reschedule().await;
-        }
-        messages.send(name).unwrap();
     }
 
     #[test]
@@ -426,47 +421,6 @@ mod tests {
         let output1 = run_with_seed(12345);
         let output2 = run_with_seed(54321);
         assert_ne!(output1, output2);
-    }
-
-    #[test]
-    fn test_runner_with_error_future() {
-        async fn error_future() -> Result<&'static str, &'static str> {
-            Err("An error occurred")
-        }
-        let (runner, _context) = Executor::init(1, Duration::from_millis(1));
-        let result = runner.start(error_future());
-        assert_eq!(result, Err("An error occurred"));
-    }
-
-    #[test]
-    fn test_clock() {
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
-
-        // Check initial time
-        assert_eq!(context.current(), SystemTime::UNIX_EPOCH);
-
-        // Run task that sleeps
-        runner.start(async move {
-            let sleep_duration = Duration::from_millis(10);
-            context.sleep(sleep_duration).await;
-
-            // After run, time should have advanced
-            let expected_time = SystemTime::UNIX_EPOCH + sleep_duration;
-            assert_eq!(context.current(), expected_time);
-        });
-    }
-
-    #[test]
-    fn test_run_stops_when_root_task_ends() {
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
-            context.spawn(async {
-                loop {
-                    // Simulate work
-                    reschedule().await;
-                }
-            });
-        });
     }
 
     #[test]

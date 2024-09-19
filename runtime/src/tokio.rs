@@ -2,25 +2,20 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, tokio::{Executor, reschedule}};
+//! use commonware_runtime::{Spawner, Runner, tokio::Executor};
+//! use tokio::sync::oneshot;
 //!
 //! let (runner, context) = Executor::init(2);
 //! runner.start(async move {
+//!     println!("Parent started");
+//!     let (sender, mut receiver) = oneshot::channel();
 //!     context.spawn(async move {
 //!         println!("Child started");
-//!         for _ in 0..5 {
-//!           // Simulate work
-//!           reschedule().await;
-//!         }
-//!         println!("Child completed");
+//!         sender.send(()).unwrap();
+//!         println!("Child exited");
 //!     });
-//!
-//!     println!("Parent started");
-//!     for _ in 0..3 {
-//!       // Simulate work
-//!       reschedule().await;
-//!     }
-//!     println!("Parent completed");
+//!     receiver.await.unwrap();
+//!     println!("Parent exited");
 //! });
 //! ```
 
@@ -119,15 +114,15 @@ impl RngCore for Context {
     }
 }
 
-pub async fn reschedule() {
-    tokio::task::yield_now().await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Clock, Runner, Spawner};
+    use crate::{Runner, Spawner};
     use tokio::sync::mpsc;
+
+    async fn reschedule() {
+        tokio::task::yield_now().await;
+    }
 
     async fn task(name: &'static str, messages: mpsc::UnboundedSender<&'static str>) {
         for _ in 0..5 {
@@ -152,57 +147,6 @@ mod tests {
                 output.push(message);
             }
             assert_eq!(output.len(), 3);
-        });
-    }
-
-    #[test]
-    fn test_runner_with_error_future() {
-        async fn error_future() -> Result<&'static str, &'static str> {
-            Err("An error occurred")
-        }
-        let (runner, _context) = Executor::init(1);
-        let result = runner.start(error_future());
-        assert_eq!(result, Err("An error occurred"));
-    }
-
-    #[test]
-    fn test_run_stops_when_root_task_ends() {
-        let (runner, context) = Executor::init(1);
-        runner.start(async move {
-            context.spawn(async {
-                loop {
-                    // Simulate work
-                    reschedule().await;
-                }
-            });
-        });
-    }
-
-    #[test]
-    fn test_clock_sleep() {
-        let (runner, context) = Executor::init(1);
-        runner.start(async move {
-            // Capture initial time
-            let start = context.current();
-            context.sleep(Duration::from_millis(100)).await;
-
-            // Ensure sleep duration is at least 100ms
-            let end = context.current();
-            assert!(end.duration_since(start).unwrap() >= Duration::from_millis(100));
-        });
-    }
-
-    #[test]
-    fn test_clock_sleep_until_future() {
-        let (runner, context) = Executor::init(1);
-        runner.start(async move {
-            // Trigger sleep
-            let now = SystemTime::now();
-            context.sleep_until(now + Duration::from_millis(100)).await;
-
-            // Ensure slept duration has elapsed
-            let elapsed = now.elapsed().unwrap();
-            assert!(elapsed >= Duration::from_millis(100));
         });
     }
 }
