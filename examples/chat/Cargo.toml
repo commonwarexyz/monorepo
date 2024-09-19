@@ -19,7 +19,7 @@ clap = "4"
 chrono = "0.4"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
 ratatui = "0.27"
-crossterm = "0.22"
+crossterm = "0.28"
 serde_json = "1"
 prometheus-client = "0.22"
 governor = "0.6"
