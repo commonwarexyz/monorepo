@@ -43,11 +43,9 @@ pub trait Clock: Clone + Send + 'static {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
-
-    use utils::reschedule;
-
     use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use utils::reschedule;
 
     fn test_error_future(runner: impl Runner) {
         async fn error_future() -> Result<&'static str, &'static str> {
