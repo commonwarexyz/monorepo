@@ -78,6 +78,7 @@ impl Tasks {
     }
 }
 
+/// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     cycle: Duration,
     rng: Mutex<StdRng>,
@@ -87,6 +88,10 @@ pub struct Executor {
 }
 
 impl Executor {
+    /// Initialize a new deterministic runtime with the given seed and cycle duration.
+    ///
+    /// The cycle duration determines how much time is advanced after each iteration of the event
+    /// loop. This is useful to prevent starvation if some task never yields.
     pub fn init(seed: u64, cycle: Duration) -> (Runner, Context) {
         let executor = Arc::new(Self {
             cycle,
@@ -106,6 +111,7 @@ impl Executor {
     }
 }
 
+/// Implementation of [`crate::Runner`] for the `deterministic` runtime.
 pub struct Runner {
     executor: Arc<Executor>,
 }
@@ -228,6 +234,7 @@ impl crate::Runner for Runner {
     }
 }
 
+/// Implementation of [`crate::Context`] for the `deterministic` runtime.
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,

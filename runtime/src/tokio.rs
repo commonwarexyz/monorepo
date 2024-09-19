@@ -1,4 +1,5 @@
-//! A non-deterministic runtime based on Tokio with secure randomness.
+//! A production-focused runtime based on [Tokio](https://tokio.rs) with
+//! secure randomness.
 //!
 //! # Example
 //! ```rust
@@ -25,11 +26,13 @@ use std::{
 };
 use tokio::runtime::{Builder, Runtime};
 
+/// Runtime based on Tokio.
 pub struct Executor {
     runtime: Runtime,
 }
 
 impl Executor {
+    /// Initialize a new Tokio runtime with the given number of threads.
     pub fn init(threads: usize) -> (Runner, Context) {
         let runtime = Builder::new_multi_thread()
             .worker_threads(threads)
@@ -46,6 +49,7 @@ impl Executor {
     }
 }
 
+/// Implementation of [`crate::Runner`] for the `tokio` runtime.
 pub struct Runner {
     executor: Arc<Executor>,
 }
@@ -60,6 +64,7 @@ impl crate::Runner for Runner {
     }
 }
 
+/// Implementation of [`crate::Spawner`] for `tokio` runtime.
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,
