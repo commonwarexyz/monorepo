@@ -234,7 +234,8 @@ impl crate::Runner for Runner {
     }
 }
 
-/// Implementation of [`crate::Context`] for the `deterministic` runtime.
+/// Implementation of [`crate::Spawner`] and [`crate::Clock`]
+/// for the `deterministic` runtime.
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,

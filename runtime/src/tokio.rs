@@ -64,7 +64,8 @@ impl crate::Runner for Runner {
     }
 }
 
-/// Implementation of [`crate::Spawner`] for `tokio` runtime.
+/// Implementation of [`crate::Spawner`] and [`crate::Clock`]
+/// for the `tokio` runtime.
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,
