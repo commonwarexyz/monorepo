@@ -154,43 +154,47 @@
 //! ```rust
 //! use commonware_p2p::authenticated::{Config, Network};
 //! use commonware_cryptography::{ed25519, Scheme};
+//! use commonware_runtime::{tokio::Executor, Spawner, Runner};
 //! use governor::Quota;
 //! use prometheus_client::registry::Registry;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //! use std::num::NonZeroU32;
 //! use std::sync::{Arc, Mutex};
 //!
-//! #[tokio::main]
-//! async fn main() {
-//!     // Generate identity
-//!     //
-//!     // In production, the signer should be generated from a secure source of entropy.
-//!     let signer = ed25519::insecure_signer(0);
+//! // Generate identity
+//! //
+//! // In production, the signer should be generated from a secure source of entropy.
+//! let signer = ed25519::insecure_signer(0);
 //!
-//!     // Generate peers
-//!     //
-//!     // In production, peer identities will be provided by some external source of truth
-//!     // (like the staking set of a blockchain).
-//!     let peer1 = ed25519::insecure_signer(1).me();
-//!     let peer2 = ed25519::insecure_signer(2).me();
-//!     let peer3 = ed25519::insecure_signer(3).me();
+//! // Generate peers
+//! //
+//! // In production, peer identities will be provided by some external source of truth
+//! // (like the staking set of a blockchain).
+//! let peer1 = ed25519::insecure_signer(1).me();
+//! let peer2 = ed25519::insecure_signer(2).me();
+//! let peer3 = ed25519::insecure_signer(3).me();
 //!
-//!     // Configure bootstrappers
-//!     //
-//!     // In production, it is likely that the address of bootstrappers will be some public address.
-//!     let bootstrappers = vec![(peer1.clone(), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001))];
+//! // Configure bootstrappers
+//! //
+//! // In production, it is likely that the address of bootstrappers will be some public address.
+//! let bootstrappers = vec![(peer1.clone(), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001))];
 //!
-//!     // Configure network
-//!     //
-//!     // In production, use a more conservative configuration like `Config::recommended`.
-//!     let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-//!     let config = Config::aggressive(
-//!         signer.clone(),
-//!         registry,
-//!         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
-//!         bootstrappers,
-//!     );
-//!     let (mut network, oracle) = Network::new(config);
+//! // Configure network
+//! //
+//! // In production, use a more conservative configuration like `Config::recommended`.
+//! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+//! let config = Config::aggressive(
+//!     signer.clone(),
+//!     registry,
+//!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
+//!     bootstrappers,
+//! );
+//!
+//! // Configure runtime
+//! let (runner, context) = Executor::init(4);
+//! runner.start(async move {
+//!     // Initialize network
+//!     let (mut network, oracle) = Network::new(context.clone(), config);
 //!
 //!     // Register authorized peers
 //!     //
@@ -208,13 +212,13 @@
 //!     );
 //!
 //!     // Run network
-//!     let network_handler = tokio::spawn(network.run());
+//!     let network_handler = context.spawn(network.run());
 //!
 //!     // ... Use sender and receiver ...
 //!
 //!     // Shutdown network
 //!     network_handler.abort();
-//! }
+//! });
 //! ```
 
 mod actors;
