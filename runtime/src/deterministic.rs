@@ -19,7 +19,7 @@
 
 use crate::Handle;
 use futures::task::{waker_ref, ArcWake};
-use rand::{prelude::SliceRandom, rngs::StdRng, RngCore, SeedableRng};
+use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use std::{
     collections::BinaryHeap,
     future::Future,
@@ -387,6 +387,8 @@ impl RngCore for Context {
         self.executor.rng.lock().unwrap().try_fill_bytes(dest)
     }
 }
+
+impl CryptoRng for Context {}
 
 #[cfg(test)]
 mod tests {

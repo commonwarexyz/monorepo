@@ -23,7 +23,7 @@ use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     future::Future,
     net::SocketAddr,
@@ -290,6 +290,8 @@ impl RngCore for Context {
         OsRng.try_fill_bytes(dest)
     }
 }
+
+impl CryptoRng for Context {}
 
 #[cfg(test)]
 mod tests {
