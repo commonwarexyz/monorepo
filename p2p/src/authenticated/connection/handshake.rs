@@ -2,7 +2,8 @@ use super::{utils::codec, x25519, Error};
 use crate::authenticated::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::Clock;
+use commonware_runtime::Spawner;
+use commonware_runtime::{timeout, Clock};
 use futures::StreamExt;
 use prost::Message;
 use std::time::{Duration, UNIX_EPOCH};
@@ -138,7 +139,7 @@ pub struct IncomingHandshake {
 }
 
 impl IncomingHandshake {
-    pub async fn verify<E: Clock, C: Scheme>(
+    pub async fn verify<E: Clock + Spawner, C: Scheme>(
         context: E,
         crypto: &C,
         max_frame_len: usize,
@@ -151,7 +152,7 @@ impl IncomingHandshake {
         let mut framed = Framed::new(stream, codec(max_frame_len));
 
         // Verify handshake message from peer
-        let msg = time::timeout(handshake_timeout, framed.next())
+        let msg = timeout(context, handshake_timeout, framed.next())
             .await
             .map_err(|_| Error::HandshakeTimeout)?
             .ok_or(Error::StreamClosed)?
