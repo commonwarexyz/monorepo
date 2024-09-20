@@ -2,11 +2,12 @@
 
 #[cfg(test)]
 use crate::Runner;
-use crate::{select, Clock, Error, Spawner};
+use crate::{Clock, Error, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::{
     channel::oneshot,
+    pin_mut, select,
     stream::{AbortHandle, Abortable},
     FutureExt,
 };
@@ -95,17 +96,28 @@ where
     }
 }
 
-pub async fn timeout<E, F, T>(context: E, timeout: Duration, future: F) -> Result<T, Error>
+pub async fn timeout<E, F, T>(context: E, timeout: Duration, f: F) -> Result<T, Error>
 where
     E: Clock + Spawner,
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
+    // Prepare f
+    let f_handle = context.spawn(f);
+    pin_mut!(f_handle);
+
+    // Prepare timeout
+    let t = context.sleep(timeout);
+    pin_mut!(t);
+
+    // Wait for either to complete
     select! {
-        _timeout = context.sleep(timeout) => {
+        _ = t.fuse() => {
+            // Abort f if we timeout
+            f_handle.abort();
             Err(Error::Timeout)
         },
-        result = context.spawn(future) => {
+        result = f_handle.as_mut().fuse() => {
             result
         },
     }
