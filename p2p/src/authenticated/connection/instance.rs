@@ -10,27 +10,27 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::{select, Clock, Sink, Spawner, Stream as RStream};
+use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use prost::Message;
 use rand::{CryptoRng, Rng};
-use std::time::Duration;
 
 const CHUNK_PADDING: usize = 32 /* protobuf padding*/ + 12 /* chunk info */ + 16 /* encryption tag */;
 
-pub struct Stream<E: Clock + Spawner, C: Scheme, Si: Sink, St: RStream> {
+pub struct Instance<E: Clock + Spawner, C: Scheme, Si: Sink, St: Stream> {
     context: E,
     config: Config<C>,
     dialer: bool,
-    stream: S,
+    sink: Si,
+    stream: St,
     cipher: ChaCha20Poly1305,
 }
 
-impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: RStream> Stream<E, C, Si, St> {
+impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Instance<E, C, Si, St> {
     pub async fn upgrade_dialer(
-        context: E,
+        mut context: E,
         mut config: Config<C>,
-        sink: Si,
-        stream: St,
+        mut sink: Si,
+        mut stream: St,
         peer: PublicKey,
     ) -> Result<Self, Error> {
         // Generate shared secret
@@ -66,15 +66,16 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: RStream> Str
             context,
             config,
             dialer: true,
+            sink,
             stream,
             cipher,
         })
     }
 
     pub async fn upgrade_listener(
-        context: E,
+        mut context: E,
         mut config: Config<C>,
-        handshake: IncomingHandshake<S>,
+        mut handshake: IncomingHandshake<Si, St>,
     ) -> Result<Self, Error> {
         // Generate shared secret
         let secret = x25519::new(&mut context);
@@ -88,10 +89,9 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: RStream> Str
             ephemeral,
         )?;
         handshake
-            .stream
+            .sink
             .send(msg)
             .await
-            .map_err(|_| Error::HandshakeTimeout)?
             .map_err(|_| Error::SendFailed)?;
 
         // Create cipher
@@ -99,23 +99,23 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: RStream> Str
         let cipher = ChaCha20Poly1305::new_from_slice(shared_secret.as_bytes())
             .map_err(|_| Error::CipherCreationFailed)?;
 
-        Ok(Stream {
+        Ok(Instance {
             context,
             config,
             dialer: false,
+            sink: handshake.sink,
             stream: handshake.stream,
             cipher,
         })
     }
 
-    pub fn split(self) -> (usize, Sender<E, S>, Receiver<E, S>) {
+    pub fn split(self) -> (usize, Sender<E, Si>, Receiver<E, St>) {
         (
             self.config.max_frame_length - CHUNK_PADDING,
             Sender {
                 context: self.context.clone(),
-                write_timeout: self.config.write_timeout,
                 cipher: self.cipher.clone(),
-                stream: self.stream.clone(),
+                sink: self.sink,
 
                 dialer: self.dialer,
                 iter: 0,
@@ -123,7 +123,6 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: RStream> Str
             },
             Receiver {
                 context: self.context,
-                read_timeout: self.config.read_timeout,
                 cipher: self.cipher,
                 stream: self.stream,
 
@@ -135,19 +134,18 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: RStream> Str
     }
 }
 
-pub struct Sender<E: Spawner + Clock, S: RStream> {
+pub struct Sender<E: Spawner + Clock, Si: Sink> {
     context: E,
 
-    write_timeout: Duration,
     cipher: ChaCha20Poly1305,
-    stream: S,
+    sink: Si,
 
     dialer: bool,
     iter: u16,
     seq: u64,
 }
 
-impl<E: Spawner + Clock, S: RStream> Sender<E, S> {
+impl<E: Spawner + Clock, Si: Sink> Sender<E, Si> {
     fn my_nonce(&mut self) -> Result<Nonce, Error> {
         if self.seq == u64::MAX {
             if self.iter == u16::MAX {
@@ -171,31 +169,25 @@ impl<E: Spawner + Clock, S: RStream> Sender<E, S> {
             .map_err(|_| Error::EncryptionFailed)?;
 
         // Send data
-        let result = timeout(
-            self.context.clone(),
-            self.write_timeout,
-            self.stream.send(Bytes::from(msg)),
-        )
-        .await;
-        result
-            .map_err(|_| Error::WriteTimeout)?
+        self.sink
+            .send(Bytes::from(msg))
+            .await
             .map_err(|_| Error::SendFailed)
     }
 }
 
-pub struct Receiver<E: Clock, S: RStream> {
+pub struct Receiver<E: Clock, St: Stream> {
     context: E,
 
-    read_timeout: Duration,
     cipher: ChaCha20Poly1305,
-    stream: S,
+    stream: St,
 
     dialer: bool,
     iter: u16,
     seq: u64,
 }
 
-impl<E: Clock, S: RStream> Receiver<E, S> {
+impl<E: Clock, St: Stream> Receiver<E, St> {
     fn peer_nonce(&mut self) -> Result<Nonce, Error> {
         if self.seq == u64::MAX {
             if self.iter == u16::MAX {
@@ -210,24 +202,17 @@ impl<E: Clock, S: RStream> Receiver<E, S> {
     }
 
     pub async fn receive(&mut self) -> Result<wire::Message, Error> {
-        select! {
-            _timeout = self.context.sleep(self.read_timeout) => {
-                Err(Error::ReadTimeout)
-            },
-            msg = self.stream.recv() => {
-                // Read message
-                let msg = msg.map_err(|_| Error::StreamClosed)?;
+        // Read message
+        let msg = self.stream.recv().await.map_err(|_| Error::StreamClosed)?;
 
-                // Decrypt data
-                let nonce = self.peer_nonce()?;
-                let msg = self
-                    .cipher
-                    .decrypt(&nonce, msg.as_ref())
-                    .map_err(|_| Error::DecryptionFailed)?;
+        // Decrypt data
+        let nonce = self.peer_nonce()?;
+        let msg = self
+            .cipher
+            .decrypt(&nonce, msg.as_ref())
+            .map_err(|_| Error::DecryptionFailed)?;
 
-                // Deserialize data
-                Ok(wire::Message::decode(msg.as_ref()).map_err(Error::UnableToDecode)?)
-            },
-        }
+        // Deserialize data
+        Ok(wire::Message::decode(msg.as_ref()).map_err(Error::UnableToDecode)?)
     }
 }

@@ -2,7 +2,7 @@ use super::{x25519, Error};
 use crate::authenticated::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::{timeout, Clock, Spawner, Stream};
+use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use prost::Message;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -127,30 +127,29 @@ impl Handshake {
     }
 }
 
-pub struct IncomingHandshake<S: Stream> {
-    pub(super) stream: S,
+pub struct IncomingHandshake<Si: Sink, St: Stream> {
+    pub(super) sink: Si,
+    pub(super) stream: St,
     pub peer_public_key: PublicKey,
     pub(super) ephemeral_public_key: x25519_dalek::PublicKey,
 }
 
-impl<S: Stream> IncomingHandshake<S> {
+impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
     pub async fn verify<E: Clock + Spawner, C: Scheme>(
         context: E,
         crypto: &C,
         synchrony_bound: Duration,
         max_handshake_age: Duration,
-        handshake_timeout: Duration,
-        stream: S,
+        sink: Si,
+        mut stream: St,
     ) -> Result<Self, Error> {
         // Verify handshake message from peer
-        let msg = timeout(context.clone(), handshake_timeout, stream.recv())
-            .await
-            .map_err(|_| Error::HandshakeTimeout)?
-            .map_err(|_| Error::ReadFailed)?;
+        let msg = stream.recv().await.map_err(|_| Error::ReadFailed)?;
         let handshake =
             Handshake::verify(context, crypto, synchrony_bound, max_handshake_age, msg)?;
 
         Ok(Self {
+            sink,
             stream,
             peer_public_key: handshake.peer_public_key,
             ephemeral_public_key: handshake.ephemeral_public_key,

@@ -6,12 +6,12 @@ use std::time::Duration;
 use thiserror::Error;
 
 mod handshake;
-mod stream;
+mod instance;
 mod utils;
 mod x25519;
 
 pub use handshake::IncomingHandshake;
-pub use stream::{Sender, Stream};
+pub use instance::{Receiver, Sender};
 
 #[derive(Clone)]
 pub struct Config<C: Scheme> {
