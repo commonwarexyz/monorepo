@@ -43,9 +43,6 @@ pub struct Config {
     /// If not set, no address will be bound.
     pub listen: Option<SocketAddr>,
 
-    /// Pending connection limit for the TCP listener.
-    pub listen_backlog: usize,
-
     /// Maximum size used for all messages sent over the wire.
     ///
     /// We use this to prevent malicious peers from sending us large messages
@@ -83,7 +80,6 @@ impl Default for Config {
         Self {
             threads: 2,
             listen: None,
-            listen_backlog: 1,
             max_frame_length: 1024 * 1024, // 1 MB
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
@@ -107,7 +103,7 @@ impl Executor {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let (sender, receiver) = mpsc::channel(cfg.listen_backlog);
+        let (sender, receiver) = mpsc::channel(1);
         let executor = Arc::new(Self {
             cfg,
             runtime,
@@ -213,7 +209,17 @@ impl crate::Network<Stream> for Context {
     fn accept(&self) -> impl Future<Output = Result<(SocketAddr, Stream), Error>> + Send {
         let connections = self.connections.clone();
         async move {
+            // Wait for a new connection
             let (addr, stream) = connections.recv().await.ok_or(Error::Closed)?;
+
+            // Set TCP_NODELAY if configured
+            if let Some(tcp_nodelay) = self.executor.cfg.tcp_nodelay {
+                if let Err(err) = stream.set_nodelay(tcp_nodelay) {
+                    warn!(?err, "failed to set TCP_NODELAY");
+                }
+            }
+
+            // Create a new framed stream
             let framed = Framed::new(stream, codec(self.executor.cfg.max_frame_length));
             Ok((addr, Stream::new(framed)))
         }
@@ -222,9 +228,19 @@ impl crate::Network<Stream> for Context {
     fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<Stream, Error>> + Send {
         let max_frame_length = self.executor.cfg.max_frame_length;
         async move {
+            // Create a new TCP stream
             let stream = TcpStream::connect(socket)
                 .await
                 .map_err(|_| Error::ConnectionFailed)?;
+
+            // Set TCP_NODELAY if configured
+            if let Some(tcp_nodelay) = self.executor.cfg.tcp_nodelay {
+                if let Err(err) = stream.set_nodelay(tcp_nodelay) {
+                    warn!(?err, "failed to set TCP_NODELAY");
+                }
+            }
+
+            // Create a new framed stream
             let framed = Framed::new(stream, codec(max_frame_length));
             Ok(Stream::new(framed))
         }
