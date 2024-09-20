@@ -33,6 +33,12 @@ pub enum Error {
     Closed,
     #[error("timeout")]
     Timeout,
+    #[error("connection failed")]
+    ConnectionFailed,
+    #[error("write failed")]
+    WriteFailed,
+    #[error("read failed")]
+    ReadFailed,
 }
 
 /// Interface that any task scheduler must implement to start
@@ -74,17 +80,21 @@ pub trait Clock: Clone + Send + Sync + 'static {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
+/// Interface that any runtime must implement to provide
+/// network operations.
 pub trait Network<S>: Clone + Send + Sync + 'static
 where
     S: Stream,
 {
-    fn accept(&self) -> impl Future<Output = Result<(SocketAddr, S), Error>> + Send + 'static;
-    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<S, Error>> + Send + 'static;
+    fn accept(&self) -> impl Future<Output = Result<(SocketAddr, S), Error>> + Send;
+    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<S, Error>> + Send;
 }
 
+/// Interface that any runtime must implement to provide
+/// stream operations.
 pub trait Stream: Clone + Send + Sync + 'static {
-    fn send(&self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send + 'static;
-    fn recv(&self) -> impl Future<Output = Result<Bytes, Error>> + Send + 'static;
+    fn send(&self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send;
+    fn recv(&self) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }
 
 /// Macro to select the first future that completes.
