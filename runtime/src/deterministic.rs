@@ -125,7 +125,10 @@ impl Executor {
             Runner {
                 executor: executor.clone(),
             },
-            Context { executor },
+            Context {
+                executor,
+                networking: Arc::new(Networking::new()),
+            },
         )
     }
 }
@@ -296,22 +299,23 @@ impl Networking {
         }
     }
 
-    fn bind(&self, socket: SocketAddr) -> Listener {
+    fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
+        let mut listeners = self.listeners.lock().unwrap();
+        if listeners.contains_key(&socket) {
+            return Err(Error::BindFailed);
+        }
         let (sender, receiver) = mpsc::unbounded();
-        self.listeners
-            .lock()
-            .unwrap()
-            .insert(socket, sender.clone());
-        Listener { listener: receiver }
+        listeners.insert(socket, sender.clone());
+        Ok(Listener { listener: receiver })
     }
 
-    async fn dial(&self, socket: SocketAddr) -> Option<(Sink, Stream)> {
+    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
         let mut listeners = self.listeners.lock().unwrap();
-        let sender = listeners.get_mut(&socket)?;
+        let sender = listeners.get_mut(&socket).ok_or(Error::ConnectionFailed)?;
         let (dialer_sender, dialer_receiver) = mpsc::unbounded();
         let (dialee_sender, dialee_receiver) = mpsc::unbounded();
         sender.send((socket, dialer_sender, dialee_receiver)).await;
-        Some((
+        Ok((
             Sink {
                 sender: dialee_sender,
             },
@@ -425,14 +429,11 @@ impl crate::Clock for Context {
 
 impl crate::Network<Listener, Sink, Stream> for Context {
     async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
-        Ok(self.networking.bind(socket))
+        self.networking.bind(socket)
     }
 
     async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
-        self.networking
-            .dial(socket)
-            .await
-            .ok_or(Error::ConnectionFailed)
+        self.networking.dial(socket).await
     }
 }
 
