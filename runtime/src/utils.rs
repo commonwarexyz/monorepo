@@ -11,11 +11,14 @@ use futures::{
     FutureExt,
 };
 use std::{
+    any::Any,
+    backtrace::Backtrace,
     future::Future,
     panic::AssertUnwindSafe,
     pin::Pin,
     task::{Context, Poll},
 };
+use tracing::error;
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {
@@ -38,6 +41,16 @@ pub async fn reschedule() {
     }
 
     Reschedule { yielded: false }.await
+}
+
+fn extract_panic_message(err: &(dyn Any + Send)) -> String {
+    if let Some(s) = err.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        format!("{:?}", err)
+    }
 }
 
 /// Handle to a spawned task.
@@ -66,7 +79,12 @@ where
             let result = AssertUnwindSafe(f).catch_unwind().await;
             let result = match result {
                 Ok(result) => Ok(result),
-                Err(_) => Err(Error::Exited),
+                Err(err) => {
+                    let backtrace = Backtrace::capture();
+                    let err = extract_panic_message(&*err);
+                    error!(?err, ?backtrace, "task panicked");
+                    Err(Error::Exited)
+                }
             };
             let _ = sender.send(result);
         };

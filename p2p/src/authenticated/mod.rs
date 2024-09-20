@@ -261,8 +261,8 @@ mod tests {
     use governor::Quota;
     use prometheus_client::registry::Registry;
     use rand::Rng;
+    use std::collections::HashSet;
     use std::{
-        collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroU32,
         sync::{Arc, Mutex},
@@ -274,8 +274,12 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     fn test_connectivity(base_port: u16, n: usize) {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .init();
+
         // Initialze runtime
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, context) = Executor::init(0, Duration::from_millis(100));
         runner.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -398,6 +402,10 @@ mod tests {
     }
 
     fn test_chunking(base_port: u16, compression: Option<u8>) {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .init();
+
         // Initialize runtime
         let (runner, mut context) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
