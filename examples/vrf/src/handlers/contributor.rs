@@ -17,10 +17,10 @@ use commonware_cryptography::{
     PublicKey, Scheme,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
+use futures::{channel::mpsc, SinkExt};
 use prost::Message;
 use rand::rngs::OsRng;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly

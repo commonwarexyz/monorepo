@@ -482,12 +482,12 @@ dependencies = [
  "commonware-cryptography",
  "commonware-p2p",
  "commonware-runtime",
+ "futures",
  "governor",
  "prometheus-client",
  "prost",
  "prost-build",
  "rand",
- "tokio",
  "tracing",
  "tracing-subscriber",
 ]

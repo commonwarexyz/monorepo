@@ -14,13 +14,12 @@ use commonware_cryptography::{
     PublicKey, Scheme,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{select, Clock};
 use prost::Message;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
 };
-use tokio::select;
 use tracing::{debug, info, warn};
 
 pub struct Arbiter<E: Clock> {
@@ -104,45 +103,45 @@ impl<E: Clock> Arbiter<E> {
         );
         loop {
             select! {
-                biased;
-
-                _ = self.context.sleep_until(t_commitment) => {
+                _timeout = self.context.sleep_until(t_commitment) => {
                     debug!("commitment phase timed out");
                     break
-                }
-                result = receiver.recv() => match result {
-                    Ok((sender, msg)) =>{
-                        let msg = match wire::Dkg::decode(msg) {
-                            Ok(msg) => msg,
-                            Err(_) => {
+                },
+                result = receiver.recv() => {
+                    match result {
+                        Ok((sender, msg)) =>{
+                            let msg = match wire::Dkg::decode(msg) {
+                                Ok(msg) => msg,
+                                Err(_) => {
+                                    p0.disqualify(sender);
+                                    continue;
+                                }
+                            };
+                            if msg.round != round {
                                 p0.disqualify(sender);
                                 continue;
                             }
-                        };
-                        if msg.round != round {
-                            p0.disqualify(sender);
-                            continue;
+                            let msg = match msg.payload {
+                                Some(wire::dkg::Payload::Commitment(msg)) => msg,
+                                _ => {
+                                    p0.disqualify(sender);
+                                    continue;
+                                }
+                            };
+                            let commitment = match poly::Public::deserialize(&msg.commitment, self.t) {
+                                Some(commitment) => commitment,
+                                None => {
+                                    p0.disqualify(sender);
+                                    continue;
+                                }
+                            };
+                            let _ = p0.commitment(sender, commitment);
+                        },
+                        Err(err) => {
+                            warn!(round, ?err, "failed to receive commitment");
+                            break;
                         }
-                        let msg = match msg.payload {
-                            Some(wire::dkg::Payload::Commitment(msg)) => msg,
-                            _ => {
-                                p0.disqualify(sender);
-                                continue;
-                            }
-                        };
-                        let commitment = match poly::Public::deserialize(&msg.commitment, self.t) {
-                            Some(commitment) => commitment,
-                            None => {
-                                p0.disqualify(sender);
-                                continue;
-                            }
-                        };
-                        let _ = p0.commitment(sender, commitment);
-                    },
-                    Err(err) => {
-                        warn!(round, ?err, "failed to receive commitment");
-                        break;
-                    }
+                    };
                 }
             }
         }
@@ -207,65 +206,65 @@ impl<E: Clock> Arbiter<E> {
         // Collect acks and complaints
         loop {
             select! {
-                biased;
-
-                _ = self.context.sleep_until(t_ack) => {
+                _timeout = self.context.sleep_until(t_ack) => {
                     debug!("ack phase timed out");
                     break
-                }
-                result = receiver.recv() => match result {
-                    Ok((sender, msg)) =>{
-                        // Parse message as Ack or Complaint
-                        let msg = match wire::Dkg::decode(msg) {
-                            Ok(msg) => msg,
-                            Err(_) => {
-                                p1.disqualify(sender);
-                                continue;
-                            }
-                        };
-
-                        // Verify the message
-                        if msg.round != round {
-                            p1.disqualify(sender);
-                            continue;
-                        }
-
-                        match msg.payload{
-                            Some(wire::dkg::Payload::Ack(ack)) => {
-                                let _ = p1.ack(sender, ack.dealer);
-                            }
-                            Some(wire::dkg::Payload::Complaint(complaint)) => {
-                                let share = match group::Share::deserialize(&complaint.share) {
-                                    Some(share) => share,
-                                    None => {
-                                        p1.disqualify(sender);
-                                        continue;
-                                    }
-                                };
-                                let bad_dealer = match p1.dealer(complaint.dealer) {
-                                    Some(bad_dealer) => bad_dealer,
-                                    None => {
-                                        p1.disqualify(sender);
-                                        continue;
-                                    }
-                                };
-                                let payload = payload(round, complaint.dealer, &complaint.share);
-                                if !C::verify(SHARE_NAMESPACE, &payload, &bad_dealer, &complaint.signature) {
+                },
+                result = receiver.recv() => {
+                    match result {
+                        Ok((sender, msg)) =>{
+                            // Parse message as Ack or Complaint
+                            let msg = match wire::Dkg::decode(msg) {
+                                Ok(msg) => msg,
+                                Err(_) => {
                                     p1.disqualify(sender);
                                     continue;
                                 }
-                                let _ = p1.complaint(sender, complaint.dealer, &share);
-                            }
-                            _ => {
+                            };
+
+                            // Verify the message
+                            if msg.round != round {
                                 p1.disqualify(sender);
-                                continue
+                                continue;
+                            }
+
+                            match msg.payload{
+                                Some(wire::dkg::Payload::Ack(ack)) => {
+                                    let _ = p1.ack(sender, ack.dealer);
+                                }
+                                Some(wire::dkg::Payload::Complaint(complaint)) => {
+                                    let share = match group::Share::deserialize(&complaint.share) {
+                                        Some(share) => share,
+                                        None => {
+                                            p1.disqualify(sender);
+                                            continue;
+                                        }
+                                    };
+                                    let bad_dealer = match p1.dealer(complaint.dealer) {
+                                        Some(bad_dealer) => bad_dealer,
+                                        None => {
+                                            p1.disqualify(sender);
+                                            continue;
+                                        }
+                                    };
+                                    let payload = payload(round, complaint.dealer, &complaint.share);
+                                    if !C::verify(SHARE_NAMESPACE, &payload, &bad_dealer, &complaint.signature) {
+                                        p1.disqualify(sender);
+                                        continue;
+                                    }
+                                    let _ = p1.complaint(sender, complaint.dealer, &share);
+                                }
+                                _ => {
+                                    p1.disqualify(sender);
+                                    continue
+                                }
                             }
                         }
-                    }
-                    Err(err) => {
-                        warn!(round, ?err, "failed to receive ack or complaint");
-                        break;
-                    }
+                        Err(err) => {
+                            warn!(round, ?err, "failed to receive ack or complaint");
+                            break;
+                        }
+                    };
                 }
             }
         }
@@ -373,64 +372,64 @@ impl<E: Clock> Arbiter<E> {
         let mut signatures = HashMap::new();
         loop {
             select! {
-                biased;
-
-                _ = self.context.sleep_until(t_repair) => {
+                _timeout = self.context.sleep_until(t_repair) => {
                     break
-                }
-                result = receiver.recv() => match result {
-                    Ok((sender, msg)) => {
-                        let msg = match wire::Dkg::decode(msg) {
-                            Ok(msg) => msg,
-                            Err(_) => {
+                },
+                result = receiver.recv() => {
+                    match result {
+                        Ok((sender, msg)) => {
+                            let msg = match wire::Dkg::decode(msg) {
+                                Ok(msg) => msg,
+                                Err(_) => {
+                                    p2.disqualify(sender);
+                                    continue;
+                                }
+                            };
+                            if msg.round != round {
                                 p2.disqualify(sender);
                                 continue;
                             }
-                        };
-                        if msg.round != round {
-                            p2.disqualify(sender);
-                            continue;
+                            let msg = match msg.payload {
+                                Some(wire::dkg::Payload::Reveal(msg)) => msg,
+                                _ => {
+                                    p2.disqualify(sender);
+                                    continue;
+                                }
+                            };
+                            let share = match group::Share::deserialize(&msg.share) {
+                                Some(share) => share,
+                                None => {
+                                    p2.disqualify(sender);
+                                    continue;
+                                }
+                            };
+                            let dealer = match p2.dealer(&sender) {
+                                Some(dealer) => dealer,
+                                None => {
+                                    p2.disqualify(sender);
+                                    continue;
+                                }
+                            };
+                            let payload = payload(round, dealer, &msg.share);
+                            if !C::verify(SHARE_NAMESPACE, &payload, &sender, &msg.signature) {
+                                p2.disqualify(sender);
+                                continue;
+                            }
+                            match p2.reveal(sender.clone(), share) {
+                                Ok(()) => {
+                                    signatures.insert((dealer, share.index), msg.signature);
+                                }
+                                Err(_) => {
+                                    p2.disqualify(sender);
+                                    continue;
+                                }
+                            }
                         }
-                        let msg = match msg.payload {
-                            Some(wire::dkg::Payload::Reveal(msg)) => msg,
-                            _ => {
-                                p2.disqualify(sender);
-                                continue;
-                            }
-                        };
-                        let share = match group::Share::deserialize(&msg.share) {
-                            Some(share) => share,
-                            None => {
-                                p2.disqualify(sender);
-                                continue;
-                            }
-                        };
-                        let dealer = match p2.dealer(&sender) {
-                            Some(dealer) => dealer,
-                            None => {
-                                p2.disqualify(sender);
-                                continue;
-                            }
-                        };
-                        let payload = payload(round, dealer, &msg.share);
-                        if !C::verify(SHARE_NAMESPACE, &payload, &sender, &msg.signature) {
-                            p2.disqualify(sender);
-                            continue;
+                        Err(err) => {
+                            warn!(round, ?err, "failed to receive missing share");
+                            break;
                         }
-                        match p2.reveal(sender.clone(), share) {
-                            Ok(()) => {
-                                signatures.insert((dealer, share.index), msg.signature);
-                            }
-                            Err(_) => {
-                                p2.disqualify(sender);
-                                continue;
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        warn!(round, ?err, "failed to receive missing share");
-                        break;
-                    }
+                    };
                 }
             };
         }
