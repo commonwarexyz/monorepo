@@ -16,7 +16,7 @@ pub mod tokio;
 
 mod utils;
 use bytes::Bytes;
-pub use utils::{reschedule, timeout, Handle};
+pub use utils::{reschedule, Handle};
 
 use std::{
     future::Future,
@@ -141,6 +141,7 @@ macro_rules! select {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokio::Config;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::Mutex;
     use utils::reschedule;
@@ -276,36 +277,37 @@ mod tests {
 
     #[test]
     fn test_tokio() {
+        let cfg = Config::default();
         {
-            let (runner, _) = tokio::Executor::init(1);
+            let (runner, _) = tokio::Executor::init(cfg);
             test_error_future(runner);
         }
         {
-            let (runner, context) = tokio::Executor::init(1);
+            let (runner, context) = tokio::Executor::init(cfg);
             test_clock_sleep(runner, context);
         }
         {
-            let (runner, context) = tokio::Executor::init(1);
+            let (runner, context) = tokio::Executor::init(cfg);
             test_clock_sleep_until(runner, context);
         }
         {
-            let (runner, context) = tokio::Executor::init(1);
+            let (runner, context) = tokio::Executor::init(cfg);
             test_root_finishes(runner, context);
         }
         {
-            let (runner, context) = tokio::Executor::init(1);
+            let (runner, context) = tokio::Executor::init(cfg);
             test_spawn_abort(runner, context);
         }
         {
-            let (runner, _) = tokio::Executor::init(1);
+            let (runner, _) = tokio::Executor::init(cfg);
             test_panic_aborts_root(runner);
         }
         {
-            let (runner, context) = tokio::Executor::init(1);
+            let (runner, context) = tokio::Executor::init(cfg);
             test_panic_aborts_spawn(runner, context);
         }
         {
-            let (runner, context) = tokio::Executor::init(1);
+            let (runner, context) = tokio::Executor::init(cfg);
             test_select(runner, context);
         }
     }

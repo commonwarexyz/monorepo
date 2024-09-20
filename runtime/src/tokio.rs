@@ -38,6 +38,7 @@ use tokio::{
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::warn;
 
+#[derive(Copy, Clone)]
 pub struct Config {
     /// Number of threads to use for the runtime.
     pub threads: usize,
@@ -297,7 +298,8 @@ mod tests {
 
     #[test]
     fn test_runs_tasks() {
-        let (runner, context) = Executor::init(1);
+        let cfg = Config::default();
+        let (runner, context) = Executor::init(cfg);
         run_tasks(10, runner, context);
     }
 }
