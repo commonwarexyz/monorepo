@@ -435,7 +435,9 @@ mod tests {
                     signer.clone(),
                     registry,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                     bootstrappers,
+                    1_024 * 1_024, // 1MB
                 );
                 let (mut network, mut oracle) = Network::new(context.clone(), config);
 
@@ -536,7 +538,9 @@ mod tests {
                 signer.clone(),
                 registry,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 Vec::new(),
+                1_024 * 1_024, // 1MB
             );
             let (mut network, mut oracle) = Network::new(context.clone(), config);
 
