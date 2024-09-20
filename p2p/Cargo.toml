@@ -20,7 +20,6 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true } 
 prost = { workspace = true }
-tokio-util = { version = "0.7", features = ["codec"] }
 governor = "0.6"
 x25519-dalek = { version = "2", features = ["getrandom"] }
 chacha20poly1305 = "0.10"
@@ -28,9 +27,6 @@ bitvec = "1"
 prometheus-client = "0.22"
 zstd = "0.13"
 rand_distr = "0.4"
-
-[dev-dependencies]
-tokio-test = "0.4"
 
 [build-dependencies]
 prost-build = { workspace = true } 
