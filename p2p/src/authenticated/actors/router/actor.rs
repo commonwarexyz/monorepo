@@ -12,9 +12,9 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
+use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 use tracing::debug;
 
 pub struct Actor {
@@ -90,7 +90,7 @@ impl Actor {
     }
 
     pub async fn run(mut self, routing: Channels) {
-        while let Some(msg) = self.control.recv().await {
+        while let Some(msg) = self.control.next().await {
             match msg {
                 Message::Ready {
                     peer,

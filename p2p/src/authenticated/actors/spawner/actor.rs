@@ -70,7 +70,7 @@ impl<E: Spawner + Clock, C: Scheme, S: RStream> Actor<E, C, S> {
                     let sent_messages = self.sent_messages.clone();
                     let received_messages = self.received_messages.clone();
                     let tracker = tracker.clone();
-                    let router = router.clone();
+                    let mut router = router.clone();
 
                     // Record handshake messages
                     //
