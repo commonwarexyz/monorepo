@@ -1,46 +1,49 @@
 //! Listener
 
+use std::marker::PhantomData;
+
 use crate::authenticated::{
     actors::{spawner, tracker},
     connection::{self, IncomingHandshake, Stream},
 };
 use commonware_cryptography::{utils::hex, Scheme};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Listener, Spawner, Stream as RStream};
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
-use std::net::{Ipv4Addr, SocketAddr};
-use tokio::net::{TcpListener, TcpStream};
 use tracing::debug;
 
 /// Configuration for the listener actor.
 pub struct Config<C: Scheme> {
-    pub port: u16,
     pub connection: connection::Config<C>,
     pub allowed_incoming_connectioned_rate: Quota,
 }
 
-pub struct Actor<E: Spawner + Clock, C: Scheme> {
+pub struct Actor<E: Spawner + Clock, S: RStream, L: Listener<S>, C: Scheme> {
     context: E,
+    listener: L,
 
-    port: u16,
     connection: connection::Config<C>,
-
     rate_limiter: DefaultDirectRateLimiter,
+
+    _phantom: PhantomData<S>,
 }
 
-impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>) -> Self {
+impl<E: Spawner + Clock, S: RStream, L: Listener<S>, C: Scheme> Actor<E, S, L, C> {
+    pub fn new(context: E, listener: L, cfg: Config<C>) -> Self {
         Self {
             context,
-            port: cfg.port,
+            listener,
+
             connection: cfg.connection,
             rate_limiter: RateLimiter::direct(cfg.allowed_incoming_connectioned_rate),
+
+            _phantom: PhantomData,
         }
     }
 
     async fn handshake(
         context: E,
         connection: connection::Config<C>,
-        stream: TcpStream,
+        stream: S,
         tracker: tracker::Mailbox<E>,
         supervisor: spawner::Mailbox<E, C>,
     ) {
@@ -51,7 +54,6 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
         let handshake = match IncomingHandshake::verify(
             context.clone(),
             &connection.crypto,
-            connection.max_frame_length,
             connection.synchrony_bound,
             connection.max_handshake_age,
             connection.handshake_timeout,
@@ -93,32 +95,20 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
     }
 
     pub async fn run(self, tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, C>) {
-        // Configure the listener on the specified port
-        let address = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.port);
-        let listener = TcpListener::bind(address).await.unwrap();
-        debug!(port = self.port, "listening for incoming connections");
-
         // Loop over incoming connections as fast as our rate limiter allows
         loop {
             // Ensure we don't attempt to perform too many handshakes at once
             self.rate_limiter.until_ready().await;
 
             // Accept a new connection
-            let (stream, address) = match listener.accept().await {
-                Ok((stream, address)) => (stream, address),
+            let (address, stream) = match self.listener.accept().await {
+                Ok((address, stream)) => (address, stream),
                 Err(e) => {
                     debug!(error = ?e, "failed to accept connection");
                     continue;
                 }
             };
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
-
-            // Set TCP_NODELAY
-            if let Some(nodelay) = self.connection.tcp_nodelay {
-                if let Err(e) = stream.set_nodelay(nodelay) {
-                    debug!(ip = ?address.ip(), port = ?address.port(), error = ?e, "failed to set TCP_NODELAY")
-                }
-            }
 
             // Spawn a new handshaker to upgrade connection
             self.context.spawn(Self::handshake(
