@@ -19,6 +19,7 @@
 
 use crate::{timeout, Error, Handle};
 use bytes::Bytes;
+use futures::{SinkExt, StreamExt};
 use rand::{rngs::OsRng, RngCore};
 use std::{
     future::Future,
@@ -29,7 +30,7 @@ use std::{
 use tokio::{
     net::{TcpListener, TcpStream},
     runtime::{Builder, Runtime},
-    sync::mpsc,
+    sync::{mpsc, Mutex},
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::warn;
@@ -115,7 +116,7 @@ impl Executor {
             },
             Context {
                 executor,
-                connections: Arc::new(receiver),
+                connections: Arc::new(Mutex::new(receiver)),
             },
         )
     }
@@ -163,7 +164,7 @@ impl crate::Runner for Runner {
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,
-    connections: Arc<mpsc::Receiver<(SocketAddr, TcpStream)>>,
+    connections: Arc<Mutex<mpsc::Receiver<(SocketAddr, TcpStream)>>>,
 }
 
 impl crate::Spawner for Context {
@@ -208,9 +209,13 @@ pub fn codec(max_frame_len: usize) -> LengthDelimitedCodec {
 impl crate::Network<Stream> for Context {
     fn accept(&self) -> impl Future<Output = Result<(SocketAddr, Stream), Error>> + Send {
         let connections = self.connections.clone();
+        let context = self.clone();
         async move {
             // Wait for a new connection
-            let (addr, stream) = connections.recv().await.ok_or(Error::Closed)?;
+            let (addr, stream) = {
+                let mut connections = connections.lock().await;
+                connections.recv().await.ok_or(Error::Closed)?
+            };
 
             // Set TCP_NODELAY if configured
             if let Some(tcp_nodelay) = self.executor.cfg.tcp_nodelay {
@@ -221,12 +226,13 @@ impl crate::Network<Stream> for Context {
 
             // Create a new framed stream
             let framed = Framed::new(stream, codec(self.executor.cfg.max_frame_length));
-            Ok((addr, Stream::new(framed)))
+            let executor = self.executor.clone();
+            Ok((addr, Stream::new(context, framed)))
         }
     }
 
     fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<Stream, Error>> + Send {
-        let max_frame_length = self.executor.cfg.max_frame_length;
+        let context = self.clone();
         async move {
             // Create a new TCP stream
             let stream = TcpStream::connect(socket)
@@ -241,20 +247,22 @@ impl crate::Network<Stream> for Context {
             }
 
             // Create a new framed stream
-            let framed = Framed::new(stream, codec(max_frame_length));
-            Ok(Stream::new(framed))
+            let framed = Framed::new(stream, codec(self.executor.cfg.max_frame_length));
+            Ok(Stream::new(context, framed))
         }
     }
 }
 
 #[derive(Clone)]
 pub struct Stream {
+    context: Context,
     stream: Arc<Framed<TcpStream, LengthDelimitedCodec>>,
 }
 
 impl Stream {
-    fn new(stream: Framed<TcpStream, LengthDelimitedCodec>) -> Self {
+    fn new(context: Context, stream: Framed<TcpStream, LengthDelimitedCodec>) -> Self {
         Self {
+            context,
             stream: Arc::new(stream),
         }
     }
@@ -262,22 +270,29 @@ impl Stream {
 
 impl crate::Stream for Stream {
     fn send(&self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send {
-        timeout(self, self.write_timeout, async move {
-            self.stream
-                .send(msg)
-                .map_err(|_| Error::WriteFailed)
-                .map_ok(|_| ())
-        });
+        async move {
+            timeout(
+                self.context,
+                self.context.executor.cfg.write_timeout,
+                async move { self.stream.send(msg).await.map_err(|_| Error::WriteFailed) },
+            )
+        }
     }
 
     fn recv(&self) -> impl Future<Output = Result<Bytes, Error>> + Send {
-        timeout(self, self.read_timeout, async move {
-            self.stream
-                .next()
-                .await
-                .ok_or(Error::Closed)?
-                .map_err(|_| Error::ReadFailed)
-        });
+        async move {
+            timeout(
+                self.context,
+                self.context.executor.cfg.read_timeout,
+                async move {
+                    self.stream
+                        .next()
+                        .await
+                        .ok_or(Error::Closed)?
+                        .map_err(|_| Error::ReadFailed)
+                },
+            )
+        }
     }
 }
 
