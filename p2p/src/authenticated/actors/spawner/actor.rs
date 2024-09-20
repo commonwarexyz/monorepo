@@ -7,14 +7,14 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::{utils::hex, Scheme};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Spawner, Stream as RStream};
+use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock, C: Scheme> {
+pub struct Actor<E: Spawner + Clock, C: Scheme, S: RStream> {
     context: E,
 
     mailbox_size: usize,
@@ -22,14 +22,14 @@ pub struct Actor<E: Spawner + Clock, C: Scheme> {
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
 
-    receiver: mpsc::Receiver<Message<E, C>>,
+    receiver: mpsc::Receiver<Message<E, C, S>>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C>) {
+impl<E: Spawner + Clock, C: Scheme, S: RStream> Actor<E, C, S> {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C, S>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         {
@@ -59,7 +59,7 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
     }
 
     pub async fn run(mut self, tracker: tracker::Mailbox<E>, router: router::Mailbox) {
-        while let Some(msg) = self.receiver.recv().await {
+        while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {
                     peer,
