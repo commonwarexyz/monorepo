@@ -25,9 +25,9 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::insecure_signer, utils::hex, Scheme};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
     use std::{collections::HashMap, time::Duration};
-    use tokio::sync::mpsc;
 
     fn simulate_messages(seed: u64, size: usize) -> Vec<usize> {
         // Create simulated network
@@ -47,7 +47,7 @@ mod tests {
                 let pk = insecure_signer(i as u64).me();
                 let (sender, mut receiver) = network.register(pk.clone());
                 agents.insert(pk, sender);
-                let agent_sender = seen_sender.clone();
+                let mut agent_sender = seen_sender.clone();
                 context.spawn(async move {
                     for _ in 0..size {
                         receiver.recv().await.unwrap();
@@ -118,7 +118,7 @@ mod tests {
             // Wait for all recipients
             let mut results = Vec::new();
             for _ in 0..size {
-                results.push(seen_receiver.recv().await.unwrap());
+                results.push(seen_receiver.next().await.unwrap());
             }
             results
         })

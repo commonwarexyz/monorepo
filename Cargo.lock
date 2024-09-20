@@ -454,7 +454,6 @@ dependencies = [
  "rand_distr",
  "sha2 0.10.8",
  "thiserror",
- "tokio",
  "tokio-test",
  "tokio-util",
  "tracing",
