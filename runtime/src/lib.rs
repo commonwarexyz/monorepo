@@ -74,18 +74,12 @@ pub trait Clock: Clone + Send + Sync + 'static {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
-pub trait Dialer<S>: Clone + Send + Sync + 'static
-where
-    S: Stream,
-{
-    fn dial(&self, socket: SocketAddr) -> Result<S, Error>;
-}
-
-pub trait Listener<S>: Clone + Send + Sync + 'static
+pub trait Network<S>: Clone + Send + Sync + 'static
 where
     S: Stream,
 {
     fn accept(&self) -> impl Future<Output = Result<(SocketAddr, S), Error>> + Send + 'static;
+    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<S, Error>>;
 }
 
 pub trait Stream: Clone + Send + Sync + 'static {

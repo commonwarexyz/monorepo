@@ -7,7 +7,7 @@ use crate::authenticated::{
     connection::{self, IncomingHandshake, Stream},
 };
 use commonware_cryptography::{utils::hex, Scheme};
-use commonware_runtime::{Clock, Listener, Spawner, Stream as RStream};
+use commonware_runtime::{Clock, Network, Spawner, Stream as RStream};
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use tracing::debug;
 
@@ -17,9 +17,8 @@ pub struct Config<C: Scheme> {
     pub allowed_incoming_connectioned_rate: Quota,
 }
 
-pub struct Actor<E: Spawner + Clock, S: RStream, L: Listener<S>, C: Scheme> {
+pub struct Actor<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> {
     context: E,
-    listener: L,
 
     connection: connection::Config<C>,
     rate_limiter: DefaultDirectRateLimiter,
@@ -27,11 +26,10 @@ pub struct Actor<E: Spawner + Clock, S: RStream, L: Listener<S>, C: Scheme> {
     _phantom: PhantomData<S>,
 }
 
-impl<E: Spawner + Clock, S: RStream, L: Listener<S>, C: Scheme> Actor<E, S, L, C> {
-    pub fn new(context: E, listener: L, cfg: Config<C>) -> Self {
+impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
+    pub fn new(context: E, cfg: Config<C>) -> Self {
         Self {
             context,
-            listener,
 
             connection: cfg.connection,
             rate_limiter: RateLimiter::direct(cfg.allowed_incoming_connectioned_rate),
@@ -101,7 +99,7 @@ impl<E: Spawner + Clock, S: RStream, L: Listener<S>, C: Scheme> Actor<E, S, L, C
             self.rate_limiter.until_ready().await;
 
             // Accept a new connection
-            let (address, stream) = match self.listener.accept().await {
+            let (address, stream) = match self.context.accept().await {
                 Ok((address, stream)) => (address, stream),
                 Err(e) => {
                     debug!(error = ?e, "failed to accept connection");

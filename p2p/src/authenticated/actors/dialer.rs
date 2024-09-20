@@ -6,17 +6,16 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Network, Spawner, Stream as RStream};
 use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
-use std::{net::SocketAddr, time::Duration};
+use std::{marker::PhantomData, net::SocketAddr, time::Duration};
 use std::{
     ops::Add,
     sync::{Arc, Mutex},
 };
-use tokio::net::TcpStream;
 use tracing::debug;
 
 pub struct Config<C: Scheme> {
@@ -26,7 +25,7 @@ pub struct Config<C: Scheme> {
     pub dial_rate: Quota,
 }
 
-pub struct Actor<E: Spawner + Clock, C: Scheme> {
+pub struct Actor<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> {
     context: E,
 
     connection: connection::Config<C>,
@@ -35,9 +34,11 @@ pub struct Actor<E: Spawner + Clock, C: Scheme> {
     dial_limiter: DefaultDirectRateLimiter,
 
     dial_attempts: Family<metrics::Peer, Counter>,
+
+    _phantom: PhantomData<S>,
 }
 
-impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
+impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let dial_attempts = Family::<metrics::Peer, Counter>::default();
         {
@@ -54,6 +55,7 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
             dial_frequency: cfg.dial_frequency,
             dial_limiter: RateLimiter::direct(cfg.dial_rate),
             dial_attempts,
+            _phantom: PhantomData,
         }
     }
 
@@ -96,7 +98,7 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
         supervisor: spawner::Mailbox<E, C>,
     ) {
         // Attempt to dial peer
-        let connection = match TcpStream::connect(address).await {
+        let connection = match context.dial(address).await {
             Ok(stream) => stream,
             Err(e) => {
                 debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
@@ -108,13 +110,6 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
             address = address.to_string(),
             "dialed peer"
         );
-
-        // Set TCP_NODELAY
-        if let Some(nodelay) = config.tcp_nodelay {
-            if let Err(e) = connection.set_nodelay(nodelay) {
-                debug!(peer = hex(&peer), error = ?e, "failed to set TCP_NODELAY")
-            }
-        }
 
         // Upgrade connection
         let stream = match Stream::upgrade_dialer(context, config, connection, peer.clone()).await {
