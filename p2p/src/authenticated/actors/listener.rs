@@ -7,7 +7,7 @@ use crate::authenticated::{
     connection::{self, IncomingHandshake, Instance},
 };
 use commonware_cryptography::{utils::hex, Scheme};
-use commonware_runtime::{Clock, Listener, Listener, Network, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use rand::{CryptoRng, Rng};
 use tracing::debug;
@@ -120,7 +120,7 @@ impl<
         supervisor: spawner::Mailbox<E, C, Si, St>,
     ) {
         // Start listening for incoming connections
-        let listener = self
+        let mut listener = self
             .context
             .bind(self.address)
             .await

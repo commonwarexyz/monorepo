@@ -142,14 +142,14 @@ impl<
     pub async fn run(
         self,
         mut tracker: tracker::Mailbox<E>,
-        supervisor: spawner::Mailbox<E, C, Si, St>,
+        mut supervisor: spawner::Mailbox<E, C, Si, St>,
     ) {
         let mut next_update = self.context.current();
         loop {
             self.context.sleep_until(next_update).await;
 
             // Attempt to dial peers we know about
-            self.dial_peers(&mut tracker, &supervisor).await;
+            self.dial_peers(&mut tracker, &mut supervisor).await;
 
             // Ensure we reset the timer with a new jitter
             let jitter = Jitter::up_to(self.dial_frequency);

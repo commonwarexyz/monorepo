@@ -11,7 +11,6 @@ pub enum Message<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
     },
 }
 
-#[derive(Clone)]
 pub struct Mailbox<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
     sender: mpsc::Sender<Message<E, C, Si, St>>,
 }
@@ -19,6 +18,16 @@ pub struct Mailbox<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
 impl<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> Mailbox<E, C, Si, St> {
     pub fn new(sender: mpsc::Sender<Message<E, C, Si, St>>) -> Self {
         Self { sender }
+    }
+
+    /// Clone the mailbox.
+    ///
+    /// We manually implement `clone` because the auto-generated `derive` would
+    /// require the `E`, `C`, `Si`, and `St` types to be `Clone`.
+    pub fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
     }
 
     pub async fn spawn(
