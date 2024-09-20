@@ -3,11 +3,7 @@ use super::{
     Config,
 };
 use crate::{
-    authenticated::{
-        actors::peer::{self, Relay},
-        channels::Channels,
-        metrics,
-    },
+    authenticated::{actors::peer, channels::Channels, metrics},
     Recipients,
 };
 use bytes::Bytes;
@@ -50,37 +46,26 @@ impl Actor {
         )
     }
 
-    async fn send_message(
-        &self,
-        messenger: &Relay,
-        recipient: &PublicKey,
-        channel: u32,
-        message: Bytes,
-        priority: bool,
-    ) {
-        if messenger
-            .content(channel, message.clone(), priority)
-            .await
-            .is_ok()
-        {
-            return;
-        }
-        self.messages_dropped
-            .get_or_create(&metrics::Message::new_chunk(recipient, channel))
-            .inc();
-    }
-
     async fn send_to_recipient(
-        &self,
+        &mut self,
         recipient: &PublicKey,
         channel: u32,
         message: Bytes,
         priority: bool,
         sent: &mut Vec<PublicKey>,
     ) {
-        if let Some(messenger) = self.connections.get(recipient) {
-            self.send_message(messenger, recipient, channel, message, priority)
-                .await;
+        if let Some(messenger) = self.connections.get_mut(recipient) {
+            if messenger
+                .content(channel, message.clone(), priority)
+                .await
+                .is_ok()
+            {
+                return;
+            } else {
+                self.messages_dropped
+                    .get_or_create(&metrics::Message::new_chunk(recipient, channel))
+                    .inc();
+            }
             sent.push(recipient.clone());
         } else {
             self.messages_dropped
@@ -133,15 +118,20 @@ impl Actor {
                             }
                         }
                         Recipients::All => {
-                            for (recipient, messenger) in self.connections.iter() {
-                                self.send_message(
-                                    messenger,
-                                    recipient,
-                                    channel,
-                                    message.clone(),
-                                    priority,
-                                )
-                                .await;
+                            for (recipient, messenger) in self.connections.iter_mut() {
+                                if messenger
+                                    .content(channel, message.clone(), priority)
+                                    .await
+                                    .is_ok()
+                                {
+                                    return;
+                                } else {
+                                    self.messages_dropped
+                                        .get_or_create(&metrics::Message::new_chunk(
+                                            recipient, channel,
+                                        ))
+                                        .inc();
+                                }
                                 sent.push(recipient.clone());
                             }
                         }
