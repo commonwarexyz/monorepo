@@ -19,10 +19,14 @@
 
 use crate::{Error, Handle};
 use bytes::Bytes;
-use futures::task::{waker_ref, ArcWake};
+use futures::{
+    channel::mpsc::{self, Sender},
+    task::{waker_ref, ArcWake},
+    SinkExt, StreamExt,
+};
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use std::{
-    collections::BinaryHeap,
+    collections::{BinaryHeap, HashMap},
     future::Future,
     mem::replace,
     net::SocketAddr,
@@ -272,11 +276,37 @@ impl crate::Runner for Runner {
     }
 }
 
+struct Networking {
+    listeners: Mutex<HashMap<SocketAddr, Sender<(SocketAddr, Bytes)>>>,
+}
+
+impl Networking {
+    fn new() -> Self {
+        Self {
+            listeners: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn bind(&self, socket: SocketAddr) -> Listener {
+        let (sender, _) = mpsc::channel(1);
+        self.listeners
+            .lock()
+            .unwrap()
+            .insert(socket, sender.clone());
+        sender
+    }
+
+    fn dial(&self, socket: SocketAddr) -> Option<Sender<Bytes>> {
+        self.listeners.lock().unwrap().get(&socket).cloned()
+    }
+}
+
 /// Implementation of [`crate::Spawner`] and [`crate::Clock`]
 /// for the `deterministic` runtime.
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,
+    networking: Arc<Networking>,
 }
 
 impl crate::Spawner for Context {
@@ -385,7 +415,9 @@ impl crate::Network<Listener, Sink, Stream> for Context {
     }
 }
 
-pub struct Listener;
+pub struct Listener {
+    listener: mpsc::Receiver<(SocketAddr, Bytes)>,
+}
 
 impl crate::Listener<Sink, Stream> for Listener {
     fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Sink, Stream), Error>> + Send {
@@ -393,19 +425,23 @@ impl crate::Listener<Sink, Stream> for Listener {
     }
 }
 
-pub struct Sink;
+pub struct Sink {
+    sender: mpsc::Sender<Bytes>,
+}
 
 impl crate::Sink for Sink {
-    fn send(&mut self, _msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send {
-        todo!()
+    async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
+        self.sender.send(msg).await.map_err(|_| Error::WriteFailed)
     }
 }
 
-pub struct Stream;
+pub struct Stream {
+    receiver: mpsc::Receiver<Bytes>,
+}
 
 impl crate::Stream for Stream {
-    fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send {
-        todo!()
+    async fn recv(&mut self) -> Result<Bytes, Error> {
+        self.receiver.next().await.ok_or(Error::ReadFailed)
     }
 }
 
