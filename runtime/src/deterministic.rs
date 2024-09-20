@@ -32,34 +32,24 @@ use std::{
 use tracing::{debug, trace};
 
 struct Task {
+    id: u128,
     tasks: Arc<Tasks>,
 
     root: bool,
     future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
 
-    queued: Mutex<bool>,
     completed: Mutex<bool>,
-    id: usize,
 }
 
 impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        {
-            let mut queued = arc_self.queued.lock().unwrap();
-            if *queued {
-                trace!(id = arc_self.id, "task already queued");
-                return;
-            }
-            *queued = true;
-            trace!(id = arc_self.id, "task queued");
-        }
         arc_self.tasks.enqueue(arc_self.clone());
     }
 }
 
 struct Tasks {
+    counter: Mutex<u128>,
     queue: Mutex<Vec<Arc<Task>>>,
-    counter: Mutex<usize>,
 }
 
 impl Tasks {
@@ -72,16 +62,15 @@ impl Tasks {
         let id = {
             let mut l = arc_self.counter.lock().unwrap();
             let old = *l;
-            *l += 1;
+            *l = l.checked_add(1).expect("task counter overflow");
             old
         };
         queue.push(Arc::new(Task {
+            id,
             root,
             future: Mutex::new(future),
             tasks: arc_self.clone(),
-            queued: Mutex::new(true),
             completed: Mutex::new(false),
-            id,
         }));
     }
 
@@ -178,15 +167,12 @@ impl crate::Runner for Runner {
             // processing a different task required for other tasks to make progress).
             trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
-                // Reset queued flag
-                *task.queued.lock().unwrap() = false;
-                trace!(id = task.id, "processing task");
-
                 // Check if task is already complete
                 if *task.completed.lock().unwrap() {
                     trace!(id = task.id, "skipping already completed task");
                     continue;
                 }
+                trace!(id = task.id, "processing task");
 
                 // Prepare task for polling
                 let waker = waker_ref(&task);
