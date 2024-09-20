@@ -29,23 +29,37 @@ use std::{
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::debug;
+use tracing::{debug, trace};
 
 struct Task {
     tasks: Arc<Tasks>,
 
     root: bool,
     future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+
+    queued: Mutex<bool>,
+    completed: Mutex<bool>,
+    id: usize,
 }
 
 impl ArcWake for Task {
     fn wake_by_ref(arc_self: &Arc<Self>) {
+        {
+            let mut queued = arc_self.queued.lock().unwrap();
+            if *queued {
+                trace!(id = arc_self.id, "task already queued");
+                return;
+            }
+            *queued = true;
+            trace!(id = arc_self.id, "task queued");
+        }
         arc_self.tasks.enqueue(arc_self.clone());
     }
 }
 
 struct Tasks {
     queue: Mutex<Vec<Arc<Task>>>,
+    counter: Mutex<usize>,
 }
 
 impl Tasks {
@@ -55,10 +69,19 @@ impl Tasks {
         future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     ) {
         let mut queue = arc_self.queue.lock().unwrap();
+        let id = {
+            let mut l = arc_self.counter.lock().unwrap();
+            let old = *l;
+            *l += 1;
+            old
+        };
         queue.push(Arc::new(Task {
             root,
             future: Mutex::new(future),
             tasks: arc_self.clone(),
+            queued: Mutex::new(true),
+            completed: Mutex::new(false),
+            id,
         }));
     }
 
@@ -99,6 +122,7 @@ impl Executor {
             time: Mutex::new(UNIX_EPOCH),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
+                counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
         });
@@ -136,6 +160,7 @@ impl crate::Runner for Runner {
         );
 
         // Process tasks until root task completes or progress stalls
+        let mut iter = 0;
         loop {
             // Snapshot available tasks
             let mut tasks = self.executor.tasks.drain();
@@ -151,14 +176,39 @@ impl crate::Runner for Runner {
             // This approach is more efficient than randomly selecting a task one-at-a-time
             // because it ensures we don't pull the same pending task multiple times in a row (without
             // processing a different task required for other tasks to make progress).
+            trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
+                // Reset queued flag
+                *task.queued.lock().unwrap() = false;
+                trace!(id = task.id, "processing task");
+
+                // Check if task is already complete
+                if *task.completed.lock().unwrap() {
+                    trace!(id = task.id, "skipping already completed task");
+                    continue;
+                }
+
+                // Prepare task for polling
                 let waker = waker_ref(&task);
                 let mut context = task::Context::from_waker(&waker);
                 let mut future = task.future.lock().unwrap();
-                if future.as_mut().poll(&mut context).is_pending() {
-                    // Task is re-queued in its `wake_by_ref` implementation.
-                } else if task.root {
-                    // Root task completed
+
+                // Poll the task
+                //
+                // Task is re-queued in its `wake_by_ref` implementation as soon as we poll here (regardless
+                // of whether it is Pending/Ready).
+                let pending = future.as_mut().poll(&mut context).is_pending();
+                if pending {
+                    trace!(id = task.id, "task is still pending");
+                    continue;
+                }
+
+                // Mark task as completed
+                *task.completed.lock().unwrap() = true;
+                trace!(id = task.id, "task is complete");
+
+                // Root task completed
+                if task.root {
                     return output.lock().unwrap().take().unwrap();
                 }
             }
@@ -229,7 +279,7 @@ impl crate::Runner for Runner {
             if remaining == 0 {
                 panic!("runtime stalled");
             }
-            debug!(remaining, "tasks remaining");
+            iter += 1;
         }
     }
 }

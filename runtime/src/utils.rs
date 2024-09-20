@@ -1,8 +1,8 @@
 //! Utility functions for interacting with any runtime.
 
-use crate::Error;
 #[cfg(test)]
-use crate::{Runner, Spawner};
+use crate::Runner;
+use crate::{Clock, Error, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::{
@@ -14,7 +14,9 @@ use std::{
     future::Future,
     panic::AssertUnwindSafe,
     pin::Pin,
+    sync::Mutex,
     task::{Context, Poll},
+    time::{Duration, SystemTime},
 };
 
 /// Yield control back to the runtime.
@@ -66,7 +68,7 @@ where
             let result = AssertUnwindSafe(f).catch_unwind().await;
             let result = match result {
                 Ok(result) => Ok(result),
-                Err(err) => Err(Error::Exited(err)),
+                Err(_) => Err(Error::Exited),
             };
             let _ = sender.send(result);
         };
@@ -91,6 +93,61 @@ where
         Pin::new(&mut self.receiver)
             .poll(cx)
             .map(|res| res.map_err(|_| Error::Closed).and_then(|r| r))
+    }
+}
+
+pub struct Timeout<E, F, T>
+where
+    E: Clock + Spawner,
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    context: E,
+    future: Mutex<Pin<Box<F>>>,
+    timeout: SystemTime,
+}
+
+pub fn timeout<E, F, T>(context: E, timeout: Duration, future: F) -> Handle<Result<T, Error>>
+where
+    E: Clock + Spawner,
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let f = Timeout {
+        context: context.clone(),
+        future: Mutex::new(Box::pin(future)),
+        timeout: context.current() + timeout,
+    };
+    context.spawn(f)
+}
+
+impl<E, F, T> Future for Timeout<E, F, T>
+where
+    E: Clock + Spawner,
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    type Output = Result<T, Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Poll the user's future
+        match self.future.lock().unwrap().as_mut().poll(cx) {
+            Poll::Ready(output) => {
+                // Future completed, clean up and return the result
+                return Poll::Ready(Ok(output));
+            }
+            Poll::Pending => {
+                // Future not ready yet, continue polling
+            }
+        }
+
+        // Check if we've timed out
+        if self.context.current() >= self.timeout {
+            return Poll::Ready(Err(Error::Timeout));
+        }
+
+        // Neither future is ready, indicate that we're still pending
+        Poll::Pending
     }
 }
 

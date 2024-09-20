@@ -15,21 +15,22 @@ pub mod deterministic;
 pub mod tokio;
 
 mod utils;
-pub use utils::{reschedule, Handle};
+pub use utils::{reschedule, timeout, Handle, Timeout};
 
 use std::{
-    any::Any,
     future::Future,
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum Error {
-    #[error("exited: {0:?}")]
-    Exited(Box<dyn Any + Send + 'static>),
+    #[error("exited")]
+    Exited,
     #[error("closed")]
     Closed,
+    #[error("timeout")]
+    Timeout,
 }
 
 /// Interface that any task scheduler must implement to start
@@ -72,6 +73,8 @@ pub trait Clock: Clone + Send + Sync + 'static {
 }
 
 /// Macro to select the first future that completes.
+///
+/// It is not possible to use duplicate variable names with the macro.
 #[macro_export]
 macro_rules! select {
     (
@@ -153,7 +156,7 @@ mod tests {
                 }
             });
             handle.abort();
-            handle.await.unwrap_err();
+            assert_eq!(handle.await, Err(Error::Closed));
         });
     }
 
@@ -171,7 +174,7 @@ mod tests {
             let result = context.spawn(async move {
                 panic!("blah");
             });
-            result.await.unwrap_err();
+            assert_eq!(result.await, Err(Error::Exited));
             Result::<(), Error>::Ok(())
         });
 
@@ -191,6 +194,18 @@ mod tests {
                 },
             };
             assert_eq!(*output.lock().unwrap(), 1);
+        });
+    }
+
+    fn test_timeout(runner: impl Runner, context: impl Spawner + Clock) {
+        runner.start(async move {
+            let timeout = timeout(context, Duration::from_millis(10), async {
+                loop {
+                    reschedule().await;
+                }
+            });
+            let result = timeout.await.unwrap();
+            assert_eq!(result, Err(Error::Timeout));
         });
     }
 
@@ -229,6 +244,10 @@ mod tests {
             let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
             test_select(runner, context);
         }
+        {
+            let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
+            test_timeout(runner, context);
+        }
     }
 
     #[test]
@@ -264,6 +283,10 @@ mod tests {
         {
             let (runner, context) = tokio::Executor::init(1);
             test_select(runner, context);
+        }
+        {
+            let (runner, context) = tokio::Executor::init(1);
+            test_timeout(runner, context);
         }
     }
 }
