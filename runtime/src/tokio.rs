@@ -19,7 +19,10 @@
 
 use crate::{timeout, Error, Handle};
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
+use futures::{
+    stream::{SplitSink, SplitStream},
+    SinkExt, StreamExt,
+};
 use rand::{rngs::OsRng, RngCore};
 use std::{
     future::Future,
@@ -206,8 +209,8 @@ pub fn codec(max_frame_len: usize) -> LengthDelimitedCodec {
         .new_codec()
 }
 
-impl crate::Network<Stream> for Context {
-    fn accept(&self) -> impl Future<Output = Result<(SocketAddr, Stream), Error>> + Send {
+impl crate::Network<Sink, Stream> for Context {
+    fn accept(&self) -> impl Future<Output = Result<(SocketAddr, Sink, Stream), Error>> + Send {
         let connections = self.connections.clone();
         let context = self.clone();
         async move {
@@ -226,12 +229,25 @@ impl crate::Network<Stream> for Context {
 
             // Create a new framed stream
             let framed = Framed::new(stream, codec(self.executor.cfg.max_frame_length));
-            let executor = self.executor.clone();
-            Ok((addr, Stream::new(context, framed)))
+            let (sink, stream) = framed.split();
+            Ok((
+                addr,
+                Sink {
+                    context: context.clone(),
+                    sink,
+                },
+                Stream {
+                    context: context.clone(),
+                    stream,
+                },
+            ))
         }
     }
 
-    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<Stream, Error>> + Send {
+    fn dial(
+        &self,
+        socket: SocketAddr,
+    ) -> impl Future<Output = Result<(Sink, Stream), Error>> + Send {
         let context = self.clone();
         async move {
             // Create a new TCP stream
@@ -248,51 +264,43 @@ impl crate::Network<Stream> for Context {
 
             // Create a new framed stream
             let framed = Framed::new(stream, codec(self.executor.cfg.max_frame_length));
-            Ok(Stream::new(context, framed))
+            let (sink, stream) = framed.split();
+            Ok((
+                Sink {
+                    context: context.clone(),
+                    sink,
+                },
+                Stream { context, stream },
+            ))
         }
     }
 }
 
-#[derive(Clone)]
+pub struct Sink {
+    context: Context,
+    sink: SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>,
+}
+
+impl crate::Sink for Sink {
+    async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
+        self.sink.send(msg).await.map_err(|_| Error::WriteFailed)
+    }
+}
+
 pub struct Stream {
     context: Context,
-    stream: Arc<Framed<TcpStream, LengthDelimitedCodec>>,
-}
-
-impl Stream {
-    fn new(context: Context, stream: Framed<TcpStream, LengthDelimitedCodec>) -> Self {
-        Self {
-            context,
-            stream: Arc::new(stream),
-        }
-    }
+    stream: SplitStream<Framed<TcpStream, LengthDelimitedCodec>>,
 }
 
 impl crate::Stream for Stream {
-    fn send(&self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send {
-        async move {
-            timeout(
-                self.context,
-                self.context.executor.cfg.write_timeout,
-                async move { self.stream.send(msg).await.map_err(|_| Error::WriteFailed) },
-            )
-        }
-    }
-
-    fn recv(&self) -> impl Future<Output = Result<Bytes, Error>> + Send {
-        async move {
-            timeout(
-                self.context,
-                self.context.executor.cfg.read_timeout,
-                async move {
-                    self.stream
-                        .next()
-                        .await
-                        .ok_or(Error::Closed)?
-                        .map_err(|_| Error::ReadFailed)
-                },
-            )
-        }
+    async fn recv(&mut self) -> Result<Bytes, Error> {
+        let stream = &mut self.stream;
+        let frame = stream
+            .next()
+            .await
+            .ok_or(Error::Closed)?
+            .map_err(|_| Error::ReadFailed)?;
+        Ok(frame.freeze())
     }
 }
 

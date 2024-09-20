@@ -82,19 +82,23 @@ pub trait Clock: Clone + Send + Sync + 'static {
 
 /// Interface that any runtime must implement to provide
 /// network operations.
-pub trait Network<S>: Clone + Send + Sync + 'static
+pub trait Network<Si, St>: Clone + Send + Sync + 'static
 where
-    S: Stream,
+    Si: Sink,
+    St: Stream,
 {
-    fn accept(&self) -> impl Future<Output = Result<(SocketAddr, S), Error>> + Send;
-    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<S, Error>> + Send;
+    fn accept(&self) -> impl Future<Output = Result<(SocketAddr, Si, St), Error>> + Send;
+    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to provide
 /// stream operations.
-pub trait Stream: Clone + Send + Sync + 'static {
-    fn send(&self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send;
-    fn recv(&self) -> impl Future<Output = Result<Bytes, Error>> + Send;
+pub trait Sink: Send + 'static {
+    async fn send(&mut self, msg: Bytes) -> Result<(), Error>;
+}
+
+pub trait Stream: Send + 'static {
+    async fn recv(&mut self) -> Result<Bytes, Error>;
 }
 
 /// Macro to select the first future that completes.
