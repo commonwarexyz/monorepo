@@ -17,13 +17,15 @@
 //! });
 //! ```
 
-use crate::Handle;
+use crate::{Error, Handle};
+use bytes::Bytes;
 use futures::task::{waker_ref, ArcWake};
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use std::{
     collections::BinaryHeap,
     future::Future,
     mem::replace,
+    net::SocketAddr,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
@@ -367,6 +369,43 @@ impl crate::Clock for Context {
             time: deadline,
             registered: false,
         }
+    }
+}
+
+impl crate::Network<Listener, Sink, Stream> for Context {
+    fn bind(&self, _socket: SocketAddr) -> impl Future<Output = Result<Listener, Error>> + Send {
+        todo!()
+    }
+
+    fn dial(
+        &self,
+        _socket: SocketAddr,
+    ) -> impl Future<Output = Result<(Sink, Stream), Error>> + Send {
+        todo!()
+    }
+}
+
+pub struct Listener;
+
+impl crate::Listener<Sink, Stream> for Listener {
+    fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Sink, Stream), Error>> + Send {
+        todo!()
+    }
+}
+
+pub struct Sink;
+
+impl crate::Sink for Sink {
+    fn send(&mut self, _msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send {
+        todo!()
+    }
+}
+
+pub struct Stream;
+
+impl crate::Stream for Stream {
+    fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send {
+        todo!()
     }
 }
 
