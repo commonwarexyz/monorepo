@@ -67,8 +67,6 @@ pub enum Error {
     EncryptionFailed,
     #[error("decryption failed")]
     DecryptionFailed,
-    #[error("read invalid frame")]
-    ReadInvalidFrame,
     #[error("invalid timestamp")]
     InvalidTimestamp,
 }

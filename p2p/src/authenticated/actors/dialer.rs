@@ -5,13 +5,13 @@ use crate::authenticated::{
     connection::{self, Stream},
     metrics,
 };
-use commonware_cryptography::{utils::hex, PublicKey, Scheme};
+use commonware_cryptography::{utils::hex, Scheme};
 use commonware_runtime::{Clock, Network, Spawner, Stream as RStream};
 use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
-use std::{marker::PhantomData, net::SocketAddr, time::Duration};
+use std::{marker::PhantomData, time::Duration};
 use std::{
     ops::Add,
     sync::{Arc, Mutex},
@@ -82,51 +82,43 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
                 .inc();
 
             // Spawn dialer to connect to peer
-            self.context.spawn(Self::dial(
-                self.context.clone(),
-                self.connection.clone(),
-                peer.clone(),
-                address,
-                reservation,
-                supervisor.clone(),
-            ));
+            self.context.spawn({
+                let context = self.context.clone();
+                let config = self.connection.clone();
+                let mut supervisor = supervisor.clone();
+                async move {
+                    // Attempt to dial peer
+                    let connection = match context.dial(address).await {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
+                            return;
+                        }
+                    };
+                    debug!(
+                        peer = hex(&peer),
+                        address = address.to_string(),
+                        "dialed peer"
+                    );
+
+                    // Upgrade connection
+                    let stream =
+                        match Stream::upgrade_dialer(context, config, connection, peer.clone())
+                            .await
+                        {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
+                                return;
+                            }
+                        };
+                    debug!(peer = hex(&peer), "upgraded connection");
+
+                    // Start peer to handle messages
+                    supervisor.spawn(peer, stream, reservation).await;
+                }
+            });
         }
-    }
-
-    async fn dial(
-        context: E,
-        config: connection::Config<C>,
-        peer: PublicKey,
-        address: SocketAddr,
-        reservation: tracker::Reservation<E>,
-        mut supervisor: spawner::Mailbox<E, C, S>,
-    ) {
-        // Attempt to dial peer
-        let connection = match context.dial(address).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
-                return;
-            }
-        };
-        debug!(
-            peer = hex(&peer),
-            address = address.to_string(),
-            "dialed peer"
-        );
-
-        // Upgrade connection
-        let stream = match Stream::upgrade_dialer(context, config, connection, peer.clone()).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
-                return;
-            }
-        };
-        debug!(peer = hex(&peer), "upgraded connection");
-
-        // Start peer to handle messages
-        supervisor.spawn(peer, stream, reservation).await;
     }
 
     pub async fn run(

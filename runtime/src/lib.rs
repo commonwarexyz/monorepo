@@ -79,7 +79,7 @@ where
     S: Stream,
 {
     fn accept(&self) -> impl Future<Output = Result<(SocketAddr, S), Error>> + Send + 'static;
-    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<S, Error>>;
+    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<S, Error>> + Send + 'static;
 }
 
 pub trait Stream: Clone + Send + Sync + 'static {
