@@ -71,6 +71,7 @@ pub trait Clock: Clone + Send + Sync + 'static {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
+/// Macro to select the first future that completes.
 #[macro_export]
 macro_rules! select {
     (
