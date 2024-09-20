@@ -11,7 +11,7 @@ use futures::{
 };
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, time::Duration};
 use tracing::{debug, error};
 
 type Task = (
@@ -28,7 +28,7 @@ pub struct Network<E: Spawner + Rng + Clock> {
 
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
-    links: HashMap<PublicKey, HashMap<PublicKey, (Link, Arc<Semaphore>)>>,
+    links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
     agents: HashMap<PublicKey, mpsc::UnboundedSender<Message>>,
 }
 
@@ -98,11 +98,10 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         if config.success_rate < 0.0 || config.success_rate > 1.0 {
             return Err(Error::InvalidSuccessRate(config.success_rate));
         }
-        let capacity = Arc::new(Semaphore::new(config.capacity));
         self.links
             .entry(sender)
             .or_default()
-            .insert(receiver, (config, capacity));
+            .insert(receiver, config);
         Ok(())
     }
 
@@ -162,8 +161,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 };
 
                 // Apply link settings
-                let should_deliver = self.context.gen_bool(link.0.success_rate);
-                let delay = Normal::new(link.0.latency_mean, link.0.latency_stddev)
+                let should_deliver = self.context.gen_bool(link.success_rate);
+                let delay = Normal::new(link.latency_mean, link.latency_stddev)
                     .unwrap()
                     .sample(&mut self.context);
                 debug!("sending message to {}: delay={}ms", hex(&recipient), delay);
@@ -171,14 +170,12 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 // Send message
                 self.context.spawn({
                     let context = self.context.clone();
-                    let sender = sender.clone();
+                    let mut sender = sender.clone();
                     let recipient = recipient.clone();
                     let message = message.clone();
-                    let semaphore = link.1.clone();
-                    let acquired_sender = acquired_sender.clone();
+                    let mut acquired_sender = acquired_sender.clone();
                     async move {
-                        // Mark as sent as soon as acquire semaphore
-                        let _permit = semaphore.acquire().await.unwrap();
+                        // Mark as sent as soon as soon as execution starts
                         acquired_sender.send(()).await.unwrap();
 
                         // Apply delay to send (once link is not saturated)
