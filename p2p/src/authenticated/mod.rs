@@ -268,7 +268,6 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tokio::time;
 
     /// Test connectivity between `n` peers.
     ///
@@ -355,7 +354,7 @@ mod tests {
                                 }
 
                                 // Sleep and try again (avoid busy loop)
-                                context.sleep(time::Duration::from_millis(100)).await;
+                                context.sleep(Duration::from_millis(100)).await;
                             }
                         }
 
@@ -475,7 +474,7 @@ mod tests {
                                 }
 
                                 // Sleep and try again (avoid busy loop)
-                                context.sleep(time::Duration::from_millis(100)).await;
+                                context.sleep(Duration::from_millis(100)).await;
                             }
                         } else {
                             // Ensure message equals sender identity

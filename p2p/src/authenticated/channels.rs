@@ -2,9 +2,9 @@ use super::{actors::Messenger, Error};
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 use zstd::bulk::{compress, decompress};
 
 /// Sender is the mechanism used to send arbitrary bytes to
@@ -111,7 +111,7 @@ impl crate::Receiver for Receiver {
     /// This method will block until a message is received or the underlying
     /// network shuts down.
     async fn recv(&mut self) -> Result<Message, Error> {
-        let (sender, mut message) = self.receiver.recv().await.ok_or(Error::NetworkClosed)?;
+        let (sender, mut message) = self.receiver.next().await.ok_or(Error::NetworkClosed)?;
 
         // If compression is enabled, decompress the message before returning.
         if self.compression {
