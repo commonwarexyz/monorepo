@@ -38,6 +38,9 @@ pub struct Config<C: Scheme> {
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
 
+    /// Maximum frame length for messages.
+    pub max_frame_length: usize,
+
     /// Message backlog allowed for internal actors.
     ///
     /// When there are more messages in the mailbox than this value, any actor
@@ -99,6 +102,7 @@ impl<C: Scheme> Config<C> {
         listen: SocketAddr,
         dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
+        max_frame_length: usize,
     ) -> Self {
         Self {
             crypto,
@@ -108,6 +112,7 @@ impl<C: Scheme> Config<C> {
             bootstrappers,
 
             allow_private_ips: false,
+            max_frame_length,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
@@ -134,6 +139,7 @@ impl<C: Scheme> Config<C> {
         listen: SocketAddr,
         dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
+        max_frame_length: usize,
     ) -> Self {
         Self {
             crypto,
@@ -143,6 +149,7 @@ impl<C: Scheme> Config<C> {
             bootstrappers,
 
             allow_private_ips: true,
+            max_frame_length,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
@@ -165,6 +172,7 @@ impl<C: Scheme> Config<C> {
         listen: SocketAddr,
         dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
+        max_frame_length: usize,
     ) -> Self {
         Self {
             crypto,
@@ -174,6 +182,7 @@ impl<C: Scheme> Config<C> {
             bootstrappers,
 
             allow_private_ips: true,
+            max_frame_length,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),

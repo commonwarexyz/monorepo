@@ -9,12 +9,18 @@ use super::{
     connection,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Network as RNetwork, Spawner, Stream};
-use rand::Rng;
+use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use rand::{CryptoRng, Rng};
 use tracing::info;
 
 /// Implementation of an `authenticated` network.
-pub struct Network<S: Stream, E: Spawner + Clock + Rng + RNetwork<S>, C: Scheme> {
+pub struct Network<
+    Si: Sink,
+    St: Stream,
+    L: Listener<Si, St>,
+    E: Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+    C: Scheme,
+> {
     context: E,
     cfg: Config<C>,
 
@@ -24,10 +30,19 @@ pub struct Network<S: Stream, E: Spawner + Clock + Rng + RNetwork<S>, C: Scheme>
     router: router::Actor,
     router_mailbox: router::Mailbox,
 
-    _phantom: PhantomData<S>,
+    _phantom_si: PhantomData<Si>,
+    _phantom_st: PhantomData<St>,
+    _phantom_l: PhantomData<L>,
 }
 
-impl<S: Stream, E: Spawner + Clock + Rng + RNetwork<S>, C: Scheme> Network<S, E, C> {
+impl<
+        Si: Sink,
+        St: Stream,
+        L: Listener<Si, St>,
+        E: Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+        C: Scheme,
+    > Network<Si, St, L, E, C>
+{
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -44,7 +59,7 @@ impl<S: Stream, E: Spawner + Clock + Rng + RNetwork<S>, C: Scheme> Network<S, E,
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 registry: cfg.registry.clone(),
-                address: cfg.address,
+                address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
                 allow_private_ips: cfg.allow_private_ips,
                 mailbox_size: cfg.mailbox_size,
@@ -70,7 +85,9 @@ impl<S: Stream, E: Spawner + Clock + Rng + RNetwork<S>, C: Scheme> Network<S, E,
                 router,
                 router_mailbox,
 
-                _phantom: PhantomData,
+                _phantom_si: PhantomData,
+                _phantom_st: PhantomData,
+                _phantom_l: PhantomData,
             },
             oracle,
         )
@@ -133,14 +150,11 @@ impl<S: Stream, E: Spawner + Clock + Rng + RNetwork<S>, C: Scheme> Network<S, E,
             max_frame_length: self.cfg.max_frame_length,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
-            handshake_timeout: self.cfg.handshake_timeout,
-            read_timeout: self.cfg.read_timeout,
-            write_timeout: self.cfg.write_timeout,
-            tcp_nodelay: self.cfg.tcp_nodelay,
         };
         let listener = listener::Actor::new(
             self.context.clone(),
             listener::Config {
+                address: self.cfg.listen,
                 connection: connection.clone(),
                 allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
             },

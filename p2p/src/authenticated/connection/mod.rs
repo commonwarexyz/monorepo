@@ -19,10 +19,6 @@ pub struct Config<C: Scheme> {
     pub max_frame_length: usize,
     pub synchrony_bound: Duration,
     pub max_handshake_age: Duration,
-    pub handshake_timeout: Duration,
-    pub read_timeout: Duration,
-    pub write_timeout: Duration,
-    pub tcp_nodelay: Option<bool>,
 }
 
 #[derive(Error, Debug)]
