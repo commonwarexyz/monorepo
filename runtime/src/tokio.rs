@@ -17,7 +17,7 @@
 //! });
 //! ```
 
-use crate::{timeout, Error, Handle};
+use crate::{Error, Handle};
 use bytes::Bytes;
 use futures::{
     stream::{SplitSink, SplitStream},
@@ -33,7 +33,7 @@ use std::{
 use tokio::{
     net::{TcpListener, TcpStream},
     runtime::{Builder, Runtime},
-    sync::{mpsc, Mutex},
+    time::timeout,
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::warn;
@@ -249,7 +249,10 @@ pub struct Sink {
 
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
-        self.sink.send(msg).await.map_err(|_| Error::WriteFailed)
+        timeout(self.context.executor.cfg.write_timeout, self.sink.send(msg))
+            .await
+            .map_err(|_| Error::WriteFailed)?
+            .map_err(|_| Error::WriteFailed)
     }
 }
 
@@ -260,13 +263,12 @@ pub struct Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self) -> Result<Bytes, Error> {
-        let stream = &mut self.stream;
-        let frame = stream
-            .next()
+        let result = timeout(self.context.executor.cfg.read_timeout, self.stream.next())
             .await
+            .map_err(|_| Error::ReadFailed)?
             .ok_or(Error::Closed)?
             .map_err(|_| Error::ReadFailed)?;
-        Ok(frame.freeze())
+        Ok(result.freeze())
     }
 }
 
