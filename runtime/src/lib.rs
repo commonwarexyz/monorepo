@@ -91,7 +91,7 @@ where
 }
 
 pub trait Stream: Clone + Send + Sync + 'static {
-    fn send(&self, msg: Bytes) -> Result<(), Error>;
+    fn send(&self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send + 'static;
     fn recv(&self) -> impl Future<Output = Result<Bytes, Error>> + Send + 'static;
 }
 

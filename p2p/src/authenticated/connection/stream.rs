@@ -1,6 +1,6 @@
 use super::{
     handshake::{create_handshake, Handshake, IncomingHandshake},
-    utils::{codec, nonce_bytes},
+    utils::nonce_bytes,
     Config, Error,
 };
 use crate::authenticated::wire;
@@ -10,59 +10,50 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::{select, timeout, Clock, Spawner};
-use futures::{
-    stream::{SplitSink, SplitStream},
-    SinkExt, StreamExt,
-};
+use commonware_runtime::{select, timeout, Clock, Spawner, Stream as RStream};
 use prost::Message;
 use std::time::Duration;
-use tokio_util::codec::Framed;
-use tokio_util::codec::LengthDelimitedCodec;
 
 const CHUNK_PADDING: usize = 32 /* protobuf padding*/ + 12 /* chunk info */ + 16 /* encryption tag */;
 
-pub struct Stream<E: Clock + Spawner, C: Scheme> {
+pub struct Stream<E: Clock + Spawner, C: Scheme, S: RStream> {
     context: E,
     config: Config<C>,
     dialer: bool,
-    framed: Framed<TcpStream, LengthDelimitedCodec>,
+    stream: S,
     cipher: ChaCha20Poly1305,
 }
 
-impl<E: Clock + Spawner, C: Scheme> Stream<E, C> {
+impl<E: Clock + Spawner, C: Scheme, S: RStream> Stream<E, C, S> {
     pub async fn upgrade_dialer(
         context: E,
         mut config: Config<C>,
-        stream: TcpStream,
+        stream: S,
         peer: PublicKey,
     ) -> Result<Self, Error> {
-        // Setup connection
-        let mut framed = Framed::new(stream, codec(config.max_frame_length));
-
         // Generate shared secret
         let secret = x25519_dalek::EphemeralSecret::random();
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
         let msg = create_handshake(context.clone(), &mut config.crypto, peer.clone(), ephemeral)?;
-        timeout(context, config.handshake_timeout, framed.send(msg))
+        timeout(context.clone(), config.handshake_timeout, stream.send(msg))
             .await
             .map_err(|_| Error::HandshakeTimeout)?
             .map_err(|_| Error::SendFailed)?;
 
         // Verify handshake message from peer
-        let msg = timeout(context, config.handshake_timeout, framed.next())
+        let msg = timeout(context.clone(), config.handshake_timeout, stream.recv())
             .await
             .map_err(|_| Error::HandshakeTimeout)?
-            .ok_or(Error::StreamClosed)?
+            .map_err(|_| Error::StreamClosed)?
             .map_err(|_| Error::ReadFailed)?;
         let handshake = Handshake::verify(
             context.clone(),
             &config.crypto,
             config.synchrony_bound,
             config.max_handshake_age,
-            msg.freeze(),
+            msg,
         )?;
 
         // Ensure we connected to the right peer
@@ -80,7 +71,7 @@ impl<E: Clock + Spawner, C: Scheme> Stream<E, C> {
             context,
             config,
             dialer: true,
-            framed,
+            stream,
             cipher,
         })
     }
@@ -88,7 +79,7 @@ impl<E: Clock + Spawner, C: Scheme> Stream<E, C> {
     pub async fn upgrade_listener(
         context: E,
         mut config: Config<C>,
-        mut handshake: IncomingHandshake,
+        handshake: IncomingHandshake<S>,
     ) -> Result<Self, Error> {
         // Generate shared secret
         let secret = x25519_dalek::EphemeralSecret::random();
@@ -102,9 +93,9 @@ impl<E: Clock + Spawner, C: Scheme> Stream<E, C> {
             ephemeral,
         )?;
         timeout(
-            context,
+            context.clone(),
             config.handshake_timeout,
-            handshake.framed.send(msg),
+            handshake.stream.send(msg),
         )
         .await
         .map_err(|_| Error::HandshakeTimeout)?
@@ -119,20 +110,19 @@ impl<E: Clock + Spawner, C: Scheme> Stream<E, C> {
             context,
             config,
             dialer: false,
-            framed: handshake.framed,
+            stream: handshake.stream,
             cipher,
         })
     }
 
-    pub fn split(self) -> (usize, Sender<E>, Receiver<E>) {
-        let (sink, stream) = self.framed.split();
+    pub fn split(self) -> (usize, Sender<E, S>, Receiver<E, S>) {
         (
             self.config.max_frame_length - CHUNK_PADDING,
             Sender {
                 context: self.context.clone(),
                 write_timeout: self.config.write_timeout,
                 cipher: self.cipher.clone(),
-                sink,
+                stream: self.stream.clone(),
 
                 dialer: self.dialer,
                 iter: 0,
@@ -142,7 +132,7 @@ impl<E: Clock + Spawner, C: Scheme> Stream<E, C> {
                 context: self.context,
                 read_timeout: self.config.read_timeout,
                 cipher: self.cipher,
-                stream,
+                stream: self.stream,
 
                 dialer: self.dialer,
                 iter: 0,
@@ -152,19 +142,19 @@ impl<E: Clock + Spawner, C: Scheme> Stream<E, C> {
     }
 }
 
-pub struct Sender<E: Spawner + Clock> {
+pub struct Sender<E: Spawner + Clock, S: RStream> {
     context: E,
 
     write_timeout: Duration,
     cipher: ChaCha20Poly1305,
-    sink: SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>,
+    stream: S,
 
     dialer: bool,
     iter: u16,
     seq: u64,
 }
 
-impl<E: Spawner + Clock> Sender<E> {
+impl<E: Spawner + Clock, S: RStream> Sender<E, S> {
     fn my_nonce(&mut self) -> Result<Nonce, Error> {
         if self.seq == u64::MAX {
             if self.iter == u16::MAX {
@@ -189,30 +179,31 @@ impl<E: Spawner + Clock> Sender<E> {
 
         // Send data
         let result = timeout(
-            self.context,
+            self.context.clone(),
             self.write_timeout,
-            self.sink.send(Bytes::from(msg)),
+            self.stream.send(Bytes::from(msg)),
         )
         .await;
         result
             .map_err(|_| Error::WriteTimeout)?
+            .map_err(|_| Error::StreamClosed)?
             .map_err(|_| Error::SendFailed)
     }
 }
 
-pub struct Receiver<E: Clock> {
+pub struct Receiver<E: Clock, S: RStream> {
     context: E,
 
     read_timeout: Duration,
     cipher: ChaCha20Poly1305,
-    stream: SplitStream<Framed<TcpStream, LengthDelimitedCodec>>,
+    stream: S,
 
     dialer: bool,
     iter: u16,
     seq: u64,
 }
 
-impl<E: Clock> Receiver<E> {
+impl<E: Clock, S: RStream> Receiver<E, S> {
     fn peer_nonce(&mut self) -> Result<Nonce, Error> {
         if self.seq == u64::MAX {
             if self.iter == u16::MAX {
@@ -231,12 +222,9 @@ impl<E: Clock> Receiver<E> {
             _timeout = self.context.sleep(self.read_timeout) => {
                 Err(Error::ReadTimeout)
             },
-            msg = self.stream.next() => {
+            msg = self.stream.recv() => {
                 // Read message
-                let msg = msg.ok_or(Error::StreamClosed)?;
-
-                // Invalid frame
-                let msg = msg.map_err(|_| Error::ReadInvalidFrame)?;
+                let msg = msg.map_err(|_| Error::StreamClosed)?;
 
                 // Decrypt data
                 let nonce = self.peer_nonce()?;
