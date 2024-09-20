@@ -45,9 +45,6 @@ pub struct Link {
 
     /// Probability of a message being delivered successfully (in range [0,1]).
     pub success_rate: f64,
-
-    /// Maximum number of messages that can be in-flight at once before blocking.
-    pub capacity: usize,
 }
 
 /// Configuration for a `simulated` network.

@@ -73,7 +73,6 @@ mod tests {
                             latency_mean: 5.0,
                             latency_stddev: 2.5,
                             success_rate: 0.75,
-                            capacity: 1,
                         },
                     );
                     if agent == other {
