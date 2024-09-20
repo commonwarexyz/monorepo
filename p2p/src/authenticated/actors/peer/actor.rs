@@ -7,12 +7,11 @@ use crate::authenticated::{
 };
 use bytes::BytesMut;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
-use commonware_runtime::{Clock, Handle, Spawner};
-use futures::try_join;
+use commonware_runtime::{select, Clock, Handle, Spawner, Stream as RStream};
+use futures::{channel::mpsc, try_join, SinkExt, StreamExt};
 use governor::{DefaultDirectRateLimiter, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::mpsc;
 
 pub struct Actor<E: Spawner + Clock> {
     context: E,
@@ -57,10 +56,10 @@ impl<E: Spawner + Clock> Actor<E> {
         )
     }
 
-    async fn send_content(
+    async fn send_content<S: RStream>(
         max_size: usize,
         max_content_size: usize,
-        sender: &mut Sender,
+        sender: &mut Sender<E, S>,
         peer: &PublicKey,
         data: Data,
         sent_messages: &Family<metrics::Message, Counter>,
@@ -107,10 +106,10 @@ impl<E: Spawner + Clock> Actor<E> {
         Ok(())
     }
 
-    pub async fn run<C: Scheme>(
+    pub async fn run<C: Scheme, S: RStream>(
         mut self,
         peer: PublicKey,
-        connection: Stream<E, C>,
+        connection: Stream<E, C, S>,
         tracker: tracker::Mailbox<E>,
         channels: Channels,
     ) -> Error {
@@ -129,17 +128,21 @@ impl<E: Spawner + Clock> Actor<E> {
         let send_mailbox = self.mailbox.clone();
         let send_rate_limits = rate_limits.clone();
         let mut send_handler: Handle<Result<(), Error>> = self.context.spawn(async move {
-            let mut ticker = tokio::time::interval(self.gossip_bit_vec_frequency);
+            let mut ticker = self.context.sleep(self.gossip_bit_vec_frequency);
             loop {
-                tokio::select! {
-                    // Ensure we send ip gossip before any user messages
-                    biased;
-
-                    _ = ticker.tick() => {
+                select! {
+                    _timeout = ticker => {
                         // Get latest bitset from tracker (also used as ping)
                         send_tracker.construct(send_peer.clone(), send_mailbox.clone()).await;
-                    }
-                    Some(msg) = self.control.recv() => {
+
+                        // Reset ticker
+                        ticker = self.context.sleep(self.gossip_bit_vec_frequency);
+                    },
+                    msg_control = self.control.next() => {
+                        let msg = match msg_control {
+                            Some(msg_control) => msg_control,
+                            None => return Err(Error::PeerDisconnected),
+                        };
                         match msg {
                             Message::BitVec { bit_vec } => {
                                 conn_sender.send(wire::Message{
@@ -161,8 +164,24 @@ impl<E: Spawner + Clock> Actor<E> {
                                 return Err(Error::PeerKilled(hex(&send_peer)))
                             }
                         }
-                    }
-                    Some(msg) = self.high.recv() => {
+                    },
+                    msg_high = self.high.next() => {
+                        let msg = match msg_high {
+                            Some(msg_high) => msg_high,
+                            None => return Err(Error::PeerDisconnected),
+                        };
+                        let entry = send_rate_limits.get(&msg.channel);
+                        if entry.is_none() {
+                            return Err(Error::InvalidChannel);
+                        }
+                        let (_, max_size, _) = entry.unwrap();
+                        Self::send_content(*max_size, max_content_size, &mut conn_sender, &send_peer, msg, &self.sent_messages).await?;
+                    },
+                    msg_low = self.low.next() => {
+                        let msg = match msg_low {
+                            Some(msg_low) => msg_low,
+                            None => return Err(Error::PeerDisconnected),
+                        };
                         let entry = send_rate_limits.get(&msg.channel);
                         if entry.is_none() {
                             return Err(Error::InvalidChannel);
@@ -170,15 +189,6 @@ impl<E: Spawner + Clock> Actor<E> {
                         let (_, max_size, _) = entry.unwrap();
                         Self::send_content(*max_size, max_content_size, &mut conn_sender, &send_peer, msg, &self.sent_messages).await?;
                     }
-                    Some(msg) = self.low.recv() => {
-                        let entry = send_rate_limits.get(&msg.channel);
-                        if entry.is_none() {
-                            return Err(Error::InvalidChannel);
-                        }
-                        let (_, max_size, _) = entry.unwrap();
-                        Self::send_content(*max_size, max_content_size, &mut conn_sender, &send_peer, msg, &self.sent_messages).await?;
-                    }
-                    else => return Err(Error::PeerDisconnected),
                 }
             }
         });
