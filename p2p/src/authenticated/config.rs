@@ -47,9 +47,6 @@ pub struct Config<C: Scheme> {
     /// Duration after which a handshake message is considered stale.
     pub max_handshake_age: Duration,
 
-    /// Duration after which to close the connection if the handshake is not completed.
-    pub handshake_timeout: Duration,
-
     /// Quota for connection attempts per peer (incoming or outgoing).
     pub allowed_connection_rate_per_peer: Quota,
 

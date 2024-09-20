@@ -1,13 +1,12 @@
 //! Utility functions for interacting with any runtime.
 
+use crate::Error;
 #[cfg(test)]
-use crate::Runner;
-use crate::{Clock, Error, Spawner};
+use crate::{Runner, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::{
     channel::oneshot,
-    pin_mut, select,
     stream::{AbortHandle, Abortable},
     FutureExt,
 };
@@ -16,7 +15,6 @@ use std::{
     panic::AssertUnwindSafe,
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
 
 /// Yield control back to the runtime.
@@ -93,33 +91,6 @@ where
         Pin::new(&mut self.receiver)
             .poll(cx)
             .map(|res| res.map_err(|_| Error::Closed).and_then(|r| r))
-    }
-}
-
-pub async fn timeout<E, F, T>(context: E, timeout: Duration, f: F) -> Result<T, Error>
-where
-    E: Clock + Spawner,
-    F: Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    // Prepare f
-    let f_handle = context.spawn(f);
-    pin_mut!(f_handle);
-
-    // Prepare timeout
-    let t = context.sleep(timeout);
-    pin_mut!(t);
-
-    // Wait for either to complete
-    select! {
-        _ = t.fuse() => {
-            // Abort f if we timeout
-            f_handle.abort();
-            Err(Error::Timeout)
-        },
-        result = f_handle.as_mut().fuse() => {
-            result
-        },
     }
 }
 

@@ -237,18 +237,6 @@ mod tests {
         });
     }
 
-    fn test_timeout(runner: impl Runner, context: impl Spawner + Clock) {
-        runner.start(async move {
-            let timeout = timeout(context, Duration::from_millis(10), async {
-                loop {
-                    reschedule().await;
-                }
-            });
-            let result = timeout.await.unwrap_err();
-            assert_eq!(result, Error::Timeout);
-        });
-    }
-
     #[test]
     fn test_deterministic() {
         {
@@ -283,10 +271,6 @@ mod tests {
         {
             let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
             test_select(runner, context);
-        }
-        {
-            let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
-            test_timeout(runner, context);
         }
     }
 
@@ -323,10 +307,6 @@ mod tests {
         {
             let (runner, context) = tokio::Executor::init(1);
             test_select(runner, context);
-        }
-        {
-            let (runner, context) = tokio::Executor::init(1);
-            test_timeout(runner, context);
         }
     }
 }
