@@ -410,11 +410,11 @@ dependencies = [
  "commonware-p2p",
  "commonware-runtime",
  "crossterm 0.28.1",
+ "futures",
  "governor",
  "prometheus-client",
  "ratatui",
  "serde_json",
- "tokio",
  "tracing",
  "tracing-subscriber",
 ]

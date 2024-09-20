@@ -71,10 +71,34 @@ pub trait Clock: Clone + Send + Sync + 'static {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
+#[macro_export]
+macro_rules! select {
+    (
+        $(
+            $var:ident = $fut:expr => $block:block
+        ),+ $(,)?
+    ) => {{
+        use futures::{pin_mut, select_biased, FutureExt};
+        $(
+            // Fuse each future and assign it to the provided variable
+            let $var = $fut.fuse();
+            pin_mut!($var);
+        )+
+
+        // Use `futures::select_biased!` to await the first future that completes
+        select_biased! {
+            $(
+                $var = $var => $block,
+            )+
+        }
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::Mutex;
     use utils::reschedule;
 
     fn test_error_future(runner: impl Runner) {
@@ -154,6 +178,21 @@ mod tests {
         result.unwrap();
     }
 
+    fn test_select(runner: impl Runner, context: impl Spawner) {
+        runner.start(async move {
+            let output = Mutex::new(0);
+            select! {
+                v1 = context.spawn(async { 1 }) => {
+                    *output.lock().unwrap() = v1.unwrap();
+                },
+                v2 = context.spawn(async { 2 }) => {
+                    *output.lock().unwrap() = v2.unwrap();
+                },
+            };
+            assert_eq!(*output.lock().unwrap(), 1);
+        });
+    }
+
     #[test]
     fn test_deterministic() {
         {
@@ -184,6 +223,10 @@ mod tests {
         {
             let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
             test_panic_aborts_spawn(runner, context);
+        }
+        {
+            let (runner, context) = deterministic::Executor::init(1, Duration::from_millis(1));
+            test_select(runner, context);
         }
     }
 
@@ -216,6 +259,10 @@ mod tests {
         {
             let (runner, context) = tokio::Executor::init(1);
             test_panic_aborts_spawn(runner, context);
+        }
+        {
+            let (runner, context) = tokio::Executor::init(1);
+            test_select(runner, context);
         }
     }
 }
