@@ -82,7 +82,7 @@ where
                 Err(err) => {
                     let backtrace = Backtrace::capture();
                     let err = extract_panic_message(&*err);
-                    error!(?err, ?backtrace, "task panicked");
+                    error!(?err, "task panicked: {:#?}", backtrace);
                     Err(Error::Exited)
                 }
             };
