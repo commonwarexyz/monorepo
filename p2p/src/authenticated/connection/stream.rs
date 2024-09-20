@@ -46,7 +46,6 @@ impl<E: Clock + Spawner, C: Scheme, S: RStream> Stream<E, C, S> {
         let msg = timeout(context.clone(), config.handshake_timeout, stream.recv())
             .await
             .map_err(|_| Error::HandshakeTimeout)?
-            .map_err(|_| Error::StreamClosed)?
             .map_err(|_| Error::ReadFailed)?;
         let handshake = Handshake::verify(
             context.clone(),
@@ -186,7 +185,6 @@ impl<E: Spawner + Clock, S: RStream> Sender<E, S> {
         .await;
         result
             .map_err(|_| Error::WriteTimeout)?
-            .map_err(|_| Error::StreamClosed)?
             .map_err(|_| Error::SendFailed)
     }
 }
