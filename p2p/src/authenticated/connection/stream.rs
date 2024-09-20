@@ -10,21 +10,19 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::Clock;
+use commonware_runtime::{select, timeout, Clock, Spawner};
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
 use prost::Message;
 use std::time::Duration;
-use tokio::net::TcpStream;
-use tokio::{select, time};
 use tokio_util::codec::Framed;
 use tokio_util::codec::LengthDelimitedCodec;
 
 const CHUNK_PADDING: usize = 32 /* protobuf padding*/ + 12 /* chunk info */ + 16 /* encryption tag */;
 
-pub struct Stream<E: Clock, C: Scheme> {
+pub struct Stream<E: Clock + Spawner, C: Scheme> {
     context: E,
     config: Config<C>,
     dialer: bool,
@@ -32,7 +30,7 @@ pub struct Stream<E: Clock, C: Scheme> {
     cipher: ChaCha20Poly1305,
 }
 
-impl<E: Clock, C: Scheme> Stream<E, C> {
+impl<E: Clock + Spawner, C: Scheme> Stream<E, C> {
     pub async fn upgrade_dialer(
         context: E,
         mut config: Config<C>,
@@ -48,13 +46,13 @@ impl<E: Clock, C: Scheme> Stream<E, C> {
 
         // Send handshake
         let msg = create_handshake(context.clone(), &mut config.crypto, peer.clone(), ephemeral)?;
-        time::timeout(config.handshake_timeout, framed.send(msg))
+        timeout(context, config.handshake_timeout, framed.send(msg))
             .await
             .map_err(|_| Error::HandshakeTimeout)?
             .map_err(|_| Error::SendFailed)?;
 
         // Verify handshake message from peer
-        let msg = time::timeout(config.handshake_timeout, framed.next())
+        let msg = timeout(context, config.handshake_timeout, framed.next())
             .await
             .map_err(|_| Error::HandshakeTimeout)?
             .ok_or(Error::StreamClosed)?
@@ -103,10 +101,14 @@ impl<E: Clock, C: Scheme> Stream<E, C> {
             handshake.peer_public_key.clone(),
             ephemeral,
         )?;
-        time::timeout(config.handshake_timeout, handshake.framed.send(msg))
-            .await
-            .map_err(|_| Error::HandshakeTimeout)?
-            .map_err(|_| Error::SendFailed)?;
+        timeout(
+            context,
+            config.handshake_timeout,
+            handshake.framed.send(msg),
+        )
+        .await
+        .map_err(|_| Error::HandshakeTimeout)?
+        .map_err(|_| Error::SendFailed)?;
 
         // Create cipher
         let shared_secret = secret.diffie_hellman(&handshake.ephemeral_public_key);
@@ -122,11 +124,12 @@ impl<E: Clock, C: Scheme> Stream<E, C> {
         })
     }
 
-    pub fn split(self) -> (usize, Sender, Receiver<E>) {
+    pub fn split(self) -> (usize, Sender<E>, Receiver<E>) {
         let (sink, stream) = self.framed.split();
         (
             self.config.max_frame_length - CHUNK_PADDING,
             Sender {
+                context: self.context.clone(),
                 write_timeout: self.config.write_timeout,
                 cipher: self.cipher.clone(),
                 sink,
@@ -149,7 +152,9 @@ impl<E: Clock, C: Scheme> Stream<E, C> {
     }
 }
 
-pub struct Sender {
+pub struct Sender<E: Spawner + Clock> {
+    context: E,
+
     write_timeout: Duration,
     cipher: ChaCha20Poly1305,
     sink: SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>,
@@ -159,7 +164,7 @@ pub struct Sender {
     seq: u64,
 }
 
-impl Sender {
+impl<E: Spawner + Clock> Sender<E> {
     fn my_nonce(&mut self) -> Result<Nonce, Error> {
         if self.seq == u64::MAX {
             if self.iter == u16::MAX {
@@ -183,7 +188,12 @@ impl Sender {
             .map_err(|_| Error::EncryptionFailed)?;
 
         // Send data
-        let result = time::timeout(self.write_timeout, self.sink.send(Bytes::from(msg))).await;
+        let result = timeout(
+            self.context,
+            self.write_timeout,
+            self.sink.send(Bytes::from(msg)),
+        )
+        .await;
         result
             .map_err(|_| Error::WriteTimeout)?
             .map_err(|_| Error::SendFailed)
@@ -218,7 +228,13 @@ impl<E: Clock> Receiver<E> {
 
     pub async fn receive(&mut self) -> Result<wire::Message, Error> {
         select! {
-            Some(msg) = self.stream.next() => {
+            _timeout = self.context.sleep(self.read_timeout) => {
+                Err(Error::ReadTimeout)
+            },
+            msg = self.stream.next() => {
+                // Read message
+                let msg = msg.ok_or(Error::StreamClosed)?;
+
                 // Invalid frame
                 let msg = msg.map_err(|_| Error::ReadInvalidFrame)?;
 
@@ -232,8 +248,6 @@ impl<E: Clock> Receiver<E> {
                 // Deserialize data
                 Ok(wire::Message::decode(msg.as_ref()).map_err(Error::UnableToDecode)?)
             },
-            _ = self.context.sleep(self.read_timeout) => Err(Error::ReadTimeout),
-            else => Err(Error::StreamClosed),
         }
     }
 }

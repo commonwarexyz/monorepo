@@ -1,12 +1,4 @@
 use chacha20poly1305::Nonce;
-use tokio_util::codec::LengthDelimitedCodec;
-
-pub fn codec(max_frame_len: usize) -> LengthDelimitedCodec {
-    LengthDelimitedCodec::builder()
-        .length_field_type::<u32>()
-        .max_frame_length(max_frame_len)
-        .new_codec()
-}
 
 pub fn nonce_bytes(dialer: bool, iter: u16, seq: u64) -> Nonce {
     let mut nonce_bytes = Nonce::default();

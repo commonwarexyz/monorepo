@@ -15,10 +15,12 @@ pub mod deterministic;
 pub mod tokio;
 
 mod utils;
+use bytes::Bytes;
 pub use utils::{reschedule, timeout, Handle, Timeout};
 
 use std::{
     future::Future,
+    net::SocketAddr,
     time::{Duration, SystemTime},
 };
 use thiserror::Error;
@@ -70,6 +72,27 @@ pub trait Clock: Clone + Send + Sync + 'static {
 
     /// Sleep until the given deadline.
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
+}
+
+pub trait Network<L, S>: Clone + Send + Sync + 'static
+where
+    L: Listener<S>,
+    S: Stream,
+{
+    fn bind(&self, socket: SocketAddr) -> L;
+    fn dial(&self, socket: SocketAddr) -> Result<S, Error>;
+}
+
+pub trait Listener<S>: Clone + Send + Sync + 'static
+where
+    S: Stream,
+{
+    fn accept(&self) -> Result<S, Error>;
+}
+
+pub trait Stream: Clone + Send + Sync + 'static {
+    fn send(&self, msg: Bytes) -> Result<(), Error>;
+    fn recv(&self) -> impl Future<Output = Result<Bytes, Error>> + Send + 'static;
 }
 
 /// Macro to select the first future that completes.

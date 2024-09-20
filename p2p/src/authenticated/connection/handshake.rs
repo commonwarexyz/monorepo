@@ -1,15 +1,10 @@
-use super::{utils::codec, x25519, Error};
+use super::{x25519, Error};
 use crate::authenticated::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::Spawner;
-use commonware_runtime::{timeout, Clock};
-use futures::StreamExt;
+use commonware_runtime::{timeout, Clock, Spawner, Stream};
 use prost::Message;
 use std::time::{Duration, UNIX_EPOCH};
-use tokio::net::TcpStream;
-use tokio_util::codec::Framed;
-use tokio_util::codec::LengthDelimitedCodec;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_HANDSHAKE_";
 
@@ -132,41 +127,32 @@ impl Handshake {
     }
 }
 
-pub struct IncomingHandshake {
+pub struct IncomingHandshake<S: Stream> {
+    pub(super) stream: S,
     pub peer_public_key: PublicKey,
-    pub(super) framed: Framed<TcpStream, LengthDelimitedCodec>,
     pub(super) ephemeral_public_key: x25519_dalek::PublicKey,
 }
 
-impl IncomingHandshake {
+impl<S: Stream> IncomingHandshake<S> {
     pub async fn verify<E: Clock + Spawner, C: Scheme>(
         context: E,
         crypto: &C,
-        max_frame_len: usize,
         synchrony_bound: Duration,
         max_handshake_age: Duration,
         handshake_timeout: Duration,
-        stream: TcpStream,
+        stream: S,
     ) -> Result<Self, Error> {
-        // Setup connection
-        let mut framed = Framed::new(stream, codec(max_frame_len));
-
         // Verify handshake message from peer
-        let msg = timeout(context, handshake_timeout, framed.next())
+        let msg = timeout(context.clone(), handshake_timeout, stream.recv())
             .await
             .map_err(|_| Error::HandshakeTimeout)?
-            .ok_or(Error::StreamClosed)?
+            .map_err(|_| Error::StreamClosed)?
             .map_err(|_| Error::ReadFailed)?;
-        let handshake = Handshake::verify(
-            context,
-            crypto,
-            synchrony_bound,
-            max_handshake_age,
-            msg.freeze(),
-        )?;
+        let handshake =
+            Handshake::verify(context, crypto, synchrony_bound, max_handshake_age, msg)?;
 
         Ok(Self {
-            framed,
+            stream,
             peer_public_key: handshake.peer_public_key,
             ephemeral_public_key: handshake.ephemeral_public_key,
         })

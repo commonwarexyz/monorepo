@@ -465,6 +465,7 @@ dependencies = [
 name = "commonware-runtime"
 version = "0.0.2"
 dependencies = [
+ "bytes",
  "futures",
  "rand",
  "thiserror",
