@@ -42,11 +42,6 @@ pub struct Config {
     /// Number of threads to use for the runtime.
     pub threads: usize,
 
-    /// Address to bind the TCP listener to.
-    ///
-    /// If not set, no address will be bound.
-    pub listen: Option<SocketAddr>,
-
     /// Maximum size used for all messages sent over the wire.
     ///
     /// We use this to prevent malicious peers from sending us large messages
@@ -83,7 +78,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             threads: 2,
-            listen: None,
             max_frame_length: 1024 * 1024, // 1 MB
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
@@ -96,7 +90,6 @@ impl Default for Config {
 pub struct Executor {
     cfg: Config,
     runtime: Runtime,
-    connections: mpsc::Sender<(SocketAddr, TcpStream)>,
 }
 
 impl Executor {
@@ -107,20 +100,12 @@ impl Executor {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let (sender, receiver) = mpsc::channel(1);
-        let executor = Arc::new(Self {
-            cfg,
-            runtime,
-            connections: sender,
-        });
+        let executor = Arc::new(Self { cfg, runtime });
         (
             Runner {
                 executor: executor.clone(),
             },
-            Context {
-                executor,
-                connections: Arc::new(Mutex::new(receiver)),
-            },
+            Context { executor },
         )
     }
 }
@@ -136,28 +121,6 @@ impl crate::Runner for Runner {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        // If a port is set, bind the TCP listener
-        if let Some(addr) = self.executor.cfg.listen {
-            self.executor.runtime.spawn({
-                let executor = self.executor.clone();
-                async move {
-                    let listener = match TcpListener::bind(addr).await {
-                        Ok(listener) => listener,
-                        Err(err) => {
-                            warn!(?err, "failed to bind listener");
-                            return;
-                        }
-                    };
-                    for (stream, addr) in listener.accept().await {
-                        if executor.connections.send((addr, stream)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-
-        // Start the root task
         self.executor.runtime.block_on(f)
     }
 }
@@ -167,7 +130,6 @@ impl crate::Runner for Runner {
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,
-    connections: Arc<Mutex<mpsc::Receiver<(SocketAddr, TcpStream)>>>,
 }
 
 impl crate::Spawner for Context {
@@ -209,70 +171,74 @@ pub fn codec(max_frame_len: usize) -> LengthDelimitedCodec {
         .new_codec()
 }
 
-impl crate::Network<Sink, Stream> for Context {
-    fn accept(&self) -> impl Future<Output = Result<(SocketAddr, Sink, Stream), Error>> + Send {
-        let connections = self.connections.clone();
-        let context = self.clone();
-        async move {
-            // Wait for a new connection
-            let (addr, stream) = {
-                let mut connections = connections.lock().await;
-                connections.recv().await.ok_or(Error::Closed)?
-            };
-
-            // Set TCP_NODELAY if configured
-            if let Some(tcp_nodelay) = self.executor.cfg.tcp_nodelay {
-                if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                    warn!(?err, "failed to set TCP_NODELAY");
-                }
-            }
-
-            // Create a new framed stream
-            let framed = Framed::new(stream, codec(self.executor.cfg.max_frame_length));
-            let (sink, stream) = framed.split();
-            Ok((
-                addr,
-                Sink {
-                    context: context.clone(),
-                    sink,
-                },
-                Stream {
-                    context: context.clone(),
-                    stream,
-                },
-            ))
-        }
+impl crate::Network<Listener, Sink, Stream> for Context {
+    async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
+        TcpListener::bind(socket)
+            .await
+            .map_err(|_| Error::BindFailed)
+            .map(|listener| Listener {
+                context: self.clone(),
+                listener,
+            })
     }
 
-    fn dial(
-        &self,
-        socket: SocketAddr,
-    ) -> impl Future<Output = Result<(Sink, Stream), Error>> + Send {
-        let context = self.clone();
-        async move {
-            // Create a new TCP stream
-            let stream = TcpStream::connect(socket)
-                .await
-                .map_err(|_| Error::ConnectionFailed)?;
+    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+        // Create a new TCP stream
+        let stream = TcpStream::connect(socket)
+            .await
+            .map_err(|_| Error::ConnectionFailed)?;
 
-            // Set TCP_NODELAY if configured
-            if let Some(tcp_nodelay) = self.executor.cfg.tcp_nodelay {
-                if let Err(err) = stream.set_nodelay(tcp_nodelay) {
-                    warn!(?err, "failed to set TCP_NODELAY");
-                }
+        // Set TCP_NODELAY if configured
+        if let Some(tcp_nodelay) = self.executor.cfg.tcp_nodelay {
+            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
+                warn!(?err, "failed to set TCP_NODELAY");
             }
-
-            // Create a new framed stream
-            let framed = Framed::new(stream, codec(self.executor.cfg.max_frame_length));
-            let (sink, stream) = framed.split();
-            Ok((
-                Sink {
-                    context: context.clone(),
-                    sink,
-                },
-                Stream { context, stream },
-            ))
         }
+
+        // Create a new framed stream
+        let context = self.clone();
+        let framed = Framed::new(stream, codec(self.executor.cfg.max_frame_length));
+        let (sink, stream) = framed.split();
+        Ok((
+            Sink {
+                context: context.clone(),
+                sink,
+            },
+            Stream { context, stream },
+        ))
+    }
+}
+
+pub struct Listener {
+    context: Context,
+    listener: TcpListener,
+}
+
+impl crate::Listener<Sink, Stream> for Listener {
+    async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
+        // Accept a new TCP stream
+        let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
+
+        // Set TCP_NODELAY if configured
+        if let Some(tcp_nodelay) = self.context.executor.cfg.tcp_nodelay {
+            if let Err(err) = stream.set_nodelay(tcp_nodelay) {
+                warn!(?err, "failed to set TCP_NODELAY");
+            }
+        }
+        let framed = Framed::new(stream, codec(self.context.executor.cfg.max_frame_length));
+        let (sink, stream) = framed.split();
+        let context = self.context.clone();
+        Ok((
+            addr,
+            Sink {
+                context: context.clone(),
+                sink,
+            },
+            Stream {
+                context: context.clone(),
+                stream,
+            },
+        ))
     }
 }
 

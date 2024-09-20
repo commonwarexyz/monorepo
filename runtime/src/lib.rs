@@ -33,6 +33,8 @@ pub enum Error {
     Closed,
     #[error("timeout")]
     Timeout,
+    #[error("bind failed")]
+    BindFailed,
     #[error("connection failed")]
     ConnectionFailed,
     #[error("write failed")]
@@ -82,23 +84,32 @@ pub trait Clock: Clone + Send + Sync + 'static {
 
 /// Interface that any runtime must implement to provide
 /// network operations.
-pub trait Network<Si, St>: Clone + Send + Sync + 'static
+pub trait Network<L, Si, St>: Clone + Send + Sync + 'static
+where
+    L: Listener<Si, St>,
+    Si: Sink,
+    St: Stream,
+{
+    fn bind(&self, socket: SocketAddr) -> impl Future<Output = Result<L, Error>> + Send;
+    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
+}
+
+pub trait Listener<Si, St>: Send + 'static
 where
     Si: Sink,
     St: Stream,
 {
-    fn accept(&self) -> impl Future<Output = Result<(SocketAddr, Si, St), Error>> + Send;
-    fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
+    fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Si, St), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to provide
 /// stream operations.
 pub trait Sink: Send + 'static {
-    async fn send(&mut self, msg: Bytes) -> Result<(), Error>;
+    fn send(&mut self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 pub trait Stream: Send + 'static {
-    async fn recv(&mut self) -> Result<Bytes, Error>;
+    fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }
 
 /// Macro to select the first future that completes.
