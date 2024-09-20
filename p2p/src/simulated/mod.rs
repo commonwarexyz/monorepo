@@ -97,7 +97,7 @@ mod tests {
                         let sender = keys[index];
                         let msg = format!("hello from {}", hex(sender));
                         let msg = Bytes::from(msg);
-                        let message_sender = agents.get(sender).unwrap().clone();
+                        let mut message_sender = agents.get(sender).unwrap().clone();
                         let sent = message_sender
                             .send(Recipients::All, msg.clone(), false)
                             .await
@@ -179,7 +179,7 @@ mod tests {
             let keys = agents.keys().collect::<Vec<_>>();
             let index = context.gen_range(0..keys.len());
             let sender = keys[index];
-            let message_sender = agents.get(sender).unwrap().clone();
+            let mut message_sender = agents.get(sender).unwrap().clone();
             let mut msg = vec![0u8; 1024 * 1024 + 1];
             context.fill(&mut msg[..]);
             let result = message_sender

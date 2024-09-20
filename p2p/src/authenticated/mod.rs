@@ -308,13 +308,13 @@ mod tests {
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                     bootstrappers,
                 );
-                let (mut network, oracle) = Network::new(context.clone(), config);
+                let (mut network, mut oracle) = Network::new(context.clone(), config);
 
                 // Register peers
                 oracle.register(0, addresses.clone()).await;
 
                 // Register basic application
-                let (sender, mut receiver) = network.register(
+                let (mut sender, mut receiver) = network.register(
                     0,
                     Quota::per_second(NonZeroU32::new(1).unwrap()),
                     1_024,
@@ -435,13 +435,13 @@ mod tests {
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                     bootstrappers,
                 );
-                let (mut network, oracle) = Network::new(context.clone(), config);
+                let (mut network, mut oracle) = Network::new(context.clone(), config);
 
                 // Register peers
                 oracle.register(0, addresses.clone()).await;
 
                 // Register basic application
-                let (sender, mut receiver) = network.register(
+                let (mut sender, mut receiver) = network.register(
                     0,
                     Quota::per_second(NonZeroU32::new(10).unwrap()),
                     5 * 1_024 * 1_024, // 5MB
@@ -536,13 +536,13 @@ mod tests {
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 Vec::new(),
             );
-            let (mut network, oracle) = Network::new(context.clone(), config);
+            let (mut network, mut oracle) = Network::new(context.clone(), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
 
             // Register basic application
-            let (sender, _) = network.register(
+            let (mut sender, _) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
                 1_024 * 1_024, // 1MB

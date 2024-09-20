@@ -56,7 +56,7 @@ impl crate::Sender for Sender {
     /// that the message was sent to. Note, a successful send does not mean that the recipient will
     /// receive the message (connection may no longer be active and we may not know that yet).
     async fn send(
-        &self,
+        &mut self,
         recipients: Recipients,
         mut message: Bytes,
         priority: bool,

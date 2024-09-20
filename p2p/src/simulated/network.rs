@@ -256,7 +256,7 @@ impl crate::Sender for Sender {
     type Error = Error;
 
     async fn send(
-        &self,
+        &mut self,
         recipients: Recipients,
         message: Bytes,
         priority: bool,

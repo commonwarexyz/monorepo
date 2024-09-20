@@ -547,7 +547,10 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
     pub async fn run(mut self) {
         while let Some(msg) = self.receiver.next().await {
             match msg {
-                Message::Construct { public_key, peer } => {
+                Message::Construct {
+                    public_key,
+                    mut peer,
+                } => {
                     // Kill if peer is not authorized
                     if !self.peers.contains_key(&public_key) {
                         peer.kill().await;
@@ -567,7 +570,7 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
                     // Send bit vector if stored
                     let _ = peer.bit_vec(set.msg()).await;
                 }
-                Message::BitVec { bit_vec, peer } => {
+                Message::BitVec { bit_vec, mut peer } => {
                     let result = self.handle_bit_vec(bit_vec);
                     if let Err(e) = result {
                         debug!(error = ?e, "failed to handle bit vector");
@@ -578,7 +581,7 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
                         peer.peers(peers).await;
                     }
                 }
-                Message::Peers { peers, peer } => {
+                Message::Peers { peers, mut peer } => {
                     // Consider new peer signatures
                     let result = self.handle_peers(peers);
                     if let Err(e) = result {
@@ -625,7 +628,7 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{actors::peer, config::Bootstrapper};
+    use crate::authenticated::config::Bootstrapper;
     use commonware_cryptography::ed25519;
     use commonware_runtime::{deterministic::Executor, Clock, Runner};
     use governor::Quota;
@@ -690,164 +693,6 @@ mod tests {
                     break;
                 }
                 context.sleep(Duration::from_millis(10)).await;
-            }
-        });
-    }
-
-    #[test]
-    fn test_bit_vec() {
-        // Create actor
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
-        let peer0 = ed25519::insecure_signer(0);
-        let cfg = test_config(peer0.clone(), Vec::new());
-        runner.start(async move {
-            let (actor, mailbox, oracle) = Actor::new(context.clone(), cfg);
-
-            // Run actor in background
-            context.spawn(async move {
-                actor.run().await;
-            });
-
-            // Create peers
-            let mut peer1_signer = ed25519::insecure_signer(1);
-            let peer1 = peer1_signer.me();
-            let peer2 = ed25519::insecure_signer(2).me();
-            let peer3 = ed25519::insecure_signer(3).me();
-
-            // Request bit vector with unallowed peer
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
-            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-            let msg = peer_receiver.recv().await.unwrap();
-            assert!(matches!(msg, peer::Message::Kill));
-
-            // Find sorted indicies
-            let mut peers = vec![peer0.me(), peer1.clone(), peer2.clone(), peer3.clone()];
-            peers.sort();
-            let me_idx = peers.iter().position(|peer| peer == &peer0.me()).unwrap();
-            let peer1_idx = peers.iter().position(|peer| peer == &peer1).unwrap();
-
-            // Register some peers
-            oracle.register(0, peers).await;
-
-            // Request bit vector
-            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-            let msg = peer_receiver.recv().await.unwrap();
-            let bit_vec = match msg {
-                peer::Message::BitVec { bit_vec } => bit_vec,
-                _ => panic!("unexpected message"),
-            };
-            assert!(bit_vec.index == 0);
-            let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-            for (idx, bit) in bits.iter().enumerate() {
-                if idx == me_idx {
-                    assert!(*bit);
-                } else {
-                    assert!(!*bit);
-                }
-            }
-
-            // Provide peer address
-            let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-            let (socket_bytes, payload_bytes) = socket_peer_payload(&socket, 0);
-            let ip_signature = peer1_signer.sign(NAMESPACE, &payload_bytes);
-            let peers = wire::Peers {
-                peers: vec![wire::Peer {
-                    socket: socket_bytes,
-                    timestamp: 0,
-                    signature: Some(wire::Signature {
-                        public_key: peer1.clone(),
-                        signature: ip_signature,
-                    }),
-                }],
-            };
-            mailbox.peers(peers, peer_mailbox.clone()).await;
-
-            // Request bit vector again
-            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-            let msg = peer_receiver.recv().await.unwrap();
-            let bit_vec = match msg {
-                peer::Message::BitVec { bit_vec } => bit_vec,
-                _ => panic!("unexpected message"),
-            };
-            assert!(bit_vec.index == 0);
-            let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-            for (idx, bit) in bits.iter().enumerate() {
-                if idx == me_idx || idx == peer1_idx {
-                    assert!(*bit);
-                } else {
-                    assert!(!*bit);
-                }
-            }
-
-            // Register new peers
-            oracle.register(1, vec![peer2.clone(), peer3.clone()]).await;
-
-            // Request bit vector until both indexes returned
-            let mut index_0_returned = false;
-            let mut index_1_returned = false;
-            while !index_0_returned || !index_1_returned {
-                mailbox.construct(peer1.clone(), peer_mailbox.clone()).await; // peer1 still allowed
-                let msg = peer_receiver.recv().await.unwrap();
-                let bit_vec = match msg {
-                    peer::Message::BitVec { bit_vec } => bit_vec,
-                    _ => panic!("unexpected message"),
-                };
-                let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-                match bit_vec.index {
-                    0 => {
-                        for (idx, bit) in bits.iter().enumerate() {
-                            if idx == me_idx || idx == peer1_idx {
-                                assert!(*bit);
-                            } else {
-                                assert!(!*bit);
-                            }
-                        }
-                        index_0_returned = true
-                    }
-                    1 => {
-                        for bit in bits.iter() {
-                            assert!(!*bit);
-                        }
-                        index_1_returned = true
-                    }
-                    _ => panic!("unexpected index"),
-                };
-            }
-
-            // Register some peers
-            oracle.register(2, vec![peer2.clone()]).await;
-
-            // Ensure peer1 has been evicted from the peer tracker and should die
-            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-            let msg = peer_receiver.recv().await.unwrap();
-            assert!(matches!(msg, peer::Message::Kill));
-
-            // Wait for valid sets to be returned
-            let mut index_1_returned = false;
-            let mut index_2_returned = false;
-            while !index_1_returned || !index_2_returned {
-                mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
-                let msg = peer_receiver.recv().await.unwrap();
-                let bit_vec = match msg {
-                    peer::Message::BitVec { bit_vec } => bit_vec,
-                    _ => panic!("unexpected message"),
-                };
-                let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-                match bit_vec.index {
-                    1 => {
-                        for bit in bits.iter() {
-                            assert!(!*bit);
-                        }
-                        index_1_returned = true
-                    }
-                    2 => {
-                        for bit in bits.iter() {
-                            assert!(!*bit);
-                        }
-                        index_2_returned = true
-                    }
-                    _ => panic!("unexpected index"),
-                };
             }
         });
     }

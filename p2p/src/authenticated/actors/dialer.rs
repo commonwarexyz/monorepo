@@ -62,7 +62,7 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
     async fn dial_peers(
         &self,
         tracker: &mut tracker::Mailbox<E>,
-        supervisor: &spawner::Mailbox<E, C>,
+        supervisor: &spawner::Mailbox<E, C, S>,
     ) {
         for (peer, address, reservation) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
@@ -77,11 +77,11 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
                 debug!("dial rate limit exceeded");
                 break;
             }
-
-            // Spawn dialer to connect to peer
             self.dial_attempts
                 .get_or_create(&metrics::Peer::new(&peer))
                 .inc();
+
+            // Spawn dialer to connect to peer
             self.context.spawn(Self::dial(
                 self.context.clone(),
                 self.connection.clone(),
@@ -99,7 +99,7 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
         peer: PublicKey,
         address: SocketAddr,
         reservation: tracker::Reservation<E>,
-        supervisor: spawner::Mailbox<E, C>,
+        mut supervisor: spawner::Mailbox<E, C, S>,
     ) {
         // Attempt to dial peer
         let connection = match context.dial(address).await {
@@ -129,7 +129,11 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
         supervisor.spawn(peer, stream, reservation).await;
     }
 
-    pub async fn run(self, mut tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, C>) {
+    pub async fn run(
+        self,
+        mut tracker: tracker::Mailbox<E>,
+        supervisor: spawner::Mailbox<E, C, S>,
+    ) {
         let mut next_update = self.context.current();
         loop {
             self.context.sleep_until(next_update).await;

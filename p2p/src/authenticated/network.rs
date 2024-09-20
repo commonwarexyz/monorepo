@@ -1,5 +1,7 @@
 //! Implementation of an `authenticated` network.
 
+use std::marker::PhantomData;
+
 use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
@@ -7,12 +9,12 @@ use super::{
     connection,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Network as RNetwork, Spawner, Stream};
 use rand::Rng;
 use tracing::info;
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + Clock + Rng, C: Scheme> {
+pub struct Network<S: Stream, E: Spawner + Clock + Rng + RNetwork<S>, C: Scheme> {
     context: E,
     cfg: Config<C>,
 
@@ -21,9 +23,11 @@ pub struct Network<E: Spawner + Clock + Rng, C: Scheme> {
     tracker_mailbox: tracker::Mailbox<E>,
     router: router::Actor,
     router_mailbox: router::Mailbox,
+
+    _phantom: PhantomData<S>,
 }
 
-impl<E: Spawner + Clock + Rng, C: Scheme> Network<E, C> {
+impl<S: Stream, E: Spawner + Clock + Rng + RNetwork<S>, C: Scheme> Network<S, E, C> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -65,6 +69,8 @@ impl<E: Spawner + Clock + Rng, C: Scheme> Network<E, C> {
                 tracker_mailbox,
                 router,
                 router_mailbox,
+
+                _phantom: PhantomData,
             },
             oracle,
         )
@@ -135,7 +141,6 @@ impl<E: Spawner + Clock + Rng, C: Scheme> Network<E, C> {
         let listener = listener::Actor::new(
             self.context.clone(),
             listener::Config {
-                port: self.cfg.address.port(),
                 connection: connection.clone(),
                 allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
             },

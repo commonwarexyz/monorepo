@@ -42,8 +42,8 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
         context: E,
         connection: connection::Config<C>,
         stream: S,
-        tracker: tracker::Mailbox<E>,
-        supervisor: spawner::Mailbox<E, C>,
+        mut tracker: tracker::Mailbox<E>,
+        mut supervisor: spawner::Mailbox<E, C, S>,
     ) {
         // Wait for the peer to send us their public key
         //
@@ -92,7 +92,7 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
         supervisor.spawn(peer, stream, reservation).await;
     }
 
-    pub async fn run(self, tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, C>) {
+    pub async fn run(self, tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, C, S>) {
         // Loop over incoming connections as fast as our rate limiter allows
         loop {
             // Ensure we don't attempt to perform too many handshakes at once
