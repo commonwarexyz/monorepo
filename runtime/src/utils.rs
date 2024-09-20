@@ -12,9 +12,8 @@ use futures::{
 };
 use std::{
     any::Any,
-    backtrace::Backtrace,
     future::Future,
-    panic::AssertUnwindSafe,
+    panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -66,7 +65,7 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn init<F>(f: F) -> (impl Future<Output = ()>, Self)
+    pub(crate) fn init<F>(f: F, crash: bool) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
     {
@@ -80,9 +79,11 @@ where
             let result = match result {
                 Ok(result) => Ok(result),
                 Err(err) => {
-                    let backtrace = Backtrace::capture();
+                    if crash {
+                        resume_unwind(err);
+                    }
                     let err = extract_panic_message(&*err);
-                    error!(?err, "task panicked: {:#?}", backtrace);
+                    error!(?err, "task panicked");
                     Err(Error::Exited)
                 }
             };

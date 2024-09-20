@@ -343,7 +343,7 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (f, handle) = Handle::init(f);
+        let (f, handle) = Handle::init(f, true);
         Tasks::register(&self.executor.tasks, false, Box::pin(f));
         handle
     }
