@@ -16,7 +16,7 @@ pub mod tokio;
 
 mod utils;
 use bytes::Bytes;
-pub use utils::{reschedule, timeout, Handle, Timeout};
+pub use utils::{reschedule, timeout, Handle};
 
 use std::{
     future::Future,
@@ -227,8 +227,8 @@ mod tests {
                     reschedule().await;
                 }
             });
-            let result = timeout.await.unwrap();
-            assert_eq!(result, Err(Error::Timeout));
+            let result = timeout.await.unwrap_err();
+            assert_eq!(result, Error::Timeout);
         });
     }
 
