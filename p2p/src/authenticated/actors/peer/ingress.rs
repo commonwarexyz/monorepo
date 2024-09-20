@@ -1,7 +1,7 @@
 use super::Error;
 use crate::authenticated::wire;
 use bytes::Bytes;
-use tokio::sync::mpsc;
+use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {
     BitVec { bit_vec: wire::BitVec },
@@ -25,15 +25,15 @@ impl Mailbox {
         (Self { sender }, receiver)
     }
 
-    pub async fn bit_vec(&self, bit_vec: wire::BitVec) {
+    pub async fn bit_vec(&mut self, bit_vec: wire::BitVec) {
         let _ = self.sender.send(Message::BitVec { bit_vec }).await;
     }
 
-    pub async fn peers(&self, peers: wire::Peers) {
+    pub async fn peers(&mut self, peers: wire::Peers) {
         let _ = self.sender.send(Message::Peers { peers }).await;
     }
 
-    pub async fn kill(&self) {
+    pub async fn kill(&mut self) {
         let _ = self.sender.send(Message::Kill).await;
     }
 }
@@ -59,7 +59,12 @@ impl Relay {
     /// We return a Result here instead of unwrapping the send
     /// because the peer may have disconnected in the normal course of
     /// business.
-    pub async fn content(&self, channel: u32, message: Bytes, priority: bool) -> Result<(), Error> {
+    pub async fn content(
+        &mut self,
+        channel: u32,
+        message: Bytes,
+        priority: bool,
+    ) -> Result<(), Error> {
         if priority {
             return self
                 .high

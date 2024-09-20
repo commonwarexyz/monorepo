@@ -110,84 +110,89 @@ impl<E: Spawner + Clock> Actor<E> {
         mut self,
         peer: PublicKey,
         connection: Stream<E, C, S>,
-        tracker: tracker::Mailbox<E>,
+        mut tracker: tracker::Mailbox<E>,
         channels: Channels,
     ) -> Error {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
+        let mut senders = HashMap::new();
         for (channel, (rate, max_size, sender)) in channels.collect() {
             let rate_limiter = DefaultDirectRateLimiter::direct(rate);
-            rate_limits.insert(channel, (rate_limiter, max_size, sender));
+            rate_limits.insert(channel, (rate_limiter, max_size));
+            senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
 
         // Send/Receive messages from the peer
         let (max_content_size, mut conn_sender, mut conn_receiver) = connection.split();
-        let send_tracker = tracker.clone();
-        let send_peer = peer.clone();
-        let send_mailbox = self.mailbox.clone();
-        let send_rate_limits = rate_limits.clone();
-        let mut send_handler: Handle<Result<(), Error>> = self.context.spawn(async move {
-            let mut ticker = self.context.sleep(self.gossip_bit_vec_frequency);
-            loop {
-                select! {
-                    _timeout = ticker => {
-                        // Get latest bitset from tracker (also used as ping)
-                        send_tracker.construct(send_peer.clone(), send_mailbox.clone()).await;
+        let mut send_handler: Handle<Result<(), Error>> = self.context.spawn({
+            let context = self.context.clone();
+            let mut tracker = tracker.clone();
+            let peer = peer.clone();
+            let mailbox = self.mailbox.clone();
+            let rate_limits = rate_limits.clone();
+            async move {
+                let mut deadline = context.current() + self.gossip_bit_vec_frequency;
+                loop {
+                    select! {
+                        _timeout = context.sleep_until(deadline) => {
+                            // Get latest bitset from tracker (also used as ping)
+                            tracker.construct(peer.clone(), mailbox.clone()).await;
 
-                        // Reset ticker
-                        ticker = self.context.sleep(self.gossip_bit_vec_frequency);
-                    },
-                    msg_control = self.control.next() => {
-                        let msg = match msg_control {
-                            Some(msg_control) => msg_control,
-                            None => return Err(Error::PeerDisconnected),
-                        };
-                        match msg {
-                            Message::BitVec { bit_vec } => {
-                                conn_sender.send(wire::Message{
-                                    payload: Some(wire::message::Payload::BitVec(bit_vec)),
-                                }).await.map_err(Error::SendFailed)?;
-                                self.sent_messages
-                                    .get_or_create(&metrics::Message::new_bit_vec(&send_peer))
-                                    .inc();
+                            // Reset ticker
+                            deadline = context.current() + self.gossip_bit_vec_frequency;
+                        },
+                        msg_control = self.control.next() => {
+                            let msg = match msg_control {
+                                Some(msg_control) => msg_control,
+                                None => return Err(Error::PeerDisconnected),
+                            };
+                            match msg {
+                                Message::BitVec { bit_vec } => {
+                                    conn_sender.send(wire::Message{
+                                        payload: Some(wire::message::Payload::BitVec(bit_vec)),
+                                    }).await.map_err(Error::SendFailed)?;
+                                    self.sent_messages
+                                        .get_or_create(&metrics::Message::new_bit_vec(&peer))
+                                        .inc();
+                                }
+                                Message::Peers { peers: msg } => {
+                                    conn_sender.send(wire::Message{
+                                        payload: Some(wire::message::Payload::Peers(msg)),
+                                    }).await.map_err(Error::SendFailed)?;
+                                    self.sent_messages
+                                        .get_or_create(&metrics::Message::new_peers(&peer))
+                                        .inc();
+                                }
+                                Message::Kill => {
+                                    return Err(Error::PeerKilled(hex(&peer)))
+                                }
                             }
-                            Message::Peers { peers: msg } => {
-                                conn_sender.send(wire::Message{
-                                    payload: Some(wire::message::Payload::Peers(msg)),
-                                }).await.map_err(Error::SendFailed)?;
-                                self.sent_messages
-                                    .get_or_create(&metrics::Message::new_peers(&send_peer))
-                                    .inc();
+                        },
+                        msg_high = self.high.next() => {
+                            let msg = match msg_high {
+                                Some(msg_high) => msg_high,
+                                None => return Err(Error::PeerDisconnected),
+                            };
+                            let entry = rate_limits.get(&msg.channel);
+                            if entry.is_none() {
+                                return Err(Error::InvalidChannel);
                             }
-                            Message::Kill => {
-                                return Err(Error::PeerKilled(hex(&send_peer)))
+                            let (_, max_size) = entry.unwrap();
+                            Self::send_content(*max_size, max_content_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
+                        },
+                        msg_low = self.low.next() => {
+                            let msg = match msg_low {
+                                Some(msg_low) => msg_low,
+                                None => return Err(Error::PeerDisconnected),
+                            };
+                            let entry = rate_limits.get(&msg.channel);
+                            if entry.is_none() {
+                                return Err(Error::InvalidChannel);
                             }
+                            let (_, max_size) = entry.unwrap();
+                            Self::send_content(*max_size, max_content_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
                         }
-                    },
-                    msg_high = self.high.next() => {
-                        let msg = match msg_high {
-                            Some(msg_high) => msg_high,
-                            None => return Err(Error::PeerDisconnected),
-                        };
-                        let entry = send_rate_limits.get(&msg.channel);
-                        if entry.is_none() {
-                            return Err(Error::InvalidChannel);
-                        }
-                        let (_, max_size, _) = entry.unwrap();
-                        Self::send_content(*max_size, max_content_size, &mut conn_sender, &send_peer, msg, &self.sent_messages).await?;
-                    },
-                    msg_low = self.low.next() => {
-                        let msg = match msg_low {
-                            Some(msg_low) => msg_low,
-                            None => return Err(Error::PeerDisconnected),
-                        };
-                        let entry = send_rate_limits.get(&msg.channel);
-                        if entry.is_none() {
-                            return Err(Error::InvalidChannel);
-                        }
-                        let (_, max_size, _) = entry.unwrap();
-                        Self::send_content(*max_size, max_content_size, &mut conn_sender, &send_peer, msg, &self.sent_messages).await?;
                     }
                 }
             }
@@ -236,8 +241,9 @@ impl<E: Spawner + Clock> Actor<E> {
                             // are on a newer version than us
                             continue;
                         }
-                        let (rate_limiter, max_size, sender) = entry.unwrap();
+                        let (rate_limiter, max_size) = entry.unwrap();
                         rate_limiter.until_ready().await;
+                        let sender = senders.get_mut(&chunk.channel).unwrap();
 
                         // Ensure messasge is not too large
                         let chunk_len = chunk.content.len();
