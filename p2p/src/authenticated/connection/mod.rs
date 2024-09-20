@@ -11,7 +11,7 @@ mod utils;
 mod x25519;
 
 pub use handshake::IncomingHandshake;
-pub use instance::{Receiver, Sender};
+pub use instance::{Instance, Sender};
 
 #[derive(Clone)]
 pub struct Config<C: Scheme> {

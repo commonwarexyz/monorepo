@@ -2,15 +2,16 @@
 
 use crate::authenticated::{
     actors::{spawner, tracker},
-    connection::{self, Stream},
+    connection::{self, Instance},
     metrics,
 };
 use commonware_cryptography::{utils::hex, Scheme};
-use commonware_runtime::{Clock, Network, Spawner, Stream as RStream};
+use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
 use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
+use rand::{CryptoRng, Rng};
 use std::{marker::PhantomData, time::Duration};
 use std::{
     ops::Add,
@@ -25,7 +26,13 @@ pub struct Config<C: Scheme> {
     pub dial_rate: Quota,
 }
 
-pub struct Actor<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> {
+pub struct Actor<
+    Si: Sink,
+    St: Stream,
+    L: Listener<Si, St>,
+    E: Spawner + Clock + Network<L, Si, St>,
+    C: Scheme,
+> {
     context: E,
 
     connection: connection::Config<C>,
@@ -35,10 +42,19 @@ pub struct Actor<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> {
 
     dial_attempts: Family<metrics::Peer, Counter>,
 
-    _phantom: PhantomData<S>,
+    _phantom_si: PhantomData<Si>,
+    _phantom_st: PhantomData<St>,
+    _phantom_l: PhantomData<L>,
 }
 
-impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
+impl<
+        Si: Sink,
+        St: Stream,
+        L: Listener<Si, St>,
+        E: Spawner + Clock + Network<L, Si, St> + Rng + CryptoRng,
+        C: Scheme,
+    > Actor<Si, St, L, E, C>
+{
     pub fn new(context: E, cfg: Config<C>) -> Self {
         let dial_attempts = Family::<metrics::Peer, Counter>::default();
         {
@@ -55,14 +71,16 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
             dial_frequency: cfg.dial_frequency,
             dial_limiter: RateLimiter::direct(cfg.dial_rate),
             dial_attempts,
-            _phantom: PhantomData,
+            _phantom_si: PhantomData,
+            _phantom_st: PhantomData,
+            _phantom_l: PhantomData,
         }
     }
 
     async fn dial_peers(
         &self,
         tracker: &mut tracker::Mailbox<E>,
-        supervisor: &spawner::Mailbox<E, C, S>,
+        supervisor: &mut spawner::Mailbox<E, C, Si, St>,
     ) {
         for (peer, address, reservation) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
@@ -88,7 +106,7 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
                 let mut supervisor = supervisor.clone();
                 async move {
                     // Attempt to dial peer
-                    let connection = match context.dial(address).await {
+                    let (sink, stream) = match context.dial(address).await {
                         Ok(stream) => stream,
                         Err(e) => {
                             debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
@@ -102,11 +120,11 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
                     );
 
                     // Upgrade connection
-                    let stream =
-                        match Stream::upgrade_dialer(context, config, connection, peer.clone())
+                    let instance =
+                        match Instance::upgrade_dialer(context, config, sink, stream, peer.clone())
                             .await
                         {
-                            Ok(stream) => stream,
+                            Ok(instance) => instance,
                             Err(e) => {
                                 debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
                                 return;
@@ -115,7 +133,7 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
                     debug!(peer = hex(&peer), "upgraded connection");
 
                     // Start peer to handle messages
-                    supervisor.spawn(peer, stream, reservation).await;
+                    supervisor.spawn(peer, instance, reservation).await;
                 }
             });
         }
@@ -124,7 +142,7 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
     pub async fn run(
         self,
         mut tracker: tracker::Mailbox<E>,
-        supervisor: spawner::Mailbox<E, C, S>,
+        supervisor: spawner::Mailbox<E, C, Si, St>,
     ) {
         let mut next_update = self.context.current();
         loop {

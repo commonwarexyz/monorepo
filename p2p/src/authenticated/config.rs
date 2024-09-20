@@ -26,8 +26,11 @@ pub struct Config<C: Scheme> {
     /// Registry for prometheus metrics.
     pub registry: Arc<Mutex<Registry>>,
 
+    /// Address to listen on.
+    pub listen: SocketAddr,
+
     /// Dialable address of the peer.
-    pub address: SocketAddr,
+    pub dialable: SocketAddr,
 
     /// Peers dialed on startup.
     pub bootstrappers: Vec<Bootstrapper>,
@@ -93,13 +96,15 @@ impl<C: Scheme> Config<C> {
     pub fn recommended(
         crypto: C,
         registry: Arc<Mutex<Registry>>,
-        address: SocketAddr,
+        listen: SocketAddr,
+        dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
     ) -> Self {
         Self {
             crypto,
             registry,
-            address,
+            listen,
+            dialable,
             bootstrappers,
 
             allow_private_ips: false,
@@ -126,13 +131,15 @@ impl<C: Scheme> Config<C> {
     pub fn aggressive(
         crypto: C,
         registry: Arc<Mutex<Registry>>,
-        address: SocketAddr,
+        listen: SocketAddr,
+        dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
     ) -> Self {
         Self {
             crypto,
             registry,
-            address,
+            listen,
+            dialable,
             bootstrappers,
 
             allow_private_ips: true,
@@ -155,13 +162,15 @@ impl<C: Scheme> Config<C> {
     pub fn test(
         crypto: C,
         registry: Arc<Mutex<Registry>>,
-        address: SocketAddr,
+        listen: SocketAddr,
+        dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
     ) -> Self {
         Self {
             crypto,
             registry,
-            address,
+            listen,
+            dialable,
             bootstrappers,
 
             allow_private_ips: true,

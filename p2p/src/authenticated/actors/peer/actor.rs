@@ -2,15 +2,16 @@ use super::{ingress::Data, Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{
     actors::tracker,
     channels::Channels,
-    connection::{Sender, Stream},
+    connection::{Instance, Sender},
     metrics, wire,
 };
 use bytes::BytesMut;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
-use commonware_runtime::{select, Clock, Handle, Spawner, Stream as RStream};
+use commonware_runtime::{select, Clock, Handle, Sink, Spawner, Stream};
 use futures::{channel::mpsc, try_join, SinkExt, StreamExt};
 use governor::{DefaultDirectRateLimiter, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
+use rand::{CryptoRng, Rng};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
 
 pub struct Actor<E: Spawner + Clock> {
@@ -32,7 +33,7 @@ pub struct Actor<E: Spawner + Clock> {
     _reservation: tracker::Reservation<E>,
 }
 
-impl<E: Spawner + Clock> Actor<E> {
+impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
     pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -56,10 +57,10 @@ impl<E: Spawner + Clock> Actor<E> {
         )
     }
 
-    async fn send_content<S: RStream>(
+    async fn send_content<Si: Sink>(
         max_size: usize,
         max_content_size: usize,
-        sender: &mut Sender<E, S>,
+        sender: &mut Sender<E, Si>,
         peer: &PublicKey,
         data: Data,
         sent_messages: &Family<metrics::Message, Counter>,
@@ -106,10 +107,10 @@ impl<E: Spawner + Clock> Actor<E> {
         Ok(())
     }
 
-    pub async fn run<C: Scheme, S: RStream>(
+    pub async fn run<C: Scheme, Si: Sink, St: Stream>(
         mut self,
         peer: PublicKey,
-        connection: Stream<E, C, S>,
+        connection: Instance<E, C, Si, St>,
         mut tracker: tracker::Mailbox<E>,
         channels: Channels,
     ) -> Error {

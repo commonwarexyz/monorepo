@@ -1,49 +1,71 @@
 //! Listener
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, net::SocketAddr};
 
 use crate::authenticated::{
     actors::{spawner, tracker},
-    connection::{self, IncomingHandshake, Stream},
+    connection::{self, IncomingHandshake, Instance},
 };
 use commonware_cryptography::{utils::hex, Scheme};
-use commonware_runtime::{Clock, Network, Spawner, Stream as RStream};
+use commonware_runtime::{Clock, Listener, Listener, Network, Sink, Spawner, Stream};
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
+use rand::{CryptoRng, Rng};
 use tracing::debug;
 
 /// Configuration for the listener actor.
 pub struct Config<C: Scheme> {
+    pub address: SocketAddr,
     pub connection: connection::Config<C>,
     pub allowed_incoming_connectioned_rate: Quota,
 }
 
-pub struct Actor<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> {
+pub struct Actor<
+    Si: Sink,
+    St: Stream,
+    L: Listener<Si, St>,
+    E: Spawner + Clock + Network<L, Si, St> + Rng + CryptoRng,
+    C: Scheme,
+> {
     context: E,
 
+    address: SocketAddr,
     connection: connection::Config<C>,
     rate_limiter: DefaultDirectRateLimiter,
 
-    _phantom: PhantomData<S>,
+    _phantom_si: PhantomData<Si>,
+    _phantom_st: PhantomData<St>,
+    _phantom_l: PhantomData<L>,
 }
 
-impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
+impl<
+        Si: Sink,
+        St: Stream,
+        L: Listener<Si, St>,
+        E: Spawner + Clock + Network<L, Si, St> + Rng + CryptoRng,
+        C: Scheme,
+    > Actor<Si, St, L, E, C>
+{
     pub fn new(context: E, cfg: Config<C>) -> Self {
         Self {
             context,
 
+            address: cfg.address,
             connection: cfg.connection,
             rate_limiter: RateLimiter::direct(cfg.allowed_incoming_connectioned_rate),
 
-            _phantom: PhantomData,
+            _phantom_si: PhantomData,
+            _phantom_st: PhantomData,
+            _phantom_l: PhantomData,
         }
     }
 
     async fn handshake(
         context: E,
         connection: connection::Config<C>,
-        stream: S,
+        sink: Si,
+        stream: St,
         mut tracker: tracker::Mailbox<E>,
-        mut supervisor: spawner::Mailbox<E, C, S>,
+        mut supervisor: spawner::Mailbox<E, C, Si, St>,
     ) {
         // Wait for the peer to send us their public key
         //
@@ -54,7 +76,7 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
             &connection.crypto,
             connection.synchrony_bound,
             connection.max_handshake_age,
-            connection.handshake_timeout,
+            sink,
             stream,
         )
         .await
@@ -79,7 +101,7 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
         };
 
         // Perform handshake
-        let stream = match Stream::upgrade_listener(context, connection, handshake).await {
+        let stream = match Instance::upgrade_listener(context, connection, handshake).await {
             Ok(connection) => connection,
             Err(e) => {
                 debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");
@@ -92,15 +114,26 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
         supervisor.spawn(peer, stream, reservation).await;
     }
 
-    pub async fn run(self, tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, C, S>) {
+    pub async fn run(
+        self,
+        tracker: tracker::Mailbox<E>,
+        supervisor: spawner::Mailbox<E, C, Si, St>,
+    ) {
+        // Start listening for incoming connections
+        let listener = self
+            .context
+            .bind(self.address)
+            .await
+            .expect("failed to bind listener");
+
         // Loop over incoming connections as fast as our rate limiter allows
         loop {
             // Ensure we don't attempt to perform too many handshakes at once
             self.rate_limiter.until_ready().await;
 
             // Accept a new connection
-            let (address, stream) = match self.context.accept().await {
-                Ok((address, stream)) => (address, stream),
+            let (address, sink, stream) = match listener.accept().await {
+                Ok((address, sink, stream)) => (address, sink, stream),
                 Err(e) => {
                     debug!(error = ?e, "failed to accept connection");
                     continue;
@@ -112,6 +145,7 @@ impl<S: RStream, E: Spawner + Clock + Network<S>, C: Scheme> Actor<S, E, C> {
             self.context.spawn(Self::handshake(
                 self.context.clone(),
                 self.connection.clone(),
+                sink,
                 stream,
                 tracker.clone(),
                 supervisor.clone(),

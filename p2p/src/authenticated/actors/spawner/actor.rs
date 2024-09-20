@@ -7,14 +7,15 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::{utils::hex, Scheme};
-use commonware_runtime::{Clock, Spawner, Stream as RStream};
+use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
+use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock, C: Scheme, S: RStream> {
+pub struct Actor<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
     context: E,
 
     mailbox_size: usize,
@@ -22,14 +23,14 @@ pub struct Actor<E: Spawner + Clock, C: Scheme, S: RStream> {
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
 
-    receiver: mpsc::Receiver<Message<E, C, S>>,
+    receiver: mpsc::Receiver<Message<E, C, Si, St>>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock, C: Scheme, S: RStream> Actor<E, C, S> {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C, S>) {
+impl<E: Spawner + Clock + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Actor<E, C, Si, St> {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C, Si, St>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         {
