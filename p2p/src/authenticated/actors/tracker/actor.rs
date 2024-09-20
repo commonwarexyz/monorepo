@@ -7,6 +7,7 @@ use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_runtime::{Clock, Spawner};
+use futures::{channel::mpsc, StreamExt};
 use governor::DefaultKeyedRateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -17,7 +18,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
 };
-use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_IP_";
@@ -545,7 +545,7 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
     }
 
     pub async fn run(mut self) {
-        while let Some(msg) = self.receiver.recv().await {
+        while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Construct { public_key, peer } => {
                     // Kill if peer is not authorized
@@ -655,7 +655,7 @@ mod tests {
         let (runner, context) = Executor::init(0, Duration::from_millis(1));
         let cfg = test_config(ed25519::insecure_signer(0), Vec::new());
         runner.start(async move {
-            let (actor, mailbox, oracle) = Actor::new(context.clone(), cfg);
+            let (actor, mut mailbox, mut oracle) = Actor::new(context.clone(), cfg);
 
             // Run actor in background
             context.spawn(async move {
