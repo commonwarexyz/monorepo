@@ -20,7 +20,7 @@
 use crate::{Error, Handle};
 use bytes::Bytes;
 use futures::{
-    channel::mpsc::{self, Sender},
+    channel::mpsc,
     task::{waker_ref, ArcWake},
     SinkExt, StreamExt,
 };
@@ -279,17 +279,14 @@ impl crate::Runner for Runner {
     }
 }
 
+type Dialable = mpsc::UnboundedSender<(
+    SocketAddr,
+    mpsc::UnboundedSender<Bytes>,   // Dialee -> Dialer
+    mpsc::UnboundedReceiver<Bytes>, // Dialer -> Dialee
+)>;
+
 struct Networking {
-    listeners: Mutex<
-        HashMap<
-            SocketAddr,
-            mpsc::UnboundedSender<(
-                SocketAddr,
-                mpsc::UnboundedSender<Bytes>,   // Dialee -> Dialer
-                mpsc::UnboundedReceiver<Bytes>, // Dialer -> Dialee
-            )>,
-        >,
-    >,
+    listeners: Mutex<HashMap<SocketAddr, Dialable>>,
 }
 
 impl Networking {
@@ -310,11 +307,17 @@ impl Networking {
     }
 
     async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
-        let mut listeners = self.listeners.lock().unwrap();
-        let sender = listeners.get_mut(&socket).ok_or(Error::ConnectionFailed)?;
+        let mut sender = {
+            let listeners = self.listeners.lock().unwrap();
+            let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
+            sender.clone()
+        };
         let (dialer_sender, dialer_receiver) = mpsc::unbounded();
         let (dialee_sender, dialee_receiver) = mpsc::unbounded();
-        sender.send((socket, dialer_sender, dialee_receiver)).await;
+        sender
+            .send((socket, dialer_sender, dialee_receiver))
+            .await
+            .map_err(|_| Error::ConnectionFailed)?;
         Ok((
             Sink {
                 sender: dialee_sender,
