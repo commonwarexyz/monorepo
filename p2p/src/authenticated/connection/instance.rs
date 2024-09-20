@@ -16,8 +16,7 @@ use rand::{CryptoRng, Rng};
 
 const CHUNK_PADDING: usize = 32 /* protobuf padding*/ + 12 /* chunk info */ + 16 /* encryption tag */;
 
-pub struct Instance<E: Clock + Spawner, C: Scheme, Si: Sink, St: Stream> {
-    context: E,
+pub struct Instance<C: Scheme, Si: Sink, St: Stream> {
     config: Config<C>,
     dialer: bool,
     sink: Si,
@@ -25,9 +24,9 @@ pub struct Instance<E: Clock + Spawner, C: Scheme, Si: Sink, St: Stream> {
     cipher: ChaCha20Poly1305,
 }
 
-impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Instance<E, C, Si, St> {
+impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
     pub async fn upgrade_dialer(
-        mut context: E,
+        mut context: impl Rng + CryptoRng + Spawner + Clock,
         mut config: Config<C>,
         mut sink: Si,
         mut stream: St,
@@ -44,7 +43,7 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Inst
         // Verify handshake message from peer
         let msg = stream.recv().await.map_err(|_| Error::ReadFailed)?;
         let handshake = Handshake::verify(
-            context.clone(),
+            context,
             &config.crypto,
             config.synchrony_bound,
             config.max_handshake_age,
@@ -63,7 +62,6 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Inst
 
         // We keep track of dialer to determine who adds a bit to their nonce (to prevent reuse)
         Ok(Self {
-            context,
             config,
             dialer: true,
             sink,
@@ -73,7 +71,7 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Inst
     }
 
     pub async fn upgrade_listener(
-        mut context: E,
+        mut context: impl Rng + CryptoRng + Spawner + Clock,
         mut config: Config<C>,
         mut handshake: IncomingHandshake<Si, St>,
     ) -> Result<Self, Error> {
@@ -100,7 +98,6 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Inst
             .map_err(|_| Error::CipherCreationFailed)?;
 
         Ok(Instance {
-            context,
             config,
             dialer: false,
             sink: handshake.sink,
@@ -109,11 +106,10 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Inst
         })
     }
 
-    pub fn split(self) -> (usize, Sender<E, Si>, Receiver<E, St>) {
+    pub fn split(self) -> (usize, Sender<Si>, Receiver<St>) {
         (
             self.config.max_frame_length - CHUNK_PADDING,
             Sender {
-                context: self.context.clone(),
                 cipher: self.cipher.clone(),
                 sink: self.sink,
 
@@ -122,7 +118,6 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Inst
                 seq: 0,
             },
             Receiver {
-                context: self.context,
                 cipher: self.cipher,
                 stream: self.stream,
 
@@ -134,9 +129,7 @@ impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Inst
     }
 }
 
-pub struct Sender<E: Spawner + Clock, Si: Sink> {
-    context: E,
-
+pub struct Sender<Si: Sink> {
     cipher: ChaCha20Poly1305,
     sink: Si,
 
@@ -145,7 +138,7 @@ pub struct Sender<E: Spawner + Clock, Si: Sink> {
     seq: u64,
 }
 
-impl<E: Spawner + Clock, Si: Sink> Sender<E, Si> {
+impl<Si: Sink> Sender<Si> {
     fn my_nonce(&mut self) -> Result<Nonce, Error> {
         if self.seq == u64::MAX {
             if self.iter == u16::MAX {
@@ -176,9 +169,7 @@ impl<E: Spawner + Clock, Si: Sink> Sender<E, Si> {
     }
 }
 
-pub struct Receiver<E: Clock, St: Stream> {
-    context: E,
-
+pub struct Receiver<St: Stream> {
     cipher: ChaCha20Poly1305,
     stream: St,
 
@@ -187,7 +178,7 @@ pub struct Receiver<E: Clock, St: Stream> {
     seq: u64,
 }
 
-impl<E: Clock, St: Stream> Receiver<E, St> {
+impl<St: Stream> Receiver<St> {
     fn peer_nonce(&mut self) -> Result<Nonce, Error> {
         if self.seq == u64::MAX {
             if self.iter == u16::MAX {
@@ -213,6 +204,6 @@ impl<E: Clock, St: Stream> Receiver<E, St> {
             .map_err(|_| Error::DecryptionFailed)?;
 
         // Deserialize data
-        Ok(wire::Message::decode(msg.as_ref()).map_err(Error::UnableToDecode)?)
+        wire::Message::decode(msg.as_ref()).map_err(Error::UnableToDecode)
     }
 }

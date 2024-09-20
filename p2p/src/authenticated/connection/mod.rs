@@ -39,12 +39,6 @@ pub enum Error {
     MissingSignature,
     #[error("invalid signature")]
     InvalidSignature,
-    #[error("handshake timeout")]
-    HandshakeTimeout,
-    #[error("read timeout")]
-    ReadTimeout,
-    #[error("write timeout")]
-    WriteTimeout,
     #[error("wrong peer")]
     WrongPeer,
     #[error("read failed")]

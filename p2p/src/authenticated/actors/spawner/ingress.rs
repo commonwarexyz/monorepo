@@ -6,7 +6,7 @@ use futures::{channel::mpsc, SinkExt};
 pub enum Message<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
     Spawn {
         peer: PublicKey,
-        connection: Instance<E, C, Si, St>,
+        connection: Instance<C, Si, St>,
         reservation: tracker::Reservation<E>,
     },
 }
@@ -33,7 +33,7 @@ impl<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> Mailbox<E, C, Si, St> 
     pub async fn spawn(
         &mut self,
         peer: PublicKey,
-        connection: Instance<E, C, Si, St>,
+        connection: Instance<C, Si, St>,
         reservation: tracker::Reservation<E>,
     ) {
         self.sender

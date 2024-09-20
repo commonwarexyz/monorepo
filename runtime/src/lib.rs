@@ -94,7 +94,7 @@ where
     fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
 }
 
-pub trait Listener<Si, St>: Send + 'static
+pub trait Listener<Si, St>: Sync + Send + 'static
 where
     Si: Sink,
     St: Stream,
@@ -104,11 +104,11 @@ where
 
 /// Interface that any runtime must implement to provide
 /// stream operations.
-pub trait Sink: Send + 'static {
+pub trait Sink: Sync + Send + 'static {
     fn send(&mut self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
-pub trait Stream: Send + 'static {
+pub trait Stream: Sync + Send + 'static {
     fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }
 

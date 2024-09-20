@@ -60,7 +60,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
     async fn send_content<Si: Sink>(
         max_size: usize,
         max_content_size: usize,
-        sender: &mut Sender<E, Si>,
+        sender: &mut Sender<Si>,
         peer: &PublicKey,
         data: Data,
         sent_messages: &Family<metrics::Message, Counter>,
@@ -110,7 +110,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
     pub async fn run<C: Scheme, Si: Sink, St: Stream>(
         mut self,
         peer: PublicKey,
-        connection: Instance<E, C, Si, St>,
+        connection: Instance<C, Si, St>,
         mut tracker: tracker::Mailbox<E>,
         channels: Channels,
     ) -> Error {
