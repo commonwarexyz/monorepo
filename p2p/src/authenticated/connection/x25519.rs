@@ -1,8 +1,13 @@
 use super::Error;
 use bytes::Bytes;
-use x25519_dalek::PublicKey;
+use rand::{CryptoRng, Rng};
+use x25519_dalek::{EphemeralSecret, PublicKey};
 
 const PUBLIC_KEY_LENGTH: usize = 32;
+
+pub fn new<R: Rng + CryptoRng>(rng: &mut R) -> EphemeralSecret {
+    EphemeralSecret::random_from_rng(rng)
+}
 
 pub fn decode_public_key(public_key: &Bytes) -> Result<PublicKey, Error> {
     // Constuct a public key array from the data

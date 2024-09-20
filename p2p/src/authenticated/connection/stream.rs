@@ -1,7 +1,7 @@
 use super::{
     handshake::{create_handshake, Handshake, IncomingHandshake},
     utils::nonce_bytes,
-    Config, Error,
+    x25519, Config, Error,
 };
 use crate::authenticated::wire;
 use bytes::Bytes;
@@ -10,13 +10,14 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::{select, timeout, Clock, Spawner, Stream as RStream};
+use commonware_runtime::{select, Clock, Sink, Spawner, Stream as RStream};
 use prost::Message;
+use rand::{CryptoRng, Rng};
 use std::time::Duration;
 
 const CHUNK_PADDING: usize = 32 /* protobuf padding*/ + 12 /* chunk info */ + 16 /* encryption tag */;
 
-pub struct Stream<E: Clock + Spawner, C: Scheme, S: RStream> {
+pub struct Stream<E: Clock + Spawner, C: Scheme, Si: Sink, St: RStream> {
     context: E,
     config: Config<C>,
     dialer: bool,
@@ -24,29 +25,24 @@ pub struct Stream<E: Clock + Spawner, C: Scheme, S: RStream> {
     cipher: ChaCha20Poly1305,
 }
 
-impl<E: Clock + Spawner, C: Scheme, S: RStream> Stream<E, C, S> {
+impl<E: Clock + Spawner + Rng + CryptoRng, C: Scheme, Si: Sink, St: RStream> Stream<E, C, Si, St> {
     pub async fn upgrade_dialer(
         context: E,
         mut config: Config<C>,
-        stream: S,
+        sink: Si,
+        stream: St,
         peer: PublicKey,
     ) -> Result<Self, Error> {
         // Generate shared secret
-        let secret = x25519_dalek::EphemeralSecret::random();
+        let secret = x25519::new(&mut context);
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
         let msg = create_handshake(context.clone(), &mut config.crypto, peer.clone(), ephemeral)?;
-        timeout(context.clone(), config.handshake_timeout, stream.send(msg))
-            .await
-            .map_err(|_| Error::HandshakeTimeout)?
-            .map_err(|_| Error::SendFailed)?;
+        sink.send(msg).await.map_err(|_| Error::SendFailed)?;
 
         // Verify handshake message from peer
-        let msg = timeout(context.clone(), config.handshake_timeout, stream.recv())
-            .await
-            .map_err(|_| Error::HandshakeTimeout)?
-            .map_err(|_| Error::ReadFailed)?;
+        let msg = stream.recv().await.map_err(|_| Error::ReadFailed)?;
         let handshake = Handshake::verify(
             context.clone(),
             &config.crypto,
@@ -81,7 +77,7 @@ impl<E: Clock + Spawner, C: Scheme, S: RStream> Stream<E, C, S> {
         handshake: IncomingHandshake<S>,
     ) -> Result<Self, Error> {
         // Generate shared secret
-        let secret = x25519_dalek::EphemeralSecret::random();
+        let secret = x25519::new(&mut context);
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
@@ -91,14 +87,12 @@ impl<E: Clock + Spawner, C: Scheme, S: RStream> Stream<E, C, S> {
             handshake.peer_public_key.clone(),
             ephemeral,
         )?;
-        timeout(
-            context.clone(),
-            config.handshake_timeout,
-            handshake.stream.send(msg),
-        )
-        .await
-        .map_err(|_| Error::HandshakeTimeout)?
-        .map_err(|_| Error::SendFailed)?;
+        handshake
+            .stream
+            .send(msg)
+            .await
+            .map_err(|_| Error::HandshakeTimeout)?
+            .map_err(|_| Error::SendFailed)?;
 
         // Create cipher
         let shared_secret = secret.diffie_hellman(&handshake.ephemeral_public_key);
