@@ -277,7 +277,16 @@ impl crate::Runner for Runner {
 }
 
 struct Networking {
-    listeners: Mutex<HashMap<SocketAddr, Sender<(SocketAddr, Bytes)>>>,
+    listeners: Mutex<
+        HashMap<
+            SocketAddr,
+            mpsc::UnboundedSender<(
+                SocketAddr,
+                mpsc::UnboundedSender<Bytes>,   // Dialee -> Dialer
+                mpsc::UnboundedReceiver<Bytes>, // Dialer -> Dialee
+            )>,
+        >,
+    >,
 }
 
 impl Networking {
@@ -288,16 +297,28 @@ impl Networking {
     }
 
     fn bind(&self, socket: SocketAddr) -> Listener {
-        let (sender, _) = mpsc::channel(1);
+        let (sender, receiver) = mpsc::unbounded();
         self.listeners
             .lock()
             .unwrap()
             .insert(socket, sender.clone());
-        sender
+        Listener { listener: receiver }
     }
 
-    fn dial(&self, socket: SocketAddr) -> Option<Sender<Bytes>> {
-        self.listeners.lock().unwrap().get(&socket).cloned()
+    async fn dial(&self, socket: SocketAddr) -> Option<(Sink, Stream)> {
+        let mut listeners = self.listeners.lock().unwrap();
+        let sender = listeners.get_mut(&socket)?;
+        let (dialer_sender, dialer_receiver) = mpsc::unbounded();
+        let (dialee_sender, dialee_receiver) = mpsc::unbounded();
+        sender.send((socket, dialer_sender, dialee_receiver)).await;
+        Some((
+            Sink {
+                sender: dialee_sender,
+            },
+            Stream {
+                receiver: dialer_receiver,
+            },
+        ))
     }
 }
 
@@ -403,30 +424,35 @@ impl crate::Clock for Context {
 }
 
 impl crate::Network<Listener, Sink, Stream> for Context {
-    fn bind(&self, _socket: SocketAddr) -> impl Future<Output = Result<Listener, Error>> + Send {
-        todo!()
+    async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
+        Ok(self.networking.bind(socket))
     }
 
-    fn dial(
-        &self,
-        _socket: SocketAddr,
-    ) -> impl Future<Output = Result<(Sink, Stream), Error>> + Send {
-        todo!()
+    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+        self.networking
+            .dial(socket)
+            .await
+            .ok_or(Error::ConnectionFailed)
     }
 }
 
 pub struct Listener {
-    listener: mpsc::Receiver<(SocketAddr, Bytes)>,
+    listener: mpsc::UnboundedReceiver<(
+        SocketAddr,
+        mpsc::UnboundedSender<Bytes>,
+        mpsc::UnboundedReceiver<Bytes>,
+    )>,
 }
 
 impl crate::Listener<Sink, Stream> for Listener {
-    fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Sink, Stream), Error>> + Send {
-        todo!()
+    async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
+        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
+        Ok((socket, Sink { sender }, Stream { receiver }))
     }
 }
 
 pub struct Sink {
-    sender: mpsc::Sender<Bytes>,
+    sender: mpsc::UnboundedSender<Bytes>,
 }
 
 impl crate::Sink for Sink {
@@ -436,7 +462,7 @@ impl crate::Sink for Sink {
 }
 
 pub struct Stream {
-    receiver: mpsc::Receiver<Bytes>,
+    receiver: mpsc::UnboundedReceiver<Bytes>,
 }
 
 impl crate::Stream for Stream {
