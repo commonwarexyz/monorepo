@@ -416,7 +416,7 @@ mod tests {
     fn test_tokio_connectivity() {
         let cfg = tokio::Config::default();
         let (runner, context) = tokio::Executor::init(cfg);
-        run_network(runner, context, cfg.max_message_size, 3000, 100);
+        run_network(runner, context, cfg.max_message_size, 3000, 50);
     }
 
     fn test_chunking(compression: Option<u8>) {

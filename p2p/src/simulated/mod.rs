@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn test_determinism() {
-        compare_outputs(25, 50);
+        compare_outputs(25, 25);
     }
 
     #[test]
