@@ -318,12 +318,13 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
 
     fn handle_dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation<E>)> {
         // Collect unreserved peers
-        let available_peers: Vec<_> = self
+        let mut available_peers: Vec<_> = self
             .peers
             .keys()
             .filter(|peer| !self.connections.contains(*peer))
             .cloned()
             .collect();
+        available_peers.sort();
 
         // Iterate over available peers
         let mut reserved = Vec::new();

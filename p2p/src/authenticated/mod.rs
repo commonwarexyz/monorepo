@@ -280,7 +280,7 @@ mod tests {
             .init();
 
         // Initialze runtime
-        let (runner, context) = Executor::init(0, Duration::from_millis(100));
+        let (runner, context) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
             let mut peers = Vec::new();
