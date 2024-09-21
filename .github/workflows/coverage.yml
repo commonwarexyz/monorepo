@@ -33,7 +33,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cargo/bin/cargo-tarpaulin
-        key: ${{ runner.os }}-${{ env.TARPAULIN_VERSION }}-cargo-tarpaulin
+        key: ${{ runner.os }}-${{ env.TARPAULIN_VERSION }}-cargo-tarpaulin-${{ steps.rust-version.outputs.rust_version }}
     - name: Install cargo-tarpaulin
       if: steps.cargo-tarpaulin-cache.outputs.cache-hit != 'true'
       run: cargo install cargo-tarpaulin --version ${{ env.TARPAULIN_VERSION }}
