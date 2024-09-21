@@ -8,9 +8,10 @@
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{ed25519::Ed25519, Scheme};
+//! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key
-//! let mut signer = Ed25519::new();
+//! let mut signer = Ed25519::new(&mut OsRng);
 //!
 //! // Create a message to sign
 //! let namespace = b"demo";
