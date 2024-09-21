@@ -95,7 +95,9 @@ impl Handshake {
             .duration_since(UNIX_EPOCH)
             .expect("failed to get current time")
             .as_secs();
-        if handshake.timestamp < current_time - max_handshake_age.as_secs() {
+        if current_time >= max_handshake_age.as_secs()
+            && handshake.timestamp < current_time - max_handshake_age.as_secs()
+        {
             return Err(Error::InvalidTimestamp);
         }
         if handshake.timestamp > current_time + synchrony_bound.as_secs() {
