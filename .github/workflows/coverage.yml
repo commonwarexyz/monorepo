@@ -13,25 +13,7 @@ jobs:
   All:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    - name: Cache Cargo registry
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}-${{ github.job }}
-    - name: Cache Cargo index
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}-${{ github.job }}
-    - name: Cache target directory
-      uses: actions/cache@v4
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}-${{ github.job }}
-    - name: Install protoc
-      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    - uses: ./.github/actions/checkout
     - name: Remove examples
       # Reduces compilation time on code we exclude from coverage
       run: rm -rf examples
@@ -40,7 +22,7 @@ jobs:
         sed -i.bak '/examples/d' Cargo.toml
     - name: Cache cargo-tarpaulin
       id: cargo-tarpaulin-cache
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cargo/bin/cargo-tarpaulin
         key: ${{ runner.os }}-${{ env.TARPAULIN_VERSION }}-cargo-tarpaulin

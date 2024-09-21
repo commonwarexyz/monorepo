@@ -8,10 +8,7 @@ jobs:
   All:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    - name: Install protoc
-      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    - uses: ./.github/actions/checkout
     - name: Publish cryptography 
       run: cargo publish --manifest-path cryptography/Cargo.toml
       continue-on-error: true
