@@ -35,7 +35,7 @@ use std::{
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{debug, trace};
+use tracing::trace;
 
 struct Task {
     id: u128,
@@ -218,7 +218,7 @@ impl crate::Runner for Runner {
                 *time += self.executor.cycle;
                 current = *time;
             }
-            debug!(
+            trace!(
                 now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
                 "time advanced",
             );
@@ -240,7 +240,7 @@ impl crate::Runner for Runner {
                         *time = skip.unwrap();
                         current = *time;
                     }
-                    debug!(
+                    trace!(
                         now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
                         "time skipped",
                     );
