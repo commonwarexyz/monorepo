@@ -112,7 +112,8 @@ pub trait Stream: Sync + Send + 'static {
     fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }
 
-/// Macro to select the first future that completes.
+/// Macro to select the first future that completes (biased
+/// by order).
 ///
 /// It is not possible to use duplicate variable names with the macro.
 #[macro_export]
