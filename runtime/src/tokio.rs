@@ -296,11 +296,59 @@ impl CryptoRng for Context {}
 mod tests {
     use super::*;
     use crate::utils::run_tasks;
+    use crate::Runner;
+    use std::io::Cursor;
 
     #[test]
     fn test_runs_tasks() {
         let cfg = Config::default();
         let (runner, context) = Executor::init(cfg);
         run_tasks(10, runner, context);
+    }
+
+    #[test]
+    fn test_codec_invalid_frame_len() {
+        // Initalize runtime
+        let cfg = Config::default();
+        let (runner, _) = Executor::init(cfg);
+        runner.start(async move {
+            // Create a stream
+            let max_frame_len = 10;
+            let codec = codec(max_frame_len);
+            let mut framed = Framed::new(Cursor::new(Vec::new()), codec);
+
+            // Create a message larger than the max_frame_len
+            let message = vec![0; max_frame_len + 1];
+            let message = Bytes::from(message);
+
+            // Encode the message
+            let result = framed.send(message).await;
+
+            // Ensure that encoding fails due to exceeding max_frame_len
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn test_codec_valid_frame_len() {
+        // Initialize runtime
+        let cfg = Config::default();
+        let (runner, _) = Executor::init(cfg);
+        runner.start(async move {
+            // Create a stream
+            let max_frame_len = 10;
+            let codec = codec(max_frame_len);
+            let mut framed = Framed::new(Cursor::new(Vec::new()), codec);
+
+            // Create a message larger than the max_frame_len
+            let message = vec![0; max_frame_len];
+            let message = Bytes::from(message);
+
+            // Encode the message
+            let result = framed.send(message).await;
+
+            // Ensure that encoding fails due to exceeding max_frame_len
+            assert!(result.is_ok());
+        });
     }
 }
