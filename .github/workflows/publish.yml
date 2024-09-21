@@ -8,7 +8,14 @@ jobs:
   All:
     runs-on: ubuntu-latest
     steps:
-    - uses: ./.github/actions/checkout
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+    - uses: ./.github/actions/setup
+      with:
+        rust-version: ${{ steps.rust-version.outputs.rust_version}}
     - name: Publish cryptography 
       run: cargo publish --manifest-path cryptography/Cargo.toml
       continue-on-error: true
