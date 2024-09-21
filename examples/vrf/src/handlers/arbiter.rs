@@ -61,7 +61,7 @@ impl<E: Clock> Arbiter<E> {
         &self,
         round: u64,
         previous: Option<poly::Public>,
-        sender: &impl Sender,
+        sender: &mut impl Sender,
         receiver: &mut impl Receiver,
     ) -> (Option<poly::Public>, HashSet<PublicKey>) {
         // Create a new round
@@ -497,12 +497,12 @@ impl<E: Clock> Arbiter<E> {
         (Some(result.public), disqualified)
     }
 
-    pub async fn run<C: Scheme>(self, sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run<C: Scheme>(self, mut sender: impl Sender, mut receiver: impl Receiver) {
         let mut round = 0;
         let mut previous = None;
         loop {
             let (public, disqualified) = self
-                .run_round::<C>(round, previous.clone(), &sender, &mut receiver)
+                .run_round::<C>(round, previous.clone(), &mut sender, &mut receiver)
                 .await;
 
             // Log round results

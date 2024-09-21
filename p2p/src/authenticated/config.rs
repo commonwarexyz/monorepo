@@ -100,7 +100,6 @@ impl<C: Scheme> Config<C> {
         crypto: C,
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
-        dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
         max_frame_length: usize,
     ) -> Self {
@@ -108,7 +107,7 @@ impl<C: Scheme> Config<C> {
             crypto,
             registry,
             listen,
-            dialable,
+            dialable: listen,
             bootstrappers,
 
             allow_private_ips: false,
@@ -137,7 +136,6 @@ impl<C: Scheme> Config<C> {
         crypto: C,
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
-        dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
         max_frame_length: usize,
     ) -> Self {
@@ -145,7 +143,7 @@ impl<C: Scheme> Config<C> {
             crypto,
             registry,
             listen,
-            dialable,
+            dialable: listen,
             bootstrappers,
 
             allow_private_ips: true,
@@ -170,7 +168,6 @@ impl<C: Scheme> Config<C> {
         crypto: C,
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
-        dialable: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
         max_frame_length: usize,
     ) -> Self {
@@ -178,7 +175,7 @@ impl<C: Scheme> Config<C> {
             crypto,
             registry,
             listen,
-            dialable,
+            dialable: listen,
             bootstrappers,
 
             allow_private_ips: true,

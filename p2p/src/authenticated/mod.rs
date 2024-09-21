@@ -306,7 +306,6 @@ mod tests {
                     signer.clone(),
                     registry,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                     bootstrappers,
                     1024 * 1024,
                 );
@@ -434,7 +433,6 @@ mod tests {
                     signer.clone(),
                     registry,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                     bootstrappers,
                     1_024 * 1_024, // 1MB
                 );
@@ -533,7 +531,6 @@ mod tests {
             let config = Config::test(
                 signer.clone(),
                 registry,
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 Vec::new(),
                 1_024 * 1_024, // 1MB

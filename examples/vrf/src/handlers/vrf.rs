@@ -58,7 +58,7 @@ impl<E: Clock> Vrf<E> {
         &self,
         output: &Output,
         round: u64,
-        sender: &impl Sender,
+        sender: &mut impl Sender,
         receiver: &mut impl Receiver,
     ) -> Option<group::Signature> {
         // Construct payload
@@ -157,7 +157,7 @@ impl<E: Clock> Vrf<E> {
         }
     }
 
-    pub async fn run(mut self, sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
         loop {
             let (round, output) = match self.requests.next().await {
                 Some(request) => request,
@@ -166,7 +166,10 @@ impl<E: Clock> Vrf<E> {
                 }
             };
 
-            match self.run_round(&output, round, &sender, &mut receiver).await {
+            match self
+                .run_round(&output, round, &mut sender, &mut receiver)
+                .await
+            {
                 Some(signature) => {
                     let signature = signature.serialize();
                     info!(

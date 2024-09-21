@@ -47,8 +47,11 @@ mod logger;
 
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, utils::hex, Scheme};
-use commonware_p2p::authenticated::{Config, Network};
-use commonware_runtime::{tokio::Executor, Runner, Spawner};
+use commonware_p2p::authenticated::{self, Network};
+use commonware_runtime::{
+    tokio::{self, Executor},
+    Runner, Spawner,
+};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -60,7 +63,8 @@ use tracing::info;
 #[doc(hidden)]
 fn main() {
     // Initialize runtime
-    let (runner, context) = Executor::init(4);
+    let cfg = tokio::Config::default();
+    let (runner, context) = Executor::init(cfg);
 
     // Parse arguments
     let matches = Command::new("commonware-chat")
@@ -137,17 +141,18 @@ fn main() {
 
     // Configure network
     let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-    let config = Config::aggressive(
+    let config = authenticated::Config::aggressive(
         signer.clone(),
         registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        cfg.max_frame_length,
     );
 
     // Start runtime
     runner.start(async move {
         // Initialize network
-        let (mut network, oracle) = Network::new(context.clone(), config);
+        let (mut network, mut oracle) = Network::new(context.clone(), config);
 
         // Provide authorized peers
         //
