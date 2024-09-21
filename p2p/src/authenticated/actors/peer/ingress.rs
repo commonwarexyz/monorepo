@@ -19,6 +19,12 @@ impl Mailbox {
         Self { sender }
     }
 
+    #[cfg(test)]
+    pub fn test() -> (Self, mpsc::Receiver<Message>) {
+        let (sender, receiver) = mpsc::channel(1);
+        (Self { sender }, receiver)
+    }
+
     pub async fn bit_vec(&mut self, bit_vec: wire::BitVec) {
         let _ = self.sender.send(Message::BitVec { bit_vec }).await;
     }
