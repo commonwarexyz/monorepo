@@ -3,9 +3,10 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, tokio::Executor};
+//! use commonware_runtime::{Spawner, Runner, tokio::{Config, Executor}};
 //!
-//! let (runner, context) = Executor::init(2);
+//! let cfg = Config::default();
+//! let (runner, context) = Executor::init(cfg);
 //! runner.start(async move {
 //!     println!("Parent started");
 //!     let result = context.spawn(async move {

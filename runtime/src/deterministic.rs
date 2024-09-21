@@ -5,7 +5,7 @@
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use std::time::Duration;
 //!
-//! let (runner, context) = Executor::init(42, Duration::from_millis(1));
+//! let (runner, context, auditor) = Executor::init(42, Duration::from_millis(1));
 //! runner.start(async move {
 //!     println!("Parent started");
 //!     let result = context.spawn(async move {
@@ -15,6 +15,7 @@
 //!     println!("Child result: {:?}", result.await);
 //!     println!("Parent exited");
 //! });
+//! println!("Auditor state: {}", auditor.state());
 //! ```
 
 use crate::{Error, Handle};
