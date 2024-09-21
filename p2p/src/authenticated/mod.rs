@@ -330,7 +330,7 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                let network_handler = context.spawn(network.run());
+                context.spawn(network.run());
 
                 // Send/Recieve messages
                 let peer_addresses = addresses.clone();
@@ -375,9 +375,6 @@ mod tests {
                             // Add to received set
                             received.insert(sender);
                         }
-
-                        // Shutdown network
-                        network_handler.abort();
                     }
                 });
 

@@ -9,9 +9,9 @@ use super::{
     connection,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{select, Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
 use rand::{CryptoRng, Rng};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
@@ -179,7 +179,6 @@ impl<
 
         // Wait for actors
         info!("network started");
-        // TODO: use select with errors?
         let err = futures::try_join!(
             &mut tracker_task,
             &mut router_task,
@@ -197,6 +196,6 @@ impl<
         dialer_task.abort();
 
         // Log error
-        info!(error=?err, "network shutdown")
+        warn!(error=?err, "network shutdown")
     }
 }
