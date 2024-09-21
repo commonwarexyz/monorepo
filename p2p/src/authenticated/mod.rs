@@ -269,16 +269,44 @@ mod tests {
         time::Duration,
     };
     use tracing::{info, warn};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    struct VecWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl VecWriter {
+        fn new(buffer: Arc<Mutex<Vec<u8>>>) -> Self {
+            Self { buffer }
+        }
+    }
+
+    impl std::io::Write for VecWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for VecWriter {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            VecWriter {
+                buffer: Arc::clone(&self.buffer),
+            }
+        }
+    }
 
     /// Test connectivity between `n` peers.
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
-    fn test_connectivity(base_port: u16, n: usize) {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .init();
-
+    fn run_network(base_port: u16, n: usize) {
         // Initialze runtime
         let (runner, context) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
@@ -390,20 +418,38 @@ mod tests {
     }
 
     #[test]
-    fn test_connectivity_small() {
-        test_connectivity(3000, 5);
+    fn test_determinism() {
+        // Capture logs
+        let log_buffer = Arc::new(Mutex::new(Vec::new()));
+        let log_writer = VecWriter::new(log_buffer.clone());
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(log_writer)
+            .without_time()
+            .init();
+
+        // Run first iteration
+        run_network(3000, 5);
+        let logs1 = {
+            let mut logs = log_buffer.lock().unwrap();
+            logs.drain(..).collect::<Vec<_>>()
+        };
+
+        // Run second iteration
+        run_network(3000, 5);
+        let logs2 = {
+            let mut logs = log_buffer.lock().unwrap();
+            logs.drain(..).collect::<Vec<_>>()
+        };
+        assert_eq!(logs1, logs2);
     }
 
     #[test]
-    fn test_connectivity_large() {
-        test_connectivity(3100, 35); // 35 is greater than the max number of peers per response
+    fn test_connectivity() {
+        run_network(3100, 35); // 35 is greater than the max number of peers per response
     }
 
     fn test_chunking(base_port: u16, compression: Option<u8>) {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .init();
-
         // Initialize runtime
         let (runner, mut context) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
