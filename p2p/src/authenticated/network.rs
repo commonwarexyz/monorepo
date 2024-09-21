@@ -9,7 +9,7 @@ use super::{
     connection,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use commonware_runtime::{select, Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
 use rand::{CryptoRng, Rng};
 use tracing::info;
 
@@ -179,6 +179,7 @@ impl<
 
         // Wait for actors
         info!("network started");
+        // TODO: use select with errors?
         let err = futures::try_join!(
             &mut tracker_task,
             &mut router_task,

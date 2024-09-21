@@ -256,7 +256,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519, Scheme};
+    use commonware_cryptography::{ed25519, utils::hex, Scheme};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use governor::Quota;
     use prometheus_client::registry::Registry;
@@ -268,6 +268,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
+    use tracing::info;
 
     /// Test connectivity between `n` peers.
     ///
@@ -492,6 +493,8 @@ mod tests {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
                             assert_eq!(sender, msg_sender);
+
+                            info!("received message from {}", hex(&sender));
 
                             // Ensure message equals sent message
                             assert_eq!(message.len(), msg.len());

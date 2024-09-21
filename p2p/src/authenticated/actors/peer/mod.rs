@@ -44,4 +44,6 @@ pub enum Error {
     InvalidChunk,
     #[error("invalid channel")]
     InvalidChannel,
+    #[error("client closed")]
+    ClientClosed,
 }

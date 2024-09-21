@@ -297,7 +297,10 @@ impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
                         }
 
                         // Send message to client
-                        sender.send((peer.clone(), message.freeze())).await.unwrap();
+                        sender
+                            .send((peer.clone(), message.freeze()))
+                            .await
+                            .map_err(|_| Error::ClientClosed)?;
                     }
                     Some(wire::message::Payload::Handshake(_)) => {
                         self.received_messages
