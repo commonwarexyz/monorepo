@@ -12,7 +12,8 @@ jobs:
   All:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
     - name: Lint with clippy
@@ -23,11 +24,13 @@ jobs:
   Dependencies:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Install nightly Rust toolchain
-        run: rustup toolchain install nightly
-      - name: Install cargo-udeps
-        run: cargo install cargo-udeps
-      - name: Check for unused dependencies
-        run: cargo +nightly udeps
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install protoc
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly
+    - name: Install cargo-udeps
+      run: cargo install cargo-udeps
+    - name: Check for unused dependencies
+      run: cargo +nightly udeps
