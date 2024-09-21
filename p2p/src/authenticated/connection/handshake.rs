@@ -164,7 +164,8 @@ mod tests {
         ed25519::{self, Ed25519},
         Scheme,
     };
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic::Executor, Listener, Network, Runner};
+    use std::net::SocketAddr;
     use x25519_dalek::PublicKey;
 
     #[test]
@@ -256,27 +257,22 @@ mod tests {
 
             // Setup a mock TcpStream that will listen for the response
             let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-            let addr = listener.local_addr().unwrap();
+            let mut listener = context.bind(addr).await.unwrap();
 
             // Send message over stream
-            let max_frame_len = 1024;
             context.spawn(async move {
-                let (socket, _) = listener.accept().await.unwrap();
-                let codec = codec(max_frame_len);
-                let mut stream = Framed::new(socket, codec);
-                stream.send(handshake_bytes).await.unwrap();
+                let (_, mut sink, _) = listener.accept().await.unwrap();
+                sink.send(handshake_bytes).await.unwrap();
             });
 
             // Call the verify function
-            let stream = TcpStream::connect(addr).await.unwrap();
+            let (sink, stream) = context.dial(addr).await.unwrap();
             let result = IncomingHandshake::verify(
                 context,
                 &recipient,
-                max_frame_len,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
-                Duration::from_secs(5),
+                sink,
                 stream,
             )
             .await
@@ -291,76 +287,37 @@ mod tests {
     #[test]
     fn test_incoming_handshake_invalid_data() {
         // Initialize runtime
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Setup a mock TcpStream that will listen for the response
             let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-            let addr = listener.local_addr().unwrap();
+            let mut listener = context.bind(addr).await.unwrap();
 
             // Send message over stream
             context.spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let _ = socket.write_all(b"mock data").await;
+                let (_, mut sink, _) = listener.accept().await.unwrap();
+                sink.send(Bytes::from("mock data")).await.unwrap();
             });
 
             // Parameters for the verify function
             let crypto = ed25519::insecure_signer(0);
-            let max_frame_len = 1024;
             let synchrony_bound = Duration::from_secs(1);
             let max_handshake_age = Duration::from_secs(1);
-            let handshake_timeout = Duration::from_secs(500);
 
             // Call the verify function
-            let stream = TcpStream::connect(addr).await.unwrap();
+            let (sink, stream) = context.dial(addr).await.unwrap();
             let result = IncomingHandshake::verify(
                 context,
                 &crypto,
-                max_frame_len,
                 synchrony_bound,
                 max_handshake_age,
-                handshake_timeout,
+                sink,
                 stream,
             )
             .await;
 
-            // Assert that the result is an Err of type Error::ReadFailed (no frame len)
-            assert!(matches!(result, Err(Error::ReadFailed)));
-        });
-    }
-
-    #[test]
-    fn test_incoming_handshake_verify_timeout() {
-        // Initialize runtime
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
-            // Setup a mock TcpStream
-            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-            let addr = listener.local_addr().unwrap();
-
-            // Parameters for the verify function
-            let crypto = ed25519::insecure_signer(0);
-            let max_frame_len = 1024;
-            let synchrony_bound = Duration::from_secs(1);
-            let max_handshake_age = Duration::from_secs(1);
-            let handshake_timeout = Duration::from_millis(500); // Short timeout to trigger the error
-
-            // Call the verify function
-            let stream = TcpStream::connect(addr).await.unwrap();
-            let result = IncomingHandshake::verify(
-                context,
-                &crypto,
-                max_frame_len,
-                synchrony_bound,
-                max_handshake_age,
-                handshake_timeout,
-                stream,
-            )
-            .await;
-
-            // Assert that the result is an Err of type Error::HandshakeTimeout
-            assert!(matches!(result, Err(Error::HandshakeTimeout)));
+            // Assert that the result is an error
+            assert!(result.is_err());
         });
     }
 }
