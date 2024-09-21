@@ -20,16 +20,6 @@ impl<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> Mailbox<E, C, Si, St> 
         Self { sender }
     }
 
-    /// Clone the mailbox.
-    ///
-    /// We manually implement `clone` because the auto-generated `derive` would
-    /// require the `E`, `C`, `Si`, and `St` types to be `Clone`.
-    pub fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-        }
-    }
-
     pub async fn spawn(
         &mut self,
         peer: PublicKey,
@@ -44,5 +34,17 @@ impl<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> Mailbox<E, C, Si, St> 
             })
             .await
             .unwrap();
+    }
+}
+
+impl<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> Clone for Mailbox<E, C, Si, St> {
+    /// Clone the mailbox.
+    ///
+    /// We manually implement `clone` because the auto-generated `derive` would
+    /// require the `E`, `C`, `Si`, and `St` types to be `Clone`.
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
     }
 }
