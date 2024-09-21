@@ -22,4 +22,5 @@ runs:
         path: target
         key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}-${{ inputs.rust-version }}
     - name: Install protoc
+      shell: bash
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
