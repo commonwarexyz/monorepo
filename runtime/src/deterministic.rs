@@ -1,6 +1,11 @@
-//! A deterministic runtime that randomly selects tasks to run based on a seed.
+//! A deterministic runtime that randomly selects tasks to run based on a seed
+//!
+//! # Panics
+//!
+//! If any task panics, the runtime will panic (and shutdown).
 //!
 //! # Example
+//!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use std::time::Duration;
@@ -396,7 +401,7 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (f, handle) = Handle::init(f, true);
+        let (f, handle) = Handle::init(f, false);
         Tasks::register(&self.executor.tasks, false, Box::pin(f));
         handle
     }
@@ -489,6 +494,12 @@ type Dialable = mpsc::UnboundedSender<(
     mpsc::UnboundedReceiver<Bytes>, // Dialer -> Dialee
 )>;
 
+/// Implementation of [`crate::Network`] for the `deterministic` runtime.
+///
+/// When a dialer connects to a dialee, the dialee is given a new ephemeral port
+/// from the range `32768..61000`. To keep things simple, it is not possible to
+/// bind to an ephemeral port. Likewise, if ports are not reused and when exhausted,
+/// the runtime will panic.
 struct Networking {
     auditor: Arc<Auditor>,
     ephemeral: Mutex<u16>,

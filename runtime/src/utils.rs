@@ -65,7 +65,7 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn init<F>(f: F, crash: bool) -> (impl Future<Output = ()>, Self)
+    pub(crate) fn init<F>(f: F, catch_panic: bool) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
     {
@@ -79,7 +79,7 @@ where
             let result = match result {
                 Ok(result) => Ok(result),
                 Err(err) => {
-                    if crash {
+                    if !catch_panic {
                         resume_unwind(err);
                     }
                     let err = extract_panic_message(&*err);

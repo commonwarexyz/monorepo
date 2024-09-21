@@ -1,7 +1,13 @@
 //! A production-focused runtime based on [Tokio](https://tokio.rs) with
 //! secure randomness.
 //!
+//! # Panics
+//!
+//! By default, the runtime will catch any panic and log the error. It is
+//! possible to override this behavior in the configuration.
+//!
 //! # Example
+//!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, tokio::{Config, Executor}};
 //!
@@ -44,6 +50,9 @@ pub struct Config {
     /// Number of threads to use for the runtime.
     pub threads: usize,
 
+    /// Whether or not to catch panics.
+    pub catch_panics: bool,
+
     /// Maximum size used for all messages sent over the wire.
     ///
     /// We use this to prevent malicious peers from sending us large messages
@@ -79,6 +88,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             threads: 2,
+            catch_panics: true,
             max_message_size: 1024 * 1024, // 1 MB
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
@@ -139,7 +149,7 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (f, handle) = Handle::init(f, false);
+        let (f, handle) = Handle::init(f, self.executor.cfg.catch_panics);
         self.executor.runtime.spawn(f);
         handle
     }
