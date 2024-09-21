@@ -194,6 +194,7 @@ mod tests {
                 Some(wire::message::Payload::Handshake(handshake)) => handshake,
                 _ => panic!("unexpected message"),
             };
+
             // Verify the timestamp
             let current_timestamp = context
                 .current()
@@ -201,7 +202,7 @@ mod tests {
                 .expect("failed to get current time")
                 .as_secs();
             assert!(handshake.timestamp <= current_timestamp);
-            assert!(handshake.timestamp >= current_timestamp - 5); // Allow a 5-second window
+            assert!(handshake.timestamp + 5 >= current_timestamp); // Allow a 5-second window
 
             // Verify the signature
             assert_eq!(handshake.recipient_public_key, recipient.me());
