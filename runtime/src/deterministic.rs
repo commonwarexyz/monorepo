@@ -1,11 +1,16 @@
-//! A deterministic runtime that randomly selects tasks to run based on a seed.
+//! A deterministic runtime that randomly selects tasks to run based on a seed
+//!
+//! # Panics
+//!
+//! If any task panics, the runtime will panic (and shutdown).
 //!
 //! # Example
+//!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use std::time::Duration;
 //!
-//! let (runner, context) = Executor::init(42, Duration::from_millis(1));
+//! let (runner, context, auditor) = Executor::init(42, Duration::from_millis(1));
 //! runner.start(async move {
 //!     println!("Parent started");
 //!     let result = context.spawn(async move {
@@ -15,27 +20,132 @@
 //!     println!("Child result: {:?}", result.await);
 //!     println!("Parent exited");
 //! });
+//! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::Handle;
-use futures::task::{waker_ref, ArcWake};
-use rand::{prelude::SliceRandom, rngs::StdRng, RngCore, SeedableRng};
+use crate::{Error, Handle};
+use bytes::Bytes;
+use futures::{
+    channel::mpsc,
+    task::{waker_ref, ArcWake},
+    SinkExt, StreamExt,
+};
+use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::BinaryHeap,
+    collections::{BinaryHeap, HashMap},
     future::Future,
     mem::replace,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    ops::Range,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::debug;
+use tracing::trace;
+
+/// Range of ephemeral ports assigned to dialers.
+const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
+
+/// Track the state of the runtime for determinism auditing.
+pub struct Auditor {
+    hash: Mutex<String>,
+}
+
+impl Auditor {
+    fn new() -> Self {
+        Self {
+            hash: Mutex::new(String::new()),
+        }
+    }
+
+    fn process_task(&self, task: u128) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"process_task");
+        hasher.update(task.to_be_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn bind(&self, address: SocketAddr) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"bind");
+        hasher.update(address.to_string().as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn dial(&self, dialer: SocketAddr, dialee: SocketAddr) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"dial");
+        hasher.update(dialer.to_string().as_bytes());
+        hasher.update(dialee.to_string().as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn accept(&self, dialee: SocketAddr, dialer: SocketAddr) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"accept");
+        hasher.update(dialee.to_string().as_bytes());
+        hasher.update(dialer.to_string().as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn send(&self, sender: SocketAddr, receiver: SocketAddr, message: Bytes) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"send");
+        hasher.update(sender.to_string().as_bytes());
+        hasher.update(receiver.to_string().as_bytes());
+        hasher.update(&message);
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn recv(&self, receiver: SocketAddr, sender: SocketAddr, message: Bytes) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"recv");
+        hasher.update(receiver.to_string().as_bytes());
+        hasher.update(sender.to_string().as_bytes());
+        hasher.update(&message);
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn rand(&self, method: String) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"rand");
+        hasher.update(method.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    /// Generate a representation of the current state of the runtime.
+    ///
+    /// This can be used to ensure that logic running on top
+    /// of the runtime is interacting deterministically.
+    pub fn state(&self) -> String {
+        self.hash.lock().unwrap().clone()
+    }
+}
 
 struct Task {
+    id: u128,
     tasks: Arc<Tasks>,
 
     root: bool,
     future: Mutex<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>,
+
+    completed: Mutex<bool>,
 }
 
 impl ArcWake for Task {
@@ -45,6 +155,7 @@ impl ArcWake for Task {
 }
 
 struct Tasks {
+    counter: Mutex<u128>,
     queue: Mutex<Vec<Arc<Task>>>,
 }
 
@@ -55,10 +166,18 @@ impl Tasks {
         future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     ) {
         let mut queue = arc_self.queue.lock().unwrap();
+        let id = {
+            let mut l = arc_self.counter.lock().unwrap();
+            let old = *l;
+            *l = l.checked_add(1).expect("task counter overflow");
+            old
+        };
         queue.push(Arc::new(Task {
+            id,
             root,
             future: Mutex::new(future),
             tasks: arc_self.clone(),
+            completed: Mutex::new(false),
         }));
     }
 
@@ -81,6 +200,7 @@ impl Tasks {
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     cycle: Duration,
+    auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
@@ -92,13 +212,16 @@ impl Executor {
     ///
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
-    pub fn init(seed: u64, cycle: Duration) -> (Runner, Context) {
+    pub fn init(seed: u64, cycle: Duration) -> (Runner, Context, Arc<Auditor>) {
+        let auditor = Arc::new(Auditor::new());
         let executor = Arc::new(Self {
             cycle,
+            auditor: auditor.clone(),
             rng: Mutex::new(StdRng::seed_from_u64(seed)),
             time: Mutex::new(UNIX_EPOCH),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
+                counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
         });
@@ -106,7 +229,11 @@ impl Executor {
             Runner {
                 executor: executor.clone(),
             },
-            Context { executor },
+            Context {
+                executor,
+                networking: Arc::new(Networking::new(auditor.clone())),
+            },
+            auditor,
         )
     }
 }
@@ -136,6 +263,7 @@ impl crate::Runner for Runner {
         );
 
         // Process tasks until root task completes or progress stalls
+        let mut iter = 0;
         loop {
             // Snapshot available tasks
             let mut tasks = self.executor.tasks.drain();
@@ -151,14 +279,39 @@ impl crate::Runner for Runner {
             // This approach is more efficient than randomly selecting a task one-at-a-time
             // because it ensures we don't pull the same pending task multiple times in a row (without
             // processing a different task required for other tasks to make progress).
+            trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
+                // Record task for auditing
+                self.executor.auditor.process_task(task.id);
+
+                // Check if task is already complete
+                if *task.completed.lock().unwrap() {
+                    trace!(id = task.id, "skipping already completed task");
+                    continue;
+                }
+                trace!(id = task.id, "processing task");
+
+                // Prepare task for polling
                 let waker = waker_ref(&task);
                 let mut context = task::Context::from_waker(&waker);
                 let mut future = task.future.lock().unwrap();
-                if future.as_mut().poll(&mut context).is_pending() {
-                    // Task is re-queued in its `wake_by_ref` implementation.
-                } else if task.root {
-                    // Root task completed
+
+                // Poll the task
+                //
+                // Task is re-queued in its `wake_by_ref` implementation as soon as we poll here (regardless
+                // of whether it is Pending/Ready).
+                let pending = future.as_mut().poll(&mut context).is_pending();
+                if pending {
+                    trace!(id = task.id, "task is still pending");
+                    continue;
+                }
+
+                // Mark task as completed
+                *task.completed.lock().unwrap() = true;
+                trace!(id = task.id, "task is complete");
+
+                // Root task completed
+                if task.root {
                     return output.lock().unwrap().take().unwrap();
                 }
             }
@@ -173,7 +326,7 @@ impl crate::Runner for Runner {
                 *time += self.executor.cycle;
                 current = *time;
             }
-            debug!(
+            trace!(
                 now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
                 "time advanced",
             );
@@ -195,7 +348,7 @@ impl crate::Runner for Runner {
                         *time = skip.unwrap();
                         current = *time;
                     }
-                    debug!(
+                    trace!(
                         now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
                         "time skipped",
                     );
@@ -229,7 +382,7 @@ impl crate::Runner for Runner {
             if remaining == 0 {
                 panic!("runtime stalled");
             }
-            debug!(remaining, "tasks remaining");
+            iter += 1;
         }
     }
 }
@@ -239,6 +392,7 @@ impl crate::Runner for Runner {
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,
+    networking: Arc<Networking>,
 }
 
 impl crate::Spawner for Context {
@@ -247,7 +401,7 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (f, handle) = Handle::init(f);
+        let (f, handle) = Handle::init(f, false);
         Tasks::register(&self.executor.tasks, false, Box::pin(f));
         handle
     }
@@ -334,23 +488,194 @@ impl crate::Clock for Context {
     }
 }
 
+type Dialable = mpsc::UnboundedSender<(
+    SocketAddr,
+    mpsc::UnboundedSender<Bytes>,   // Dialee -> Dialer
+    mpsc::UnboundedReceiver<Bytes>, // Dialer -> Dialee
+)>;
+
+/// Implementation of [`crate::Network`] for the `deterministic` runtime.
+///
+/// When a dialer connects to a dialee, the dialee is given a new ephemeral port
+/// from the range `32768..61000`. To keep things simple, it is not possible to
+/// bind to an ephemeral port. Likewise, if ports are not reused and when exhausted,
+/// the runtime will panic.
+struct Networking {
+    auditor: Arc<Auditor>,
+    ephemeral: Mutex<u16>,
+    listeners: Mutex<HashMap<SocketAddr, Dialable>>,
+}
+
+impl Networking {
+    fn new(auditor: Arc<Auditor>) -> Self {
+        Self {
+            auditor,
+            ephemeral: Mutex::new(EPHEMERAL_PORT_RANGE.start),
+            listeners: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
+        self.auditor.bind(socket);
+
+        // Ensure the port is not in the ephemeral range
+        if EPHEMERAL_PORT_RANGE.contains(&socket.port()) {
+            return Err(Error::BindFailed);
+        }
+
+        // Ensure the port is not already bound
+        let mut listeners = self.listeners.lock().unwrap();
+        if listeners.contains_key(&socket) {
+            return Err(Error::BindFailed);
+        }
+
+        // Bind the socket
+        let (sender, receiver) = mpsc::unbounded();
+        listeners.insert(socket, sender.clone());
+        Ok(Listener {
+            auditor: self.auditor.clone(),
+            address: socket,
+            listener: receiver,
+        })
+    }
+
+    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+        // Assign dialer a port from the ephemeral range
+        let dialer = {
+            let mut ephemeral = self.ephemeral.lock().unwrap();
+            let dialer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *ephemeral);
+            *ephemeral = ephemeral
+                .checked_add(1)
+                .expect("ephemeral port range exhausted");
+            dialer
+        };
+        self.auditor.dial(dialer, socket);
+
+        // Get dialee
+        let mut sender = {
+            let listeners = self.listeners.lock().unwrap();
+            let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
+            sender.clone()
+        };
+
+        // Construct connection
+        let (dialer_sender, dialer_receiver) = mpsc::unbounded();
+        let (dialee_sender, dialee_receiver) = mpsc::unbounded();
+        sender
+            .send((dialer, dialer_sender, dialee_receiver))
+            .await
+            .map_err(|_| Error::ConnectionFailed)?;
+        Ok((
+            Sink {
+                auditor: self.auditor.clone(),
+                me: dialer,
+                peer: socket,
+                sender: dialee_sender,
+            },
+            Stream {
+                auditor: self.auditor.clone(),
+                me: dialer,
+                peer: socket,
+                receiver: dialer_receiver,
+            },
+        ))
+    }
+}
+
+impl crate::Network<Listener, Sink, Stream> for Context {
+    async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
+        self.networking.bind(socket)
+    }
+
+    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+        self.networking.dial(socket).await
+    }
+}
+
+pub struct Listener {
+    auditor: Arc<Auditor>,
+    address: SocketAddr,
+    listener: mpsc::UnboundedReceiver<(
+        SocketAddr,
+        mpsc::UnboundedSender<Bytes>,
+        mpsc::UnboundedReceiver<Bytes>,
+    )>,
+}
+
+impl crate::Listener<Sink, Stream> for Listener {
+    async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
+        let (socket, sender, receiver) = self.listener.next().await.ok_or(Error::ReadFailed)?;
+        self.auditor.accept(self.address, socket);
+        Ok((
+            socket,
+            Sink {
+                auditor: self.auditor.clone(),
+                me: self.address,
+                peer: socket,
+                sender,
+            },
+            Stream {
+                auditor: self.auditor.clone(),
+                me: self.address,
+                peer: socket,
+                receiver,
+            },
+        ))
+    }
+}
+
+pub struct Sink {
+    auditor: Arc<Auditor>,
+    me: SocketAddr,
+    peer: SocketAddr,
+    sender: mpsc::UnboundedSender<Bytes>,
+}
+
+impl crate::Sink for Sink {
+    async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
+        self.auditor.send(self.me, self.peer, msg.clone());
+        self.sender.send(msg).await.map_err(|_| Error::WriteFailed)
+    }
+}
+
+pub struct Stream {
+    auditor: Arc<Auditor>,
+    me: SocketAddr,
+    peer: SocketAddr,
+    receiver: mpsc::UnboundedReceiver<Bytes>,
+}
+
+impl crate::Stream for Stream {
+    async fn recv(&mut self) -> Result<Bytes, Error> {
+        let bytes = self.receiver.next().await.ok_or(Error::ReadFailed)?;
+        self.auditor.recv(self.me, self.peer, bytes.clone());
+        Ok(bytes)
+    }
+}
+
 impl RngCore for Context {
     fn next_u32(&mut self) -> u32 {
+        self.executor.auditor.rand("next_u32".to_string());
         self.executor.rng.lock().unwrap().next_u32()
     }
 
     fn next_u64(&mut self) -> u64 {
+        self.executor.auditor.rand("next_u64".to_string());
         self.executor.rng.lock().unwrap().next_u64()
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.executor.auditor.rand("fill_bytes".to_string());
         self.executor.rng.lock().unwrap().fill_bytes(dest)
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        self.executor.auditor.rand("try_fill_bytes".to_string());
         self.executor.rng.lock().unwrap().try_fill_bytes(dest)
     }
 }
+
+impl CryptoRng for Context {}
 
 #[cfg(test)]
 mod tests {
@@ -358,9 +683,10 @@ mod tests {
     use crate::utils::run_tasks;
     use futures::task::noop_waker;
 
-    fn run_with_seed(seed: u64) -> Vec<usize> {
-        let (runner, context) = Executor::init(seed, Duration::from_millis(1));
-        run_tasks(30, runner, context)
+    fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
+        let (runner, context, auditor) = Executor::init(seed, Duration::from_millis(1));
+        let messages = run_tasks(5, runner, context);
+        (auditor.state(), messages)
     }
 
     #[test]

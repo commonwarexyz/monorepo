@@ -1,5 +1,7 @@
 //! Implementation of an `authenticated` network.
 
+use std::marker::PhantomData;
+
 use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
@@ -7,12 +9,18 @@ use super::{
     connection,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Spawner};
-use rand::Rng;
-use tracing::info;
+use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use rand::{CryptoRng, Rng};
+use tracing::{info, warn};
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + Clock + Rng, C: Scheme> {
+pub struct Network<
+    Si: Sink,
+    St: Stream,
+    L: Listener<Si, St>,
+    E: Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+    C: Scheme,
+> {
     context: E,
     cfg: Config<C>,
 
@@ -21,9 +29,20 @@ pub struct Network<E: Spawner + Clock + Rng, C: Scheme> {
     tracker_mailbox: tracker::Mailbox<E>,
     router: router::Actor,
     router_mailbox: router::Mailbox,
+
+    _phantom_si: PhantomData<Si>,
+    _phantom_st: PhantomData<St>,
+    _phantom_l: PhantomData<L>,
 }
 
-impl<E: Spawner + Clock + Rng, C: Scheme> Network<E, C> {
+impl<
+        Si: Sink,
+        St: Stream,
+        L: Listener<Si, St>,
+        E: Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+        C: Scheme,
+    > Network<Si, St, L, E, C>
+{
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -40,7 +59,7 @@ impl<E: Spawner + Clock + Rng, C: Scheme> Network<E, C> {
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 registry: cfg.registry.clone(),
-                address: cfg.address,
+                address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
                 allow_private_ips: cfg.allow_private_ips,
                 mailbox_size: cfg.mailbox_size,
@@ -65,6 +84,10 @@ impl<E: Spawner + Clock + Rng, C: Scheme> Network<E, C> {
                 tracker_mailbox,
                 router,
                 router_mailbox,
+
+                _phantom_si: PhantomData,
+                _phantom_st: PhantomData,
+                _phantom_l: PhantomData,
             },
             oracle,
         )
@@ -124,18 +147,14 @@ impl<E: Spawner + Clock + Rng, C: Scheme> Network<E, C> {
         // Start listener
         let connection = connection::Config {
             crypto: self.cfg.crypto,
-            max_frame_length: self.cfg.max_frame_length,
+            max_message_size: self.cfg.max_message_size,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
-            handshake_timeout: self.cfg.handshake_timeout,
-            read_timeout: self.cfg.read_timeout,
-            write_timeout: self.cfg.write_timeout,
-            tcp_nodelay: self.cfg.tcp_nodelay,
         };
         let listener = listener::Actor::new(
             self.context.clone(),
             listener::Config {
-                port: self.cfg.address.port(),
+                address: self.cfg.listen,
                 connection: connection.clone(),
                 allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
             },
@@ -177,6 +196,6 @@ impl<E: Spawner + Clock + Rng, C: Scheme> Network<E, C> {
         dialer_task.abort();
 
         // Log error
-        info!(error=?err, "network shutdown")
+        warn!(error=?err, "network shutdown")
     }
 }

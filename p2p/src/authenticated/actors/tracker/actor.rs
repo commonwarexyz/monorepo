@@ -7,6 +7,7 @@ use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_runtime::{Clock, Spawner};
+use futures::{channel::mpsc, StreamExt};
 use governor::DefaultKeyedRateLimiter;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -17,7 +18,6 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
 };
-use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_IP_";
@@ -135,7 +135,7 @@ pub struct Actor<E: Spawner + Rng, C: Scheme> {
 
     sender: mpsc::Sender<Message<E>>,
     receiver: mpsc::Receiver<Message<E>>,
-    peers: HashMap<PublicKey, AddressCount>,
+    peers: BTreeMap<PublicKey, AddressCount>,
     sets: BTreeMap<u64, PeerSet>,
     connections_rate_limiter: DefaultKeyedRateLimiter<PublicKey>,
     connections: HashSet<PublicKey>,
@@ -168,7 +168,7 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
         };
 
         // Register bootstrappers
-        let mut peers = HashMap::new();
+        let mut peers = BTreeMap::new();
         for (peer, address) in cfg.bootstrappers.into_iter() {
             if peer == cfg.crypto.me() {
                 continue;
@@ -545,9 +545,12 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
     }
 
     pub async fn run(mut self) {
-        while let Some(msg) = self.receiver.recv().await {
+        while let Some(msg) = self.receiver.next().await {
             match msg {
-                Message::Construct { public_key, peer } => {
+                Message::Construct {
+                    public_key,
+                    mut peer,
+                } => {
                     // Kill if peer is not authorized
                     if !self.peers.contains_key(&public_key) {
                         peer.kill().await;
@@ -567,7 +570,7 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
                     // Send bit vector if stored
                     let _ = peer.bit_vec(set.msg()).await;
                 }
-                Message::BitVec { bit_vec, peer } => {
+                Message::BitVec { bit_vec, mut peer } => {
                     let result = self.handle_bit_vec(bit_vec);
                     if let Err(e) = result {
                         debug!(error = ?e, "failed to handle bit vector");
@@ -578,7 +581,7 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
                         peer.peers(peers).await;
                     }
                 }
-                Message::Peers { peers, peer } => {
+                Message::Peers { peers, mut peer } => {
                     // Consider new peer signatures
                     let result = self.handle_peers(peers);
                     if let Err(e) = result {
@@ -652,10 +655,10 @@ mod tests {
     #[test]
     fn test_reserve_peer() {
         // Create actor
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
         let cfg = test_config(ed25519::insecure_signer(0), Vec::new());
         runner.start(async move {
-            let (actor, mailbox, oracle) = Actor::new(context.clone(), cfg);
+            let (actor, mut mailbox, mut oracle) = Actor::new(context.clone(), cfg);
 
             // Run actor in background
             context.spawn(async move {
@@ -697,11 +700,11 @@ mod tests {
     #[test]
     fn test_bit_vec() {
         // Create actor
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
         let peer0 = ed25519::insecure_signer(0);
         let cfg = test_config(peer0.clone(), Vec::new());
         runner.start(async move {
-            let (actor, mailbox, oracle) = Actor::new(context.clone(), cfg);
+            let (actor, mut mailbox, mut oracle) = Actor::new(context.clone(), cfg);
 
             // Run actor in background
             context.spawn(async move {
@@ -717,7 +720,7 @@ mod tests {
             // Request bit vector with unallowed peer
             let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
             mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-            let msg = peer_receiver.recv().await.unwrap();
+            let msg = peer_receiver.next().await.unwrap();
             assert!(matches!(msg, peer::Message::Kill));
 
             // Find sorted indicies
@@ -731,7 +734,7 @@ mod tests {
 
             // Request bit vector
             mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-            let msg = peer_receiver.recv().await.unwrap();
+            let msg = peer_receiver.next().await.unwrap();
             let bit_vec = match msg {
                 peer::Message::BitVec { bit_vec } => bit_vec,
                 _ => panic!("unexpected message"),
@@ -764,7 +767,7 @@ mod tests {
 
             // Request bit vector again
             mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-            let msg = peer_receiver.recv().await.unwrap();
+            let msg = peer_receiver.next().await.unwrap();
             let bit_vec = match msg {
                 peer::Message::BitVec { bit_vec } => bit_vec,
                 _ => panic!("unexpected message"),
@@ -787,7 +790,7 @@ mod tests {
             let mut index_1_returned = false;
             while !index_0_returned || !index_1_returned {
                 mailbox.construct(peer1.clone(), peer_mailbox.clone()).await; // peer1 still allowed
-                let msg = peer_receiver.recv().await.unwrap();
+                let msg = peer_receiver.next().await.unwrap();
                 let bit_vec = match msg {
                     peer::Message::BitVec { bit_vec } => bit_vec,
                     _ => panic!("unexpected message"),
@@ -819,7 +822,7 @@ mod tests {
 
             // Ensure peer1 has been evicted from the peer tracker and should die
             mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-            let msg = peer_receiver.recv().await.unwrap();
+            let msg = peer_receiver.next().await.unwrap();
             assert!(matches!(msg, peer::Message::Kill));
 
             // Wait for valid sets to be returned
@@ -827,7 +830,7 @@ mod tests {
             let mut index_2_returned = false;
             while !index_1_returned || !index_2_returned {
                 mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
-                let msg = peer_receiver.recv().await.unwrap();
+                let msg = peer_receiver.next().await.unwrap();
                 let bit_vec = match msg {
                     peer::Message::BitVec { bit_vec } => bit_vec,
                     _ => panic!("unexpected message"),

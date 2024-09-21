@@ -1,5 +1,6 @@
-use commonware_cryptography::{bls12381::scheme::Bls12381, Scheme};
+use commonware_cryptography::{bls12381::Bls12381, Scheme};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use rand::thread_rng;
 use std::hint::black_box;
 
 fn benchmark_signature_generation(c: &mut Criterion) {
@@ -9,7 +10,7 @@ fn benchmark_signature_generation(c: &mut Criterion) {
         &format!("ns_len={} msg_len={}", namespace.len(), msg.len()),
         |b| {
             b.iter_batched(
-                Bls12381::new,
+                || Bls12381::new(&mut thread_rng()),
                 |mut signer| {
                     black_box(signer.sign(namespace, msg));
                 },

@@ -152,14 +152,18 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::authenticated::{Config, Network};
+//! use commonware_p2p::authenticated::{self, Network};
 //! use commonware_cryptography::{ed25519, Scheme};
-//! use commonware_runtime::{tokio::Executor, Spawner, Runner};
+//! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner};
 //! use governor::Quota;
 //! use prometheus_client::registry::Registry;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //! use std::num::NonZeroU32;
 //! use std::sync::{Arc, Mutex};
+//!
+//! // Configure runtime
+//! let runtime_cfg = tokio::Config::default();
+//! let (runner, context) = Executor::init(runtime_cfg);
 //!
 //! // Generate identity
 //! //
@@ -183,18 +187,18 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-//! let config = Config::aggressive(
+//! let p2p_cfg = authenticated::Config::aggressive(
 //!     signer.clone(),
 //!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,
+//!     runtime_cfg.max_message_size,
 //! );
 //!
-//! // Configure runtime
-//! let (runner, context) = Executor::init(4);
+//! // Start runtime
 //! runner.start(async move {
 //!     // Initialize network
-//!     let (mut network, oracle) = Network::new(context.clone(), config);
+//!     let (mut network, mut oracle) = Network::new(context.clone(), p2p_cfg);
 //!
 //!     // Register authorized peers
 //!     //
@@ -257,26 +261,32 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
+    use commonware_runtime::{
+        deterministic, tokio, Clock, Listener, Network as RNetwork, Runner, Sink, Spawner, Stream,
+    };
     use governor::Quota;
     use prometheus_client::registry::Registry;
-    use rand::Rng;
+    use rand::{CryptoRng, Rng};
+    use std::collections::HashSet;
     use std::{
-        collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         num::NonZeroU32,
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tokio::time;
 
     /// Test connectivity between `n` peers.
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
-    fn test_connectivity(base_port: u16, n: usize) {
+    fn run_network<Si: Sink, St: Stream, L: Listener<Si, St>>(
+        runner: impl Runner,
+        context: impl Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+        max_message_size: usize,
+        base_port: u16,
+        n: usize,
+    ) {
         // Initialze runtime
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -308,14 +318,15 @@ mod tests {
                     registry,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                     bootstrappers,
+                    max_message_size,
                 );
-                let (mut network, oracle) = Network::new(context.clone(), config);
+                let (mut network, mut oracle) = Network::new(context.clone(), config);
 
                 // Register peers
                 oracle.register(0, addresses.clone()).await;
 
                 // Register basic application
-                let (sender, mut receiver) = network.register(
+                let (mut sender, mut receiver) = network.register(
                     0,
                     Quota::per_second(NonZeroU32::new(1).unwrap()),
                     1_024,
@@ -324,7 +335,7 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                let network_handler = context.spawn(network.run());
+                context.spawn(network.run());
 
                 // Send/Recieve messages
                 let peer_addresses = addresses.clone();
@@ -355,7 +366,7 @@ mod tests {
                                 }
 
                                 // Sleep and try again (avoid busy loop)
-                                context.sleep(time::Duration::from_millis(100)).await;
+                                context.sleep(Duration::from_millis(100)).await;
                             }
                         }
 
@@ -369,9 +380,6 @@ mod tests {
                             // Add to received set
                             received.insert(sender);
                         }
-
-                        // Shutdown network
-                        network_handler.abort();
                     }
                 });
 
@@ -387,18 +395,34 @@ mod tests {
     }
 
     #[test]
-    fn test_connectivity_small() {
-        test_connectivity(3000, 5);
+    fn test_determinism() {
+        let max_message_size = 1_024 * 1_024; // 1MB
+        let (runner, context, auditor) = deterministic::Executor::init(0, Duration::from_millis(1));
+        run_network(runner, context, max_message_size, 3000, 10);
+        let state = auditor.state();
+        let (runner, context, auditor) = deterministic::Executor::init(0, Duration::from_millis(1));
+        run_network(runner, context, max_message_size, 3000, 10);
+        assert_eq!(state, auditor.state());
     }
 
     #[test]
-    fn test_connectivity_large() {
-        test_connectivity(3100, 35); // 35 is greater than the max number of peers per response
+    fn test_deterministic_connectivity() {
+        let max_message_size = 1_024 * 1_024; // 1MB
+        let (runner, context, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        run_network(runner, context, max_message_size, 3000, 35); // 35 is greater than the max number of peers per response
     }
 
-    fn test_chunking(base_port: u16, compression: Option<u8>) {
+    #[test]
+    fn test_tokio_connectivity() {
+        let cfg = tokio::Config::default();
+        let (runner, context) = tokio::Executor::init(cfg);
+        run_network(runner, context, cfg.max_message_size, 3000, 50);
+    }
+
+    fn test_chunking(compression: Option<u8>) {
         // Initialize runtime
-        let (runner, mut context) = Executor::init(0, Duration::from_millis(1));
+        let base_port = 3000;
+        let (runner, mut context, _) = deterministic::Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
             const N: usize = 2;
@@ -435,14 +459,15 @@ mod tests {
                     registry,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
                     bootstrappers,
+                    1_024 * 1_024, // 1MB
                 );
-                let (mut network, oracle) = Network::new(context.clone(), config);
+                let (mut network, mut oracle) = Network::new(context.clone(), config);
 
                 // Register peers
                 oracle.register(0, addresses.clone()).await;
 
                 // Register basic application
-                let (sender, mut receiver) = network.register(
+                let (mut sender, mut receiver) = network.register(
                     0,
                     Quota::per_second(NonZeroU32::new(10).unwrap()),
                     5 * 1_024 * 1_024, // 5MB
@@ -451,7 +476,7 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                let network_handler = context.spawn(network.run());
+                context.spawn(network.run());
 
                 // Send/Recieve messages
                 let msg = Bytes::from(msg.clone());
@@ -475,7 +500,7 @@ mod tests {
                                 }
 
                                 // Sleep and try again (avoid busy loop)
-                                context.sleep(time::Duration::from_millis(100)).await;
+                                context.sleep(Duration::from_millis(100)).await;
                             }
                         } else {
                             // Ensure message equals sender identity
@@ -489,9 +514,6 @@ mod tests {
                                 assert_eq!(byte1, byte2, "byte {} mismatch", i);
                             }
                         }
-
-                        // Shutdown network
-                        network_handler.abort();
                     }
                 });
 
@@ -508,17 +530,18 @@ mod tests {
 
     #[test]
     fn test_chunking_no_compression() {
-        test_chunking(3200, None);
+        test_chunking(None);
     }
 
     #[test]
     fn test_chunking_compression() {
-        test_chunking(3300, Some(3));
+        test_chunking(Some(3));
     }
 
-    fn test_message_too_large(base_port: u16, compression: Option<u8>) {
+    fn test_message_too_large(compression: Option<u8>) {
         // Initialize runtime
-        let (runner, mut context) = Executor::init(0, Duration::from_millis(1));
+        let base_port = 3000;
+        let (runner, mut context, _) = deterministic::Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
             const N: usize = 2;
@@ -536,14 +559,15 @@ mod tests {
                 registry,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 Vec::new(),
+                1_024 * 1_024, // 1MB
             );
-            let (mut network, oracle) = Network::new(context.clone(), config);
+            let (mut network, mut oracle) = Network::new(context.clone(), config);
 
             // Register peers
             oracle.register(0, addresses.clone()).await;
 
             // Register basic application
-            let (sender, _) = network.register(
+            let (mut sender, _) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
                 1_024 * 1_024, // 1MB
@@ -567,11 +591,11 @@ mod tests {
 
     #[test]
     fn test_message_too_large_no_compression() {
-        test_message_too_large(3400, None);
+        test_message_too_large(None);
     }
 
     #[test]
     fn test_message_too_large_compression() {
-        test_message_too_large(3500, Some(3));
+        test_message_too_large(Some(3));
     }
 }

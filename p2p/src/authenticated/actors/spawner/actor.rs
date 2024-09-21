@@ -7,14 +7,15 @@ use crate::authenticated::{
     metrics,
 };
 use commonware_cryptography::{utils::hex, Scheme};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Clock, Sink, Spawner, Stream};
+use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
+use rand::{CryptoRng, Rng};
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock, C: Scheme> {
+pub struct Actor<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
     context: E,
 
     mailbox_size: usize,
@@ -22,14 +23,14 @@ pub struct Actor<E: Spawner + Clock, C: Scheme> {
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
 
-    receiver: mpsc::Receiver<Message<E, C>>,
+    receiver: mpsc::Receiver<Message<E, C, Si, St>>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C>) {
+impl<E: Spawner + Clock + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Actor<E, C, Si, St> {
+    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C, Si, St>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         {
@@ -59,7 +60,7 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
     }
 
     pub async fn run(mut self, tracker: tracker::Mailbox<E>, router: router::Mailbox) {
-        while let Some(msg) = self.receiver.recv().await {
+        while let Some(msg) = self.receiver.next().await {
             match msg {
                 Message::Spawn {
                     peer,
@@ -70,7 +71,7 @@ impl<E: Spawner + Clock, C: Scheme> Actor<E, C> {
                     let sent_messages = self.sent_messages.clone();
                     let received_messages = self.received_messages.clone();
                     let tracker = tracker.clone();
-                    let router = router.clone();
+                    let mut router = router.clone();
 
                     // Record handshake messages
                     //

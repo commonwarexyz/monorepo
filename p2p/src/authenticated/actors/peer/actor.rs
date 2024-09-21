@@ -2,17 +2,18 @@ use super::{ingress::Data, Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{
     actors::tracker,
     channels::Channels,
-    connection::{Sender, Stream},
+    connection::{Instance, Sender},
     metrics, wire,
 };
 use bytes::BytesMut;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
-use commonware_runtime::{Clock, Handle, Spawner};
-use futures::try_join;
+use commonware_runtime::{select, Clock, Handle, Sink, Spawner, Stream};
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{DefaultDirectRateLimiter, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
+use rand::{CryptoRng, Rng};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::mpsc;
+use tracing::{info, warn};
 
 pub struct Actor<E: Spawner + Clock> {
     context: E,
@@ -33,7 +34,7 @@ pub struct Actor<E: Spawner + Clock> {
     _reservation: tracker::Reservation<E>,
 }
 
-impl<E: Spawner + Clock> Actor<E> {
+impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
     pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -57,10 +58,10 @@ impl<E: Spawner + Clock> Actor<E> {
         )
     }
 
-    async fn send_content(
+    async fn send_content<Si: Sink>(
         max_size: usize,
         max_content_size: usize,
-        sender: &mut Sender,
+        sender: &mut Sender<Si>,
         peer: &PublicKey,
         data: Data,
         sent_messages: &Family<metrics::Message, Counter>,
@@ -98,6 +99,7 @@ impl<E: Spawner + Clock> Actor<E> {
                     }
                 })),
             };
+            info!("Sending chunk {}/{} to {}", part, total_parts, hex(peer));
             sender.send(msg).await.map_err(Error::SendFailed)?;
             sent_messages
                 .get_or_create(&metrics::Message::new_chunk(peer, channel))
@@ -107,78 +109,94 @@ impl<E: Spawner + Clock> Actor<E> {
         Ok(())
     }
 
-    pub async fn run<C: Scheme>(
+    pub async fn run<C: Scheme, Si: Sink, St: Stream>(
         mut self,
         peer: PublicKey,
-        connection: Stream<E, C>,
-        tracker: tracker::Mailbox<E>,
+        connection: Instance<C, Si, St>,
+        mut tracker: tracker::Mailbox<E>,
         channels: Channels,
     ) -> Error {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
+        let mut senders = HashMap::new();
         for (channel, (rate, max_size, sender)) in channels.collect() {
             let rate_limiter = DefaultDirectRateLimiter::direct(rate);
-            rate_limits.insert(channel, (rate_limiter, max_size, sender));
+            rate_limits.insert(channel, (rate_limiter, max_size));
+            senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
 
         // Send/Receive messages from the peer
         let (max_content_size, mut conn_sender, mut conn_receiver) = connection.split();
-        let send_tracker = tracker.clone();
-        let send_peer = peer.clone();
-        let send_mailbox = self.mailbox.clone();
-        let send_rate_limits = rate_limits.clone();
-        let mut send_handler: Handle<Result<(), Error>> = self.context.spawn(async move {
-            let mut ticker = tokio::time::interval(self.gossip_bit_vec_frequency);
-            loop {
-                tokio::select! {
-                    // Ensure we send ip gossip before any user messages
-                    biased;
+        let mut send_handler: Handle<Result<(), Error>> = self.context.spawn({
+            let context = self.context.clone();
+            let mut tracker = tracker.clone();
+            let peer = peer.clone();
+            let mailbox = self.mailbox.clone();
+            let rate_limits = rate_limits.clone();
+            async move {
+                let mut deadline = context.current() + self.gossip_bit_vec_frequency;
+                loop {
+                    select! {
+                        _timeout = context.sleep_until(deadline) => {
+                            // Get latest bitset from tracker (also used as ping)
+                            tracker.construct(peer.clone(), mailbox.clone()).await;
 
-                    _ = ticker.tick() => {
-                        // Get latest bitset from tracker (also used as ping)
-                        send_tracker.construct(send_peer.clone(), send_mailbox.clone()).await;
-                    }
-                    Some(msg) = self.control.recv() => {
-                        match msg {
-                            Message::BitVec { bit_vec } => {
-                                conn_sender.send(wire::Message{
-                                    payload: Some(wire::message::Payload::BitVec(bit_vec)),
-                                }).await.map_err(Error::SendFailed)?;
-                                self.sent_messages
-                                    .get_or_create(&metrics::Message::new_bit_vec(&send_peer))
-                                    .inc();
+                            // Reset ticker
+                            deadline = context.current() + self.gossip_bit_vec_frequency;
+                        },
+                        msg_control = self.control.next() => {
+                            let msg = match msg_control {
+                                Some(msg_control) => msg_control,
+                                None => return Err(Error::PeerDisconnected),
+                            };
+                            match msg {
+                                Message::BitVec { bit_vec } => {
+                                    conn_sender.send(wire::Message{
+                                        payload: Some(wire::message::Payload::BitVec(bit_vec)),
+                                    }).await.map_err(Error::SendFailed)?;
+                                    self.sent_messages
+                                        .get_or_create(&metrics::Message::new_bit_vec(&peer))
+                                        .inc();
+                                }
+                                Message::Peers { peers: msg } => {
+                                    conn_sender.send(wire::Message{
+                                        payload: Some(wire::message::Payload::Peers(msg)),
+                                    }).await.map_err(Error::SendFailed)?;
+                                    self.sent_messages
+                                        .get_or_create(&metrics::Message::new_peers(&peer))
+                                        .inc();
+                                }
+                                Message::Kill => {
+                                    return Err(Error::PeerKilled(hex(&peer)))
+                                }
                             }
-                            Message::Peers { peers: msg } => {
-                                conn_sender.send(wire::Message{
-                                    payload: Some(wire::message::Payload::Peers(msg)),
-                                }).await.map_err(Error::SendFailed)?;
-                                self.sent_messages
-                                    .get_or_create(&metrics::Message::new_peers(&send_peer))
-                                    .inc();
+                        },
+                        msg_high = self.high.next() => {
+                            let msg = match msg_high {
+                                Some(msg_high) => msg_high,
+                                None => return Err(Error::PeerDisconnected),
+                            };
+                            let entry = rate_limits.get(&msg.channel);
+                            if entry.is_none() {
+                                return Err(Error::InvalidChannel);
                             }
-                            Message::Kill => {
-                                return Err(Error::PeerKilled(hex(&send_peer)))
+                            let (_, max_size) = entry.unwrap();
+                            Self::send_content(*max_size, max_content_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
+                        },
+                        msg_low = self.low.next() => {
+                            let msg = match msg_low {
+                                Some(msg_low) => msg_low,
+                                None => return Err(Error::PeerDisconnected),
+                            };
+                            let entry = rate_limits.get(&msg.channel);
+                            if entry.is_none() {
+                                return Err(Error::InvalidChannel);
                             }
+                            let (_, max_size) = entry.unwrap();
+                            Self::send_content(*max_size, max_content_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
                         }
                     }
-                    Some(msg) = self.high.recv() => {
-                        let entry = send_rate_limits.get(&msg.channel);
-                        if entry.is_none() {
-                            return Err(Error::InvalidChannel);
-                        }
-                        let (_, max_size, _) = entry.unwrap();
-                        Self::send_content(*max_size, max_content_size, &mut conn_sender, &send_peer, msg, &self.sent_messages).await?;
-                    }
-                    Some(msg) = self.low.recv() => {
-                        let entry = send_rate_limits.get(&msg.channel);
-                        if entry.is_none() {
-                            return Err(Error::InvalidChannel);
-                        }
-                        let (_, max_size, _) = entry.unwrap();
-                        Self::send_content(*max_size, max_content_size, &mut conn_sender, &send_peer, msg, &self.sent_messages).await?;
-                    }
-                    else => return Err(Error::PeerDisconnected),
                 }
             }
         });
@@ -226,8 +244,9 @@ impl<E: Spawner + Clock> Actor<E> {
                             // are on a newer version than us
                             continue;
                         }
-                        let (rate_limiter, max_size, sender) = entry.unwrap();
+                        let (rate_limiter, max_size) = entry.unwrap();
                         rate_limiter.until_ready().await;
+                        let sender = senders.get_mut(&chunk.channel).unwrap();
 
                         // Ensure messasge is not too large
                         let chunk_len = chunk.content.len();
@@ -280,7 +299,10 @@ impl<E: Spawner + Clock> Actor<E> {
                         }
 
                         // Send message to client
-                        sender.send((peer.clone(), message.freeze())).await.unwrap();
+                        sender
+                            .send((peer.clone(), message.freeze()))
+                            .await
+                            .map_err(|_| Error::ClientClosed)?;
                     }
                     Some(wire::message::Payload::Handshake(_)) => {
                         self.received_messages
@@ -304,18 +326,21 @@ impl<E: Spawner + Clock> Actor<E> {
         // Wait for one of the handlers to finish
         //
         // It is only possible for a handler to exit if there is an error.
-        let result = try_join!(&mut send_handler, &mut receive_handler);
-
-        // Ensure both handlers are aborted when one of them exits
-        send_handler.abort();
-        receive_handler.abort();
-
-        // Handle the join of handlers
-        match result {
-            Ok((first, second)) => match first {
-                Ok(_) => second.unwrap_err(),
-                Err(e) => e,
+        let result = select! {
+            send_result = &mut send_handler => {
+                receive_handler.abort();
+                warn!("send_handler exited: {:?}", send_result);
+                send_result
             },
+            receive_result = &mut receive_handler => {
+                send_handler.abort();
+                receive_result
+            }
+        };
+
+        // Parse error
+        match result {
+            Ok(e) => e.unwrap_err(),
             Err(e) => Error::UnexpectedFailure(e),
         }
     }

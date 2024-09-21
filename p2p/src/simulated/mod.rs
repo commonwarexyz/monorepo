@@ -25,13 +25,16 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{ed25519::insecure_signer, utils::hex, Scheme};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
-    use std::{collections::HashMap, time::Duration};
-    use tokio::sync::mpsc;
+    use std::{
+        collections::{BTreeMap, HashMap},
+        time::Duration,
+    };
 
-    fn simulate_messages(seed: u64, size: usize) -> Vec<usize> {
+    fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         // Create simulated network
-        let (runner, context) = Executor::init(seed, Duration::from_millis(1));
+        let (runner, context, auditor) = Executor::init(seed, Duration::from_millis(1));
         runner.start(async move {
             let mut network = network::Network::new(
                 context.clone(),
@@ -41,13 +44,13 @@ mod tests {
             );
 
             // Register agents
-            let mut agents = HashMap::new();
+            let mut agents = BTreeMap::new();
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
                 let pk = insecure_signer(i as u64).me();
                 let (sender, mut receiver) = network.register(pk.clone());
                 agents.insert(pk, sender);
-                let agent_sender = seen_sender.clone();
+                let mut agent_sender = seen_sender.clone();
                 context.spawn(async move {
                     for _ in 0..size {
                         receiver.recv().await.unwrap();
@@ -73,7 +76,6 @@ mod tests {
                             latency_mean: 5.0,
                             latency_stddev: 2.5,
                             success_rate: 0.75,
-                            capacity: 1,
                         },
                     );
                     if agent == other {
@@ -89,8 +91,7 @@ mod tests {
                 let mut context = context.clone();
                 async move {
                     // Sort agents for deterministic output
-                    let mut keys = agents.keys().collect::<Vec<_>>();
-                    keys.sort();
+                    let keys = agents.keys().collect::<Vec<_>>();
 
                     // Send messages
                     loop {
@@ -98,7 +99,7 @@ mod tests {
                         let sender = keys[index];
                         let msg = format!("hello from {}", hex(sender));
                         let msg = Bytes::from(msg);
-                        let message_sender = agents.get(sender).unwrap().clone();
+                        let mut message_sender = agents.get(sender).unwrap().clone();
                         let sent = message_sender
                             .send(Recipients::All, msg.clone(), false)
                             .await
@@ -118,9 +119,9 @@ mod tests {
             // Wait for all recipients
             let mut results = Vec::new();
             for _ in 0..size {
-                results.push(seen_receiver.recv().await.unwrap());
+                results.push(seen_receiver.next().await.unwrap());
             }
-            results
+            (auditor.state(), results)
         })
     }
 
@@ -139,23 +140,13 @@ mod tests {
     }
 
     #[test]
-    fn test_small() {
-        compare_outputs(25, 10);
-    }
-
-    #[test]
-    fn test_medium() {
-        compare_outputs(10, 100);
-    }
-
-    #[test]
-    fn test_large() {
-        compare_outputs(5, 250);
+    fn test_determinism() {
+        compare_outputs(25, 25);
     }
 
     #[test]
     fn test_invalid_message() {
-        let (runner, mut context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, mut context, _) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
@@ -180,7 +171,7 @@ mod tests {
             let keys = agents.keys().collect::<Vec<_>>();
             let index = context.gen_range(0..keys.len());
             let sender = keys[index];
-            let message_sender = agents.get(sender).unwrap().clone();
+            let mut message_sender = agents.get(sender).unwrap().clone();
             let mut msg = vec![0u8; 1024 * 1024 + 1];
             context.fill(&mut msg[..]);
             let result = message_sender

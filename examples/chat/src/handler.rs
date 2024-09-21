@@ -36,7 +36,7 @@ pub async fn run(
     me: String,
     registry: Arc<Mutex<Registry>>,
     logs: Arc<Mutex<Vec<String>>>,
-    sender: impl Sender,
+    mut sender: impl Sender,
     mut receiver: impl Receiver,
 ) {
     // Setup terminal

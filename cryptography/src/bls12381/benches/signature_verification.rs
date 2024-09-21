@@ -1,5 +1,6 @@
-use commonware_cryptography::{bls12381::scheme::Bls12381, Scheme};
+use commonware_cryptography::{bls12381::Bls12381, Scheme};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use rand::thread_rng;
 use std::hint::black_box;
 
 fn benchmark_signature_verification(c: &mut Criterion) {
@@ -10,7 +11,7 @@ fn benchmark_signature_verification(c: &mut Criterion) {
         |b| {
             b.iter_batched(
                 || {
-                    let mut signer = Bls12381::new();
+                    let mut signer = Bls12381::new(&mut thread_rng());
                     let signature = signer.sign(namespace, msg);
                     (signer, signature)
                 },

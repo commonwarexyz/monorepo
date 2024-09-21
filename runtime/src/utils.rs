@@ -11,11 +11,13 @@ use futures::{
     FutureExt,
 };
 use std::{
+    any::Any,
     future::Future,
-    panic::AssertUnwindSafe,
+    panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
     task::{Context, Poll},
 };
+use tracing::error;
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {
@@ -40,6 +42,16 @@ pub async fn reschedule() {
     Reschedule { yielded: false }.await
 }
 
+fn extract_panic_message(err: &(dyn Any + Send)) -> String {
+    if let Some(s) = err.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        format!("{:?}", err)
+    }
+}
+
 /// Handle to a spawned task.
 pub struct Handle<T>
 where
@@ -53,7 +65,7 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn init<F>(f: F) -> (impl Future<Output = ()>, Self)
+    pub(crate) fn init<F>(f: F, catch_panic: bool) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
     {
@@ -66,7 +78,14 @@ where
             let result = AssertUnwindSafe(f).catch_unwind().await;
             let result = match result {
                 Ok(result) => Ok(result),
-                Err(err) => Err(Error::Exited(err)),
+                Err(err) => {
+                    if !catch_panic {
+                        resume_unwind(err);
+                    }
+                    let err = extract_panic_message(&*err);
+                    error!(?err, "task panicked");
+                    Err(Error::Exited)
+                }
             };
             let _ = sender.send(result);
         };

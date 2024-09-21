@@ -86,8 +86,11 @@ use commonware_cryptography::{
     utils::hex,
     Scheme,
 };
-use commonware_p2p::authenticated::{Config, Network};
-use commonware_runtime::{tokio::Executor, Runner, Spawner};
+use commonware_p2p::authenticated::{self, Network};
+use commonware_runtime::{
+    tokio::{self, Executor},
+    Runner, Spawner,
+};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -100,7 +103,8 @@ use tracing::info;
 
 fn main() {
     // Initialize runtime
-    let (runner, context) = Executor::init(4);
+    let runtime_cfg = tokio::Config::default();
+    let (runner, context) = Executor::init(runtime_cfg);
 
     // Parse arguments
     let matches = Command::new("commonware-vrf")
@@ -207,16 +211,17 @@ fn main() {
 
     // Configure network
     let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-    let config = Config::aggressive(
+    let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        runtime_cfg.max_message_size,
     );
 
     // Start runtime
     runner.start(async move {
-        let (mut network, oracle) = Network::new(context.clone(), config);
+        let (mut network, mut oracle) = Network::new(context.clone(), p2p_cfg);
 
         // Provide authorized peers
         //

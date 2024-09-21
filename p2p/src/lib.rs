@@ -34,7 +34,7 @@ pub trait Sender: Clone {
 
     /// Send a message to a set of recipients.
     fn send(
-        &self,
+        &mut self,
         recipients: Recipients,
         message: Bytes,
         priority: bool,

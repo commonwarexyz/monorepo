@@ -4,11 +4,17 @@ use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{select, Clock, Spawner};
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt, StreamExt,
+};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 use tracing::{debug, error};
 
 type Task = (
@@ -25,8 +31,8 @@ pub struct Network<E: Spawner + Rng + Clock> {
 
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
-    links: HashMap<PublicKey, HashMap<PublicKey, (Link, Arc<Semaphore>)>>,
-    agents: HashMap<PublicKey, mpsc::UnboundedSender<Message>>,
+    links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
+    agents: BTreeMap<PublicKey, mpsc::UnboundedSender<Message>>,
 }
 
 /// Describes a connection between two peers.
@@ -42,9 +48,6 @@ pub struct Link {
 
     /// Probability of a message being delivered successfully (in range [0,1]).
     pub success_rate: f64,
-
-    /// Maximum number of messages that can be in-flight at once before blocking.
-    pub capacity: usize,
 }
 
 /// Configuration for a `simulated` network.
@@ -56,14 +59,14 @@ pub struct Config {
 impl<E: Spawner + Rng + Clock> Network<E> {
     /// Create a new simulated network with a given context and configuration.
     pub fn new(context: E, cfg: Config) -> Self {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::unbounded();
         Self {
             context,
             cfg,
             sender,
             receiver,
             links: HashMap::new(),
-            agents: HashMap::new(),
+            agents: BTreeMap::new(),
         }
     }
 
@@ -71,7 +74,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     ///
     /// By default, the peer will not be linked to any other peers.
     pub fn register(&mut self, public_key: PublicKey) -> (Sender, Receiver) {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::unbounded();
         self.agents.insert(public_key.clone(), sender);
         (
             Sender::new(self.context.clone(), public_key, self.sender.clone()),
@@ -95,18 +98,17 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         if config.success_rate < 0.0 || config.success_rate > 1.0 {
             return Err(Error::InvalidSuccessRate(config.success_rate));
         }
-        let capacity = Arc::new(Semaphore::new(config.capacity));
         self.links
             .entry(sender)
             .or_default()
-            .insert(receiver, (config, capacity));
+            .insert(receiver, config);
         Ok(())
     }
 
     /// Run the simulated network.
     pub async fn run(mut self) {
         // Process messages
-        while let Some((origin, recipients, message, reply)) = self.receiver.recv().await {
+        while let Some((origin, recipients, message, reply)) = self.receiver.next().await {
             // Ensure message is valid
             if message.len() > self.cfg.max_message_size {
                 if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
@@ -117,14 +119,11 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             }
 
             // Collect recipients
-            let mut recipients = match recipients {
+            let recipients = match recipients {
                 Recipients::All => self.agents.keys().cloned().collect(),
                 Recipients::Some(keys) => keys,
                 Recipients::One(key) => vec![key],
             };
-
-            // Sort recipients to ensure same seed yields same latency/drop assignments
-            recipients.sort();
 
             // Send to all recipients
             let mut sent = Vec::new();
@@ -159,8 +158,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 };
 
                 // Apply link settings
-                let should_deliver = self.context.gen_bool(link.0.success_rate);
-                let delay = Normal::new(link.0.latency_mean, link.0.latency_stddev)
+                let should_deliver = self.context.gen_bool(link.success_rate);
+                let delay = Normal::new(link.latency_mean, link.latency_stddev)
                     .unwrap()
                     .sample(&mut self.context);
                 debug!("sending message to {}: delay={}ms", hex(&recipient), delay);
@@ -168,14 +167,12 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 // Send message
                 self.context.spawn({
                     let context = self.context.clone();
-                    let sender = sender.clone();
+                    let mut sender = sender.clone();
                     let recipient = recipient.clone();
                     let message = message.clone();
-                    let semaphore = link.1.clone();
-                    let acquired_sender = acquired_sender.clone();
+                    let mut acquired_sender = acquired_sender.clone();
                     async move {
-                        // Mark as sent as soon as acquire semaphore
-                        let _permit = semaphore.acquire().await.unwrap();
+                        // Mark as sent as soon as soon as execution starts
                         acquired_sender.send(()).await.unwrap();
 
                         // Apply delay to send (once link is not saturated)
@@ -194,7 +191,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                         }
 
                         // Send message
-                        if let Err(err) = sender.send((recipient.clone(), message)) {
+                        if let Err(err) = sender.send((recipient.clone(), message)).await {
                             // This can only happen if the receiver exited.
                             error!("failed to send to {}: {:?}", hex(&recipient), err);
                         }
@@ -207,7 +204,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             self.context.spawn(async move {
                 // Wait for semaphore to be acquired on all sends
                 for _ in 0..sent.len() {
-                    acquired_receiver.recv().await.unwrap();
+                    acquired_receiver.next().await.unwrap();
                 }
 
                 // Notify sender of successful sends
@@ -229,21 +226,20 @@ pub struct Sender {
 }
 
 impl Sender {
-    fn new(context: impl Spawner, me: PublicKey, sender: mpsc::UnboundedSender<Task>) -> Self {
+    fn new(context: impl Spawner, me: PublicKey, mut sender: mpsc::UnboundedSender<Task>) -> Self {
         // Listen for messages
-        let (high, mut high_receiver) = mpsc::unbounded_channel();
-        let (low, mut low_receiver) = mpsc::unbounded_channel();
+        let (high, mut high_receiver) = mpsc::unbounded();
+        let (low, mut low_receiver) = mpsc::unbounded();
         context.spawn(async move {
             loop {
-                tokio::select! {
-                    biased;
-                    task = high_receiver.recv() => {
-                        if let Err(err) = sender.send(task.unwrap()) {
+                select! {
+                    high_task = high_receiver.next() => {
+                        if let Err(err) = sender.send(high_task.unwrap()).await{
                             error!("failed to send high priority task: {:?}", err);
                         }
-                    }
-                    task = low_receiver.recv() => {
-                        if let Err(err) = sender.send(task.unwrap()) {
+                    },
+                    low_task = low_receiver.next() => {
+                        if let Err(err) = sender.send(low_task.unwrap()).await{
                             error!("failed to send low priority task: {:?}", err);
                         }
                     }
@@ -260,15 +256,16 @@ impl crate::Sender for Sender {
     type Error = Error;
 
     async fn send(
-        &self,
+        &mut self,
         recipients: Recipients,
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<PublicKey>, Error> {
         let (sender, receiver) = oneshot::channel();
-        let channel = if priority { &self.high } else { &self.low };
+        let mut channel = if priority { &self.high } else { &self.low };
         channel
             .send((self.me.clone(), recipients, message, sender))
+            .await
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)?
     }
@@ -283,6 +280,6 @@ impl crate::Receiver for Receiver {
     type Error = Error;
 
     async fn recv(&mut self) -> Result<Message, Error> {
-        self.receiver.recv().await.ok_or(Error::NetworkClosed)
+        self.receiver.next().await.ok_or(Error::NetworkClosed)
     }
 }

@@ -1,11 +1,30 @@
 //! BLS12-381 implementation of the `Scheme` trait.
+//!
+//! # Example
+//! ```rust
+//! use commonware_cryptography::{bls12381::Bls12381, Scheme};
+//! use rand::rngs::OsRng;
+//!
+//! // Generate a new private key
+//! let mut signer = Bls12381::new(&mut OsRng);
+//!
+//! // Create a message to sign
+//! let namespace = b"demo";
+//! let msg = b"hello, world!";
+//!
+//! // Sign the message
+//! let signature = signer.sign(namespace, msg);
+//!
+//! // Verify the signature
+//! assert!(Bls12381::verify(namespace, msg, &signer.me(), &signature));
+//! ```
 
 use super::primitives::{
     group::{self, Element, Scalar},
     ops,
 };
 use crate::{utils::payload, PublicKey, Scheme, Signature};
-use rand::{rngs::OsRng, SeedableRng};
+use rand::{CryptoRng, Rng, SeedableRng};
 
 /// BLS12-381 implementation of the `Scheme` trait.
 ///
@@ -20,9 +39,9 @@ pub struct Bls12381 {
 }
 
 impl Bls12381 {
-    /// Creates a new Bls12381 signer using randomness from the operating system.
-    pub fn new() -> Self {
-        let (private, public) = ops::keypair(&mut OsRng);
+    /// Creates a new Bls12381 signer.
+    pub fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
+        let (private, public) = ops::keypair(r);
         Self { private, public }
     }
 
@@ -32,12 +51,6 @@ impl Bls12381 {
         let mut public = group::Public::one();
         public.mul(&private);
         Some(Self { private, public })
-    }
-}
-
-impl Default for Bls12381 {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

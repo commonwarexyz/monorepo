@@ -74,7 +74,7 @@ impl<C: Scheme> Contributor<C> {
     async fn run_round(
         &mut self,
         previous: Option<&Output>,
-        sender: &impl Sender,
+        sender: &mut impl Sender,
         receiver: &mut impl Receiver,
     ) -> (u64, Option<Output>) {
         // Configure me
@@ -582,7 +582,7 @@ impl<C: Scheme> Contributor<C> {
         (round, output)
     }
 
-    pub async fn run(mut self, sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
         if self.rogue {
             warn!("running as rogue player");
         }
@@ -595,7 +595,7 @@ impl<C: Scheme> Contributor<C> {
         let mut previous = None;
         loop {
             let (round, output) = self
-                .run_round(previous.as_ref(), &sender, &mut receiver)
+                .run_round(previous.as_ref(), &mut sender, &mut receiver)
                 .await;
             match output {
                 None => {

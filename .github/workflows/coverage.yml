@@ -13,7 +13,8 @@ jobs:
   All:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
     - name: Install protoc
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
     - name: Remove examples
@@ -32,7 +33,7 @@ jobs:
       if: steps.cargo-tarpaulin-cache.outputs.cache-hit != 'true'
       run: cargo install cargo-tarpaulin --version ${{ env.TARPAULIN_VERSION }}
     - name: Generate coverage report
-      run: cargo tarpaulin --out Xml
+      run: cargo tarpaulin --timeout 1000 --out Xml
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
       with:

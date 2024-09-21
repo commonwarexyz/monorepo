@@ -26,8 +26,11 @@ pub struct Config<C: Scheme> {
     /// Registry for prometheus metrics.
     pub registry: Arc<Mutex<Registry>>,
 
+    /// Address to listen on.
+    pub listen: SocketAddr,
+
     /// Dialable address of the peer.
-    pub address: SocketAddr,
+    pub dialable: SocketAddr,
 
     /// Peers dialed on startup.
     pub bootstrappers: Vec<Bootstrapper>,
@@ -35,51 +38,22 @@ pub struct Config<C: Scheme> {
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
 
+    /// Maximum size allowed for messages over any connection.
+    ///
+    /// Messages larger than this size will be chunked.
+    pub max_message_size: usize,
+
     /// Message backlog allowed for internal actors.
     ///
     /// When there are more messages in the mailbox than this value, any actor
     /// sending a message will be blocked until the mailbox is processed.
     pub mailbox_size: usize,
 
-    /// Maximum size used for all messages sent over the wire.
-    ///
-    /// We use this to prevent malicious peers from sending us large messages
-    /// that would consume all of our memory.
-    ///
-    /// If a message is larger than this size, it will be chunked into parts
-    /// of this size or smaller.
-    ///
-    /// If this value is not synchronized across all connected peers,
-    /// chunks will be parsed incorrectly (any non-terminal chunk must be of ~this
-    /// size).
-    pub max_frame_length: usize,
-
     /// Time into the future that a timestamp can be and still be considered valid.
     pub synchrony_bound: Duration,
 
     /// Duration after which a handshake message is considered stale.
     pub max_handshake_age: Duration,
-
-    /// Duration after which to close the connection if the handshake is not completed.
-    pub handshake_timeout: Duration,
-
-    /// Duration after which to close the connection if no message is read.
-    pub read_timeout: Duration,
-
-    /// Duration after which to close the connection if a message cannot be written.
-    pub write_timeout: Duration,
-
-    /// Whether or not to disable Nagle's algorithm.
-    ///
-    /// The algorithm combines a series of small network packets into a single packet
-    /// before sending to reduce overhead of sending multiple small packets which might not
-    /// be efficient on slow, congested networks. However, to do so the algorithm introduces
-    /// a slight delay as it waits to accumulate more data. Latency-sensitive networks should
-    /// consider disabling it to send the packets as soon as possible to reduce latency.
-    ///
-    /// Note: Make sure that your compile target has and allows this configuration otherwise
-    /// panics or unexpected behaviours are possible.
-    pub tcp_nodelay: Option<bool>,
 
     /// Quota for connection attempts per peer (incoming or outgoing).
     pub allowed_connection_rate_per_peer: Quota,
@@ -127,24 +101,22 @@ impl<C: Scheme> Config<C> {
     pub fn recommended(
         crypto: C,
         registry: Arc<Mutex<Registry>>,
-        address: SocketAddr,
+        listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
+        max_message_size: usize,
     ) -> Self {
         Self {
             crypto,
             registry,
-            address,
+            listen,
+            dialable: listen,
             bootstrappers,
 
             allow_private_ips: false,
+            max_message_size,
             mailbox_size: 1_000,
-            max_frame_length: 1024 * 1024, // 1 MB
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
-            handshake_timeout: Duration::from_secs(5),
-            read_timeout: Duration::from_secs(60),
-            write_timeout: Duration::from_secs(30),
-            tcp_nodelay: None,
             allowed_connection_rate_per_peer: Quota::per_minute(NonZeroU32::new(1).unwrap()),
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
             dial_frequency: Duration::from_secs(60),
@@ -165,24 +137,22 @@ impl<C: Scheme> Config<C> {
     pub fn aggressive(
         crypto: C,
         registry: Arc<Mutex<Registry>>,
-        address: SocketAddr,
+        listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
+        max_message_size: usize,
     ) -> Self {
         Self {
             crypto,
             registry,
-            address,
+            listen,
+            dialable: listen,
             bootstrappers,
 
             allow_private_ips: true,
+            max_message_size,
             mailbox_size: 1_000,
-            max_frame_length: 1024 * 1024, // 1 MB
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
-            handshake_timeout: Duration::from_secs(5),
-            read_timeout: Duration::from_secs(10), // should be greater than gossip_bit_vec_frequency
-            write_timeout: Duration::from_secs(10),
-            tcp_nodelay: None,
             allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
             dial_frequency: Duration::from_secs(5),
@@ -199,24 +169,22 @@ impl<C: Scheme> Config<C> {
     pub fn test(
         crypto: C,
         registry: Arc<Mutex<Registry>>,
-        address: SocketAddr,
+        listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
+        max_message_size: usize,
     ) -> Self {
         Self {
             crypto,
             registry,
-            address,
+            listen,
+            dialable: listen,
             bootstrappers,
 
             allow_private_ips: true,
+            max_message_size,
             mailbox_size: 1_000,
-            max_frame_length: 128 * 1024, // 128 KB (more chunking)
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
-            handshake_timeout: Duration::from_secs(5),
-            read_timeout: Duration::from_secs(10), // should be greater than gossip_bit_vec_frequency
-            write_timeout: Duration::from_secs(10),
-            tcp_nodelay: None,
             allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
             dial_frequency: Duration::from_secs(1),

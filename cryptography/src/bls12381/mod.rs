@@ -85,7 +85,8 @@
 
 pub mod dkg;
 pub mod primitives;
-pub mod scheme;
+mod scheme;
+pub use scheme::{insecure_signer, Bls12381};
 
 #[cfg(test)]
 mod tests {
