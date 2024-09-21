@@ -42,5 +42,5 @@ runs:
         rm protoc.zip
       shell: bash
     - name: Add protoc to PATH
-      run: echo "~/protoc/bin" >> $GITHUB_PATH
+      run: echo "$HOME/protoc/bin" >> $GITHUB_PATH
       shell: bash
