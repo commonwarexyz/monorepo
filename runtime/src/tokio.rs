@@ -48,13 +48,12 @@ pub struct Config {
     /// We use this to prevent malicious peers from sending us large messages
     /// that would consume all of our memory.
     ///
-    /// If a message is larger than this size, it will be chunked into parts
-    /// of this size or smaller.
-    ///
     /// If this value is not synchronized across all connected peers,
     /// chunks will be parsed incorrectly (any non-terminal chunk must be of ~this
     /// size).
-    pub max_frame_length: usize,
+    ///
+    /// Users of this runtime can chunk messages of this size to send over the wire.
+    pub max_message_size: usize,
 
     /// Duration after which to close the connection if no message is read.
     pub read_timeout: Duration,
@@ -79,7 +78,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             threads: 2,
-            max_frame_length: 1024 * 1024, // 1 MB
+            max_message_size: 1024 * 1024, // 1 MB
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             tcp_nodelay: None,
@@ -198,7 +197,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
 
         // Create a new framed stream
         let context = self.clone();
-        let framed = Framed::new(stream, codec(self.executor.cfg.max_frame_length));
+        let framed = Framed::new(stream, codec(self.executor.cfg.max_message_size));
         let (sink, stream) = framed.split();
         Ok((
             Sink {
@@ -226,7 +225,7 @@ impl crate::Listener<Sink, Stream> for Listener {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
         }
-        let framed = Framed::new(stream, codec(self.context.executor.cfg.max_frame_length));
+        let framed = Framed::new(stream, codec(self.context.executor.cfg.max_message_size));
         let (sink, stream) = framed.split();
         let context = self.context.clone();
         Ok((

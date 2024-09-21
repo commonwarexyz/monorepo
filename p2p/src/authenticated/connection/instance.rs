@@ -14,7 +14,7 @@ use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use prost::Message;
 use rand::{CryptoRng, Rng};
 
-const CHUNK_PADDING: usize = 32 /* protobuf padding*/ + 12 /* chunk info */ + 16 /* encryption tag */;
+const CHUNK_PADDING: usize = 64 /* protobuf overhead */ + 12 /* chunk info */ + 16 /* encryption tag */;
 
 pub struct Instance<C: Scheme, Si: Sink, St: Stream> {
     config: Config<C>,
@@ -108,7 +108,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
 
     pub fn split(self) -> (usize, Sender<Si>, Receiver<St>) {
         (
-            self.config.max_frame_length - CHUNK_PADDING,
+            self.config.max_message_size - CHUNK_PADDING,
             Sender {
                 cipher: self.cipher.clone(),
                 sink: self.sink,

@@ -152,14 +152,18 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::authenticated::{Config, Network};
+//! use commonware_p2p::authenticated::{self, Network};
 //! use commonware_cryptography::{ed25519, Scheme};
-//! use commonware_runtime::{tokio::Executor, Spawner, Runner};
+//! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner};
 //! use governor::Quota;
 //! use prometheus_client::registry::Registry;
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //! use std::num::NonZeroU32;
 //! use std::sync::{Arc, Mutex};
+//!
+//! // Configure runtime
+//! let runtime_cfg = tokio::Config::default();
+//! let (runner, context) = Executor::init(runtime_cfg);
 //!
 //! // Generate identity
 //! //
@@ -183,18 +187,18 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-//! let config = Config::aggressive(
+//! let p2p_cfg = Config::aggressive(
 //!     signer.clone(),
 //!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,
+//!     runtime_cfg.max_frame_length,
 //! );
 //!
-//! // Configure runtime
-//! let (runner, context) = Executor::init(4);
+//! // Start runtime
 //! runner.start(async move {
 //!     // Initialize network
-//!     let (mut network, oracle) = Network::new(context.clone(), config);
+//!     let (mut network, mut oracle) = Network::new(context.clone(), p2p_cfg);
 //!
 //!     // Register authorized peers
 //!     //

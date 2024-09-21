@@ -147,7 +147,7 @@ impl<
         // Start listener
         let connection = connection::Config {
             crypto: self.cfg.crypto,
-            max_frame_length: self.cfg.max_frame_length,
+            max_message_size: self.cfg.max_message_size,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
         };
