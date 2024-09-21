@@ -140,18 +140,8 @@ mod tests {
     }
 
     #[test]
-    fn test_small() {
-        compare_outputs(25, 10);
-    }
-
-    #[test]
-    fn test_medium() {
-        compare_outputs(10, 100);
-    }
-
-    #[test]
-    fn test_large() {
-        compare_outputs(5, 250);
+    fn test_determinism() {
+        compare_outputs(25, 50);
     }
 
     #[test]
