@@ -187,12 +187,12 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-//! let p2p_cfg = Config::aggressive(
+//! let p2p_cfg = authenticated::Config::aggressive(
 //!     signer.clone(),
 //!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,
-//!     runtime_cfg.max_frame_length,
+//!     runtime_cfg.max_message_size,
 //! );
 //!
 //! // Start runtime
