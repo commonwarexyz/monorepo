@@ -7,7 +7,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::{utils::hex, Scheme};
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
+use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
@@ -140,7 +140,7 @@ impl<
     }
 
     pub async fn run(
-        self,
+        mut self,
         mut tracker: tracker::Mailbox<E>,
         mut supervisor: spawner::Mailbox<E, C, Si, St>,
     ) {
@@ -152,7 +152,10 @@ impl<
             self.dial_peers(&mut tracker, &mut supervisor).await;
 
             // Ensure we reset the timer with a new jitter
-            let jitter = Jitter::up_to(self.dial_frequency);
+            let jitter_millis = self
+                .context
+                .gen_range(0..self.dial_frequency.as_millis() as u64);
+            let jitter = Duration::from_millis(jitter_millis);
             next_update = self.context.current().add(jitter + self.dial_frequency);
         }
     }

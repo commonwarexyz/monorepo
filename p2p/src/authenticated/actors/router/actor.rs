@@ -117,7 +117,14 @@ impl Actor {
                             }
                         }
                         Recipients::All => {
-                            for (recipient, messenger) in self.connections.iter_mut() {
+                            // Get connected peers
+                            let mut connected: Vec<PublicKey> =
+                                self.connections.keys().cloned().collect();
+                            connected.sort();
+
+                            // Send to all connected peers
+                            for recipient in connected {
+                                let messenger = self.connections.get_mut(&recipient).unwrap();
                                 if messenger
                                     .content(channel, message.clone(), priority)
                                     .await
@@ -127,7 +134,7 @@ impl Actor {
                                 } else {
                                     self.messages_dropped
                                         .get_or_create(&metrics::Message::new_chunk(
-                                            recipient, channel,
+                                            &recipient, channel,
                                         ))
                                         .inc();
                                 }
