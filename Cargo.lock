@@ -445,6 +445,7 @@ dependencies = [
  "bytes",
  "futures",
  "rand",
+ "sha2 0.10.8",
  "thiserror",
  "tokio",
  "tokio-util",
