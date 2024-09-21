@@ -31,7 +31,8 @@ use std::{
     collections::{BinaryHeap, HashMap},
     future::Future,
     mem::replace,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    ops::Range,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
@@ -39,6 +40,10 @@ use std::{
 };
 use tracing::trace;
 
+/// Range of ephemeral ports assigned to dialers.
+const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
+
+/// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
     hash: Mutex<String>,
 }
@@ -68,41 +73,44 @@ impl Auditor {
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn dial(&self, address: SocketAddr) {
+    fn dial(&self, dialer: SocketAddr, dialee: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"dial");
-        hasher.update(address.to_string().as_bytes());
+        hasher.update(dialer.to_string().as_bytes());
+        hasher.update(dialee.to_string().as_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn accept(&self, me: SocketAddr, dialer: SocketAddr) {
+    fn accept(&self, dialee: SocketAddr, dialer: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"accept");
-        hasher.update(me.to_string().as_bytes());
+        hasher.update(dialee.to_string().as_bytes());
         hasher.update(dialer.to_string().as_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn send(&self, peer: SocketAddr, message: Bytes) {
+    fn send(&self, sender: SocketAddr, receiver: SocketAddr, message: Bytes) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"send");
-        hasher.update(peer.to_string().as_bytes());
+        hasher.update(sender.to_string().as_bytes());
+        hasher.update(receiver.to_string().as_bytes());
         hasher.update(&message);
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn recv(&self, peer: SocketAddr, message: Bytes) {
+    fn recv(&self, receiver: SocketAddr, sender: SocketAddr, message: Bytes) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"recv");
-        hasher.update(peer.to_string().as_bytes());
+        hasher.update(receiver.to_string().as_bytes());
+        hasher.update(sender.to_string().as_bytes());
         hasher.update(&message);
         *hash = format!("{:x}", hasher.finalize());
     }
@@ -374,68 +382,6 @@ impl crate::Runner for Runner {
     }
 }
 
-type Dialable = mpsc::UnboundedSender<(
-    SocketAddr,
-    mpsc::UnboundedSender<Bytes>,   // Dialee -> Dialer
-    mpsc::UnboundedReceiver<Bytes>, // Dialer -> Dialee
-)>;
-
-struct Networking {
-    auditor: Arc<Auditor>,
-    listeners: Mutex<HashMap<SocketAddr, Dialable>>,
-}
-
-impl Networking {
-    fn new(auditor: Arc<Auditor>) -> Self {
-        Self {
-            auditor,
-            listeners: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
-        self.auditor.bind(socket);
-        let mut listeners = self.listeners.lock().unwrap();
-        if listeners.contains_key(&socket) {
-            return Err(Error::BindFailed);
-        }
-        let (sender, receiver) = mpsc::unbounded();
-        listeners.insert(socket, sender.clone());
-        Ok(Listener {
-            auditor: self.auditor.clone(),
-            address: socket,
-            listener: receiver,
-        })
-    }
-
-    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
-        self.auditor.dial(socket);
-        let mut sender = {
-            let listeners = self.listeners.lock().unwrap();
-            let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
-            sender.clone()
-        };
-        let (dialer_sender, dialer_receiver) = mpsc::unbounded();
-        let (dialee_sender, dialee_receiver) = mpsc::unbounded();
-        sender
-            .send((socket, dialer_sender, dialee_receiver))
-            .await
-            .map_err(|_| Error::ConnectionFailed)?;
-        Ok((
-            Sink {
-                auditor: self.auditor.clone(),
-                peer: socket,
-                sender: dialee_sender,
-            },
-            Stream {
-                auditor: self.auditor.clone(),
-                peer: socket,
-                receiver: dialer_receiver,
-            },
-        ))
-    }
-}
-
 /// Implementation of [`crate::Spawner`] and [`crate::Clock`]
 /// for the `deterministic` runtime.
 #[derive(Clone)]
@@ -537,6 +483,94 @@ impl crate::Clock for Context {
     }
 }
 
+type Dialable = mpsc::UnboundedSender<(
+    SocketAddr,
+    mpsc::UnboundedSender<Bytes>,   // Dialee -> Dialer
+    mpsc::UnboundedReceiver<Bytes>, // Dialer -> Dialee
+)>;
+
+struct Networking {
+    auditor: Arc<Auditor>,
+    ephemeral: Mutex<u16>,
+    listeners: Mutex<HashMap<SocketAddr, Dialable>>,
+}
+
+impl Networking {
+    fn new(auditor: Arc<Auditor>) -> Self {
+        Self {
+            auditor,
+            ephemeral: Mutex::new(EPHEMERAL_PORT_RANGE.start),
+            listeners: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
+        self.auditor.bind(socket);
+
+        // Ensure the port is not in the ephemeral range
+        if EPHEMERAL_PORT_RANGE.contains(&socket.port()) {
+            return Err(Error::BindFailed);
+        }
+
+        // Ensure the port is not already bound
+        let mut listeners = self.listeners.lock().unwrap();
+        if listeners.contains_key(&socket) {
+            return Err(Error::BindFailed);
+        }
+
+        // Bind the socket
+        let (sender, receiver) = mpsc::unbounded();
+        listeners.insert(socket, sender.clone());
+        Ok(Listener {
+            auditor: self.auditor.clone(),
+            address: socket,
+            listener: receiver,
+        })
+    }
+
+    async fn dial(&self, socket: SocketAddr) -> Result<(Sink, Stream), Error> {
+        // Assign dialer a port from the ephemeral range
+        let dialer = {
+            let mut ephemeral = self.ephemeral.lock().unwrap();
+            let dialer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), *ephemeral);
+            *ephemeral = ephemeral
+                .checked_add(1)
+                .expect("ephemeral port range exhausted");
+            dialer
+        };
+        self.auditor.dial(dialer, socket);
+
+        // Get dialee
+        let mut sender = {
+            let listeners = self.listeners.lock().unwrap();
+            let sender = listeners.get(&socket).ok_or(Error::ConnectionFailed)?;
+            sender.clone()
+        };
+
+        // Construct connection
+        let (dialer_sender, dialer_receiver) = mpsc::unbounded();
+        let (dialee_sender, dialee_receiver) = mpsc::unbounded();
+        sender
+            .send((dialer, dialer_sender, dialee_receiver))
+            .await
+            .map_err(|_| Error::ConnectionFailed)?;
+        Ok((
+            Sink {
+                auditor: self.auditor.clone(),
+                me: dialer,
+                peer: socket,
+                sender: dialee_sender,
+            },
+            Stream {
+                auditor: self.auditor.clone(),
+                me: dialer,
+                peer: socket,
+                receiver: dialer_receiver,
+            },
+        ))
+    }
+}
+
 impl crate::Network<Listener, Sink, Stream> for Context {
     async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         self.networking.bind(socket)
@@ -565,11 +599,13 @@ impl crate::Listener<Sink, Stream> for Listener {
             socket,
             Sink {
                 auditor: self.auditor.clone(),
+                me: self.address,
                 peer: socket,
                 sender,
             },
             Stream {
                 auditor: self.auditor.clone(),
+                me: self.address,
                 peer: socket,
                 receiver,
             },
@@ -579,19 +615,21 @@ impl crate::Listener<Sink, Stream> for Listener {
 
 pub struct Sink {
     auditor: Arc<Auditor>,
+    me: SocketAddr,
     peer: SocketAddr,
     sender: mpsc::UnboundedSender<Bytes>,
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
-        self.auditor.send(self.peer, msg.clone());
+        self.auditor.send(self.me, self.peer, msg.clone());
         self.sender.send(msg).await.map_err(|_| Error::WriteFailed)
     }
 }
 
 pub struct Stream {
     auditor: Arc<Auditor>,
+    me: SocketAddr,
     peer: SocketAddr,
     receiver: mpsc::UnboundedReceiver<Bytes>,
 }
@@ -599,7 +637,7 @@ pub struct Stream {
 impl crate::Stream for Stream {
     async fn recv(&mut self) -> Result<Bytes, Error> {
         let bytes = self.receiver.next().await.ok_or(Error::ReadFailed)?;
-        self.auditor.recv(self.peer, bytes.clone());
+        self.auditor.recv(self.me, self.peer, bytes.clone());
         Ok(bytes)
     }
 }

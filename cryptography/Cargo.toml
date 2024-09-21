@@ -13,7 +13,6 @@ documentation = "https://docs.rs/commonware-cryptography"
 [dependencies]
 bytes = { workspace = true }
 thiserror = { workspace = true }
-sha2 = { workspace = true }
 rand = { workspace = true }
 ed25519-consensus = "2.1.0"
 blst = { version = "0.3.13", features = ["no-threads"] }
