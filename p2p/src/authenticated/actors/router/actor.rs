@@ -124,7 +124,7 @@ impl Actor {
                                     .await
                                     .is_ok()
                                 {
-                                    return;
+                                    sent.push(recipient.clone());
                                 } else {
                                     self.messages_dropped
                                         .get_or_create(&metrics::Message::new_chunk(
@@ -132,7 +132,6 @@ impl Actor {
                                         ))
                                         .inc();
                                 }
-                                sent.push(recipient.clone());
                             }
                         }
                     }
