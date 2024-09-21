@@ -135,7 +135,7 @@ pub struct Actor<E: Spawner + Rng, C: Scheme> {
 
     sender: mpsc::Sender<Message<E>>,
     receiver: mpsc::Receiver<Message<E>>,
-    peers: HashMap<PublicKey, AddressCount>,
+    peers: BTreeMap<PublicKey, AddressCount>,
     sets: BTreeMap<u64, PeerSet>,
     connections_rate_limiter: DefaultKeyedRateLimiter<PublicKey>,
     connections: HashSet<PublicKey>,
@@ -168,7 +168,7 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
         };
 
         // Register bootstrappers
-        let mut peers = HashMap::new();
+        let mut peers = BTreeMap::new();
         for (peer, address) in cfg.bootstrappers.into_iter() {
             if peer == cfg.crypto.me() {
                 continue;
@@ -318,13 +318,12 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
 
     fn handle_dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation<E>)> {
         // Collect unreserved peers
-        let mut available_peers: Vec<_> = self
+        let available_peers: Vec<_> = self
             .peers
             .keys()
             .filter(|peer| !self.connections.contains(*peer))
             .cloned()
             .collect();
-        available_peers.sort();
 
         // Iterate over available peers
         let mut reserved = Vec::new();

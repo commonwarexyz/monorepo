@@ -10,12 +10,12 @@ use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use tracing::debug;
 
 pub struct Actor {
     control: mpsc::Receiver<Message>,
-    connections: HashMap<PublicKey, peer::Relay>,
+    connections: BTreeMap<PublicKey, peer::Relay>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
@@ -38,7 +38,7 @@ impl Actor {
         (
             Self {
                 control: control_receiver,
-                connections: HashMap::new(),
+                connections: BTreeMap::new(),
                 messages_dropped,
             },
             Mailbox::new(control_sender.clone()),
@@ -117,14 +117,8 @@ impl Actor {
                             }
                         }
                         Recipients::All => {
-                            // Get connected peers
-                            let mut connected: Vec<PublicKey> =
-                                self.connections.keys().cloned().collect();
-                            connected.sort();
-
                             // Send to all connected peers
-                            for recipient in connected {
-                                let messenger = self.connections.get_mut(&recipient).unwrap();
+                            for (recipient, messenger) in self.connections.iter_mut() {
                                 if messenger
                                     .content(channel, message.clone(), priority)
                                     .await
@@ -134,7 +128,7 @@ impl Actor {
                                 } else {
                                     self.messages_dropped
                                         .get_or_create(&metrics::Message::new_chunk(
-                                            &recipient, channel,
+                                            recipient, channel,
                                         ))
                                         .inc();
                                 }

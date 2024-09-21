@@ -27,7 +27,10 @@ mod tests {
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
-    use std::{collections::HashMap, time::Duration};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        time::Duration,
+    };
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         // Create simulated network
@@ -41,7 +44,7 @@ mod tests {
             );
 
             // Register agents
-            let mut agents = HashMap::new();
+            let mut agents = BTreeMap::new();
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
                 let pk = insecure_signer(i as u64).me();
@@ -88,8 +91,7 @@ mod tests {
                 let mut context = context.clone();
                 async move {
                     // Sort agents for deterministic output
-                    let mut keys = agents.keys().collect::<Vec<_>>();
-                    keys.sort();
+                    let keys = agents.keys().collect::<Vec<_>>();
 
                     // Send messages
                     loop {

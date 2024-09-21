@@ -11,7 +11,10 @@ use futures::{
 };
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 use tracing::{debug, error};
 
 type Task = (
@@ -29,7 +32,7 @@ pub struct Network<E: Spawner + Rng + Clock> {
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
     links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
-    agents: HashMap<PublicKey, mpsc::UnboundedSender<Message>>,
+    agents: BTreeMap<PublicKey, mpsc::UnboundedSender<Message>>,
 }
 
 /// Describes a connection between two peers.
@@ -63,7 +66,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             sender,
             receiver,
             links: HashMap::new(),
-            agents: HashMap::new(),
+            agents: BTreeMap::new(),
         }
     }
 
@@ -116,14 +119,11 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             }
 
             // Collect recipients
-            let mut recipients = match recipients {
+            let recipients = match recipients {
                 Recipients::All => self.agents.keys().cloned().collect(),
                 Recipients::Some(keys) => keys,
                 Recipients::One(key) => vec![key],
             };
-
-            // Sort recipients to ensure same seed yields same latency/drop assignments
-            recipients.sort();
 
             // Send to all recipients
             let mut sent = Vec::new();
