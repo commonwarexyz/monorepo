@@ -25,8 +25,7 @@
 
 use crate::{utils::payload, PublicKey, Scheme, Signature};
 use ed25519_consensus;
-use rand::rngs::OsRng;
-use rand::{Rng, SeedableRng};
+use rand::{CryptoRng, Rng, SeedableRng};
 
 const SECRET_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
@@ -40,9 +39,9 @@ pub struct Ed25519 {
 }
 
 impl Ed25519 {
-    /// Creates a new Ed25519 signer using randomness from the operating system.
-    pub fn new() -> Self {
-        let signer = ed25519_consensus::SigningKey::new(OsRng);
+    /// Creates a new Ed25519 signer.
+    pub fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
+        let signer = ed25519_consensus::SigningKey::new(r);
         let verifier = signer.verification_key();
         Self {
             signer,
@@ -58,12 +57,6 @@ impl Ed25519 {
             signer,
             verifier: verifier.to_bytes().to_vec().into(),
         }
-    }
-}
-
-impl Default for Ed25519 {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
