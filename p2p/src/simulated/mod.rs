@@ -29,9 +29,9 @@ mod tests {
     use rand::Rng;
     use std::{collections::HashMap, time::Duration};
 
-    fn simulate_messages(seed: u64, size: usize) -> Vec<usize> {
+    fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         // Create simulated network
-        let (runner, context) = Executor::init(seed, Duration::from_millis(1));
+        let (runner, context, auditor) = Executor::init(seed, Duration::from_millis(1));
         runner.start(async move {
             let mut network = network::Network::new(
                 context.clone(),
@@ -119,7 +119,7 @@ mod tests {
             for _ in 0..size {
                 results.push(seen_receiver.next().await.unwrap());
             }
-            results
+            (auditor.state(), results)
         })
     }
 
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn test_invalid_message() {
-        let (runner, mut context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, mut context, _) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create simulated network
             let mut network = network::Network::new(

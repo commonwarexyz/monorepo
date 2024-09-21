@@ -256,7 +256,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519, utils::hex, Scheme};
+    use commonware_cryptography::{ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use governor::Quota;
     use prometheus_client::registry::Registry;
@@ -268,47 +268,14 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::{info, warn};
-    use tracing_subscriber::fmt::MakeWriter;
-
-    struct VecWriter {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl VecWriter {
-        fn new(buffer: Arc<Mutex<Vec<u8>>>) -> Self {
-            Self { buffer }
-        }
-    }
-
-    impl std::io::Write for VecWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.buffer.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for VecWriter {
-        type Writer = Self;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            VecWriter {
-                buffer: Arc::clone(&self.buffer),
-            }
-        }
-    }
 
     /// Test connectivity between `n` peers.
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
-    fn run_network(base_port: u16, n: usize) {
+    fn run_network(base_port: u16, n: usize) -> String {
         // Initialze runtime
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, context, auditor) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -415,33 +382,13 @@ mod tests {
                 waiter.await.unwrap();
             }
         });
+        auditor.state()
     }
 
     #[test]
     fn test_determinism() {
-        // Capture logs
-        let log_buffer = Arc::new(Mutex::new(Vec::new()));
-        let log_writer = VecWriter::new(log_buffer.clone());
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(log_writer)
-            .without_time()
-            .init();
-
-        // Run first iteration
-        run_network(3000, 5);
-        let logs1 = {
-            let mut logs = log_buffer.lock().unwrap();
-            logs.drain(..).collect::<Vec<_>>()
-        };
-
-        // Run second iteration
-        run_network(3000, 5);
-        let logs2 = {
-            let mut logs = log_buffer.lock().unwrap();
-            logs.drain(..).collect::<Vec<_>>()
-        };
-        assert_eq!(logs1, logs2);
+        let state = run_network(3000, 5);
+        assert_eq!(state, run_network(3000, 5));
     }
 
     #[test]
@@ -451,7 +398,7 @@ mod tests {
 
     fn test_chunking(base_port: u16, compression: Option<u8>) {
         // Initialize runtime
-        let (runner, mut context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, mut context, _) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
             const N: usize = 2;
@@ -519,16 +466,15 @@ mod tests {
                             // Loop until success
                             let recipient = Recipients::One(msg_recipient);
                             loop {
-                                let count = sender
+                                if sender
                                     .send(recipient.clone(), msg.clone(), true)
                                     .await
                                     .unwrap()
-                                    .len();
-                                if count == 1 {
-                                    warn!("send message");
+                                    .len()
+                                    == 1
+                                {
                                     break;
                                 }
-                                warn!("send message failed: {}", count);
 
                                 // Sleep and try again (avoid busy loop)
                                 context.sleep(Duration::from_millis(100)).await;
@@ -537,8 +483,6 @@ mod tests {
                             // Ensure message equals sender identity
                             let (sender, message) = receiver.recv().await.unwrap();
                             assert_eq!(sender, msg_sender);
-
-                            info!("received message from {}", hex(&sender));
 
                             // Ensure message equals sent message
                             assert_eq!(message.len(), msg.len());
@@ -573,7 +517,7 @@ mod tests {
 
     fn test_message_too_large(base_port: u16, compression: Option<u8>) {
         // Initialize runtime
-        let (runner, mut context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, mut context, _) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
             const N: usize = 2;

@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn test_handshake_create_verify() {
         // Initialize runtime
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create participants
             let mut sender = ed25519::insecure_signer(0);

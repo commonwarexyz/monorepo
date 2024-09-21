@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn test_reserve_peer() {
         // Create actor
-        let (runner, context) = Executor::init(0, Duration::from_millis(1));
+        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
         let cfg = test_config(ed25519::insecure_signer(0), Vec::new());
         runner.start(async move {
             let (actor, mut mailbox, mut oracle) = Actor::new(context.clone(), cfg);
