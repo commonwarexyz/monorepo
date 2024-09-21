@@ -60,13 +60,12 @@ impl Actor {
                 .await
                 .is_ok()
             {
-                return;
+                sent.push(recipient.clone());
             } else {
                 self.messages_dropped
                     .get_or_create(&metrics::Message::new_chunk(recipient, channel))
                     .inc();
             }
-            sent.push(recipient.clone());
         } else {
             self.messages_dropped
                 .get_or_create(&metrics::Message::new_chunk(recipient, channel))

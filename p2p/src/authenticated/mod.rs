@@ -268,7 +268,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::info;
+    use tracing::{info, warn};
 
     /// Test connectivity between `n` peers.
     ///
@@ -463,7 +463,7 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                let network_handler = context.spawn(network.run());
+                context.spawn(network.run());
 
                 // Send/Recieve messages
                 let msg = Bytes::from(msg.clone());
@@ -476,15 +476,16 @@ mod tests {
                             // Loop until success
                             let recipient = Recipients::One(msg_recipient);
                             loop {
-                                if sender
+                                let count = sender
                                     .send(recipient.clone(), msg.clone(), true)
                                     .await
                                     .unwrap()
-                                    .len()
-                                    == 1
-                                {
+                                    .len();
+                                if count == 1 {
+                                    warn!("send message");
                                     break;
                                 }
+                                warn!("send message failed: {}", count);
 
                                 // Sleep and try again (avoid busy loop)
                                 context.sleep(Duration::from_millis(100)).await;
@@ -503,9 +504,6 @@ mod tests {
                                 assert_eq!(byte1, byte2, "byte {} mismatch", i);
                             }
                         }
-
-                        // Shutdown network
-                        network_handler.abort();
                     }
                 });
 

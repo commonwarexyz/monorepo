@@ -8,11 +8,12 @@ use crate::authenticated::{
 use bytes::BytesMut;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_runtime::{select, Clock, Handle, Sink, Spawner, Stream};
-use futures::{channel::mpsc, try_join, SinkExt, StreamExt};
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{DefaultDirectRateLimiter, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
+use tracing::{info, warn};
 
 pub struct Actor<E: Spawner + Clock> {
     context: E,
@@ -98,6 +99,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
                     }
                 })),
             };
+            info!("Sending chunk {}/{} to {}", part, total_parts, hex(peer));
             sender.send(msg).await.map_err(Error::SendFailed)?;
             sent_messages
                 .get_or_create(&metrics::Message::new_chunk(peer, channel))
@@ -324,18 +326,21 @@ impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
         // Wait for one of the handlers to finish
         //
         // It is only possible for a handler to exit if there is an error.
-        let result = try_join!(&mut send_handler, &mut receive_handler);
-
-        // Ensure both handlers are aborted when one of them exits
-        send_handler.abort();
-        receive_handler.abort();
-
-        // Handle the join of handlers
-        match result {
-            Ok((first, second)) => match first {
-                Ok(_) => second.unwrap_err(),
-                Err(e) => e,
+        let result = select! {
+            send_result = &mut send_handler => {
+                receive_handler.abort();
+                warn!("send_handler exited: {:?}", send_result);
+                send_result
             },
+            receive_result = &mut receive_handler => {
+                send_handler.abort();
+                receive_result
+            }
+        };
+
+        // Parse error
+        match result {
+            Ok(e) => e.unwrap_err(),
             Err(e) => Error::UnexpectedFailure(e),
         }
     }
