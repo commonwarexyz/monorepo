@@ -336,7 +336,7 @@ mod tests {
                 // Register basic application
                 let (mut sender, mut receiver) = network.register(
                     0,
-                    Quota::per_second(NonZeroU32::new(2).unwrap()),
+                    Quota::per_second(NonZeroU32::new(1).unwrap()), // Ensure we hit the rate limit
                     1_024,
                     128,
                     None,
