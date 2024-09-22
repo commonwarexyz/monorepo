@@ -90,12 +90,6 @@ impl<
         for (peer, address, reservation) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
             // want to block the loop)
-            //
-            // Check will invoke the rate limiter if there is room to dial, so we don't
-            // need to invoke until_ready below.
-            //
-            // If we hit this check, we will count as a dial attempt for the peer. This isn't
-            // ideal but it shouldn't end up being a problem in practice (we'll eventually redial).
             if self.dial_limiter.check().is_err() {
                 debug!("dial rate limit exceeded");
                 break;

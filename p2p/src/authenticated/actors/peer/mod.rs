@@ -20,6 +20,7 @@ pub struct Config {
 
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
+    pub rate_limited: Family<metrics::Message, Counter>,
 }
 
 #[derive(Error, Debug)]

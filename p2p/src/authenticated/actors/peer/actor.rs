@@ -29,6 +29,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
+    rate_limited: Family<metrics::Message, Counter>,
 
     // When reservation goes out-of-scope, the tracker will be notified.
     _reservation: tracker::Reservation<E>,
@@ -52,6 +53,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                 low: low_receiver,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
+                rate_limited: cfg.rate_limited,
                 _reservation: reservation,
             },
             Relay::new(low_sender, high_sender),
@@ -220,7 +222,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 .inc();
 
                             // Ensure peer is not spamming us with bit vectors
-                            bit_vec_rate_limiter.until_ready().await;
+                            match bit_vec_rate_limiter.check() {
+                                Ok(_) => {}
+                                Err(negative) => {
+                                    self.rate_limited
+                                        .get_or_create(&metrics::Message::new_bit_vec(&peer))
+                                        .inc();
+                                    let wait = negative.wait_time_from(context.now());
+                                    context.sleep(wait).await;
+                                }
+                            }
 
                             // Gather useful peers
                             tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
@@ -231,7 +242,16 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 .inc();
 
                             // Ensure peer is not spamming us with peer messages
-                            peers_rate_limiter.until_ready().await;
+                            match peers_rate_limiter.check() {
+                                Ok(_) => {}
+                                Err(negative) => {
+                                    self.rate_limited
+                                        .get_or_create(&metrics::Message::new_peers(&peer))
+                                        .inc();
+                                    let wait = negative.wait_time_from(context.now());
+                                    context.sleep(wait).await;
+                                }
+                            }
 
                             // Send peers to tracker
                             tracker.peers(peers, self.mailbox.clone()).await;
@@ -249,7 +269,19 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 continue;
                             }
                             let (rate_limiter, max_size) = entry.unwrap();
-                            rate_limiter.until_ready().await;
+                            match rate_limiter.check() {
+                                Ok(_) => {}
+                                Err(negative) => {
+                                    self.rate_limited
+                                        .get_or_create(&metrics::Message::new_chunk(
+                                            &peer,
+                                            chunk.channel,
+                                        ))
+                                        .inc();
+                                    let wait = negative.wait_time_from(context.now());
+                                    context.sleep(wait).await;
+                                }
+                            }
 
                             // Ensure messasge is not too large
                             let chunk_len = chunk.content.len();
