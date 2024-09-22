@@ -499,15 +499,121 @@ mod tests {
         run_network(runner, context, cfg.max_message_size, 3000, 50, Mode::One);
     }
 
-    fn test_chunking(compression: Option<u8>) {
-        // Initialize runtime
+    #[test]
+    fn test_multi_index_oracle() {
+        // Configure test
         let base_port = 3000;
+        let n: usize = 100;
+
+        // Initialize runtime
+        let (runner, context, _) = deterministic::Executor::init(0, Duration::from_millis(1));
+        runner.start(async move {
+            // Create peers
+            let mut peers = Vec::new();
+            for i in 0..n {
+                peers.push(ed25519::insecure_signer(i as u64));
+            }
+            let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+
+            // Create networks
+            let mut waiters = Vec::new();
+            for (i, peer) in peers.iter().enumerate() {
+                // Derive port
+                let port = base_port + i as u16;
+
+                // Create bootstrappers
+                let mut bootstrappers = Vec::new();
+                if i > 0 {
+                    bootstrappers.push((
+                        addresses[0].clone(),
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                    ));
+                }
+
+                // Create network
+                let signer = peer.clone();
+                let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+                let config = Config::test(
+                    signer.clone(),
+                    registry,
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                    bootstrappers,
+                    1_024 * 1_024, // 1MB
+                );
+                let (mut network, mut oracle) = Network::new(context.clone(), config);
+
+                // Register peers at separate indices
+                oracle.register(0, vec![addresses[0].clone()]).await;
+                oracle
+                    .register(1, vec![addresses[1].clone(), addresses[2].clone()])
+                    .await;
+                oracle
+                    .register(2, addresses.iter().skip(2).cloned().collect())
+                    .await;
+
+                // Register basic application
+                let (mut sender, mut receiver) = network.register(
+                    0,
+                    Quota::per_second(NonZeroU32::new(10).unwrap()),
+                    1_024 * 1_024, // 1MB
+                    128,
+                    None,
+                );
+
+                // Wait to connect to all peers, and then send messages to everyone
+                context.spawn(network.run());
+
+                // Send/Recieve messages
+                let handler = context.spawn({
+                    let context = context.clone();
+                    async move {
+                        if i == 0 {
+                            // Loop until success
+                            let msg = signer.me();
+                            loop {
+                                if sender
+                                    .send(Recipients::All, msg.clone(), true)
+                                    .await
+                                    .unwrap()
+                                    .len()
+                                    == n - 1
+                                {
+                                    break;
+                                }
+
+                                // Sleep and try again (avoid busy loop)
+                                context.sleep(Duration::from_millis(100)).await;
+                            }
+                        } else {
+                            // Ensure message equals sender identity
+                            let (sender, message) = receiver.recv().await.unwrap();
+                            assert_eq!(sender, message);
+                        }
+                    }
+                });
+
+                // Add to waiters
+                waiters.push(handler);
+            }
+
+            // Wait for waiters to finish (receiver before sender)
+            for waiter in waiters.into_iter().rev() {
+                waiter.await.unwrap();
+            }
+        });
+    }
+
+    fn test_chunking(compression: Option<u8>) {
+        // Configure test
+        let base_port = 3000;
+        let n: usize = 2;
+
+        // Initialize runtime
         let (runner, mut context, _) = deterministic::Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
-            const N: usize = 2;
             let mut peers = Vec::new();
-            for i in 0..N {
+            for i in 0..n {
                 peers.push(ed25519::insecure_signer(i as u64));
             }
             let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
@@ -619,14 +725,16 @@ mod tests {
     }
 
     fn test_message_too_large(compression: Option<u8>) {
-        // Initialize runtime
+        // Configure test
         let base_port = 3000;
+        let n: usize = 2;
+
+        // Initialize runtime
         let (runner, mut context, _) = deterministic::Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
-            const N: usize = 2;
             let mut peers = Vec::new();
-            for i in 0..N {
+            for i in 0..n {
                 peers.push(ed25519::insecure_signer(i as u64));
             }
             let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
