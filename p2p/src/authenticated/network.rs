@@ -156,6 +156,7 @@ impl<
         let listener = listener::Actor::new(
             self.context.clone(),
             listener::Config {
+                registry: self.cfg.registry.clone(),
                 address: self.cfg.listen,
                 connection: connection.clone(),
                 allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,

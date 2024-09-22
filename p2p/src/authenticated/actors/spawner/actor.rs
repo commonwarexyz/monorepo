@@ -27,6 +27,7 @@ pub struct Actor<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
+    rate_limited: Family<metrics::Message, Counter>,
 }
 
 impl<
@@ -39,6 +40,7 @@ impl<
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C, Si, St>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
+        let rate_limited = Family::<metrics::Message, Counter>::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
             registry.register("messages_sent", "messages sent", sent_messages.clone());
@@ -46,6 +48,11 @@ impl<
                 "messages_received",
                 "messages received",
                 received_messages.clone(),
+            );
+            registry.register(
+                "messages_rate_limited",
+                "messages rate limited",
+                rate_limited.clone(),
             );
         }
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
@@ -60,6 +67,7 @@ impl<
                 receiver,
                 sent_messages,
                 received_messages,
+                rate_limited,
             },
             Mailbox::new(sender),
         )
@@ -76,6 +84,7 @@ impl<
                     // Clone required variables
                     let sent_messages = self.sent_messages.clone();
                     let received_messages = self.received_messages.clone();
+                    let rate_limited = self.rate_limited.clone();
                     let tracker = tracker.clone();
                     let mut router = router.clone();
 
@@ -102,6 +111,7 @@ impl<
                                 peer::Config {
                                     sent_messages,
                                     received_messages,
+                                    rate_limited,
                                     mailbox_size: self.mailbox_size,
                                     gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
                                     allowed_bit_vec_rate: self.allowed_bit_vec_rate,
