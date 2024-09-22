@@ -4,7 +4,7 @@ use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, StreamExt};
 use governor::Quota;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use zstd::bulk::{compress, decompress};
 
 /// Sender is the mechanism used to send arbitrary bytes to
@@ -129,14 +129,14 @@ impl crate::Receiver for Receiver {
 #[derive(Clone)]
 pub struct Channels {
     messenger: Messenger,
-    receivers: HashMap<u32, (Quota, usize, mpsc::Sender<Message>)>,
+    receivers: BTreeMap<u32, (Quota, usize, mpsc::Sender<Message>)>,
 }
 
 impl Channels {
     pub fn new(messenger: Messenger) -> Self {
         Self {
             messenger,
-            receivers: HashMap::new(),
+            receivers: BTreeMap::new(),
         }
     }
 
@@ -162,7 +162,7 @@ impl Channels {
         )
     }
 
-    pub fn collect(self) -> HashMap<u32, (Quota, usize, mpsc::Sender<Message>)> {
+    pub fn collect(self) -> BTreeMap<u32, (Quota, usize, mpsc::Sender<Message>)> {
         self.receivers
     }
 }
