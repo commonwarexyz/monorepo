@@ -9,7 +9,7 @@ use crate::authenticated::{
 use commonware_cryptography::{utils::hex, Scheme};
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
 use governor::{
-    clock::{Clock as GClock, ReasonablyRealtime},
+    clock::ReasonablyRealtime,
     middleware::NoOpMiddleware,
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
@@ -28,7 +28,7 @@ pub struct Actor<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + GClock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
+    E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
     C: Scheme,
 > {
     context: E,
@@ -46,7 +46,7 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + GClock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
+        E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
         C: Scheme,
     > Actor<Si, St, L, E, C>
 {

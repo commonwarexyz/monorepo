@@ -9,16 +9,13 @@ use bytes::BytesMut;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_runtime::{select, Clock, Handle, Sink, Spawner, Stream};
 use futures::{channel::mpsc, SinkExt, StreamExt};
-use governor::{
-    clock::{Clock as GClock, ReasonablyRealtime},
-    Quota, RateLimiter,
-};
+use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock + GClock + ReasonablyRealtime> {
+pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -37,7 +34,7 @@ pub struct Actor<E: Spawner + Clock + GClock + ReasonablyRealtime> {
     _reservation: tracker::Reservation<E>,
 }
 
-impl<E: Spawner + Clock + GClock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
     pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);

@@ -264,8 +264,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, tokio, Clock, Listener, Network as RNetwork, Runner, Sink, Spawner, Stream,
     };
-    use governor::clock::ReasonablyRealtime;
-    use governor::Quota;
+    use governor::{clock::ReasonablyRealtime, Quota};
     use prometheus_client::registry::Registry;
     use rand::{CryptoRng, Rng};
     use std::collections::HashSet;
