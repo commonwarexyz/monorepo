@@ -253,7 +253,6 @@ impl<E: Spawner + Clock + GClock + ReasonablyRealtime + Rng + CryptoRng> Actor<E
                             }
                             let (rate_limiter, max_size) = entry.unwrap();
                             rate_limiter.until_ready().await;
-                            let sender = senders.get_mut(&chunk.channel).unwrap();
 
                             // Ensure messasge is not too large
                             let chunk_len = chunk.content.len();
@@ -311,6 +310,7 @@ impl<E: Spawner + Clock + GClock + ReasonablyRealtime + Rng + CryptoRng> Actor<E
                             //
                             // If the channel handler is closed, we log an error but don't
                             // close the peer (as other channels may still be open).
+                            let sender = senders.get_mut(&chunk.channel).unwrap();
                             if let Err(e) = sender
                                 .send((peer.clone(), message.freeze()))
                                 .await
