@@ -10,6 +10,7 @@ use super::{
 };
 use commonware_cryptography::Scheme;
 use commonware_runtime::{select, Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
 use tracing::{debug, info, warn};
 
@@ -18,7 +19,7 @@ pub struct Network<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
     C: Scheme,
 > {
     context: E,
@@ -39,7 +40,7 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
         C: Scheme,
     > Network<Si, St, L, E, C>
 {
@@ -111,7 +112,7 @@ impl<
     pub fn register(
         &mut self,
         channel: u32,
-        rate: governor::Quota,
+        rate: Quota,
         max_size: usize,
         backlog: usize,
         compression: Option<u8>,
@@ -155,6 +156,7 @@ impl<
         let listener = listener::Actor::new(
             self.context.clone(),
             listener::Config {
+                registry: self.cfg.registry.clone(),
                 address: self.cfg.listen,
                 connection: connection.clone(),
                 allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,

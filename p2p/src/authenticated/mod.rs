@@ -264,7 +264,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, tokio, Clock, Listener, Network as RNetwork, Runner, Sink, Spawner, Stream,
     };
-    use governor::Quota;
+    use governor::{clock::ReasonablyRealtime, Quota};
     use prometheus_client::registry::Registry;
     use rand::{CryptoRng, Rng};
     use std::collections::HashSet;
@@ -288,7 +288,7 @@ mod tests {
     /// errors when tests are run immediately after each other.
     fn run_network<Si: Sink, St: Stream, L: Listener<Si, St>>(
         runner: impl Runner,
-        context: impl Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+        context: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
         max_message_size: usize,
         base_port: u16,
         n: usize,
@@ -336,7 +336,7 @@ mod tests {
                 // Register basic application
                 let (mut sender, mut receiver) = network.register(
                     0,
-                    Quota::per_second(NonZeroU32::new(1000).unwrap()),
+                    Quota::per_second(NonZeroU32::new(1).unwrap()), // Ensure we hit the rate limit
                     1_024,
                     128,
                     None,
