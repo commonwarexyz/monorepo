@@ -275,6 +275,13 @@ mod tests {
         time::Duration,
     };
 
+    #[derive(Copy, Clone)]
+    enum Mode {
+        All,
+        Some,
+        One,
+    }
+
     /// Test connectivity between `n` peers.
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
@@ -285,6 +292,7 @@ mod tests {
         max_message_size: usize,
         base_port: u16,
         n: usize,
+        mode: Mode,
     ) {
         // Initialze runtime
         runner.start(async move {
@@ -342,44 +350,50 @@ mod tests {
                 let peer_handler = context.spawn({
                     let context = context.clone();
                     async move {
-                        // Send identity to all peers
-                        let msg = signer.me();
-                        for (j, recipient) in peer_addresses.iter().enumerate() {
-                            // Don't send message to self
-                            if i == j {
-                                continue;
-                            }
+                        match mode {
+                            Mode::One => {
+                                // Send identity to all peers
+                                let msg = signer.me();
+                                for (j, recipient) in peer_addresses.iter().enumerate() {
+                                    // Don't send message to self
+                                    if i == j {
+                                        continue;
+                                    }
 
-                            // Send our identity
-                            let recipient = Recipients::One(recipient.clone());
+                                    // Send our identity
+                                    let recipient = Recipients::One(recipient.clone());
 
-                            // Loop until success
-                            loop {
-                                if sender
-                                    .send(recipient.clone(), msg.clone(), true)
-                                    .await
-                                    .unwrap()
-                                    .len()
-                                    == 1
-                                {
-                                    break;
+                                    // Loop until success
+                                    loop {
+                                        if sender
+                                            .send(recipient.clone(), msg.clone(), true)
+                                            .await
+                                            .unwrap()
+                                            .len()
+                                            == 1
+                                        {
+                                            break;
+                                        }
+
+                                        // Sleep and try again (avoid busy loop)
+                                        context.sleep(Duration::from_millis(100)).await;
+                                    }
                                 }
 
-                                // Sleep and try again (avoid busy loop)
-                                context.sleep(Duration::from_millis(100)).await;
+                                // Wait for all peers to send their identity
+                                let mut received = HashSet::new();
+                                while received.len() < n - 1 {
+                                    // Ensure message equals sender identity
+                                    let (sender, message) = receiver.recv().await.unwrap();
+                                    assert_eq!(sender, message);
+
+                                    // Add to received set
+                                    received.insert(sender);
+                                }
                             }
-                        }
-
-                        // Wait for all peers to send their identity
-                        let mut received = HashSet::new();
-                        while received.len() < n - 1 {
-                            // Ensure message equals sender identity
-                            let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender, message);
-
-                            // Add to received set
-                            received.insert(sender);
-                        }
+                            Mode::All => {}
+                            Mode::Some => {}
+                        };
                     }
                 });
 
@@ -394,29 +408,43 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_determinism() {
+    fn run_deterministic_test(mode: Mode) {
         let max_message_size = 1_024 * 1_024; // 1MB
         let (runner, context, auditor) = deterministic::Executor::init(0, Duration::from_millis(1));
-        run_network(runner, context, max_message_size, 3000, 10);
+        run_network(runner, context, max_message_size, 3000, 10, mode);
         let state = auditor.state();
         let (runner, context, auditor) = deterministic::Executor::init(0, Duration::from_millis(1));
-        run_network(runner, context, max_message_size, 3000, 10);
+        run_network(runner, context, max_message_size, 3000, 10, mode);
         assert_eq!(state, auditor.state());
+    }
+
+    #[test]
+    fn test_determinism_one() {
+        run_deterministic_test(Mode::One);
+    }
+
+    #[test]
+    fn test_determinism_some() {
+        run_deterministic_test(Mode::Some);
+    }
+
+    #[test]
+    fn test_determinism_all() {
+        run_deterministic_test(Mode::All);
     }
 
     #[test]
     fn test_deterministic_connectivity() {
         let max_message_size = 1_024 * 1_024; // 1MB
         let (runner, context, _) = deterministic::Executor::init(1, Duration::from_millis(1));
-        run_network(runner, context, max_message_size, 3000, 35); // 35 is greater than the max number of peers per response
+        run_network(runner, context, max_message_size, 3000, 35, Mode::One); // 35 is greater than the max number of peers per response
     }
 
     #[test]
     fn test_tokio_connectivity() {
         let cfg = tokio::Config::default();
         let (runner, context) = tokio::Executor::init(cfg);
-        run_network(runner, context, cfg.max_message_size, 3000, 50);
+        run_network(runner, context, cfg.max_message_size, 3000, 50, Mode::One);
     }
 
     fn test_chunking(compression: Option<u8>) {
