@@ -264,7 +264,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, tokio, Clock, Listener, Network as RNetwork, Runner, Sink, Spawner, Stream,
     };
-    use governor::Quota;
+    use governor::{clock::ReasonablyRealtime, Quota};
     use prometheus_client::registry::Registry;
     use rand::{CryptoRng, Rng};
     use std::collections::HashSet;
@@ -275,16 +275,24 @@ mod tests {
         time::Duration,
     };
 
+    #[derive(Copy, Clone)]
+    enum Mode {
+        All,
+        Some,
+        One,
+    }
+
     /// Test connectivity between `n` peers.
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     fn run_network<Si: Sink, St: Stream, L: Listener<Si, St>>(
         runner: impl Runner,
-        context: impl Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+        context: impl Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
         max_message_size: usize,
         base_port: u16,
         n: usize,
+        mode: Mode,
     ) {
         // Initialze runtime
         runner.start(async move {
@@ -328,7 +336,7 @@ mod tests {
                 // Register basic application
                 let (mut sender, mut receiver) = network.register(
                     0,
-                    Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    Quota::per_second(NonZeroU32::new(1).unwrap()), // Ensure we hit the rate limit
                     1_024,
                     128,
                     None,
@@ -338,53 +346,111 @@ mod tests {
                 context.spawn(network.run());
 
                 // Send/Recieve messages
-                let peer_addresses = addresses.clone();
-                let peer_handler = context.spawn({
+                let handler = context.spawn({
+                    let addresses = addresses.clone();
                     let context = context.clone();
                     async move {
+                        // Wait for all peers to send their identity
+                        let acker = context.spawn(async move {
+                            let mut received = HashSet::new();
+                            while received.len() < n - 1 {
+                                // Ensure message equals sender identity
+                                let (sender, message) = receiver.recv().await.unwrap();
+                                assert_eq!(sender, message);
+
+                                // Add to received set
+                                received.insert(sender);
+                            }
+                        });
+
                         // Send identity to all peers
                         let msg = signer.me();
-                        for (j, recipient) in peer_addresses.iter().enumerate() {
-                            // Don't send message to self
-                            if i == j {
-                                continue;
+                        match mode {
+                            Mode::One => {
+                                for (j, recipient) in addresses.iter().enumerate() {
+                                    // Don't send message to self
+                                    if i == j {
+                                        continue;
+                                    }
+
+                                    // Loop until success
+                                    loop {
+                                        let sent = sender
+                                            .send(
+                                                Recipients::One(recipient.clone()),
+                                                msg.clone(),
+                                                true,
+                                            )
+                                            .await
+                                            .unwrap();
+                                        if sent.len() != 1 {
+                                            context.sleep(Duration::from_millis(100)).await;
+                                            continue;
+                                        }
+                                        assert_eq!(sent[0], recipient);
+                                        break;
+                                    }
+                                }
                             }
+                            Mode::Some => {
+                                // Get all peers not including self
+                                let mut recipients = addresses.clone();
+                                recipients.remove(i);
+                                recipients.sort();
 
-                            // Send our identity
-                            let recipient = Recipients::One(recipient.clone());
+                                // Loop until all peer sends successful
+                                loop {
+                                    let mut sent = sender
+                                        .send(
+                                            Recipients::Some(recipients.clone()),
+                                            msg.clone(),
+                                            true,
+                                        )
+                                        .await
+                                        .unwrap();
+                                    if sent.len() != n - 1 {
+                                        context.sleep(Duration::from_millis(100)).await;
+                                        continue;
+                                    }
 
-                            // Loop until success
-                            loop {
-                                if sender
-                                    .send(recipient.clone(), msg.clone(), true)
-                                    .await
-                                    .unwrap()
-                                    .len()
-                                    == 1
-                                {
+                                    // Compare to expected
+                                    sent.sort();
+                                    assert_eq!(sent, recipients);
                                     break;
                                 }
-
-                                // Sleep and try again (avoid busy loop)
-                                context.sleep(Duration::from_millis(100)).await;
                             }
-                        }
+                            Mode::All => {
+                                // Get all peers not including self
+                                let mut recipients = addresses.clone();
+                                recipients.remove(i);
+                                recipients.sort();
+
+                                // Loop until all peer sends successful
+                                loop {
+                                    let mut sent = sender
+                                        .send(Recipients::All, msg.clone(), true)
+                                        .await
+                                        .unwrap();
+                                    if sent.len() != n - 1 {
+                                        context.sleep(Duration::from_millis(100)).await;
+                                        continue;
+                                    }
+
+                                    // Compare to expected
+                                    sent.sort();
+                                    assert_eq!(sent, recipients);
+                                    break;
+                                }
+                            }
+                        };
 
                         // Wait for all peers to send their identity
-                        let mut received = HashSet::new();
-                        while received.len() < n - 1 {
-                            // Ensure message equals sender identity
-                            let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender, message);
-
-                            // Add to received set
-                            received.insert(sender);
-                        }
+                        acker.await.unwrap();
                     }
                 });
 
                 // Add to waiters
-                waiters.push(peer_handler);
+                waiters.push(handler);
             }
 
             // Wait for all peers to finish
@@ -394,40 +460,160 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_determinism() {
+    fn run_deterministic_test(mode: Mode) {
         let max_message_size = 1_024 * 1_024; // 1MB
         let (runner, context, auditor) = deterministic::Executor::init(0, Duration::from_millis(1));
-        run_network(runner, context, max_message_size, 3000, 10);
+        run_network(runner, context, max_message_size, 3000, 10, mode);
         let state = auditor.state();
         let (runner, context, auditor) = deterministic::Executor::init(0, Duration::from_millis(1));
-        run_network(runner, context, max_message_size, 3000, 10);
+        run_network(runner, context, max_message_size, 3000, 10, mode);
         assert_eq!(state, auditor.state());
+    }
+
+    #[test]
+    fn test_determinism_one() {
+        run_deterministic_test(Mode::One);
+    }
+
+    #[test]
+    fn test_determinism_some() {
+        run_deterministic_test(Mode::Some);
+    }
+
+    #[test]
+    fn test_determinism_all() {
+        run_deterministic_test(Mode::All);
     }
 
     #[test]
     fn test_deterministic_connectivity() {
         let max_message_size = 1_024 * 1_024; // 1MB
         let (runner, context, _) = deterministic::Executor::init(1, Duration::from_millis(1));
-        run_network(runner, context, max_message_size, 3000, 35); // 35 is greater than the max number of peers per response
+        run_network(runner, context, max_message_size, 3000, 35, Mode::One); // 35 is greater than the max number of peers per response
     }
 
     #[test]
     fn test_tokio_connectivity() {
         let cfg = tokio::Config::default();
         let (runner, context) = tokio::Executor::init(cfg);
-        run_network(runner, context, cfg.max_message_size, 3000, 50);
+        run_network(runner, context, cfg.max_message_size, 3000, 50, Mode::One);
+    }
+
+    #[test]
+    fn test_multi_index_oracle() {
+        // Configure test
+        let base_port = 3000;
+        let n: usize = 100;
+
+        // Initialize runtime
+        let (runner, context, _) = deterministic::Executor::init(0, Duration::from_millis(1));
+        runner.start(async move {
+            // Create peers
+            let mut peers = Vec::new();
+            for i in 0..n {
+                peers.push(ed25519::insecure_signer(i as u64));
+            }
+            let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+
+            // Create networks
+            let mut waiters = Vec::new();
+            for (i, peer) in peers.iter().enumerate() {
+                // Derive port
+                let port = base_port + i as u16;
+
+                // Create bootstrappers
+                let mut bootstrappers = Vec::new();
+                if i > 0 {
+                    bootstrappers.push((
+                        addresses[0].clone(),
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
+                    ));
+                }
+
+                // Create network
+                let signer = peer.clone();
+                let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+                let config = Config::test(
+                    signer.clone(),
+                    registry,
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+                    bootstrappers,
+                    1_024 * 1_024, // 1MB
+                );
+                let (mut network, mut oracle) = Network::new(context.clone(), config);
+
+                // Register peers at separate indices
+                oracle.register(0, vec![addresses[0].clone()]).await;
+                oracle
+                    .register(1, vec![addresses[1].clone(), addresses[2].clone()])
+                    .await;
+                oracle
+                    .register(2, addresses.iter().skip(2).cloned().collect())
+                    .await;
+
+                // Register basic application
+                let (mut sender, mut receiver) = network.register(
+                    0,
+                    Quota::per_second(NonZeroU32::new(10).unwrap()),
+                    1_024 * 1_024, // 1MB
+                    128,
+                    None,
+                );
+
+                // Wait to connect to all peers, and then send messages to everyone
+                context.spawn(network.run());
+
+                // Send/Recieve messages
+                let handler = context.spawn({
+                    let context = context.clone();
+                    async move {
+                        if i == 0 {
+                            // Loop until success
+                            let msg = signer.me();
+                            loop {
+                                if sender
+                                    .send(Recipients::All, msg.clone(), true)
+                                    .await
+                                    .unwrap()
+                                    .len()
+                                    == n - 1
+                                {
+                                    break;
+                                }
+
+                                // Sleep and try again (avoid busy loop)
+                                context.sleep(Duration::from_millis(100)).await;
+                            }
+                        } else {
+                            // Ensure message equals sender identity
+                            let (sender, message) = receiver.recv().await.unwrap();
+                            assert_eq!(sender, message);
+                        }
+                    }
+                });
+
+                // Add to waiters
+                waiters.push(handler);
+            }
+
+            // Wait for waiters to finish (receiver before sender)
+            for waiter in waiters.into_iter().rev() {
+                waiter.await.unwrap();
+            }
+        });
     }
 
     fn test_chunking(compression: Option<u8>) {
-        // Initialize runtime
+        // Configure test
         let base_port = 3000;
+        let n: usize = 2;
+
+        // Initialize runtime
         let (runner, mut context, _) = deterministic::Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
-            const N: usize = 2;
             let mut peers = Vec::new();
-            for i in 0..N {
+            for i in 0..n {
                 peers.push(ed25519::insecure_signer(i as u64));
             }
             let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
@@ -539,14 +725,16 @@ mod tests {
     }
 
     fn test_message_too_large(compression: Option<u8>) {
-        // Initialize runtime
+        // Configure test
         let base_port = 3000;
+        let n: usize = 2;
+
+        // Initialize runtime
         let (runner, mut context, _) = deterministic::Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
             // Create peers
-            const N: usize = 2;
             let mut peers = Vec::new();
-            for i in 0..N {
+            for i in 0..n {
                 peers.push(ed25519::insecure_signer(i as u64));
             }
             let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();

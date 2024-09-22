@@ -9,16 +9,17 @@ use super::{
     connection,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use commonware_runtime::{select, Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+    E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
     C: Scheme,
 > {
     context: E,
@@ -39,7 +40,7 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
         C: Scheme,
     > Network<Si, St, L, E, C>
 {
@@ -106,11 +107,12 @@ impl<
     /// # Returns
     ///
     /// * A tuple containing the sender and receiver for the channel (how to communicate
-    ///   with external peers on the network).
+    ///   with external peers on the network). It is safe to close either the sender or receiver
+    ///   without impacting the ability to process messages on other channels.
     pub fn register(
         &mut self,
         channel: u32,
-        rate: governor::Quota,
+        rate: Quota,
         max_size: usize,
         backlog: usize,
         compression: Option<u8>,
@@ -154,6 +156,7 @@ impl<
         let listener = listener::Actor::new(
             self.context.clone(),
             listener::Config {
+                registry: self.cfg.registry.clone(),
                 address: self.cfg.listen,
                 connection: connection.clone(),
                 allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
@@ -177,15 +180,30 @@ impl<
             .context
             .spawn(dialer.run(self.tracker_mailbox, spawner_mailbox));
 
-        // Wait for actors
+        // Wait for first actor to exit
         info!("network started");
-        let err = futures::try_join!(
-            &mut tracker_task,
-            &mut router_task,
-            &mut spawner_task,
-            &mut listener_task,
-            &mut dialer_task,
-        )
+        let err = select! {
+            tracker = &mut tracker_task => {
+                debug!("tracker exited");
+                tracker
+            },
+            router = &mut router_task => {
+                debug!("router exited");
+                router
+            },
+            spawner = &mut spawner_task => {
+                debug!("spawner exited");
+                spawner
+            },
+            listener = &mut listener_task => {
+                debug!("listener exited");
+                listener
+            },
+            dialer = &mut dialer_task => {
+                debug!("dialer exited");
+                dialer
+            },
+        }
         .unwrap_err();
 
         // Ensure all tasks close

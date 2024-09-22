@@ -1,19 +1,29 @@
 //! Listener
 
-use std::{marker::PhantomData, net::SocketAddr};
-
 use crate::authenticated::{
     actors::{spawner, tracker},
     connection::{self, IncomingHandshake, Instance},
 };
 use commonware_cryptography::{utils::hex, Scheme};
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
+use governor::{
+    clock::ReasonablyRealtime,
+    middleware::NoOpMiddleware,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
+use prometheus_client::{metrics::counter::Counter, registry::Registry};
 use rand::{CryptoRng, Rng};
+use std::{
+    marker::PhantomData,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 use tracing::debug;
 
 /// Configuration for the listener actor.
 pub struct Config<C: Scheme> {
+    pub registry: Arc<Mutex<Registry>>,
     pub address: SocketAddr,
     pub connection: connection::Config<C>,
     pub allowed_incoming_connectioned_rate: Quota,
@@ -23,14 +33,16 @@ pub struct Actor<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + Network<L, Si, St> + Rng + CryptoRng,
+    E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
     C: Scheme,
 > {
     context: E,
 
     address: SocketAddr,
     connection: connection::Config<C>,
-    rate_limiter: DefaultDirectRateLimiter,
+    rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
+
+    handshakes_rate_limited: Counter,
 
     _phantom_si: PhantomData<Si>,
     _phantom_st: PhantomData<St>,
@@ -41,17 +53,33 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + Network<L, Si, St> + Rng + CryptoRng,
+        E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
         C: Scheme,
     > Actor<Si, St, L, E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
+        // Create metrics
+        let handshakes_rate_limited = Counter::default();
+        {
+            let mut registry = cfg.registry.lock().unwrap();
+            registry.register(
+                "handshake_rate_limited",
+                "number of handshakes rate limited",
+                handshakes_rate_limited.clone(),
+            );
+        }
+
         Self {
-            context,
+            context: context.clone(),
 
             address: cfg.address,
             connection: cfg.connection,
-            rate_limiter: RateLimiter::direct(cfg.allowed_incoming_connectioned_rate),
+            rate_limiter: RateLimiter::direct_with_clock(
+                cfg.allowed_incoming_connectioned_rate,
+                &context,
+            ),
+
+            handshakes_rate_limited,
 
             _phantom_si: PhantomData,
             _phantom_st: PhantomData,
@@ -129,7 +157,14 @@ impl<
         // Loop over incoming connections as fast as our rate limiter allows
         loop {
             // Ensure we don't attempt to perform too many handshakes at once
-            self.rate_limiter.until_ready().await;
+            match self.rate_limiter.check() {
+                Ok(_) => {}
+                Err(negative) => {
+                    self.handshakes_rate_limited.inc();
+                    let wait = negative.wait_time_from(self.context.now());
+                    self.context.sleep(wait).await;
+                }
+            }
 
             // Accept a new connection
             let (address, sink, stream) = match listener.accept().await {

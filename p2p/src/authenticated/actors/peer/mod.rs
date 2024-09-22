@@ -20,6 +20,7 @@ pub struct Config {
 
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
+    pub rate_limited: Family<metrics::Message, Counter>,
 }
 
 #[derive(Error, Debug)]
@@ -44,6 +45,6 @@ pub enum Error {
     InvalidChunk,
     #[error("invalid channel")]
     InvalidChannel,
-    #[error("client closed")]
-    ClientClosed,
+    #[error("channel closed: {0}")]
+    ChannelClosed(u32),
 }

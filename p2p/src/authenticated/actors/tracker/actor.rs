@@ -8,7 +8,10 @@ use bitvec::prelude::*;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_runtime::{Clock, Spawner};
 use futures::{channel::mpsc, StreamExt};
-use governor::DefaultKeyedRateLimiter;
+use governor::{
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
+    RateLimiter,
+};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
@@ -124,7 +127,7 @@ impl AddressCount {
     }
 }
 
-pub struct Actor<E: Spawner + Rng, C: Scheme> {
+pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
     context: E,
 
     crypto: C,
@@ -137,7 +140,8 @@ pub struct Actor<E: Spawner + Rng, C: Scheme> {
     receiver: mpsc::Receiver<Message<E>>,
     peers: BTreeMap<PublicKey, AddressCount>,
     sets: BTreeMap<u64, PeerSet>,
-    connections_rate_limiter: DefaultKeyedRateLimiter<PublicKey>,
+    connections_rate_limiter:
+        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
     connections: HashSet<PublicKey>,
 
     tracked_peers: Gauge,
@@ -148,7 +152,7 @@ pub struct Actor<E: Spawner + Rng, C: Scheme> {
     ip_signature: wire::Peer,
 }
 
-impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
+impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
     pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
         // Construct IP signature
         let current_time = context
@@ -188,7 +192,7 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
 
         // Create connections
         let connections_rate_limiter =
-            DefaultKeyedRateLimiter::keyed(cfg.allowed_connection_rate_per_peer);
+            RateLimiter::hashmap_with_clock(cfg.allowed_connection_rate_per_peer, &context);
 
         // Create metrics
         let tracked_peers = Gauge::default();
@@ -597,7 +601,7 @@ impl<E: Spawner + Rng + Clock, C: Scheme> Actor<E, C> {
                     // Fetch dialable peers
                     let _ = peers.send(self.handle_dialable());
 
-                    // Shirnk to fit rate limiter
+                    // Shrink to fit rate limiter
                     self.connections_rate_limiter.shrink_to_fit();
                 }
                 Message::Register { index, peers } => {
