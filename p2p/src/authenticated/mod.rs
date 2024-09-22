@@ -346,114 +346,111 @@ mod tests {
                 context.spawn(network.run());
 
                 // Send/Recieve messages
-                let peer_addresses = addresses.clone();
-                let peer_handler = context.spawn({
+                let handler = context.spawn({
+                    let addresses = addresses.clone();
                     let context = context.clone();
                     async move {
-                        context.spawn({
-                            let context = context.clone();
-                            async move {
-                                let msg = signer.me();
-                                match mode {
-                                    Mode::One => {
-                                        // Send identity to all peers
-                                        for (j, recipient) in peer_addresses.iter().enumerate() {
-                                            // Don't send message to self
-                                            if i == j {
-                                                continue;
-                                            }
+                        // Wait for all peers to send their identity
+                        let acker = context.spawn(async move {
+                            let mut received = HashSet::new();
+                            while received.len() < n - 1 {
+                                // Ensure message equals sender identity
+                                let (sender, message) = receiver.recv().await.unwrap();
+                                assert_eq!(sender, message);
 
-                                            // Loop until success
-                                            loop {
-                                                let sent = sender
-                                                    .send(
-                                                        Recipients::One(recipient.clone()),
-                                                        msg.clone(),
-                                                        true,
-                                                    )
-                                                    .await
-                                                    .unwrap();
-                                                if sent.len() != 1 {
-                                                    // Sleep and try again (avoid busy loop)
-                                                    context.sleep(Duration::from_millis(100)).await;
-                                                    continue;
-                                                }
-                                                assert_eq!(sent[0], recipient);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Mode::Some => {
-                                        // Get all peers not including self
-                                        let mut recipients = peer_addresses.clone();
-                                        recipients.remove(i);
-                                        recipients.sort();
-
-                                        // Loop until all peer sends successful
-                                        loop {
-                                            let mut sent = sender
-                                                .send(
-                                                    Recipients::Some(recipients.clone()),
-                                                    msg.clone(),
-                                                    true,
-                                                )
-                                                .await
-                                                .unwrap();
-                                            if sent.len() != n - 1 {
-                                                // Sleep and try again (avoid busy loop)
-                                                context.sleep(Duration::from_millis(100)).await;
-                                                continue;
-                                            }
-
-                                            // Compare to expected
-                                            sent.sort();
-                                            assert_eq!(sent, recipients);
-                                            break;
-                                        }
-                                    }
-                                    Mode::All => {
-                                        // Get all peers not including self
-                                        let mut recipients = peer_addresses.clone();
-                                        recipients.remove(i);
-                                        recipients.sort();
-
-                                        // Loop until all peer sends successful
-                                        loop {
-                                            let mut sent = sender
-                                                .send(Recipients::All, msg.clone(), true)
-                                                .await
-                                                .unwrap();
-                                            if sent.len() != n - 1 {
-                                                // Sleep and try again (avoid busy loop)
-                                                context.sleep(Duration::from_millis(100)).await;
-                                                continue;
-                                            }
-
-                                            // Compare to expected
-                                            sent.sort();
-                                            assert_eq!(sent, recipients);
-                                            break;
-                                        }
-                                    }
-                                };
+                                // Add to received set
+                                received.insert(sender);
                             }
                         });
 
-                        // Wait for all peers to send their identity
-                        let mut received = HashSet::new();
-                        while received.len() < n - 1 {
-                            // Ensure message equals sender identity
-                            let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender, message);
+                        // Send identity to all peers
+                        let msg = signer.me();
+                        match mode {
+                            Mode::One => {
+                                for (j, recipient) in addresses.iter().enumerate() {
+                                    // Don't send message to self
+                                    if i == j {
+                                        continue;
+                                    }
 
-                            // Add to received set
-                            received.insert(sender);
-                        }
+                                    // Loop until success
+                                    loop {
+                                        let sent = sender
+                                            .send(
+                                                Recipients::One(recipient.clone()),
+                                                msg.clone(),
+                                                true,
+                                            )
+                                            .await
+                                            .unwrap();
+                                        if sent.len() != 1 {
+                                            context.sleep(Duration::from_millis(100)).await;
+                                            continue;
+                                        }
+                                        assert_eq!(sent[0], recipient);
+                                        break;
+                                    }
+                                }
+                            }
+                            Mode::Some => {
+                                // Get all peers not including self
+                                let mut recipients = addresses.clone();
+                                recipients.remove(i);
+                                recipients.sort();
+
+                                // Loop until all peer sends successful
+                                loop {
+                                    let mut sent = sender
+                                        .send(
+                                            Recipients::Some(recipients.clone()),
+                                            msg.clone(),
+                                            true,
+                                        )
+                                        .await
+                                        .unwrap();
+                                    if sent.len() != n - 1 {
+                                        context.sleep(Duration::from_millis(100)).await;
+                                        continue;
+                                    }
+
+                                    // Compare to expected
+                                    sent.sort();
+                                    assert_eq!(sent, recipients);
+                                    break;
+                                }
+                            }
+                            Mode::All => {
+                                // Get all peers not including self
+                                let mut recipients = addresses.clone();
+                                recipients.remove(i);
+                                recipients.sort();
+
+                                // Loop until all peer sends successful
+                                loop {
+                                    let mut sent = sender
+                                        .send(Recipients::All, msg.clone(), true)
+                                        .await
+                                        .unwrap();
+                                    if sent.len() != n - 1 {
+                                        context.sleep(Duration::from_millis(100)).await;
+                                        continue;
+                                    }
+
+                                    // Compare to expected
+                                    sent.sort();
+                                    assert_eq!(sent, recipients);
+                                    break;
+                                }
+                            }
+                        };
+
+                        // Wait for all peers to send their identity
+                        acker.await.unwrap();
                     }
                 });
 
                 // Add to waiters
-                waiters.push(peer_handler);
+                waiters.push(handler);
             }
 
             // Wait for all peers to finish

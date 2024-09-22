@@ -13,7 +13,7 @@ use governor::{DefaultDirectRateLimiter, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
-use tracing::{info, warn};
+use tracing::{debug, info};
 
 pub struct Actor<E: Spawner + Clock> {
     context: E,
@@ -299,10 +299,16 @@ impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
                         }
 
                         // Send message to client
-                        sender
+                        //
+                        // If the channel handler is closed, we log an error but don't
+                        // close the peer (as other channels may still be open).
+                        if let Err(e) = sender
                             .send((peer.clone(), message.freeze()))
                             .await
-                            .map_err(|_| Error::ClientClosed)?;
+                            .map_err(|_| Error::ChannelClosed(chunk.channel))
+                        {
+                            debug!(err=?e, "failed to send message to channel");
+                        }
                     }
                     Some(wire::message::Payload::Handshake(_)) => {
                         self.received_messages
@@ -329,7 +335,6 @@ impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
         let result = select! {
             send_result = &mut send_handler => {
                 receive_handler.abort();
-                warn!("send_handler exited: {:?}", send_result);
                 send_result
             },
             receive_result = &mut receive_handler => {
