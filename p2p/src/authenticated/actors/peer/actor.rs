@@ -307,7 +307,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
                             .await
                             .map_err(|_| Error::ChannelClosed(chunk.channel))
                         {
-                            debug!(err=?e, "failed to send message to channel");
+                            debug!(err=?e, "failed to send message to client");
                         }
                     }
                     Some(wire::message::Payload::Handshake(_)) => {
