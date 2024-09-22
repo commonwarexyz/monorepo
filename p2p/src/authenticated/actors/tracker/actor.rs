@@ -601,7 +601,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                     // Fetch dialable peers
                     let _ = peers.send(self.handle_dialable());
 
-                    // Shirnk to fit rate limiter
+                    // Shrink to fit rate limiter
                     self.connections_rate_limiter.shrink_to_fit();
                 }
                 Message::Register { index, peers } => {
