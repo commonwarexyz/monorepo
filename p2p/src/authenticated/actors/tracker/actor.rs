@@ -9,7 +9,7 @@ use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_runtime::{Clock, Spawner};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::DefaultKeyedStateStore,
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
     RateLimiter,
 };
 use prometheus_client::metrics::counter::Counter;
@@ -141,7 +141,7 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
     peers: BTreeMap<PublicKey, AddressCount>,
     sets: BTreeMap<u64, PeerSet>,
     connections_rate_limiter:
-        RateLimiter<PublicKey, DefaultKeyedStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
+        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
     connections: HashSet<PublicKey>,
 
     tracked_peers: Gauge,
@@ -192,7 +192,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
         // Create connections
         let connections_rate_limiter =
-            RateLimiter::dashmap_with_clock(cfg.allowed_connection_rate_per_peer, &context);
+            RateLimiter::hashmap_with_clock(cfg.allowed_connection_rate_per_peer, &context);
 
         // Create metrics
         let tracked_peers = Gauge::default();
