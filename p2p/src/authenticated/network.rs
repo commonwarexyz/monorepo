@@ -9,9 +9,9 @@ use super::{
     connection,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use commonware_runtime::{select, Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
 use rand::{CryptoRng, Rng};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
@@ -177,15 +177,30 @@ impl<
             .context
             .spawn(dialer.run(self.tracker_mailbox, spawner_mailbox));
 
-        // Wait for actors
+        // Wait for first actor to exit
         info!("network started");
-        let err = futures::try_join!(
-            &mut tracker_task,
-            &mut router_task,
-            &mut spawner_task,
-            &mut listener_task,
-            &mut dialer_task,
-        )
+        let err = select! {
+            tracker = &mut tracker_task => {
+                debug!("tracker exited");
+                tracker
+            },
+            router = &mut router_task => {
+                debug!("router exited");
+                router
+            },
+            spawner = &mut spawner_task => {
+                debug!("spawner exited");
+                spawner
+            },
+            listener = &mut listener_task => {
+                debug!("listener exited");
+                listener
+            },
+            dialer = &mut dialer_task => {
+                debug!("dialer exited");
+                dialer
+            },
+        }
         .unwrap_err();
 
         // Ensure all tasks close
