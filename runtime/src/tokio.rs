@@ -24,12 +24,13 @@
 //! });
 //! ```
 
-use crate::{Error, Handle};
+use crate::{Clock, Error, Handle};
 use bytes::Bytes;
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
+use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     future::Future,
@@ -155,7 +156,7 @@ impl crate::Spawner for Context {
     }
 }
 
-impl crate::Clock for Context {
+impl Clock for Context {
     fn current(&self) -> SystemTime {
         SystemTime::now()
     }
@@ -174,6 +175,16 @@ impl crate::Clock for Context {
         tokio::time::sleep_until(target_instant)
     }
 }
+
+impl GClock for Context {
+    type Instant = SystemTime;
+
+    fn now(&self) -> Self::Instant {
+        self.current()
+    }
+}
+
+impl ReasonablyRealtime for Context {}
 
 pub fn codec(max_frame_len: usize) -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()

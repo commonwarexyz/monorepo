@@ -9,7 +9,7 @@ use crate::authenticated::{
 use commonware_cryptography::{utils::hex, Scheme};
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use futures::{channel::mpsc, StreamExt};
-use governor::Quota;
+use governor::{clock::ReasonablyRealtime, Quota};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::time::Duration;
@@ -29,7 +29,13 @@ pub struct Actor<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
     received_messages: Family<metrics::Message, Counter>,
 }
 
-impl<E: Spawner + Clock + Rng + CryptoRng, C: Scheme, Si: Sink, St: Stream> Actor<E, C, Si, St> {
+impl<
+        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng,
+        C: Scheme,
+        Si: Sink,
+        St: Stream,
+    > Actor<E, C, Si, St>
+{
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C, Si, St>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();

@@ -9,13 +9,16 @@ use bytes::BytesMut;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_runtime::{select, Clock, Handle, Sink, Spawner, Stream};
 use futures::{channel::mpsc, SinkExt, StreamExt};
-use governor::{DefaultDirectRateLimiter, Quota};
+use governor::{
+    clock::{Clock as GClock, ReasonablyRealtime},
+    Quota, RateLimiter,
+};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock> {
+pub struct Actor<E: Spawner + Clock + GClock + ReasonablyRealtime> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
@@ -34,7 +37,7 @@ pub struct Actor<E: Spawner + Clock> {
     _reservation: tracker::Reservation<E>,
 }
 
-impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
+impl<E: Spawner + Clock + GClock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
     pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -120,7 +123,7 @@ impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, max_size, sender)) in channels.collect() {
-            let rate_limiter = DefaultDirectRateLimiter::direct(rate);
+            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.context);
             rate_limits.insert(channel, (rate_limiter, max_size));
             senders.insert(channel, sender);
         }
@@ -200,130 +203,137 @@ impl<E: Spawner + Clock + Rng + CryptoRng> Actor<E> {
                 }
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self.context.spawn(async move {
-            let bit_vec_rate_limiter = DefaultDirectRateLimiter::direct(self.allowed_bit_vec_rate);
-            let peers_rate_limiter = DefaultDirectRateLimiter::direct(self.allowed_peers_rate);
-            loop {
-                match conn_receiver
-                    .receive()
-                    .await
-                    .map_err(Error::ReceiveFailed)?
-                    .payload
-                {
-                    Some(wire::message::Payload::BitVec(bit_vec)) => {
-                        self.received_messages
-                            .get_or_create(&metrics::Message::new_bit_vec(&peer))
-                            .inc();
+        let mut receive_handler: Handle<Result<(), Error>> = self.context.spawn({
+            let context = self.context.clone();
+            async move {
+                let bit_vec_rate_limiter =
+                    RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, &context);
+                let peers_rate_limiter =
+                    RateLimiter::direct_with_clock(self.allowed_peers_rate, &context);
+                loop {
+                    match conn_receiver
+                        .receive()
+                        .await
+                        .map_err(Error::ReceiveFailed)?
+                        .payload
+                    {
+                        Some(wire::message::Payload::BitVec(bit_vec)) => {
+                            self.received_messages
+                                .get_or_create(&metrics::Message::new_bit_vec(&peer))
+                                .inc();
 
-                        // Ensure peer is not spamming us with bit vectors
-                        bit_vec_rate_limiter.until_ready().await;
+                            // Ensure peer is not spamming us with bit vectors
+                            bit_vec_rate_limiter.until_ready().await;
 
-                        // Gather useful peers
-                        tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
-                    }
-                    Some(wire::message::Payload::Peers(peers)) => {
-                        self.received_messages
-                            .get_or_create(&metrics::Message::new_peers(&peer))
-                            .inc();
+                            // Gather useful peers
+                            tracker.bit_vec(bit_vec, self.mailbox.clone()).await;
+                        }
+                        Some(wire::message::Payload::Peers(peers)) => {
+                            self.received_messages
+                                .get_or_create(&metrics::Message::new_peers(&peer))
+                                .inc();
 
-                        // Ensure peer is not spamming us with peer messages
-                        peers_rate_limiter.until_ready().await;
+                            // Ensure peer is not spamming us with peer messages
+                            peers_rate_limiter.until_ready().await;
 
-                        // Send peers to tracker
-                        tracker.peers(peers, self.mailbox.clone()).await;
-                    }
-                    Some(wire::message::Payload::Chunk(chunk)) => {
-                        self.received_messages
-                            .get_or_create(&metrics::Message::new_chunk(&peer, chunk.channel))
-                            .inc();
+                            // Send peers to tracker
+                            tracker.peers(peers, self.mailbox.clone()).await;
+                        }
+                        Some(wire::message::Payload::Chunk(chunk)) => {
+                            self.received_messages
+                                .get_or_create(&metrics::Message::new_chunk(&peer, chunk.channel))
+                                .inc();
 
-                        // Ensure peer is not spamming us with content messages
-                        let entry = rate_limits.get(&chunk.channel);
-                        if entry.is_none() {
-                            // We permit unknown messages to be received in case peers
-                            // are on a newer version than us
+                            // Ensure peer is not spamming us with content messages
+                            let entry = rate_limits.get(&chunk.channel);
+                            if entry.is_none() {
+                                // We permit unknown messages to be received in case peers
+                                // are on a newer version than us
+                                continue;
+                            }
+                            let (rate_limiter, max_size) = entry.unwrap();
+                            rate_limiter.until_ready().await;
+                            let sender = senders.get_mut(&chunk.channel).unwrap();
+
+                            // Ensure messasge is not too large
+                            let chunk_len = chunk.content.len();
+                            if chunk_len > *max_size {
+                                return Err(Error::MessageTooLarge(chunk_len));
+                            }
+
+                            // Gather all chunks
+                            let mut message = BytesMut::from(&chunk.content[..]);
+                            let total_parts = chunk.total_parts;
+                            if total_parts > 1 {
+                                // Ensure first part is the max size
+                                if chunk_len != max_content_size {
+                                    return Err(Error::InvalidChunk);
+                                }
+
+                                // Read chunk messages until we have all parts
+                                let channel = chunk.channel;
+                                let mut next_part = chunk.part + 1;
+                                while next_part < total_parts {
+                                    let chunk = match conn_receiver
+                                        .receive()
+                                        .await
+                                        .map_err(Error::ReceiveFailed)?
+                                        .payload
+                                    {
+                                        Some(wire::message::Payload::Chunk(chunk)) => chunk,
+                                        _ => return Err(Error::InvalidChunk),
+                                    };
+                                    if chunk.channel != channel {
+                                        return Err(Error::InvalidChunk);
+                                    }
+                                    if chunk.total_parts != total_parts {
+                                        return Err(Error::InvalidChunk);
+                                    }
+                                    if chunk.part != next_part {
+                                        return Err(Error::InvalidChunk);
+                                    }
+                                    let chunk_len = chunk.content.len();
+                                    if chunk.part != total_parts - 1
+                                        && chunk_len != max_content_size
+                                    {
+                                        return Err(Error::InvalidChunk);
+                                    }
+                                    let new_len = message.len() + chunk_len;
+                                    if new_len > *max_size {
+                                        return Err(Error::MessageTooLarge(new_len));
+                                    }
+                                    message.extend_from_slice(&chunk.content);
+                                    next_part += 1;
+                                }
+                            }
+
+                            // Send message to client
+                            //
+                            // If the channel handler is closed, we log an error but don't
+                            // close the peer (as other channels may still be open).
+                            if let Err(e) = sender
+                                .send((peer.clone(), message.freeze()))
+                                .await
+                                .map_err(|_| Error::ChannelClosed(chunk.channel))
+                            {
+                                debug!(err=?e, "failed to send message to client");
+                            }
+                        }
+                        Some(wire::message::Payload::Handshake(_)) => {
+                            self.received_messages
+                                .get_or_create(&metrics::Message::new_handshake(&peer))
+                                .inc();
+                            return Err(Error::UnexpectedHandshake);
+                        }
+                        _ => {
+                            self.received_messages
+                                .get_or_create(&metrics::Message::new_unknown(&peer))
+                                .inc();
+
+                            // We permit unknown messages to be received in case
+                            // peers are on a newer version than us
                             continue;
                         }
-                        let (rate_limiter, max_size) = entry.unwrap();
-                        rate_limiter.until_ready().await;
-                        let sender = senders.get_mut(&chunk.channel).unwrap();
-
-                        // Ensure messasge is not too large
-                        let chunk_len = chunk.content.len();
-                        if chunk_len > *max_size {
-                            return Err(Error::MessageTooLarge(chunk_len));
-                        }
-
-                        // Gather all chunks
-                        let mut message = BytesMut::from(&chunk.content[..]);
-                        let total_parts = chunk.total_parts;
-                        if total_parts > 1 {
-                            // Ensure first part is the max size
-                            if chunk_len != max_content_size {
-                                return Err(Error::InvalidChunk);
-                            }
-
-                            // Read chunk messages until we have all parts
-                            let channel = chunk.channel;
-                            let mut next_part = chunk.part + 1;
-                            while next_part < total_parts {
-                                let chunk = match conn_receiver
-                                    .receive()
-                                    .await
-                                    .map_err(Error::ReceiveFailed)?
-                                    .payload
-                                {
-                                    Some(wire::message::Payload::Chunk(chunk)) => chunk,
-                                    _ => return Err(Error::InvalidChunk),
-                                };
-                                if chunk.channel != channel {
-                                    return Err(Error::InvalidChunk);
-                                }
-                                if chunk.total_parts != total_parts {
-                                    return Err(Error::InvalidChunk);
-                                }
-                                if chunk.part != next_part {
-                                    return Err(Error::InvalidChunk);
-                                }
-                                let chunk_len = chunk.content.len();
-                                if chunk.part != total_parts - 1 && chunk_len != max_content_size {
-                                    return Err(Error::InvalidChunk);
-                                }
-                                let new_len = message.len() + chunk_len;
-                                if new_len > *max_size {
-                                    return Err(Error::MessageTooLarge(new_len));
-                                }
-                                message.extend_from_slice(&chunk.content);
-                                next_part += 1;
-                            }
-                        }
-
-                        // Send message to client
-                        //
-                        // If the channel handler is closed, we log an error but don't
-                        // close the peer (as other channels may still be open).
-                        if let Err(e) = sender
-                            .send((peer.clone(), message.freeze()))
-                            .await
-                            .map_err(|_| Error::ChannelClosed(chunk.channel))
-                        {
-                            debug!(err=?e, "failed to send message to client");
-                        }
-                    }
-                    Some(wire::message::Payload::Handshake(_)) => {
-                        self.received_messages
-                            .get_or_create(&metrics::Message::new_handshake(&peer))
-                            .inc();
-                        return Err(Error::UnexpectedHandshake);
-                    }
-                    _ => {
-                        self.received_messages
-                            .get_or_create(&metrics::Message::new_unknown(&peer))
-                            .inc();
-
-                        // We permit unknown messages to be received in case
-                        // peers are on a newer version than us
-                        continue;
                     }
                 }
             }

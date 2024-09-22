@@ -23,13 +23,14 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{Error, Handle};
+use crate::{Clock, Error, Handle};
 use bytes::Bytes;
 use futures::{
     channel::mpsc,
     task::{waker_ref, ArcWake},
     SinkExt, StreamExt,
 };
+use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::{
@@ -460,7 +461,7 @@ impl Future for Sleeper {
     }
 }
 
-impl crate::Clock for Context {
+impl Clock for Context {
     fn current(&self) -> SystemTime {
         *self.executor.time.lock().unwrap()
     }
@@ -487,6 +488,16 @@ impl crate::Clock for Context {
         }
     }
 }
+
+impl GClock for Context {
+    type Instant = SystemTime;
+
+    fn now(&self) -> Self::Instant {
+        self.current()
+    }
+}
+
+impl ReasonablyRealtime for Context {}
 
 type Dialable = mpsc::UnboundedSender<(
     SocketAddr,

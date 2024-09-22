@@ -8,7 +8,12 @@ use crate::authenticated::{
 };
 use commonware_cryptography::{utils::hex, Scheme};
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
+use governor::{
+    clock::{Clock as GClock, ReasonablyRealtime},
+    middleware::NoOpMiddleware,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
 use rand::{CryptoRng, Rng};
 use tracing::debug;
 
@@ -23,14 +28,14 @@ pub struct Actor<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + Network<L, Si, St> + Rng + CryptoRng,
+    E: Spawner + Clock + GClock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
     C: Scheme,
 > {
     context: E,
 
     address: SocketAddr,
     connection: connection::Config<C>,
-    rate_limiter: DefaultDirectRateLimiter,
+    rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
 
     _phantom_si: PhantomData<Si>,
     _phantom_st: PhantomData<St>,
@@ -41,17 +46,20 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + Network<L, Si, St> + Rng + CryptoRng,
+        E: Spawner + Clock + GClock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
         C: Scheme,
     > Actor<Si, St, L, E, C>
 {
     pub fn new(context: E, cfg: Config<C>) -> Self {
         Self {
-            context,
+            context: context.clone(),
 
             address: cfg.address,
             connection: cfg.connection,
-            rate_limiter: RateLimiter::direct(cfg.allowed_incoming_connectioned_rate),
+            rate_limiter: RateLimiter::direct_with_clock(
+                cfg.allowed_incoming_connectioned_rate,
+                &context,
+            ),
 
             _phantom_si: PhantomData,
             _phantom_st: PhantomData,

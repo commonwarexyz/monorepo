@@ -7,7 +7,12 @@ use crate::authenticated::{
 };
 use commonware_cryptography::{utils::hex, Scheme};
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
+use governor::{
+    clock::Clock as GClock,
+    middleware::NoOpMiddleware,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
@@ -30,7 +35,7 @@ pub struct Actor<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + Network<L, Si, St>,
+    E: Spawner + Clock + GClock + Network<L, Si, St>,
     C: Scheme,
 > {
     context: E,
@@ -38,7 +43,7 @@ pub struct Actor<
     connection: connection::Config<C>,
     dial_frequency: Duration,
 
-    dial_limiter: DefaultDirectRateLimiter,
+    dial_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
 
     dial_attempts: Family<metrics::Peer, Counter>,
 
@@ -51,7 +56,7 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + Network<L, Si, St> + Rng + CryptoRng,
+        E: Spawner + Clock + GClock + Network<L, Si, St> + Rng + CryptoRng,
         C: Scheme,
     > Actor<Si, St, L, E, C>
 {
@@ -66,10 +71,10 @@ impl<
             );
         }
         Self {
-            context,
+            context: context.clone(),
             connection: cfg.connection,
             dial_frequency: cfg.dial_frequency,
-            dial_limiter: RateLimiter::direct(cfg.dial_rate),
+            dial_limiter: RateLimiter::direct_with_clock(cfg.dial_rate, &context),
             dial_attempts,
             _phantom_si: PhantomData,
             _phantom_st: PhantomData,

@@ -10,6 +10,7 @@ use super::{
 };
 use commonware_cryptography::Scheme;
 use commonware_runtime::{select, Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand::{CryptoRng, Rng};
 use tracing::{debug, info, warn};
 
@@ -18,7 +19,7 @@ pub struct Network<
     Si: Sink,
     St: Stream,
     L: Listener<Si, St>,
-    E: Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+    E: Spawner + Clock + ReasonablyRealtime + GClock + Rng + CryptoRng + RNetwork<L, Si, St>,
     C: Scheme,
 > {
     context: E,
@@ -39,7 +40,7 @@ impl<
         Si: Sink,
         St: Stream,
         L: Listener<Si, St>,
-        E: Spawner + Clock + Rng + CryptoRng + RNetwork<L, Si, St>,
+        E: Spawner + Clock + ReasonablyRealtime + GClock + Rng + CryptoRng + RNetwork<L, Si, St>,
         C: Scheme,
     > Network<Si, St, L, E, C>
 {
