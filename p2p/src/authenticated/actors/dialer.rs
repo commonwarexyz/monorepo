@@ -17,11 +17,8 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
 use rand::{CryptoRng, Rng};
+use std::sync::{Arc, Mutex};
 use std::{marker::PhantomData, time::Duration};
-use std::{
-    ops::Add,
-    sync::{Arc, Mutex},
-};
 use tracing::debug;
 
 pub struct Config<C: Scheme> {
@@ -143,19 +140,16 @@ impl<
         mut tracker: tracker::Mailbox<E>,
         mut supervisor: spawner::Mailbox<E, C, Si, St>,
     ) {
-        let mut next_update = self.context.current();
         loop {
-            self.context.sleep_until(next_update).await;
-
             // Attempt to dial peers we know about
             self.dial_peers(&mut tracker, &mut supervisor).await;
 
-            // Ensure we reset the timer with a new jitter
-            let jitter_millis = self
-                .context
-                .gen_range(0..self.dial_frequency.as_millis() as u64);
-            let jitter = Duration::from_millis(jitter_millis);
-            next_update = self.context.current().add(jitter + self.dial_frequency);
+            // Sleep for a random amount of time up to the dial frequency
+            let wait = Duration::from_millis(
+                self.context
+                    .gen_range(0..self.dial_frequency.as_millis() as u64),
+            );
+            self.context.sleep(wait).await;
         }
     }
 }

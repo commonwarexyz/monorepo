@@ -15,7 +15,10 @@ use governor::{
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::{prelude::IteratorRandom, seq::SliceRandom, Rng};
+use rand::{
+    prelude::{IteratorRandom, SliceRandom},
+    Rng,
+};
 use std::time::{Duration, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -536,6 +539,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             self.rate_limited_connections
                 .get_or_create(&metrics::Peer::new(&peer))
                 .inc();
+            return None;
         }
 
         // Reserve the connection
@@ -599,7 +603,13 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                 }
                 Message::Dialable { peers } => {
                     // Fetch dialable peers
-                    let _ = peers.send(self.handle_dialable());
+                    let mut dialable = self.handle_dialable();
+
+                    // Shuffle to prevent starvation
+                    dialable.shuffle(&mut self.context);
+
+                    // Inform dialer of dialable peers
+                    let _ = peers.send(dialable);
 
                     // Shrink to fit rate limiter
                     self.connections_rate_limiter.shrink_to_fit();
