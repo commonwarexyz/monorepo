@@ -328,7 +328,7 @@ mod tests {
             .await;
 
             // Assert that the result is an error
-            assert!(result.is_err());
+            assert!(matches!(result, Err(Error::UnableToDecode(_))));
         });
     }
 
