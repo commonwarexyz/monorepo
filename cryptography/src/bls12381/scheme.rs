@@ -99,3 +99,75 @@ pub fn insecure_signer(seed: u64) -> Bls12381 {
     let (private, public) = ops::keypair(&mut rng);
     Bls12381 { private, public }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::OsRng;
+
+    #[test]
+    fn test_new() {
+        let mut rng = OsRng;
+        let signer = Bls12381::new(&mut rng);
+        let public_key = signer.me();
+        assert!(Bls12381::validate(&public_key));
+    }
+
+    #[test]
+    fn test_from_valid_secret() {
+        let mut rng = OsRng;
+        let signer = Bls12381::new(&mut rng);
+        let secret_key = signer.private.serialize();
+        let signer_from_secret = Bls12381::from(
+            secret_key
+                .try_into()
+                .expect("secret_key should be 32 bytes"),
+        )
+        .unwrap();
+        assert_eq!(signer.me(), signer_from_secret.me());
+    }
+
+    #[test]
+    fn test_insecure_signer() {
+        let seed = 42u64;
+        let signer1 = insecure_signer(seed);
+        let signer2 = insecure_signer(seed);
+        assert_eq!(signer1.me(), signer2.me());
+
+        let mut signer = insecure_signer(seed);
+        let namespace = b"test_namespace";
+        let message = b"test_message";
+        let signature = signer.sign(namespace, message);
+
+        let public_key = signer.me();
+        assert!(Bls12381::verify(
+            namespace,
+            message,
+            &public_key,
+            &signature
+        ));
+    }
+
+    #[test]
+    fn test_validate_invalid_public_key() {
+        let invalid_public_key = vec![0u8; 31]; // Invalid length
+        assert!(!Bls12381::validate(&invalid_public_key.into()));
+    }
+
+    #[test]
+    fn test_verify_with_invalid_signature_length() {
+        let mut signer = Bls12381::new(&mut OsRng);
+        let namespace = b"test_namespace";
+        let message = b"test_message";
+        let mut signature = signer.sign(namespace, message);
+        signature.truncate(signature.len() - 1); // Invalidate the signature
+
+        let public_key = signer.me();
+        assert!(!Bls12381::verify(
+            namespace,
+            message,
+            &public_key,
+            &signature
+        ));
+    }
+}
