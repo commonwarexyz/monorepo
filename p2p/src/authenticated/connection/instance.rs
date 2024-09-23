@@ -233,3 +233,50 @@ impl<St: Stream> Receiver<St> {
         wire::Message::decode(msg.as_ref()).map_err(Error::UnableToDecode)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_runtime::{
+        deterministic::Executor,
+        mocks::{MockSink, MockStream},
+        Runner,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn test_sender_nonce_overflow() {
+        let (executuor, _, _) = Executor::init(0, Duration::from_millis(1));
+        executuor.start(async {
+            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+            let (sink, _) = MockSink::new();
+            let mut sender = Sender {
+                cipher,
+                sink,
+                dialer: true,
+                iter: u16::MAX,
+                seq: u64::MAX,
+            };
+            let nonce_result = sender.my_nonce();
+            assert!(matches!(nonce_result, Err(Error::OurNonceOverflow)));
+        });
+    }
+
+    #[test]
+    fn test_receiver_nonce_overflow() {
+        let (executuor, _, _) = Executor::init(0, Duration::from_millis(1));
+        executuor.start(async {
+            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+            let (stream, _) = MockStream::new();
+            let mut receiver = Receiver {
+                cipher,
+                stream,
+                dialer: false,
+                iter: u16::MAX,
+                seq: u64::MAX,
+            };
+            let nonce_result = receiver.peer_nonce();
+            assert!(matches!(nonce_result, Err(Error::PeerNonceOverflow)));
+        });
+    }
+}
