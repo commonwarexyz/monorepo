@@ -207,7 +207,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n_0 {
-            let signer = Ed25519::insecure(i as u64).public_key();
+            let signer = Ed25519::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -342,7 +342,7 @@ mod tests {
         // Create reshare recipients (assume no overlap)
         let mut reshare_recipients = Vec::new();
         for i in 0..n_1 {
-            let recipient = Ed25519::insecure((i + n_0) as u64).public_key();
+            let recipient = Ed25519::from_seed((i + n_0) as u64).public_key();
             reshare_recipients.push(recipient);
         }
         reshare_recipients.sort();
@@ -500,7 +500,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::insecure(i as u64).public_key();
+            let signer = Ed25519::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -651,7 +651,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = Ed25519::insecure(i as u64).public_key();
+            let signer = Ed25519::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();

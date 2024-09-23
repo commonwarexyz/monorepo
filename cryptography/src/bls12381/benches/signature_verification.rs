@@ -16,7 +16,12 @@ fn benchmark_signature_verification(c: &mut Criterion) {
                     (signer, signature)
                 },
                 |(signer, signature)| {
-                    black_box(Bls12381::verify(namespace, msg, &signer.me(), &signature));
+                    black_box(Bls12381::verify(
+                        namespace,
+                        msg,
+                        &signer.public_key(),
+                        &signature,
+                    ));
                 },
                 BatchSize::SmallInput,
             );

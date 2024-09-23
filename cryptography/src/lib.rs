@@ -159,6 +159,21 @@ mod tests {
     }
 
     #[test]
+    fn test_ed25519_validate() {
+        test_validate::<Ed25519>();
+    }
+
+    #[test]
+    fn test_ed25519_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<Ed25519>();
+    }
+
+    #[test]
+    fn test_ed25519_from_valid_private_key() {
+        test_from_valid_private_key::<Ed25519>();
+    }
+
+    #[test]
     fn test_ed25519_sign_and_verify() {
         test_sign_and_verify::<Ed25519>();
     }
@@ -181,6 +196,21 @@ mod tests {
     #[test]
     fn test_ed25519_invalid_signature_length() {
         test_invalid_signature_length::<Ed25519>();
+    }
+
+    #[test]
+    fn test_bls12381_validate() {
+        test_validate::<Bls12381>();
+    }
+
+    #[test]
+    fn test_bls12381_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<Bls12381>();
+    }
+
+    #[test]
+    fn test_bls12381_from_valid_private_key() {
+        test_from_valid_private_key::<Bls12381>();
     }
 
     #[test]
