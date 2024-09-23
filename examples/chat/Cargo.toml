@@ -16,11 +16,11 @@ commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 tracing = { workspace = true } 
 futures = { workspace = true }
-clap = "4"
+clap = { workspace = true }
+prometheus-client = { workspace = true }
+governor = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
 chrono = "0.4"
-tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
 ratatui = "0.27"
 crossterm = "0.28"
 serde_json = "1"
-prometheus-client = "0.22"
-governor = "0.6"
