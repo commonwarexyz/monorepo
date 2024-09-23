@@ -35,7 +35,7 @@ pub trait Scheme: Send + Sync + Clone + 'static {
     ///
     /// This function is insecure and should only be used for examples
     /// and testing.
-    fn insecure(seed: u64) -> Self;
+    fn from_seed(seed: u64) -> Self;
 
     /// Returns the serialized private key of the signer.
     fn private_key(&self) -> PrivateKey;
@@ -75,6 +75,8 @@ pub trait Scheme: Send + Sync + Clone + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bls12381::Bls12381;
+    use ed25519::Ed25519;
     use rand::rngs::OsRng;
 
     fn test_validate<C: Scheme>() {
@@ -97,7 +99,7 @@ mod tests {
     }
 
     fn test_sign_and_verify<C: Scheme>() {
-        let mut signer = C::insecure(0);
+        let mut signer = C::from_seed(0);
         let namespace = b"test_namespace";
         let message = b"test_message";
         let signature = signer.sign(namespace, message);
@@ -106,7 +108,7 @@ mod tests {
     }
 
     fn test_sign_and_verify_wrong_message<C: Scheme>() {
-        let mut signer = C::insecure(0);
+        let mut signer = C::from_seed(0);
         let namespace = b"test_namespace";
         let message = b"test_message";
         let wrong_message = b"wrong_message";
@@ -121,7 +123,7 @@ mod tests {
     }
 
     fn test_sign_and_verify_wrong_namespace<C: Scheme>() {
-        let mut signer = C::insecure(0);
+        let mut signer = C::from_seed(0);
         let namespace = b"test_namespace";
         let wrong_namespace = b"wrong_namespace";
         let message = b"test_message";
@@ -136,8 +138,8 @@ mod tests {
     }
 
     fn test_signature_determinism<C: Scheme>() {
-        let mut signer_1 = C::insecure(0);
-        let mut signer_2 = C::insecure(0);
+        let mut signer_1 = C::from_seed(0);
+        let mut signer_2 = C::from_seed(0);
         let namespace = b"test_namespace";
         let message = b"test_message";
         let signature_1 = signer_1.sign(namespace, message);
@@ -147,7 +149,7 @@ mod tests {
     }
 
     fn test_invalid_signature_length<C: Scheme>() {
-        let mut signer = C::insecure(0);
+        let mut signer = C::from_seed(0);
         let namespace = b"test_namespace";
         let message = b"test_message";
         let mut signature = signer.sign(namespace, message);
@@ -158,63 +160,51 @@ mod tests {
 
     #[test]
     fn test_ed25519_sign_and_verify() {
-        let signer = ed25519::insecure_signer(0);
-        test_sign_and_verify(signer);
+        test_sign_and_verify::<Ed25519>();
     }
 
     #[test]
     fn test_ed25519_sign_and_verify_wrong_message() {
-        let signer = ed25519::insecure_signer(0);
-        test_sign_and_verify_wrong_message(signer);
+        test_sign_and_verify_wrong_message::<Ed25519>();
     }
 
     #[test]
     fn test_ed25519_sign_and_verify_wrong_namespace() {
-        let signer = ed25519::insecure_signer(0);
-        test_sign_and_verify_wrong_namespace(signer);
+        test_sign_and_verify_wrong_namespace::<Ed25519>();
     }
 
     #[test]
     fn test_ed25519_signature_determinism() {
-        let signer_1 = ed25519::insecure_signer(0);
-        let signer_2 = ed25519::insecure_signer(0);
-        test_signature_determinism(signer_1, signer_2);
+        test_signature_determinism::<Ed25519>();
     }
 
     #[test]
     fn test_ed25519_invalid_signature_length() {
-        let signer = ed25519::insecure_signer(0);
-        test_invalid_signature_length(signer);
+        test_invalid_signature_length::<Ed25519>();
     }
 
     #[test]
     fn test_bls12381_sign_and_verify() {
-        let signer = bls12381::insecure_signer(0);
-        test_sign_and_verify(signer);
+        test_sign_and_verify::<Bls12381>();
     }
 
     #[test]
     fn test_bls12381_sign_and_verify_wrong_message() {
-        let signer = bls12381::insecure_signer(0);
-        test_sign_and_verify_wrong_message(signer);
+        test_sign_and_verify_wrong_message::<Bls12381>();
     }
 
     #[test]
     fn test_bls12381_sign_and_verify_wrong_namespace() {
-        let signer = bls12381::insecure_signer(0);
-        test_sign_and_verify_wrong_namespace(signer);
+        test_sign_and_verify_wrong_namespace::<Bls12381>();
     }
 
     #[test]
     fn test_bls12381_signature_determinism() {
-        let signer_1 = bls12381::insecure_signer(0);
-        let signer_2 = bls12381::insecure_signer(0);
-        test_signature_determinism(signer_1, signer_2);
+        test_signature_determinism::<Bls12381>();
     }
 
     #[test]
     fn test_bls12381_invalid_signature_length() {
-        let signer = bls12381::insecure_signer(0);
-        test_invalid_signature_length(signer);
+        test_invalid_signature_length::<Bls12381>();
     }
 }

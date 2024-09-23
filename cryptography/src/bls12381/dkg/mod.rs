@@ -651,7 +651,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = insecure_signer(i as u64).me();
+            let signer = Ed25519::insecure(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();

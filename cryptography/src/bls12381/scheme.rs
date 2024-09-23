@@ -55,7 +55,7 @@ impl Scheme for Bls12381 {
         Some(Self { private, public })
     }
 
-    fn insecure(seed: u64) -> Self {
+    fn from_seed(seed: u64) -> Self {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         Self::new(&mut rng)
     }

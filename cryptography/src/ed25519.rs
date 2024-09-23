@@ -62,7 +62,7 @@ impl Scheme for Ed25519 {
         })
     }
 
-    fn insecure(seed: u64) -> Self {
+    fn from_seed(seed: u64) -> Self {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         Self::new(&mut rng)
     }
