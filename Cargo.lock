@@ -380,7 +380,7 @@ checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "chrono",
  "clap",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.17"
+version = "0.0.18"
 dependencies = [
  "bitvec",
  "bytes",
@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "bytes",
  "futures",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "bytes",
  "clap",
