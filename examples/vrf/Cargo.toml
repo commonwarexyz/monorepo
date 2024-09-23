@@ -19,10 +19,10 @@ rand = { workspace = true }
 tracing = { workspace = true } 
 prost = { workspace = true } 
 futures = { workspace = true }
-clap = "4" 
-tracing-subscriber = "0.3"
-prometheus-client = "0.22"
-governor = "0.6"
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus-client = { workspace = true }
+governor = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true } 
