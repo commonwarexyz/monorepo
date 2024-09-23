@@ -16,7 +16,7 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 pub struct Actor<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
-    context: E,
+    runtime: E,
 
     mailbox_size: usize,
     gossip_bit_vec_frequency: Duration,
@@ -37,7 +37,7 @@ impl<
         St: Stream,
     > Actor<E, C, Si, St>
 {
-    pub fn new(context: E, cfg: Config) -> (Self, Mailbox<E, C, Si, St>) {
+    pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, C, Si, St>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();
@@ -59,7 +59,7 @@ impl<
 
         (
             Self {
-                context,
+                runtime,
                 mailbox_size: cfg.mailbox_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -101,13 +101,13 @@ impl<
                         .inc();
 
                     // Spawn peer
-                    self.context.spawn({
-                        let context = self.context.clone();
+                    self.runtime.spawn({
+                        let runtime = self.runtime.clone();
                         async move {
                             // Create peer
                             info!(peer = hex(&peer), "peer started");
                             let (actor, messenger) = peer::Actor::new(
-                                context,
+                                runtime,
                                 peer::Config {
                                     sent_messages,
                                     received_messages,

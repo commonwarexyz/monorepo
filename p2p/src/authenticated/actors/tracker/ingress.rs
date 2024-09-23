@@ -133,14 +133,14 @@ impl<E: Spawner> Oracle<E> {
 }
 
 pub struct Reservation<E: Spawner> {
-    context: E,
+    runtime: E,
     closer: Option<(PublicKey, Mailbox<E>)>,
 }
 
 impl<E: Spawner> Reservation<E> {
-    pub fn new(context: E, peer: PublicKey, mailbox: Mailbox<E>) -> Self {
+    pub fn new(runtime: E, peer: PublicKey, mailbox: Mailbox<E>) -> Self {
         Self {
-            context,
+            runtime,
             closer: Some((peer, mailbox)),
         }
     }
@@ -149,7 +149,7 @@ impl<E: Spawner> Reservation<E> {
 impl<E: Spawner> Drop for Reservation<E> {
     fn drop(&mut self) {
         let (peer, mut mailbox) = self.closer.take().unwrap();
-        self.context.spawn(async move {
+        self.runtime.spawn(async move {
             mailbox.release(peer).await;
         });
     }

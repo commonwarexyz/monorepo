@@ -22,7 +22,7 @@ pub struct Network<
     E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng + RNetwork<L, Si, St>,
     C: Scheme,
 > {
-    context: E,
+    runtime: E,
     cfg: Config<C>,
 
     channels: Channels,
@@ -54,9 +54,9 @@ impl<
     ///
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
-    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<E>) {
+    pub fn new(runtime: E, cfg: Config<C>) -> (Self, tracker::Oracle<E>) {
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
-            context.clone(),
+            runtime.clone(),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 registry: cfg.registry.clone(),
@@ -77,7 +77,7 @@ impl<
 
         (
             Self {
-                context,
+                runtime,
                 cfg,
 
                 channels: Channels::new(messenger),
@@ -126,14 +126,14 @@ impl<
     /// After the network is started, it is not possible to add more channels.
     pub async fn run(self) {
         // Start tracker
-        let mut tracker_task = self.context.spawn(self.tracker.run());
+        let mut tracker_task = self.runtime.spawn(self.tracker.run());
 
         // Start router
-        let mut router_task = self.context.spawn(self.router.run(self.channels));
+        let mut router_task = self.runtime.spawn(self.router.run(self.channels));
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
-            self.context.clone(),
+            self.runtime.clone(),
             spawner::Config {
                 registry: self.cfg.registry.clone(),
                 mailbox_size: self.cfg.mailbox_size,
@@ -143,7 +143,7 @@ impl<
             },
         );
         let mut spawner_task = self
-            .context
+            .runtime
             .spawn(spawner.run(self.tracker_mailbox.clone(), self.router_mailbox));
 
         // Start listener
@@ -155,7 +155,7 @@ impl<
             handshake_timeout: self.cfg.handshake_timeout,
         };
         let listener = listener::Actor::new(
-            self.context.clone(),
+            self.runtime.clone(),
             listener::Config {
                 registry: self.cfg.registry.clone(),
                 address: self.cfg.listen,
@@ -164,12 +164,12 @@ impl<
             },
         );
         let mut listener_task = self
-            .context
+            .runtime
             .spawn(listener.run(self.tracker_mailbox.clone(), spawner_mailbox.clone()));
 
         // Start dialer
         let dialer = dialer::Actor::new(
-            self.context.clone(),
+            self.runtime.clone(),
             dialer::Config {
                 registry: self.cfg.registry,
                 connection,
@@ -178,7 +178,7 @@ impl<
             },
         );
         let mut dialer_task = self
-            .context
+            .runtime
             .spawn(dialer.run(self.tracker_mailbox, spawner_mailbox));
 
         // Wait for first actor to exit

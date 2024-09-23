@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
 pub struct Vrf<E: Clock> {
-    context: E,
+    runtime: E,
     timeout: Duration,
     threshold: u32,
     contributors: Vec<PublicKey>,
@@ -32,7 +32,7 @@ pub struct Vrf<E: Clock> {
 
 impl<E: Clock> Vrf<E> {
     pub fn new(
-        context: E,
+        runtime: E,
         timeout: Duration,
         threshold: u32,
         mut contributors: Vec<PublicKey>,
@@ -45,7 +45,7 @@ impl<E: Clock> Vrf<E> {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
-            context,
+            runtime,
             timeout,
             threshold,
             contributors,
@@ -84,12 +84,12 @@ impl<E: Clock> Vrf<E> {
             .expect("failed to send signature");
 
         // Wait for partial signatures from peers or timeout
-        let start = self.context.current();
+        let start = self.runtime.current();
         let t_signature = start + self.timeout;
         let mut received = HashSet::new();
         loop {
             select! {
-                _timeout = self.context.sleep_until(t_signature) => {
+                _timeout = self.runtime.sleep_until(t_signature) => {
                     debug!(round, "signature timeout");
                     break;
                 },
