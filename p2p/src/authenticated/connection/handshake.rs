@@ -185,8 +185,8 @@ mod tests {
     #[test]
     fn test_handshake_create_verify() {
         // Initialize runtime
-        let (runner, runtime, _) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
             // Create participants
             let mut sender = ed25519::insecure_signer(0);
             let recipient = ed25519::insecure_signer(1);
@@ -253,8 +253,8 @@ mod tests {
     #[test]
     fn test_handshake() {
         // Initialize runtime
-        let (runner, runtime, _) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
             // Create participants
             let mut sender = ed25519::insecure_signer(0);
             let recipient = ed25519::insecure_signer(1);
@@ -302,8 +302,8 @@ mod tests {
     #[test]
     fn test_incoming_handshake_invalid_data() {
         // Initialize runtime
-        let (runner, runtime, _) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
             // Setup a mock listener that will listen for the response
             let addr: SocketAddr = "127.0.0.1:300".parse().unwrap();
             let mut listener = runtime.bind(addr).await.unwrap();
@@ -335,8 +335,8 @@ mod tests {
     #[test]
     fn test_incoming_handshake_verify_timeout() {
         // Initialize runtime
-        let (runner, runtime, _) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
             // Create participants
             let mut sender = ed25519::insecure_signer(0);
             let recipient = ed25519::insecure_signer(1);

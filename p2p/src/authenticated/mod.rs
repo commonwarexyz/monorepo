@@ -198,7 +198,7 @@
 //! // Start runtime
 //! runner.start(async move {
 //!     // Initialize network
-//!     let (mut network, mut oracle) = Network::new(context.clone(), p2p_cfg);
+//!     let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
 //!
 //!     // Register authorized peers
 //!     //

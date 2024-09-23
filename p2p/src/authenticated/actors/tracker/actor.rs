@@ -669,9 +669,9 @@ mod tests {
     #[test]
     fn test_reserve_peer() {
         // Create actor
-        let (runner, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
         let cfg = test_config(ed25519::insecure_signer(0), Vec::new());
-        runner.start(async move {
+        executor.start(async move {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
             // Run actor in background
@@ -714,10 +714,10 @@ mod tests {
     #[test]
     fn test_bit_vec() {
         // Create actor
-        let (runner, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
         let peer0 = ed25519::insecure_signer(0);
         let cfg = test_config(peer0.clone(), Vec::new());
-        runner.start(async move {
+        executor.start(async move {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
             // Run actor in background
