@@ -304,11 +304,11 @@ mod tests {
         // Initialize runtime
         let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
-            // Setup a mock TcpStream that will listen for the response
-            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            // Setup a mock listener that will listen for the response
+            let addr: SocketAddr = "127.0.0.1:300".parse().unwrap();
             let mut listener = context.bind(addr).await.unwrap();
 
-            // Send message over stream
+            // Send invalid data over stream
             context.spawn(async move {
                 let (_, mut sink, _) = listener.accept().await.unwrap();
                 sink.send(Bytes::from("mock data")).await.unwrap();
@@ -337,15 +337,40 @@ mod tests {
         // Initialize runtime
         let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
         runner.start(async move {
-            // Setup a mock TcpStream
-            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let _ = context.bind(addr).await.unwrap();
+            // Create participants
+            let mut sender = ed25519::insecure_signer(0);
+            let recipient = ed25519::insecure_signer(1);
+            let ephemeral_public_key = PublicKey::from([3u8; 32]);
+
+            // Setup a mock listener
+            let addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+            let mut listener = context.bind(addr).await.unwrap();
+
+            // Accept connections but do nothing
+            context.spawn({
+                let context = context.clone();
+                let recipient = recipient.clone();
+                async move {
+                    let (_, mut sink, _) = listener.accept().await.unwrap();
+                    context.sleep(Duration::from_secs(10)).await;
+                    let handshake_bytes = create_handshake(
+                        context.clone(),
+                        &mut sender,
+                        recipient.me(),
+                        ephemeral_public_key,
+                    )
+                    .unwrap();
+                    sink.send(handshake_bytes).await.unwrap();
+                }
+            });
+
+            // Dial listener
             let (sink, stream) = context.dial(addr).await.unwrap();
 
             // Call the verify function
             let result = IncomingHandshake::verify(
                 context,
-                &ed25519::insecure_signer(0),
+                &recipient,
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
