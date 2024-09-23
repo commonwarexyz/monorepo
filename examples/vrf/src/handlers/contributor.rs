@@ -17,10 +17,10 @@ use commonware_cryptography::{
     PublicKey, Scheme,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
+use futures::{channel::mpsc, SinkExt};
 use prost::Message;
-use rand::thread_rng;
+use rand::rngs::OsRng;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
@@ -74,7 +74,7 @@ impl<C: Scheme> Contributor<C> {
     async fn run_round(
         &mut self,
         previous: Option<&Output>,
-        sender: &impl Sender,
+        sender: &mut impl Sender,
         receiver: &mut impl Receiver,
     ) -> (u64, Option<Output>) {
         // Configure me
@@ -317,7 +317,7 @@ impl<C: Scheme> Contributor<C> {
                     // If we are rogue, randomly modify the share.
                     share_bytes = group::Share {
                         index: share.index,
-                        private: Private::rand(&mut thread_rng()),
+                        private: Private::rand(&mut OsRng),
                     }
                     .serialize();
                     warn!(round, player = idx, "modified share");
@@ -582,7 +582,7 @@ impl<C: Scheme> Contributor<C> {
         (round, output)
     }
 
-    pub async fn run(mut self, sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
         if self.rogue {
             warn!("running as rogue player");
         }
@@ -595,7 +595,7 @@ impl<C: Scheme> Contributor<C> {
         let mut previous = None;
         loop {
             let (round, output) = self
-                .run_round(previous.as_ref(), &sender, &mut receiver)
+                .run_round(previous.as_ref(), &mut sender, &mut receiver)
                 .await;
             match output {
                 None => {

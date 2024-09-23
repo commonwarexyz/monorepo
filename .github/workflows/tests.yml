@@ -7,15 +7,48 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  UDEPS_VERSION: 0.1.50
 
 jobs:
   All:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Install protoc
-      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        rust-version: ${{ steps.rust-version.outputs.rust_version}}
     - name: Lint with clippy
       run: cargo clippy -- -D warnings
     - name: Run tests
       run: cargo test --verbose
+  
+  Dependencies:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install nightly
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup 
+      uses: ./.github/actions/setup
+      with:
+        rust-version: ${{ steps.rust-version.outputs.rust_version}}
+    - name: Cache cargo-udeps
+      id: cargo-udeps-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cargo-udeps
+        key: ${{ runner.os }}-${{ env.UDEPS_VERSION }}-cargo-udeps-${{ steps.rust-version.outputs.rust_version }}
+    - name: Install cargo-udeps
+      if: steps.cargo-udeps-cache.outputs.cache-hit != 'true'
+      run: cargo +nightly install cargo-udeps --version ${{ env.UDEPS_VERSION }}
+    - name: Check for unused dependencies
+      run: cargo +nightly udeps

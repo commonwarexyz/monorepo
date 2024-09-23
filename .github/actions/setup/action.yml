@@ -1,0 +1,46 @@
+name: 'Setup'
+inputs:
+  rust-version:
+    description: 'The version of Rust to use in cache keys'
+    required: true
+  protoc-version:
+    description: 'The version of protoc to use in cache keys'
+    default: '28.2'
+    required: false 
+runs:
+  using: 'composite'
+  steps:
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}-${{ inputs.rust-version }}
+    - name: Cache cargo index
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}-${{ inputs.rust-version }}
+    - name: Cache cargo target
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}-${{ inputs.rust-version }}
+    - name: Create protoc directory
+      run: mkdir -p ~/protoc
+      shell: bash
+    - name: Cache protoc
+      id: cache-protoc
+      uses: actions/cache@v4
+      with:
+        path: ~/protoc
+        key: ${{ runner.os }}-protoc-${{ inputs.protoc-version }}
+    - name: Install protoc
+      if: steps.cache-protoc.outputs.cache-hit != 'true'
+      run: |
+        curl -L -o protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v${{ inputs.protoc-version }}/protoc-${{ inputs.protoc-version }}-linux-x86_64.zip
+        unzip protoc.zip -d ~/protoc
+        rm protoc.zip
+      shell: bash
+    - name: Add protoc to PATH
+      run: echo "$HOME/protoc/bin" >> $GITHUB_PATH
+      shell: bash

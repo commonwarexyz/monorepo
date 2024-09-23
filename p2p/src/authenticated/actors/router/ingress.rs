@@ -4,7 +4,10 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use tokio::sync::{mpsc, oneshot};
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt,
+};
 
 pub enum Message {
     Ready {
@@ -34,7 +37,7 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn ready(&self, peer: PublicKey, relay: peer::Relay) -> Channels {
+    pub async fn ready(&mut self, peer: PublicKey, relay: peer::Relay) -> Channels {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(Message::Ready {
@@ -47,7 +50,7 @@ impl Mailbox {
         receiver.await.unwrap()
     }
 
-    pub async fn release(&self, peer: PublicKey) {
+    pub async fn release(&mut self, peer: PublicKey) {
         self.sender.send(Message::Release { peer }).await.unwrap();
     }
 }
@@ -63,7 +66,7 @@ impl Messenger {
     }
 
     pub async fn content(
-        &self,
+        &mut self,
         recipients: Recipients,
         channel: u32,
         message: Bytes,

@@ -5,13 +5,19 @@ use crate::Error;
 use crate::{Runner, Spawner};
 #[cfg(test)]
 use futures::stream::{FuturesUnordered, StreamExt};
-use futures::{channel::oneshot, FutureExt};
+use futures::{
+    channel::oneshot,
+    stream::{AbortHandle, Abortable},
+    FutureExt,
+};
 use std::{
+    any::Any,
     future::Future,
-    panic::AssertUnwindSafe,
+    panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
     task::{Context, Poll},
 };
+use tracing::error;
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {
@@ -36,11 +42,22 @@ pub async fn reschedule() {
     Reschedule { yielded: false }.await
 }
 
+fn extract_panic_message(err: &(dyn Any + Send)) -> String {
+    if let Some(s) = err.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        format!("{:?}", err)
+    }
+}
+
 /// Handle to a spawned task.
 pub struct Handle<T>
 where
     T: Send + 'static,
 {
+    aborter: AbortHandle,
     receiver: oneshot::Receiver<Result<T, Error>>,
 }
 
@@ -48,29 +65,38 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn init<F>(f: F) -> (impl Future<Output = ()>, Self)
+    pub(crate) fn init<F>(f: F, catch_panic: bool) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
     {
+        // Initialize channels to handle result/abort
         let (sender, receiver) = oneshot::channel();
+        let (aborter, abort_registration) = AbortHandle::new_pair();
+
+        // Wrap the future to handle panics
         let wrapped = async move {
             let result = AssertUnwindSafe(f).catch_unwind().await;
             let result = match result {
                 Ok(result) => Ok(result),
-                Err(err) => Err(Error::Exited(err)),
+                Err(err) => {
+                    if !catch_panic {
+                        resume_unwind(err);
+                    }
+                    let err = extract_panic_message(&*err);
+                    error!(?err, "task panicked");
+                    Err(Error::Exited)
+                }
             };
             let _ = sender.send(result);
         };
-        (wrapped, Self { receiver })
+
+        // Make the future abortable
+        let abortable = Abortable::new(wrapped, abort_registration);
+        (abortable.map(|_| ()), Self { aborter, receiver })
     }
 
-    /// Wait for the task to complete and return the result.
-    pub async fn join(self) -> Result<T, Error> {
-        match self.receiver.await {
-            Ok(Ok(val)) => Ok(val),
-            Ok(Err(err)) => Err(err),
-            Err(_) => Err(Error::Closed),
-        }
+    pub fn abort(&self) {
+        self.aborter.abort();
     }
 }
 

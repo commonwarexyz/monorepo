@@ -3,23 +3,19 @@ use super::{
     Config,
 };
 use crate::{
-    authenticated::{
-        actors::peer::{self, Relay},
-        channels::Channels,
-        metrics,
-    },
+    authenticated::{actors::peer, channels::Channels, metrics},
     Recipients,
 };
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
+use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
-use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::collections::BTreeMap;
 use tracing::debug;
 
 pub struct Actor {
     control: mpsc::Receiver<Message>,
-    connections: HashMap<PublicKey, peer::Relay>,
+    connections: BTreeMap<PublicKey, peer::Relay>,
 
     messages_dropped: Family<metrics::Message, Counter>,
 }
@@ -42,7 +38,7 @@ impl Actor {
         (
             Self {
                 control: control_receiver,
-                connections: HashMap::new(),
+                connections: BTreeMap::new(),
                 messages_dropped,
             },
             Mailbox::new(control_sender.clone()),
@@ -50,38 +46,26 @@ impl Actor {
         )
     }
 
-    async fn send_message(
-        &self,
-        messenger: &Relay,
-        recipient: &PublicKey,
-        channel: u32,
-        message: Bytes,
-        priority: bool,
-    ) {
-        if messenger
-            .content(channel, message.clone(), priority)
-            .await
-            .is_ok()
-        {
-            return;
-        }
-        self.messages_dropped
-            .get_or_create(&metrics::Message::new_chunk(recipient, channel))
-            .inc();
-    }
-
     async fn send_to_recipient(
-        &self,
+        &mut self,
         recipient: &PublicKey,
         channel: u32,
         message: Bytes,
         priority: bool,
         sent: &mut Vec<PublicKey>,
     ) {
-        if let Some(messenger) = self.connections.get(recipient) {
-            self.send_message(messenger, recipient, channel, message, priority)
-                .await;
-            sent.push(recipient.clone());
+        if let Some(messenger) = self.connections.get_mut(recipient) {
+            if messenger
+                .content(channel, message.clone(), priority)
+                .await
+                .is_ok()
+            {
+                sent.push(recipient.clone());
+            } else {
+                self.messages_dropped
+                    .get_or_create(&metrics::Message::new_chunk(recipient, channel))
+                    .inc();
+            }
         } else {
             self.messages_dropped
                 .get_or_create(&metrics::Message::new_chunk(recipient, channel))
@@ -90,7 +74,7 @@ impl Actor {
     }
 
     pub async fn run(mut self, routing: Channels) {
-        while let Some(msg) = self.control.recv().await {
+        while let Some(msg) = self.control.next().await {
             match msg {
                 Message::Ready {
                     peer,
@@ -133,16 +117,21 @@ impl Actor {
                             }
                         }
                         Recipients::All => {
-                            for (recipient, messenger) in self.connections.iter() {
-                                self.send_message(
-                                    messenger,
-                                    recipient,
-                                    channel,
-                                    message.clone(),
-                                    priority,
-                                )
-                                .await;
-                                sent.push(recipient.clone());
+                            // Send to all connected peers
+                            for (recipient, messenger) in self.connections.iter_mut() {
+                                if messenger
+                                    .content(channel, message.clone(), priority)
+                                    .await
+                                    .is_ok()
+                                {
+                                    sent.push(recipient.clone());
+                                } else {
+                                    self.messages_dropped
+                                        .get_or_create(&metrics::Message::new_chunk(
+                                            recipient, channel,
+                                        ))
+                                        .inc();
+                                }
                             }
                         }
                     }

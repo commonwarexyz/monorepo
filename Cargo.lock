@@ -131,28 +131,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3d1d046238990b9cf5bcde22a3fb3584ee5cf65fb2765f454ed428c7a0063da"
 
 [[package]]
-name = "async-stream"
-version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd56dd203fef61ac097dd65721a419ddccb106b2d2b70ba60a6b529f03961a51"
-dependencies = [
- "async-stream-impl",
- "futures-core",
- "pin-project-lite",
-]
-
-[[package]]
-name = "async-stream-impl"
-version = "0.3.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16e62a023e7c117e27523144c5d2459f4397fcc3cab0085af8e2224f643a0193"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -408,12 +386,13 @@ dependencies = [
  "clap",
  "commonware-cryptography",
  "commonware-p2p",
+ "commonware-runtime",
  "crossterm 0.28.1",
+ "futures",
  "governor",
  "prometheus-client",
  "ratatui",
  "serde_json",
- "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -430,7 +409,6 @@ dependencies = [
  "prost-build",
  "rand",
  "rayon",
- "sha2 0.10.8",
  "thiserror",
  "zeroize",
 ]
@@ -453,9 +431,6 @@ dependencies = [
  "rand_distr",
  "sha2 0.10.8",
  "thiserror",
- "tokio",
- "tokio-test",
- "tokio-util",
  "tracing",
  "x25519-dalek",
  "zstd",
@@ -465,10 +440,14 @@ dependencies = [
 name = "commonware-runtime"
 version = "0.0.2"
 dependencies = [
+ "bytes",
  "futures",
+ "governor",
  "rand",
+ "sha2 0.10.8",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -480,12 +459,13 @@ dependencies = [
  "clap",
  "commonware-cryptography",
  "commonware-p2p",
+ "commonware-runtime",
+ "futures",
  "governor",
  "prometheus-client",
  "prost",
  "prost-build",
  "rand",
- "tokio",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2011,34 +1991,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-stream"
-version = "0.1.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "267ac89e0bec6e691e5813911606935d77c476ff49024f98abcea3e7b15e37af"
-dependencies = [
- "futures-core",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2468baabc3311435b55dd935f702f42cd1b8abb7e754fb7dfb16bd36aa88f9f7"
-dependencies = [
- "async-stream",
- "bytes",
- "futures-core",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
 name = "tokio-util"
-version = "0.7.11"
+version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cf6b47b3771c49ac75ad09a6162f53ad4b8088b76ac60e8ec1455b31a189fe1"
+checksum = "61e7c3654c13bcd040d4a03abee2c75b1d14a37b423cf5a813ceae1cc903ec6a"
 dependencies = [
  "bytes",
  "futures-core",

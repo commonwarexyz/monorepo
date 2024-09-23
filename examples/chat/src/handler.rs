@@ -1,10 +1,12 @@
 use commonware_cryptography::utils::hex;
 use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_runtime::{select, Spawner};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::{encoding::text::encode, registry::Registry};
 use ratatui::{
     backend::CrosstermBackend,
@@ -30,10 +32,11 @@ enum Event<I> {
 }
 
 pub async fn run(
+    runtime: impl Spawner,
     me: String,
     registry: Arc<Mutex<Registry>>,
     logs: Arc<Mutex<Vec<String>>>,
-    sender: impl Sender,
+    mut sender: impl Sender,
     mut receiver: impl Receiver,
 ) {
     // Setup terminal
@@ -44,8 +47,8 @@ pub async fn run(
     let mut terminal = Terminal::new(backend).unwrap();
 
     // Listen for input
-    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-    tokio::spawn(async move {
+    let (mut tx, mut rx) = mpsc::channel(100);
+    runtime.spawn(async move {
         loop {
             match event::poll(Duration::from_millis(500)) {
                 Ok(true) => {}
@@ -142,8 +145,12 @@ pub async fn run(
 
         // Handle input
         let formatted_me = format!("{}**{}", &me[..4], &me[me.len() - 4..]);
-        tokio::select! {
-            Some(event) = rx.recv() => {
+        select! {
+            event = rx.next() => {
+                let event = match event {
+                    Some(event) => event,
+                    None => break,
+                };
                 match event {
                     Event::Input(event) => match event.code {
                         KeyCode::Char(c) => {
@@ -194,20 +201,22 @@ pub async fn run(
                     }
                 }
             },
-            result = receiver.recv() => match result {
-                Ok((peer, msg)) => {
-                    let peer = hex(&peer);
-                    messages.insert(0, format!(
-                        "[{}] {}**{}: {}",
-                        chrono::Local::now().format("%m/%d %H:%M:%S"),
-                        &peer[..4],
-                        &peer[peer.len() - 4..],
-                        String::from_utf8_lossy(&msg)
-                    ).into());
-                }
-                Err(err) => {
-                    debug!(?err, "failed to receive message");
-                    continue;
+            result = receiver.recv() => {
+                match result {
+                    Ok((peer, msg)) => {
+                        let peer = hex(&peer);
+                        messages.insert(0, format!(
+                            "[{}] {}**{}: {}",
+                            chrono::Local::now().format("%m/%d %H:%M:%S"),
+                            &peer[..4],
+                            &peer[peer.len() - 4..],
+                            String::from_utf8_lossy(&msg)
+                        ).into());
+                    }
+                    Err(err) => {
+                        debug!(?err, "failed to receive message");
+                        continue;
+                    }
                 }
             }
         };

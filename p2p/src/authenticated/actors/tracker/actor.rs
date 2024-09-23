@@ -6,18 +6,24 @@ pub use super::{
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
-use governor::DefaultKeyedRateLimiter;
+use commonware_runtime::{Clock, Spawner};
+use futures::{channel::mpsc, StreamExt};
+use governor::{
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
+    RateLimiter,
+};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
-use rand::prelude::IteratorRandom;
-use rand::{seq::SliceRandom, thread_rng};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use rand::{
+    prelude::{IteratorRandom, SliceRandom},
+    Rng,
+};
+use std::time::{Duration, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
 };
-use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_IP_";
@@ -124,18 +130,21 @@ impl AddressCount {
     }
 }
 
-pub struct Actor<C: Scheme> {
+pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
+    runtime: E,
+
     crypto: C,
     allow_private_ips: bool,
     synchrony_bound: Duration,
     tracked_peer_sets: usize,
     peer_gossip_max_count: usize,
 
-    sender: mpsc::Sender<Message>,
-    receiver: mpsc::Receiver<Message>,
-    peers: HashMap<PublicKey, AddressCount>,
+    sender: mpsc::Sender<Message<E>>,
+    receiver: mpsc::Receiver<Message<E>>,
+    peers: BTreeMap<PublicKey, AddressCount>,
     sets: BTreeMap<u64, PeerSet>,
-    connections_rate_limiter: DefaultKeyedRateLimiter<PublicKey>,
+    connections_rate_limiter:
+        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
     connections: HashSet<PublicKey>,
 
     tracked_peers: Gauge,
@@ -146,10 +155,11 @@ pub struct Actor<C: Scheme> {
     ip_signature: wire::Peer,
 }
 
-impl<C: Scheme> Actor<C> {
-    pub fn new(mut cfg: Config<C>) -> (Self, Mailbox, Oracle) {
+impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
+    pub fn new(runtime: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
         // Construct IP signature
-        let current_time = SystemTime::now()
+        let current_time = runtime
+            .current()
             .duration_since(UNIX_EPOCH)
             .expect("failed to get current time")
             .as_secs();
@@ -165,7 +175,7 @@ impl<C: Scheme> Actor<C> {
         };
 
         // Register bootstrappers
-        let mut peers = HashMap::new();
+        let mut peers = BTreeMap::new();
         for (peer, address) in cfg.bootstrappers.into_iter() {
             if peer == cfg.crypto.me() {
                 continue;
@@ -185,7 +195,7 @@ impl<C: Scheme> Actor<C> {
 
         // Create connections
         let connections_rate_limiter =
-            DefaultKeyedRateLimiter::keyed(cfg.allowed_connection_rate_per_peer);
+            RateLimiter::hashmap_with_clock(cfg.allowed_connection_rate_per_peer, &runtime);
 
         // Create metrics
         let tracked_peers = Gauge::default();
@@ -214,6 +224,7 @@ impl<C: Scheme> Actor<C> {
 
         (
             Self {
+                runtime,
                 crypto: cfg.crypto,
                 allow_private_ips: cfg.allow_private_ips,
                 synchrony_bound: cfg.synchrony_bound,
@@ -312,7 +323,7 @@ impl<C: Scheme> Actor<C> {
         }
     }
 
-    fn handle_dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation)> {
+    fn handle_dialable(&mut self) -> Vec<(PublicKey, SocketAddr, Reservation<E>)> {
         // Collect unreserved peers
         let available_peers: Vec<_> = self
             .peers
@@ -411,7 +422,9 @@ impl<C: Scheme> Actor<C> {
             }
 
             // If any timestamp is too far into the future, disconnect from the peer
-            let current_time = SystemTime::now()
+            let current_time = self
+                .runtime
+                .current()
                 .duration_since(UNIX_EPOCH)
                 .expect("failed to get current time")
                 .as_secs();
@@ -441,7 +454,7 @@ impl<C: Scheme> Actor<C> {
         Ok(())
     }
 
-    fn handle_bit_vec(&self, bit_vec: wire::BitVec) -> Result<Option<wire::Peers>, Error> {
+    fn handle_bit_vec(&mut self, bit_vec: wire::BitVec) -> Result<Option<wire::Peers>, Error> {
         // Ensure we have the peerset requested
         let set = match self.sets.get(&bit_vec.index) {
             Some(set) => set,
@@ -506,13 +519,13 @@ impl<C: Scheme> Actor<C> {
         // select a subset to send (this increases the likelihood that
         // the recipient will hear about different peers from different sources)
         if peers.len() > self.peer_gossip_max_count {
-            peers.shuffle(&mut thread_rng());
+            peers.shuffle(&mut self.runtime);
             peers.truncate(self.peer_gossip_max_count);
         }
         Ok(Some(wire::Peers { peers }))
     }
 
-    fn reserve(&mut self, peer: PublicKey) -> Option<Reservation> {
+    fn reserve(&mut self, peer: PublicKey) -> Option<Reservation<E>> {
         // Check if we are already reserved
         if self.connections.contains(&peer) {
             return None;
@@ -526,18 +539,26 @@ impl<C: Scheme> Actor<C> {
             self.rate_limited_connections
                 .get_or_create(&metrics::Peer::new(&peer))
                 .inc();
+            return None;
         }
 
         // Reserve the connection
         self.connections.insert(peer.clone());
         self.reserved_connections.inc();
-        Some(Reservation::new(peer, Mailbox::new(self.sender.clone())))
+        Some(Reservation::new(
+            self.runtime.clone(),
+            peer,
+            Mailbox::new(self.sender.clone()),
+        ))
     }
 
     pub async fn run(mut self) {
-        while let Some(msg) = self.receiver.recv().await {
+        while let Some(msg) = self.receiver.next().await {
             match msg {
-                Message::Construct { public_key, peer } => {
+                Message::Construct {
+                    public_key,
+                    mut peer,
+                } => {
                     // Kill if peer is not authorized
                     if !self.peers.contains_key(&public_key) {
                         peer.kill().await;
@@ -546,7 +567,7 @@ impl<C: Scheme> Actor<C> {
 
                     // Select a random peer set (we want to learn about all peers in
                     // our tracked sets)
-                    let set = match self.sets.values().choose(&mut thread_rng()) {
+                    let set = match self.sets.values().choose(&mut self.runtime) {
                         Some(set) => set,
                         None => {
                             debug!("no peer sets available");
@@ -557,7 +578,7 @@ impl<C: Scheme> Actor<C> {
                     // Send bit vector if stored
                     let _ = peer.bit_vec(set.msg()).await;
                 }
-                Message::BitVec { bit_vec, peer } => {
+                Message::BitVec { bit_vec, mut peer } => {
                     let result = self.handle_bit_vec(bit_vec);
                     if let Err(e) = result {
                         debug!(error = ?e, "failed to handle bit vector");
@@ -568,7 +589,7 @@ impl<C: Scheme> Actor<C> {
                         peer.peers(peers).await;
                     }
                 }
-                Message::Peers { peers, peer } => {
+                Message::Peers { peers, mut peer } => {
                     // Consider new peer signatures
                     let result = self.handle_peers(peers);
                     if let Err(e) = result {
@@ -582,9 +603,15 @@ impl<C: Scheme> Actor<C> {
                 }
                 Message::Dialable { peers } => {
                     // Fetch dialable peers
-                    let _ = peers.send(self.handle_dialable());
+                    let mut dialable = self.handle_dialable();
 
-                    // Shirnk to fit rate limiter
+                    // Shuffle to prevent starvation
+                    dialable.shuffle(&mut self.runtime);
+
+                    // Inform dialer of dialable peers
+                    let _ = peers.send(dialable);
+
+                    // Shrink to fit rate limiter
                     self.connections_rate_limiter.shrink_to_fit();
                 }
                 Message::Register { index, peers } => {
@@ -617,12 +644,12 @@ mod tests {
     use super::*;
     use crate::authenticated::{actors::peer, config::Bootstrapper};
     use commonware_cryptography::ed25519;
+    use commonware_runtime::{deterministic::Executor, Clock, Runner};
     use governor::Quota;
     use std::net::{IpAddr, Ipv4Addr};
     use std::num::NonZeroU32;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use tokio::time;
 
     fn test_config<C: Scheme>(crypto: C, bootstrappers: Vec<Bootstrapper>) -> Config<C> {
         Config {
@@ -639,200 +666,206 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_reserve_peer() {
+    #[test]
+    fn test_reserve_peer() {
         // Create actor
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
         let cfg = test_config(ed25519::insecure_signer(0), Vec::new());
-        let (actor, mailbox, oracle) = Actor::new(cfg);
+        executor.start(async move {
+            let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
-        // Run actor in background
-        tokio::spawn(async move {
-            actor.run().await;
-        });
+            // Run actor in background
+            runtime.spawn(async move {
+                actor.run().await;
+            });
 
-        // Create peer
-        let peer = ed25519::insecure_signer(1).me();
+            // Create peer
+            let peer = ed25519::insecure_signer(1).me();
 
-        // Attempt to reserve peer before allowed
-        let reservation = mailbox.reserve(peer.clone()).await;
-        assert!(reservation.is_none());
-
-        // Register and reserve peer
-        oracle.register(0, vec![peer.clone()]).await;
-        let reservation = mailbox.reserve(peer.clone()).await;
-        assert!(reservation.is_some());
-
-        // Attempt to re-register peer that is already reserved
-        let failed_reservation = mailbox.reserve(peer.clone()).await;
-        assert!(failed_reservation.is_none());
-
-        // Release peer
-        {
-            let _ = reservation.unwrap();
-        }
-
-        // Eventually reserve peer again (async release)
-        loop {
+            // Attempt to reserve peer before allowed
             let reservation = mailbox.reserve(peer.clone()).await;
-            if reservation.is_some() {
-                break;
+            assert!(reservation.is_none());
+
+            // Register and reserve peer
+            oracle.register(0, vec![peer.clone()]).await;
+            let reservation = mailbox.reserve(peer.clone()).await;
+            assert!(reservation.is_some());
+
+            // Attempt to re-register peer that is already reserved
+            let failed_reservation = mailbox.reserve(peer.clone()).await;
+            assert!(failed_reservation.is_none());
+
+            // Release peer
+            {
+                let _ = reservation.unwrap();
             }
-            time::sleep(Duration::from_millis(10)).await;
-        }
+
+            // Eventually reserve peer again (async release)
+            loop {
+                let reservation = mailbox.reserve(peer.clone()).await;
+                if reservation.is_some() {
+                    break;
+                }
+                runtime.sleep(Duration::from_millis(10)).await;
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn test_bit_vec() {
+    #[test]
+    fn test_bit_vec() {
         // Create actor
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
         let peer0 = ed25519::insecure_signer(0);
         let cfg = test_config(peer0.clone(), Vec::new());
-        let (actor, mailbox, oracle) = Actor::new(cfg);
+        executor.start(async move {
+            let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
-        // Run actor in background
-        tokio::spawn(async move {
-            actor.run().await;
-        });
+            // Run actor in background
+            runtime.spawn(async move {
+                actor.run().await;
+            });
 
-        // Create peers
-        let mut peer1_signer = ed25519::insecure_signer(1);
-        let peer1 = peer1_signer.me();
-        let peer2 = ed25519::insecure_signer(2).me();
-        let peer3 = ed25519::insecure_signer(3).me();
+            // Create peers
+            let mut peer1_signer = ed25519::insecure_signer(1);
+            let peer1 = peer1_signer.me();
+            let peer2 = ed25519::insecure_signer(2).me();
+            let peer3 = ed25519::insecure_signer(3).me();
 
-        // Request bit vector with unallowed peer
-        let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
-        mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-        let msg = peer_receiver.recv().await.unwrap();
-        assert!(matches!(msg, peer::Message::Kill));
+            // Request bit vector with unallowed peer
+            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
+            let msg = peer_receiver.next().await.unwrap();
+            assert!(matches!(msg, peer::Message::Kill));
 
-        // Find sorted indicies
-        let mut peers = vec![peer0.me(), peer1.clone(), peer2.clone(), peer3.clone()];
-        peers.sort();
-        let me_idx = peers.iter().position(|peer| peer == &peer0.me()).unwrap();
-        let peer1_idx = peers.iter().position(|peer| peer == &peer1).unwrap();
+            // Find sorted indicies
+            let mut peers = vec![peer0.me(), peer1.clone(), peer2.clone(), peer3.clone()];
+            peers.sort();
+            let me_idx = peers.iter().position(|peer| peer == &peer0.me()).unwrap();
+            let peer1_idx = peers.iter().position(|peer| peer == &peer1).unwrap();
 
-        // Register some peers
-        oracle.register(0, peers).await;
+            // Register some peers
+            oracle.register(0, peers).await;
 
-        // Request bit vector
-        mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-        let msg = peer_receiver.recv().await.unwrap();
-        let bit_vec = match msg {
-            peer::Message::BitVec { bit_vec } => bit_vec,
-            _ => panic!("unexpected message"),
-        };
-        assert!(bit_vec.index == 0);
-        let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-        for (idx, bit) in bits.iter().enumerate() {
-            if idx == me_idx {
-                assert!(*bit);
-            } else {
-                assert!(!*bit);
-            }
-        }
-
-        // Provide peer address
-        let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-        let (socket_bytes, payload_bytes) = socket_peer_payload(&socket, 0);
-        let ip_signature = peer1_signer.sign(NAMESPACE, &payload_bytes);
-        let peers = wire::Peers {
-            peers: vec![wire::Peer {
-                socket: socket_bytes,
-                timestamp: 0,
-                signature: Some(wire::Signature {
-                    public_key: peer1.clone(),
-                    signature: ip_signature,
-                }),
-            }],
-        };
-        mailbox.peers(peers, peer_mailbox.clone()).await;
-
-        // Request bit vector again
-        mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-        let msg = peer_receiver.recv().await.unwrap();
-        let bit_vec = match msg {
-            peer::Message::BitVec { bit_vec } => bit_vec,
-            _ => panic!("unexpected message"),
-        };
-        assert!(bit_vec.index == 0);
-        let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-        for (idx, bit) in bits.iter().enumerate() {
-            if idx == me_idx || idx == peer1_idx {
-                assert!(*bit);
-            } else {
-                assert!(!*bit);
-            }
-        }
-
-        // Register new peers
-        oracle.register(1, vec![peer2.clone(), peer3.clone()]).await;
-
-        // Request bit vector until both indexes returned
-        let mut index_0_returned = false;
-        let mut index_1_returned = false;
-        while !index_0_returned || !index_1_returned {
-            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await; // peer1 still allowed
-            let msg = peer_receiver.recv().await.unwrap();
+            // Request bit vector
+            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
+            let msg = peer_receiver.next().await.unwrap();
             let bit_vec = match msg {
                 peer::Message::BitVec { bit_vec } => bit_vec,
                 _ => panic!("unexpected message"),
             };
+            assert!(bit_vec.index == 0);
             let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-            match bit_vec.index {
-                0 => {
-                    for (idx, bit) in bits.iter().enumerate() {
-                        if idx == me_idx || idx == peer1_idx {
-                            assert!(*bit);
-                        } else {
+            for (idx, bit) in bits.iter().enumerate() {
+                if idx == me_idx {
+                    assert!(*bit);
+                } else {
+                    assert!(!*bit);
+                }
+            }
+
+            // Provide peer address
+            let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+            let (socket_bytes, payload_bytes) = socket_peer_payload(&socket, 0);
+            let ip_signature = peer1_signer.sign(NAMESPACE, &payload_bytes);
+            let peers = wire::Peers {
+                peers: vec![wire::Peer {
+                    socket: socket_bytes,
+                    timestamp: 0,
+                    signature: Some(wire::Signature {
+                        public_key: peer1.clone(),
+                        signature: ip_signature,
+                    }),
+                }],
+            };
+            mailbox.peers(peers, peer_mailbox.clone()).await;
+
+            // Request bit vector again
+            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
+            let msg = peer_receiver.next().await.unwrap();
+            let bit_vec = match msg {
+                peer::Message::BitVec { bit_vec } => bit_vec,
+                _ => panic!("unexpected message"),
+            };
+            assert!(bit_vec.index == 0);
+            let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
+            for (idx, bit) in bits.iter().enumerate() {
+                if idx == me_idx || idx == peer1_idx {
+                    assert!(*bit);
+                } else {
+                    assert!(!*bit);
+                }
+            }
+
+            // Register new peers
+            oracle.register(1, vec![peer2.clone(), peer3.clone()]).await;
+
+            // Request bit vector until both indexes returned
+            let mut index_0_returned = false;
+            let mut index_1_returned = false;
+            while !index_0_returned || !index_1_returned {
+                mailbox.construct(peer1.clone(), peer_mailbox.clone()).await; // peer1 still allowed
+                let msg = peer_receiver.next().await.unwrap();
+                let bit_vec = match msg {
+                    peer::Message::BitVec { bit_vec } => bit_vec,
+                    _ => panic!("unexpected message"),
+                };
+                let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
+                match bit_vec.index {
+                    0 => {
+                        for (idx, bit) in bits.iter().enumerate() {
+                            if idx == me_idx || idx == peer1_idx {
+                                assert!(*bit);
+                            } else {
+                                assert!(!*bit);
+                            }
+                        }
+                        index_0_returned = true
+                    }
+                    1 => {
+                        for bit in bits.iter() {
                             assert!(!*bit);
                         }
+                        index_1_returned = true
                     }
-                    index_0_returned = true
-                }
-                1 => {
-                    for bit in bits.iter() {
-                        assert!(!*bit);
-                    }
-                    index_1_returned = true
-                }
-                _ => panic!("unexpected index"),
-            };
-        }
+                    _ => panic!("unexpected index"),
+                };
+            }
 
-        // Register some peers
-        oracle.register(2, vec![peer2.clone()]).await;
+            // Register some peers
+            oracle.register(2, vec![peer2.clone()]).await;
 
-        // Ensure peer1 has been evicted from the peer tracker and should die
-        mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
-        let msg = peer_receiver.recv().await.unwrap();
-        assert!(matches!(msg, peer::Message::Kill));
+            // Ensure peer1 has been evicted from the peer tracker and should die
+            mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
+            let msg = peer_receiver.next().await.unwrap();
+            assert!(matches!(msg, peer::Message::Kill));
 
-        // Wait for valid sets to be returned
-        let mut index_1_returned = false;
-        let mut index_2_returned = false;
-        while !index_1_returned || !index_2_returned {
-            mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
-            let msg = peer_receiver.recv().await.unwrap();
-            let bit_vec = match msg {
-                peer::Message::BitVec { bit_vec } => bit_vec,
-                _ => panic!("unexpected message"),
-            };
-            let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
-            match bit_vec.index {
-                1 => {
-                    for bit in bits.iter() {
-                        assert!(!*bit);
+            // Wait for valid sets to be returned
+            let mut index_1_returned = false;
+            let mut index_2_returned = false;
+            while !index_1_returned || !index_2_returned {
+                mailbox.construct(peer2.clone(), peer_mailbox.clone()).await; // peer1 no longer allowed
+                let msg = peer_receiver.next().await.unwrap();
+                let bit_vec = match msg {
+                    peer::Message::BitVec { bit_vec } => bit_vec,
+                    _ => panic!("unexpected message"),
+                };
+                let bits: BitVec<u8, Lsb0> = BitVec::from_vec(bit_vec.bits);
+                match bit_vec.index {
+                    1 => {
+                        for bit in bits.iter() {
+                            assert!(!*bit);
+                        }
+                        index_1_returned = true
                     }
-                    index_1_returned = true
-                }
-                2 => {
-                    for bit in bits.iter() {
-                        assert!(!*bit);
+                    2 => {
+                        for bit in bits.iter() {
+                            assert!(!*bit);
+                        }
+                        index_2_returned = true
                     }
-                    index_2_returned = true
-                }
-                _ => panic!("unexpected index"),
-            };
-        }
+                    _ => panic!("unexpected index"),
+                };
+            }
+        });
     }
 }

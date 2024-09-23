@@ -6,23 +6,20 @@ use std::time::Duration;
 use thiserror::Error;
 
 mod handshake;
-mod stream;
+mod instance;
 mod utils;
 mod x25519;
 
 pub use handshake::IncomingHandshake;
-pub use stream::{Sender, Stream};
+pub use instance::{Instance, Sender};
 
 #[derive(Clone)]
 pub struct Config<C: Scheme> {
     pub crypto: C,
-    pub max_frame_length: usize,
+    pub max_message_size: usize,
     pub synchrony_bound: Duration,
     pub max_handshake_age: Duration,
     pub handshake_timeout: Duration,
-    pub read_timeout: Duration,
-    pub write_timeout: Duration,
-    pub tcp_nodelay: Option<bool>,
 }
 
 #[derive(Error, Debug)]
@@ -39,16 +36,12 @@ pub enum Error {
     InvalidPeerPublicKey,
     #[error("handshake not for us")]
     HandshakeNotForUs,
+    #[error("handshake timeout")]
+    HandshakeTimeout,
     #[error("missing signature")]
     MissingSignature,
     #[error("invalid signature")]
     InvalidSignature,
-    #[error("handshake timeout")]
-    HandshakeTimeout,
-    #[error("read timeout")]
-    ReadTimeout,
-    #[error("write timeout")]
-    WriteTimeout,
     #[error("wrong peer")]
     WrongPeer,
     #[error("read failed")]
@@ -67,8 +60,6 @@ pub enum Error {
     EncryptionFailed,
     #[error("decryption failed")]
     DecryptionFailed,
-    #[error("read invalid frame")]
-    ReadInvalidFrame,
     #[error("invalid timestamp")]
     InvalidTimestamp,
 }

@@ -47,7 +47,11 @@ mod logger;
 
 use clap::{value_parser, Arg, Command};
 use commonware_cryptography::{ed25519, utils::hex, Scheme};
-use commonware_p2p::authenticated::{Config, Network};
+use commonware_p2p::authenticated::{self, Network};
+use commonware_runtime::{
+    tokio::{self, Executor},
+    Runner, Spawner,
+};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -57,8 +61,11 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 #[doc(hidden)]
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Initialize runtime
+    let runtime_cfg = tokio::Config::default();
+    let (executor, runtime) = Executor::init(runtime_cfg);
+
     // Parse arguments
     let matches = Command::new("commonware-chat")
         .about("send encrypted messages to a group of friends")
@@ -134,42 +141,49 @@ async fn main() {
 
     // Configure network
     let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-    let config = Config::aggressive(
+    let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-    );
-    let (mut network, oracle) = Network::new(config);
-
-    // Provide authorized peers
-    //
-    // In a real-world scenario, this would be updated as new peer sets are created (like when
-    // the composition of a validator set changes).
-    oracle.register(0, recipients).await;
-
-    // Initialize chat
-    let (chat_sender, chat_receiver) = network.register(
-        handler::CHANNEL,
-        Quota::per_second(NonZeroU32::new(128).unwrap()),
-        1024, // 1 KB max message size
-        128,  // 128 messages inflight
-        Some(3),
+        runtime_cfg.max_message_size,
     );
 
-    // Start network
-    let network_handler = tokio::spawn(network.run());
+    // Start runtime
+    executor.start(async move {
+        // Initialize network
+        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
 
-    // Start chat
-    handler::run(
-        hex(&signer.me()),
-        registry,
-        logs,
-        chat_sender,
-        chat_receiver,
-    )
-    .await;
+        // Provide authorized peers
+        //
+        // In a real-world scenario, this would be updated as new peer sets are created (like when
+        // the composition of a validator set changes).
+        oracle.register(0, recipients).await;
 
-    // Abort network
-    network_handler.abort();
+        // Initialize chat
+        let (chat_sender, chat_receiver) = network.register(
+            handler::CHANNEL,
+            Quota::per_second(NonZeroU32::new(128).unwrap()),
+            1024, // 1 KB max message size
+            128,  // 128 messages inflight
+            Some(3),
+        );
+
+        // Start network
+        let network_handler = runtime.spawn(network.run());
+
+        // Start chat
+        handler::run(
+            runtime,
+            hex(&signer.me()),
+            registry,
+            logs,
+            chat_sender,
+            chat_receiver,
+        )
+        .await;
+
+        // Abort network
+        network_handler.abort();
+    });
 }

@@ -17,21 +17,16 @@ bytes = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
 futures = { workspace = true }
 tracing = { workspace = true } 
 prost = { workspace = true }
-tokio-util = { version = "0.7", features = ["codec"] }
-governor = "0.6"
-x25519-dalek = { version = "2", features = ["getrandom"] }
+governor = { workspace = true }
+x25519-dalek = "2"
 chacha20poly1305 = "0.10"
 bitvec = "1"
 prometheus-client = "0.22"
 zstd = "0.13"
 rand_distr = "0.4"
-
-[dev-dependencies]
-tokio-test = "0.4"
 
 [build-dependencies]
 prost-build = { workspace = true } 

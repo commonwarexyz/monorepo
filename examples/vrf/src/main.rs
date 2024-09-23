@@ -86,7 +86,11 @@ use commonware_cryptography::{
     utils::hex,
     Scheme,
 };
-use commonware_p2p::authenticated::{Config, Network};
+use commonware_p2p::authenticated::{self, Network};
+use commonware_runtime::{
+    tokio::{self, Executor},
+    Runner, Spawner,
+};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -97,8 +101,11 @@ use std::{
 use std::{str::FromStr, time::Duration};
 use tracing::info;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Initialize runtime
+    let runtime_cfg = tokio::Config::default();
+    let (executor, runtime) = Executor::init(runtime_cfg);
+
     // Parse arguments
     let matches = Command::new("commonware-vrf")
         .about("generate bias-resistant randomness with friends")
@@ -204,91 +211,103 @@ async fn main() {
 
     // Configure network
     let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-    let config = Config::aggressive(
+    let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        runtime_cfg.max_message_size,
     );
-    let (mut network, oracle) = Network::new(config);
 
-    // Provide authorized peers
-    //
-    // In a real-world scenario, this would be updated as new peer sets are created (like when
-    // the composition of a validator set changes).
-    oracle.register(0, recipients).await;
+    // Start runtime
+    executor.start(async move {
+        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
 
-    // Parse contributors
-    let mut contributors = Vec::new();
-    let participants = matches
-        .get_many::<u64>("contributors")
-        .expect("Please provide contributors")
-        .copied();
-    if participants.len() == 0 {
-        panic!("Please provide at least one contributor");
-    }
-    for peer in participants {
-        let verifier = insecure_signer(peer).me();
-        tracing::info!(key = hex(&verifier), "registered contributor",);
-        contributors.push(verifier);
-    }
+        // Provide authorized peers
+        //
+        // In a real-world scenario, this would be updated as new peer sets are created (like when
+        // the composition of a validator set changes).
+        oracle.register(0, recipients).await;
 
-    // Infer threshold
-    let threshold = utils::threshold(contributors.len() as u32)
-        .expect("not enough contributors to form a threshold of 2f+1");
-    let max_reveals = utils::max_reveals(threshold);
-    info!(threshold, max_reveals, "inferred threshold");
+        // Parse contributors
+        let mut contributors = Vec::new();
+        let participants = matches
+            .get_many::<u64>("contributors")
+            .expect("Please provide contributors")
+            .copied();
+        if participants.len() == 0 {
+            panic!("Please provide at least one contributor");
+        }
+        for peer in participants {
+            let verifier = insecure_signer(peer).me();
+            tracing::info!(key = hex(&verifier), "registered contributor",);
+            contributors.push(verifier);
+        }
 
-    // Check if I am the arbiter
-    if let Some(arbiter) = matches.get_one::<u64>("arbiter") {
-        // Create contributor
-        let rogue = matches.get_flag("rogue");
-        let lazy = matches.get_flag("lazy");
-        let defiant = matches.get_flag("defiant");
-        let (contributor_sender, contributor_receiver) = network.register(
-            handlers::DKG_CHANNEL,
-            Quota::per_second(NonZeroU32::new(10).unwrap()),
-            1024 * 1024, // 1 MB max message size
-            256,         // 256 messages in flight
-            Some(3),
-        );
-        let arbiter = insecure_signer(*arbiter).me();
-        let (contributor, requests) = handlers::Contributor::new(
-            signer,
-            arbiter,
-            contributors.clone(),
-            threshold,
-            rogue,
-            lazy,
-            defiant,
-        );
-        tokio::spawn(contributor.run(contributor_sender, contributor_receiver));
+        // Infer threshold
+        let threshold = utils::threshold(contributors.len() as u32)
+            .expect("not enough contributors to form a threshold of 2f+1");
+        let max_reveals = utils::max_reveals(threshold);
+        info!(threshold, max_reveals, "inferred threshold");
 
-        // Create vrf
-        let (vrf_sender, vrf_receiver) = network.register(
-            handlers::VRF_CHANNEL,
-            Quota::per_second(NonZeroU32::new(10).unwrap()),
-            1024 * 1024, // 1 MB max message size
-            256,         // 256 messages in flight
-            None,
-        );
-        let signer = handlers::Vrf::new(Duration::from_secs(5), threshold, contributors, requests);
-        tokio::spawn(signer.run(vrf_sender, vrf_receiver));
-    } else {
-        let (arbiter_sender, arbiter_receiver) = network.register(
-            handlers::DKG_CHANNEL,
-            Quota::per_second(NonZeroU32::new(10).unwrap()),
-            1024 * 1024, // 1 MB max message size
-            256,         // 256 messages in flight
-            Some(3),
-        );
-        let arbiter = handlers::Arbiter::new(
-            Duration::from_secs(10),
-            Duration::from_secs(5),
-            contributors,
-            threshold,
-        );
-        tokio::spawn(arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver));
-    }
-    network.run().await;
+        // Check if I am the arbiter
+        if let Some(arbiter) = matches.get_one::<u64>("arbiter") {
+            // Create contributor
+            let rogue = matches.get_flag("rogue");
+            let lazy = matches.get_flag("lazy");
+            let defiant = matches.get_flag("defiant");
+            let (contributor_sender, contributor_receiver) = network.register(
+                handlers::DKG_CHANNEL,
+                Quota::per_second(NonZeroU32::new(10).unwrap()),
+                1024 * 1024, // 1 MB max message size
+                256,         // 256 messages in flight
+                Some(3),
+            );
+            let arbiter = insecure_signer(*arbiter).me();
+            let (contributor, requests) = handlers::Contributor::new(
+                signer,
+                arbiter,
+                contributors.clone(),
+                threshold,
+                rogue,
+                lazy,
+                defiant,
+            );
+            runtime.spawn(contributor.run(contributor_sender, contributor_receiver));
+
+            // Create vrf
+            let (vrf_sender, vrf_receiver) = network.register(
+                handlers::VRF_CHANNEL,
+                Quota::per_second(NonZeroU32::new(10).unwrap()),
+                1024 * 1024, // 1 MB max message size
+                256,         // 256 messages in flight
+                None,
+            );
+            let signer = handlers::Vrf::new(
+                runtime.clone(),
+                Duration::from_secs(5),
+                threshold,
+                contributors,
+                requests,
+            );
+            runtime.spawn(signer.run(vrf_sender, vrf_receiver));
+        } else {
+            let (arbiter_sender, arbiter_receiver) = network.register(
+                handlers::DKG_CHANNEL,
+                Quota::per_second(NonZeroU32::new(10).unwrap()),
+                1024 * 1024, // 1 MB max message size
+                256,         // 256 messages in flight
+                Some(3),
+            );
+            let arbiter = handlers::Arbiter::new(
+                runtime.clone(),
+                Duration::from_secs(10),
+                Duration::from_secs(5),
+                contributors,
+                threshold,
+            );
+            runtime.spawn(arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver));
+        }
+        network.run().await;
+    });
 }

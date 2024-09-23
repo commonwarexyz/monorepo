@@ -2,21 +2,23 @@
 
 use crate::authenticated::{
     actors::{spawner, tracker},
-    connection::{self, Stream},
+    connection::{self, Instance},
     metrics,
 };
-use commonware_cryptography::{utils::hex, PublicKey, Scheme};
-use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
+use commonware_cryptography::{utils::hex, Scheme};
+use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
+use governor::{
+    clock::Clock as GClock,
+    middleware::NoOpMiddleware,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::registry::Registry;
-use std::{net::SocketAddr, time::Duration};
-use std::{
-    ops::Add,
-    sync::{Arc, Mutex},
-};
-use tokio::net::TcpStream;
-use tokio::time::{self, Instant};
+use rand::{CryptoRng, Rng};
+use std::sync::{Arc, Mutex};
+use std::{marker::PhantomData, time::Duration};
 use tracing::debug;
 
 pub struct Config<C: Scheme> {
@@ -26,17 +28,36 @@ pub struct Config<C: Scheme> {
     pub dial_rate: Quota,
 }
 
-pub struct Actor<C: Scheme> {
+pub struct Actor<
+    Si: Sink,
+    St: Stream,
+    L: Listener<Si, St>,
+    E: Spawner + Clock + GClock + Network<L, Si, St>,
+    C: Scheme,
+> {
+    runtime: E,
+
     connection: connection::Config<C>,
     dial_frequency: Duration,
 
-    dial_limiter: DefaultDirectRateLimiter,
+    dial_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
 
     dial_attempts: Family<metrics::Peer, Counter>,
+
+    _phantom_si: PhantomData<Si>,
+    _phantom_st: PhantomData<St>,
+    _phantom_l: PhantomData<L>,
 }
 
-impl<C: Scheme> Actor<C> {
-    pub fn new(cfg: Config<C>) -> Self {
+impl<
+        Si: Sink,
+        St: Stream,
+        L: Listener<Si, St>,
+        E: Spawner + Clock + GClock + Network<L, Si, St> + Rng + CryptoRng,
+        C: Scheme,
+    > Actor<Si, St, L, E, C>
+{
+    pub fn new(runtime: E, cfg: Config<C>) -> Self {
         let dial_attempts = Family::<metrics::Peer, Counter>::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
@@ -47,95 +68,88 @@ impl<C: Scheme> Actor<C> {
             );
         }
         Self {
+            runtime: runtime.clone(),
             connection: cfg.connection,
             dial_frequency: cfg.dial_frequency,
-            dial_limiter: RateLimiter::direct(cfg.dial_rate),
+            dial_limiter: RateLimiter::direct_with_clock(cfg.dial_rate, &runtime),
             dial_attempts,
+            _phantom_si: PhantomData,
+            _phantom_st: PhantomData,
+            _phantom_l: PhantomData,
         }
     }
 
-    async fn dial_peers(&self, tracker: &tracker::Mailbox, supervisor: &spawner::Mailbox<C>) {
+    async fn dial_peers(
+        &self,
+        tracker: &mut tracker::Mailbox<E>,
+        supervisor: &mut spawner::Mailbox<E, C, Si, St>,
+    ) {
         for (peer, address, reservation) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
             // want to block the loop)
-            //
-            // Check will invoke the rate limiter if there is room to dial, so we don't
-            // need to invoke until_ready below.
-            //
-            // If we hit this check, we will count as a dial attempt for the peer. This isn't
-            // ideal but it shouldn't end up being a problem in practice (we'll eventually redial).
             if self.dial_limiter.check().is_err() {
                 debug!("dial rate limit exceeded");
                 break;
             }
-
-            // Spawn dialer to connect to peer
             self.dial_attempts
                 .get_or_create(&metrics::Peer::new(&peer))
                 .inc();
-            tokio::spawn(Self::dial(
-                self.connection.clone(),
-                peer.clone(),
-                address,
-                reservation,
-                supervisor.clone(),
-            ));
+
+            // Spawn dialer to connect to peer
+            self.runtime.spawn({
+                let runtime = self.runtime.clone();
+                let config = self.connection.clone();
+                let mut supervisor = supervisor.clone();
+                async move {
+                    // Attempt to dial peer
+                    let (sink, stream) = match runtime.dial(address).await {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
+                            return;
+                        }
+                    };
+                    debug!(
+                        peer = hex(&peer),
+                        address = address.to_string(),
+                        "dialed peer"
+                    );
+
+                    // Upgrade connection
+                    let instance =
+                        match Instance::upgrade_dialer(runtime, config, sink, stream, peer.clone())
+                            .await
+                        {
+                            Ok(instance) => instance,
+                            Err(e) => {
+                                debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
+                                return;
+                            }
+                        };
+                    debug!(peer = hex(&peer), "upgraded connection");
+
+                    // Start peer to handle messages
+                    supervisor.spawn(peer, instance, reservation).await;
+                }
+            });
         }
     }
 
-    async fn dial(
-        config: connection::Config<C>,
-        peer: PublicKey,
-        address: SocketAddr,
-        reservation: tracker::Reservation,
-        supervisor: spawner::Mailbox<C>,
+    pub async fn run(
+        mut self,
+        mut tracker: tracker::Mailbox<E>,
+        mut supervisor: spawner::Mailbox<E, C, Si, St>,
     ) {
-        // Attempt to dial peer
-        let connection = match TcpStream::connect(address).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
-                return;
-            }
-        };
-        debug!(
-            peer = hex(&peer),
-            address = address.to_string(),
-            "dialed peer"
-        );
-
-        // Set TCP_NODELAY
-        if let Some(nodelay) = config.tcp_nodelay {
-            if let Err(e) = connection.set_nodelay(nodelay) {
-                debug!(peer = hex(&peer), error = ?e, "failed to set TCP_NODELAY")
-            }
-        }
-
-        // Upgrade connection
-        let stream = match Stream::upgrade_dialer(config, connection, peer.clone()).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
-                return;
-            }
-        };
-        debug!(peer = hex(&peer), "upgraded connection");
-
-        // Start peer to handle messages
-        supervisor.spawn(peer, stream, reservation).await;
-    }
-
-    pub async fn run(self, tracker: tracker::Mailbox, supervisor: spawner::Mailbox<C>) {
-        let mut next_update = Instant::now();
         loop {
-            time::sleep_until(next_update).await;
-
             // Attempt to dial peers we know about
-            self.dial_peers(&tracker, &supervisor).await;
+            self.dial_peers(&mut tracker, &mut supervisor).await;
 
-            // Ensure we reset the timer with a new jitter
-            let jitter = Jitter::up_to(self.dial_frequency);
-            next_update = Instant::now().add(jitter + self.dial_frequency);
+            // Sleep for a random amount of time up to the dial frequency
+            let wait = Duration::from_millis(
+                self.runtime
+                    .gen_range(0..self.dial_frequency.as_millis() as u64),
+            );
+            self.runtime.sleep(wait).await;
         }
     }
 }

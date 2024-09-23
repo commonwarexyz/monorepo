@@ -5,7 +5,6 @@ use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::task::JoinError;
 
 mod actor;
 pub use actor::Actor;
@@ -21,6 +20,7 @@ pub struct Config {
 
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
+    pub rate_limited: Family<metrics::Message, Counter>,
 }
 
 #[derive(Error, Debug)]
@@ -36,7 +36,7 @@ pub enum Error {
     #[error("unexpected handshake message")]
     UnexpectedHandshake,
     #[error("unexpected failure: {0}")]
-    UnexpectedFailure(JoinError),
+    UnexpectedFailure(commonware_runtime::Error),
     #[error("message dropped")]
     MessageDropped,
     #[error("message too large: {0}")]
@@ -45,4 +45,6 @@ pub enum Error {
     InvalidChunk,
     #[error("invalid channel")]
     InvalidChannel,
+    #[error("channel closed: {0}")]
+    ChannelClosed(u32),
 }
