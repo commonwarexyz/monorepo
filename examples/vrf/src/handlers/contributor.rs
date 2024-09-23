@@ -78,7 +78,7 @@ impl<C: Scheme> Contributor<C> {
         receiver: &mut impl Receiver,
     ) -> (u64, Option<Output>) {
         // Configure me
-        let me = self.crypto.me();
+        let me = self.crypto.public_key();
         let me_idx = *self.contributors_ordered.get(&me).unwrap();
 
         // Wait for start message from arbiter

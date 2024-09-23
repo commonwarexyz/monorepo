@@ -363,13 +363,13 @@ impl P2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519::insecure_signer, Scheme};
+    use crate::{Ed25519, Scheme};
     use std::collections::HashMap;
 
     fn create_and_verify_shares(n: u32, t: u32, dealers: u32, concurrency: usize) {
         // Create contributors
         let mut contributors = (0..n)
-            .map(|i| insecure_signer(i as u64).me())
+            .map(|i| Ed25519::from_seed(i as u64).public_key())
             .collect::<Vec<_>>();
         contributors.sort();
 

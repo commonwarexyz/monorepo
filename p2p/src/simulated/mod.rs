@@ -23,7 +23,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::insecure_signer, utils::hex, Scheme};
+    use commonware_cryptography::{utils::hex, Ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
@@ -47,7 +47,7 @@ mod tests {
             let mut agents = BTreeMap::new();
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
-                let pk = insecure_signer(i as u64).me();
+                let pk = Ed25519::from_seed(i as u64).public_key();
                 let (sender, mut receiver) = network.register(pk.clone());
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
@@ -62,7 +62,7 @@ mod tests {
             }
 
             // Randomly link agents
-            let only_inbound = insecure_signer(0).me();
+            let only_inbound = Ed25519::from_seed(0).public_key();
             for agent in agents.keys() {
                 if agent == &only_inbound {
                     // Test that we can gracefully handle missing links
@@ -159,7 +159,7 @@ mod tests {
             // Register agents
             let mut agents = HashMap::new();
             for i in 0..10 {
-                let pk = insecure_signer(i as u64).me();
+                let pk = Ed25519::from_seed(i as u64).public_key();
                 let (sender, _) = network.register(pk.clone());
                 agents.insert(pk, sender);
             }

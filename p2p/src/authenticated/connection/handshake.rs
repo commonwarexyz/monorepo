@@ -35,7 +35,7 @@ pub fn create_handshake<E: Clock, C: Scheme>(
             ephemeral_public_key: x25519::encode_public_key(ephemeral_public_key),
             timestamp,
             signature: Some(wire::Signature {
-                public_key: crypto.me(),
+                public_key: crypto.public_key(),
                 signature,
             }),
         })),
@@ -79,7 +79,7 @@ impl Handshake {
         if !C::validate(&our_public_key) {
             return Err(Error::InvalidChannelPublicKey);
         }
-        if crypto.me() != our_public_key {
+        if crypto.public_key() != our_public_key {
             return Err(Error::HandshakeNotForUs);
         }
 
@@ -174,10 +174,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{
-        ed25519::{self, Ed25519},
-        Scheme,
-    };
+    use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, Listener, Network, Runner};
     use std::net::SocketAddr;
     use x25519_dalek::PublicKey;
@@ -188,15 +185,15 @@ mod tests {
         let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
         executor.start(async move {
             // Create participants
-            let mut sender = ed25519::insecure_signer(0);
-            let recipient = ed25519::insecure_signer(1);
+            let mut sender = Ed25519::from_seed(0);
+            let recipient = Ed25519::from_seed(1);
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Create handshake message
             let handshake_bytes = create_handshake(
                 runtime.clone(),
                 &mut sender,
-                recipient.me(),
+                recipient.public_key(),
                 ephemeral_public_key,
             )
             .unwrap();
@@ -218,7 +215,7 @@ mod tests {
             assert!(handshake.timestamp + 5 >= current_timestamp); // Allow a 5-second window
 
             // Verify the signature
-            assert_eq!(handshake.recipient_public_key, recipient.me());
+            assert_eq!(handshake.recipient_public_key, recipient.public_key());
             assert_eq!(
                 handshake.ephemeral_public_key,
                 x25519::encode_public_key(ephemeral_public_key)
@@ -232,7 +229,7 @@ mod tests {
             assert!(Ed25519::verify(
                 NAMESPACE,
                 &payload,
-                &sender.me(),
+                &sender.public_key(),
                 &handshake.signature.unwrap().signature,
             ));
 
@@ -245,7 +242,7 @@ mod tests {
                 handshake_bytes,
             )
             .unwrap();
-            assert_eq!(handshake.peer_public_key, sender.me());
+            assert_eq!(handshake.peer_public_key, sender.public_key());
             assert_eq!(handshake.ephemeral_public_key, ephemeral_public_key);
         });
     }
@@ -256,15 +253,15 @@ mod tests {
         let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
         executor.start(async move {
             // Create participants
-            let mut sender = ed25519::insecure_signer(0);
-            let recipient = ed25519::insecure_signer(1);
+            let mut sender = Ed25519::from_seed(0);
+            let recipient = Ed25519::from_seed(1);
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Create handshake message
             let handshake_bytes = create_handshake(
                 runtime.clone(),
                 &mut sender,
-                recipient.me(),
+                recipient.public_key(),
                 ephemeral_public_key,
             )
             .unwrap();
@@ -294,7 +291,7 @@ mod tests {
             .unwrap();
 
             // Assert that the result is expected
-            assert_eq!(result.peer_public_key, sender.me());
+            assert_eq!(result.peer_public_key, sender.public_key());
             assert_eq!(result.ephemeral_public_key, ephemeral_public_key);
         });
     }
@@ -318,7 +315,7 @@ mod tests {
             let (sink, stream) = runtime.dial(addr).await.unwrap();
             let result = IncomingHandshake::verify(
                 runtime,
-                &ed25519::insecure_signer(0),
+                &Ed25519::from_seed(0),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
@@ -338,8 +335,8 @@ mod tests {
         let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
         executor.start(async move {
             // Create participants
-            let mut sender = ed25519::insecure_signer(0);
-            let recipient = ed25519::insecure_signer(1);
+            let mut sender = Ed25519::from_seed(0);
+            let recipient = Ed25519::from_seed(1);
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Setup a mock listener
@@ -356,7 +353,7 @@ mod tests {
                     let handshake_bytes = create_handshake(
                         runtime.clone(),
                         &mut sender,
-                        recipient.me(),
+                        recipient.public_key(),
                         ephemeral_public_key,
                     )
                     .unwrap();

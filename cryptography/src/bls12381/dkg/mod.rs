@@ -192,7 +192,7 @@ mod tests {
     use super::*;
     use crate::bls12381::dkg::{arbiter, contributor};
     use crate::bls12381::primitives::group::Private;
-    use crate::{ed25519::insecure_signer, Scheme};
+    use crate::{Ed25519, Scheme};
     use std::collections::HashMap;
 
     fn run_dkg_and_reshare(
@@ -207,7 +207,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n_0 {
-            let signer = insecure_signer(i as u64).me();
+            let signer = Ed25519::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -342,7 +342,7 @@ mod tests {
         // Create reshare recipients (assume no overlap)
         let mut reshare_recipients = Vec::new();
         for i in 0..n_1 {
-            let recipient = insecure_signer((i + n_0) as u64).me();
+            let recipient = Ed25519::from_seed((i + n_0) as u64).public_key();
             reshare_recipients.push(recipient);
         }
         reshare_recipients.sort();
@@ -500,7 +500,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = insecure_signer(i as u64).me();
+            let signer = Ed25519::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();
@@ -651,7 +651,7 @@ mod tests {
         // Create contributors (must be in sorted order)
         let mut contributors = Vec::new();
         for i in 0..n {
-            let signer = insecure_signer(i as u64).me();
+            let signer = Ed25519::from_seed(i as u64).public_key();
             contributors.push(signer);
         }
         contributors.sort();

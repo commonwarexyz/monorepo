@@ -1,7 +1,6 @@
 use commonware_cryptography::{
     bls12381::{dkg, primitives::poly},
-    ed25519::insecure_signer,
-    Scheme,
+    Ed25519, Scheme,
 };
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;
@@ -16,7 +15,7 @@ fn benchmark_reshare_recovery(c: &mut Criterion) {
 
         // Create contributors
         let mut contributors = (0..n)
-            .map(|i| insecure_signer(i as u64).me())
+            .map(|i| Ed25519::from_seed(i as u64).public_key())
             .collect::<Vec<_>>();
         contributors.sort();
 

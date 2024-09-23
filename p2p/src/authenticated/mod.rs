@@ -156,7 +156,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::authenticated::{self, Network};
-//! use commonware_cryptography::{ed25519, Scheme};
+//! use commonware_cryptography::{Ed25519, Scheme};
 //! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner};
 //! use governor::Quota;
 //! use prometheus_client::registry::Registry;
@@ -171,15 +171,15 @@
 //! // Generate identity
 //! //
 //! // In production, the signer should be generated from a secure source of entropy.
-//! let signer = ed25519::insecure_signer(0);
+//! let signer = Ed25519::from_seed(0);
 //!
 //! // Generate peers
 //! //
 //! // In production, peer identities will be provided by some external source of truth
 //! // (like the staking set of a blockchain).
-//! let peer1 = ed25519::insecure_signer(1).me();
-//! let peer2 = ed25519::insecure_signer(2).me();
-//! let peer3 = ed25519::insecure_signer(3).me();
+//! let peer1 = Ed25519::from_seed(1).public_key();
+//! let peer2 = Ed25519::from_seed(2).public_key();
+//! let peer3 = Ed25519::from_seed(3).public_key();
 //!
 //! // Configure bootstrappers
 //! //
@@ -207,7 +207,7 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle.register(0, vec![signer.me(), peer1, peer2, peer3]);
+//!     oracle.register(0, vec![signer.public_key(), peer1, peer2, peer3]);
 //!
 //!     // Register some channel
 //!     let (sender, receiver) = network.register(
@@ -263,7 +263,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519, Scheme};
+    use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{
         deterministic, tokio, Clock, Listener, Network as RNetwork, Runner, Sink, Spawner, Stream,
     };
@@ -299,9 +299,9 @@ mod tests {
         // Create peers
         let mut peers = Vec::new();
         for i in 0..n {
-            peers.push(ed25519::insecure_signer(i as u64));
+            peers.push(Ed25519::from_seed(i as u64));
         }
-        let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+        let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 
         // Create networks
         let mut waiters = Vec::new();
@@ -364,7 +364,7 @@ mod tests {
                     });
 
                     // Send identity to all peers
-                    let msg = signer.me();
+                    let msg = signer.public_key();
                     match mode {
                         Mode::One => {
                             for (j, recipient) in addresses.iter().enumerate() {
@@ -512,9 +512,9 @@ mod tests {
             // Create peers
             let mut peers = Vec::new();
             for i in 0..n {
-                peers.push(ed25519::insecure_signer(i as u64));
+                peers.push(Ed25519::from_seed(i as u64));
             }
-            let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+            let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 
             // Create networks
             let mut waiters = Vec::new();
@@ -570,7 +570,7 @@ mod tests {
                     async move {
                         if i == 0 {
                             // Loop until success
-                            let msg = signer.me();
+                            let msg = signer.public_key();
                             loop {
                                 if sender
                                     .send(Recipients::All, msg.clone(), true)
@@ -615,9 +615,9 @@ mod tests {
             // Create peers
             let mut peers = Vec::new();
             for i in 0..n {
-                peers.push(ed25519::insecure_signer(i as u64));
+                peers.push(Ed25519::from_seed(i as u64));
             }
-            let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+            let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 
             // Create random message
             let mut msg = vec![0u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
@@ -736,9 +736,9 @@ mod tests {
             // Create peers
             let mut peers = Vec::new();
             for i in 0..n {
-                peers.push(ed25519::insecure_signer(i as u64));
+                peers.push(Ed25519::from_seed(i as u64));
             }
-            let addresses = peers.iter().map(|p| p.me()).collect::<Vec<_>>();
+            let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
 
             // Create network
             let signer = peers[0].clone();

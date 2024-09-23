@@ -169,7 +169,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             socket: socket_bytes,
             timestamp: current_time,
             signature: Some(wire::Signature {
-                public_key: cfg.crypto.me(),
+                public_key: cfg.crypto.public_key(),
                 signature: ip_signature,
             }),
         };
@@ -177,7 +177,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         // Register bootstrappers
         let mut peers = BTreeMap::new();
         for (peer, address) in cfg.bootstrappers.into_iter() {
-            if peer == cfg.crypto.me() {
+            if peer == cfg.crypto.public_key() {
                 continue;
             }
             peers.insert(peer, AddressCount::new_config(address));
@@ -253,7 +253,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
     /// Returns whether a peer is not us and in one of the known peer sets.
     fn allowed(&self, peer: &PublicKey) -> bool {
-        if *peer == self.crypto.me() {
+        if *peer == self.crypto.public_key() {
             return false;
         }
         for set in self.sets.values() {
@@ -302,7 +302,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         }
 
         // Add self
-        set.found(self.crypto.me());
+        set.found(self.crypto.public_key());
 
         // Update bit vector now that we have changed it
         set.update_msg();
@@ -411,7 +411,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             if !C::validate(public_key) {
                 return Err(Error::InvalidPublicKey);
             }
-            if public_key == &self.crypto.me() {
+            if public_key == &self.crypto.public_key() {
                 return Err(Error::ReceivedSelf);
             }
 
@@ -496,7 +496,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             }
 
             // Add the peer to the list if its address is known
-            if *peer == self.crypto.me() {
+            if *peer == self.crypto.public_key() {
                 peers.push(self.ip_signature.clone());
                 continue;
             }
@@ -643,7 +643,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 mod tests {
     use super::*;
     use crate::authenticated::{actors::peer, config::Bootstrapper};
-    use commonware_cryptography::ed25519;
+    use commonware_cryptography::Ed25519;
     use commonware_runtime::{deterministic::Executor, Clock, Runner};
     use governor::Quota;
     use std::net::{IpAddr, Ipv4Addr};
@@ -670,7 +670,7 @@ mod tests {
     fn test_reserve_peer() {
         // Create actor
         let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
-        let cfg = test_config(ed25519::insecure_signer(0), Vec::new());
+        let cfg = test_config(Ed25519::from_seed(0), Vec::new());
         executor.start(async move {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
@@ -680,7 +680,7 @@ mod tests {
             });
 
             // Create peer
-            let peer = ed25519::insecure_signer(1).me();
+            let peer = Ed25519::from_seed(1).public_key();
 
             // Attempt to reserve peer before allowed
             let reservation = mailbox.reserve(peer.clone()).await;
@@ -715,7 +715,7 @@ mod tests {
     fn test_bit_vec() {
         // Create actor
         let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
-        let peer0 = ed25519::insecure_signer(0);
+        let peer0 = Ed25519::from_seed(0);
         let cfg = test_config(peer0.clone(), Vec::new());
         executor.start(async move {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
@@ -726,10 +726,10 @@ mod tests {
             });
 
             // Create peers
-            let mut peer1_signer = ed25519::insecure_signer(1);
-            let peer1 = peer1_signer.me();
-            let peer2 = ed25519::insecure_signer(2).me();
-            let peer3 = ed25519::insecure_signer(3).me();
+            let mut peer1_signer = Ed25519::from_seed(1);
+            let peer1 = peer1_signer.public_key();
+            let peer2 = Ed25519::from_seed(2).public_key();
+            let peer3 = Ed25519::from_seed(3).public_key();
 
             // Request bit vector with unallowed peer
             let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
@@ -738,9 +738,17 @@ mod tests {
             assert!(matches!(msg, peer::Message::Kill));
 
             // Find sorted indicies
-            let mut peers = vec![peer0.me(), peer1.clone(), peer2.clone(), peer3.clone()];
+            let mut peers = vec![
+                peer0.public_key(),
+                peer1.clone(),
+                peer2.clone(),
+                peer3.clone(),
+            ];
             peers.sort();
-            let me_idx = peers.iter().position(|peer| peer == &peer0.me()).unwrap();
+            let me_idx = peers
+                .iter()
+                .position(|peer| peer == &peer0.public_key())
+                .unwrap();
             let peer1_idx = peers.iter().position(|peer| peer == &peer1).unwrap();
 
             // Register some peers

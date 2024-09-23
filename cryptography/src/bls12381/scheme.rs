@@ -2,7 +2,7 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_cryptography::{bls12381::Bls12381, Scheme};
+//! use commonware_cryptography::{Bls12381, Scheme};
 //! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key
@@ -16,14 +16,14 @@
 //! let signature = signer.sign(namespace, msg);
 //!
 //! // Verify the signature
-//! assert!(Bls12381::verify(namespace, msg, &signer.me(), &signature));
+//! assert!(Bls12381::verify(namespace, msg, &signer.public_key(), &signature));
 //! ```
 
 use super::primitives::{
     group::{self, Element, Scalar},
     ops,
 };
-use crate::{utils::payload, PublicKey, Scheme, Signature};
+use crate::{utils::payload, PrivateKey, PublicKey, Scheme, Signature};
 use rand::{CryptoRng, Rng, SeedableRng};
 
 /// BLS12-381 implementation of the `Scheme` trait.
@@ -38,25 +38,34 @@ pub struct Bls12381 {
     public: group::Public,
 }
 
-impl Bls12381 {
-    /// Creates a new Bls12381 signer.
-    pub fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
+impl Scheme for Bls12381 {
+    fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let (private, public) = ops::keypair(r);
         Self { private, public }
     }
 
-    /// Creates a new Bls12381 signer from a secret key.
-    pub fn from(signer: [u8; group::PRIVATE_KEY_LENGTH]) -> Option<Self> {
-        let private = Scalar::deserialize(&signer)?;
+    fn from(private_key: PrivateKey) -> Option<Self> {
+        let private_key: [u8; group::PRIVATE_KEY_LENGTH] = match private_key.as_ref().try_into() {
+            Ok(key) => key,
+            Err(_) => return None,
+        };
+        let private = Scalar::deserialize(&private_key)?;
         let mut public = group::Public::one();
         public.mul(&private);
         Some(Self { private, public })
     }
-}
 
-impl Scheme for Bls12381 {
-    fn me(&self) -> PublicKey {
-        PublicKey::from(self.public.serialize())
+    fn from_seed(seed: u64) -> Self {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        Self::new(&mut rng)
+    }
+
+    fn private_key(&self) -> PrivateKey {
+        self.private.serialize().into()
+    }
+
+    fn public_key(&self) -> PublicKey {
+        self.public.serialize().into()
     }
 
     fn sign(&mut self, namespace: &[u8], message: &[u8]) -> Signature {
@@ -86,16 +95,4 @@ impl Scheme for Bls12381 {
         let payload = payload(namespace, message);
         ops::verify(&public, &payload, &signature).is_ok()
     }
-}
-
-/// Creates a new BLS12-381 signer with a secret key derived from the provided seed.
-///
-/// # Warning
-///
-/// This function is intended for testing and demonstration purposes only.
-/// It should never be used in production.
-pub fn insecure_signer(seed: u64) -> Bls12381 {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let (private, public) = ops::keypair(&mut rng);
-    Bls12381 { private, public }
 }

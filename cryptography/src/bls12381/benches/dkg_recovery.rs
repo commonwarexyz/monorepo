@@ -1,4 +1,5 @@
-use commonware_cryptography::{bls12381::dkg, ed25519::insecure_signer, Scheme};
+use commonware_cryptography::Ed25519;
+use commonware_cryptography::{bls12381::dkg, Scheme};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -12,7 +13,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                 || {
                     // Create contributors
                     let mut contributors = (0..n)
-                        .map(|i| insecure_signer(i as u64).me())
+                        .map(|i| Ed25519::from_seed(i as u64).public_key())
                         .collect::<Vec<_>>();
                     contributors.sort();
 

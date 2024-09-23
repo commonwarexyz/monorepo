@@ -7,7 +7,7 @@
 //!
 //! # Example
 //! ```rust
-//! use commonware_cryptography::{ed25519::Ed25519, Scheme};
+//! use commonware_cryptography::{Ed25519, Scheme};
 //! use rand::rngs::OsRng;
 //!
 //! // Generate a new private key
@@ -21,10 +21,10 @@
 //! let signature = signer.sign(namespace, msg);
 //!
 //! // Verify the signature
-//! assert!(Ed25519::verify(namespace, msg, &signer.me(), &signature));
+//! assert!(Ed25519::verify(namespace, msg, &signer.public_key(), &signature));
 //! ```
 
-use crate::{utils::payload, PublicKey, Scheme, Signature};
+use crate::{utils::payload, PrivateKey, PublicKey, Scheme, Signature};
 use ed25519_consensus;
 use rand::{CryptoRng, Rng, SeedableRng};
 
@@ -39,9 +39,8 @@ pub struct Ed25519 {
     verifier: PublicKey,
 }
 
-impl Ed25519 {
-    /// Creates a new Ed25519 signer.
-    pub fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
+impl Scheme for Ed25519 {
+    fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let signer = ed25519_consensus::SigningKey::new(r);
         let verifier = signer.verification_key();
         Self {
@@ -50,19 +49,29 @@ impl Ed25519 {
         }
     }
 
-    /// Creates a new Ed25519 signer from a secret key.
-    pub fn from(signer: [u8; SECRET_KEY_LENGTH]) -> Self {
-        let signer = ed25519_consensus::SigningKey::from(signer);
+    fn from(private_key: PrivateKey) -> Option<Self> {
+        let private_key: [u8; SECRET_KEY_LENGTH] = match private_key.as_ref().try_into() {
+            Ok(key) => key,
+            Err(_) => return None,
+        };
+        let signer = ed25519_consensus::SigningKey::from(private_key);
         let verifier = signer.verification_key();
-        Self {
+        Some(Self {
             signer,
             verifier: verifier.to_bytes().to_vec().into(),
-        }
+        })
     }
-}
 
-impl Scheme for Ed25519 {
-    fn me(&self) -> PublicKey {
+    fn from_seed(seed: u64) -> Self {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        Self::new(&mut rng)
+    }
+
+    fn private_key(&self) -> PrivateKey {
+        self.signer.to_bytes().to_vec().into()
+    }
+
+    fn public_key(&self) -> PublicKey {
         self.verifier.clone()
     }
 
@@ -101,18 +110,4 @@ impl Scheme for Ed25519 {
         let payload = payload(namespace, message);
         public_key.verify(&signature, &payload).is_ok()
     }
-}
-
-/// Creates a new Ed25519 signer with a secret key derived from the provided
-/// seed.
-///
-/// # Warning
-///
-/// This function is intended for testing and demonstration purposes only.
-/// It should never be used in production.
-pub fn insecure_signer(seed: u64) -> Ed25519 {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let mut secret_key = [0u8; SECRET_KEY_LENGTH];
-    rng.fill(&mut secret_key);
-    Ed25519::from(secret_key)
 }
