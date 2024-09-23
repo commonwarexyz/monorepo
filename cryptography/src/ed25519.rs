@@ -24,7 +24,7 @@
 //! assert!(Ed25519::verify(namespace, msg, &signer.me(), &signature));
 //! ```
 
-use crate::{utils::payload, PublicKey, Scheme, Signature};
+use crate::{utils::payload, PrivateKey, PublicKey, Scheme, Signature};
 use ed25519_consensus;
 use rand::{CryptoRng, Rng, SeedableRng};
 
@@ -39,9 +39,8 @@ pub struct Ed25519 {
     verifier: PublicKey,
 }
 
-impl Ed25519 {
-    /// Creates a new Ed25519 signer.
-    pub fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
+impl Scheme for Ed25519 {
+    fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let signer = ed25519_consensus::SigningKey::new(r);
         let verifier = signer.verification_key();
         Self {
@@ -50,19 +49,29 @@ impl Ed25519 {
         }
     }
 
-    /// Creates a new Ed25519 signer from a secret key.
-    pub fn from(signer: [u8; SECRET_KEY_LENGTH]) -> Self {
-        let signer = ed25519_consensus::SigningKey::from(signer);
+    fn from(private_key: PrivateKey) -> Option<Self> {
+        let private_key: [u8; SECRET_KEY_LENGTH] = match private_key.as_ref().try_into() {
+            Ok(key) => key,
+            Err(_) => return None,
+        };
+        let signer = ed25519_consensus::SigningKey::from(private_key);
         let verifier = signer.verification_key();
-        Self {
+        Some(Self {
             signer,
             verifier: verifier.to_bytes().to_vec().into(),
-        }
+        })
     }
-}
 
-impl Scheme for Ed25519 {
-    fn me(&self) -> PublicKey {
+    fn insecure(seed: u64) -> Self {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        Self::new(&mut rng)
+    }
+
+    fn private_key(&self) -> PrivateKey {
+        self.signer.to_bytes().to_vec().into()
+    }
+
+    fn public_key(&self) -> PublicKey {
         self.verifier.clone()
     }
 
@@ -100,79 +109,5 @@ impl Scheme for Ed25519 {
         let signature = ed25519_consensus::Signature::from(signature);
         let payload = payload(namespace, message);
         public_key.verify(&signature, &payload).is_ok()
-    }
-}
-
-/// Creates a new Ed25519 signer with a secret key derived from the provided
-/// seed.
-///
-/// # Warning
-///
-/// This function is intended for testing and demonstration purposes only.
-/// It should never be used in production.
-pub fn insecure_signer(seed: u64) -> Ed25519 {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-    let mut secret_key = [0u8; SECRET_KEY_LENGTH];
-    rng.fill(&mut secret_key);
-    Ed25519::from(secret_key)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rand::rngs::OsRng;
-
-    #[test]
-    fn test_new() {
-        let signer = Ed25519::new(&mut OsRng);
-        let public_key = signer.me();
-        assert!(Ed25519::validate(&public_key));
-    }
-
-    #[test]
-    fn test_from_valid_secret() {
-        let signer = Ed25519::new(&mut OsRng);
-        let secret_key = signer.signer.to_bytes();
-        let signer_from_secret = Ed25519::from(secret_key);
-        assert_eq!(signer.me(), signer_from_secret.me());
-    }
-
-    #[test]
-    fn test_insecure_signer() {
-        let seed = 42u64;
-        let signer1 = insecure_signer(seed);
-        let signer2 = insecure_signer(seed);
-        assert_eq!(signer1.me(), signer2.me());
-
-        let mut signer = insecure_signer(seed);
-        let namespace = b"test_namespace";
-        let message = b"test_message";
-        let signature = signer.sign(namespace, message);
-
-        let public_key = signer.me();
-        assert!(Ed25519::verify(namespace, message, &public_key, &signature));
-    }
-
-    #[test]
-    fn test_validate_invalid_public_key() {
-        let invalid_public_key = vec![0u8; 31]; // Invalid length
-        assert!(!Ed25519::validate(&invalid_public_key.into()));
-    }
-
-    #[test]
-    fn test_verify_with_invalid_signature_length() {
-        let mut signer = Ed25519::new(&mut OsRng);
-        let namespace = b"test_namespace";
-        let message = b"test_message";
-        let mut signature = signer.sign(namespace, message);
-        signature.truncate(signature.len() - 1); // Invalidate the signature
-
-        let public_key = signer.me();
-        assert!(!Ed25519::verify(
-            namespace,
-            message,
-            &public_key,
-            &signature
-        ));
     }
 }
