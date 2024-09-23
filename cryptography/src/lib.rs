@@ -105,6 +105,16 @@ mod tests {
         assert_eq!(signature_1, signature_2);
     }
 
+    fn test_invalid_signature_length<C: Scheme>(mut signer: C) {
+        let namespace = b"test_namespace";
+        let message = b"test_message";
+        let mut signature = signer.sign(namespace, message);
+        signature.truncate(signature.len() - 1); // Invalidate the signature
+
+        let public_key = signer.me();
+        assert!(!C::verify(namespace, message, &public_key, &signature));
+    }
+
     #[test]
     fn test_ed25519_sign_and_verify() {
         let signer = ed25519::insecure_signer(0);
@@ -131,6 +141,12 @@ mod tests {
     }
 
     #[test]
+    fn test_ed25519_invalid_signature_length() {
+        let signer = ed25519::insecure_signer(0);
+        test_invalid_signature_length(signer);
+    }
+
+    #[test]
     fn test_bls12381_sign_and_verify() {
         let signer = bls12381::insecure_signer(0);
         test_sign_and_verify(signer);
@@ -153,5 +169,11 @@ mod tests {
         let signer_1 = bls12381::insecure_signer(0);
         let signer_2 = bls12381::insecure_signer(0);
         test_signature_determinism(signer_1, signer_2);
+    }
+
+    #[test]
+    fn test_bls12381_invalid_signature_length() {
+        let signer = bls12381::insecure_signer(0);
+        test_invalid_signature_length(signer);
     }
 }
