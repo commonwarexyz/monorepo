@@ -78,3 +78,56 @@ impl Relay {
             .map_err(|_| Error::MessageDropped)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_runtime::{deterministic::Executor, Runner};
+    use std::time::Duration;
+
+    #[test]
+    fn test_relay_content_priority() {
+        let (executor, _, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            let (low_sender, mut low_receiver) = mpsc::channel(1);
+            let (high_sender, mut high_receiver) = mpsc::channel(1);
+            let mut relay = Relay::new(low_sender, high_sender);
+
+            // Send a high priority message
+            let data = Data {
+                channel: 1,
+                message: Bytes::from("test high prio message"),
+            };
+            relay
+                .content(data.channel, data.message.clone(), true)
+                .await
+                .unwrap();
+            match high_receiver.try_next() {
+                Ok(Some(received_data)) => {
+                    assert_eq!(data.channel, received_data.channel);
+                    assert_eq!(data.message, received_data.message);
+                }
+                _ => panic!("Expected high priority message"),
+            }
+            assert!(low_receiver.try_next().is_err());
+
+            // Send a low priority message
+            let data = Data {
+                channel: 1,
+                message: Bytes::from("test low prio message"),
+            };
+            relay
+                .content(data.channel, data.message.clone(), false)
+                .await
+                .unwrap();
+            match low_receiver.try_next() {
+                Ok(Some(received_data)) => {
+                    assert_eq!(data.channel, received_data.channel);
+                    assert_eq!(data.message, received_data.message);
+                }
+                _ => panic!("Expected high priority message"),
+            }
+            assert!(high_receiver.try_next().is_err());
+        });
+    }
+}
