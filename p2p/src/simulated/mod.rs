@@ -34,10 +34,10 @@ mod tests {
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         // Create simulated network
-        let (runner, context, auditor) = Executor::init(seed, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, runtime, auditor) = Executor::init(seed, Duration::from_millis(1));
+        executor.start(async move {
             let mut network = network::Network::new(
-                context.clone(),
+                runtime.clone(),
                 network::Config {
                     max_message_size: 1024 * 1024,
                 },
@@ -51,7 +51,7 @@ mod tests {
                 let (sender, mut receiver) = network.register(pk.clone());
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
-                context.spawn(async move {
+                runtime.spawn(async move {
                     for _ in 0..size {
                         receiver.recv().await.unwrap();
                     }
@@ -87,15 +87,15 @@ mod tests {
             }
 
             // Send messages
-            context.spawn({
-                let mut context = context.clone();
+            runtime.spawn({
+                let mut runtime = runtime.clone();
                 async move {
                     // Sort agents for deterministic output
                     let keys = agents.keys().collect::<Vec<_>>();
 
                     // Send messages
                     loop {
-                        let index = context.gen_range(0..keys.len());
+                        let index = runtime.gen_range(0..keys.len());
                         let sender = keys[index];
                         let msg = format!("hello from {}", hex(sender));
                         let msg = Bytes::from(msg);
@@ -114,7 +114,7 @@ mod tests {
             });
 
             // Start network
-            context.spawn(network.run());
+            runtime.spawn(network.run());
 
             // Wait for all recipients
             let mut results = Vec::new();
@@ -146,11 +146,11 @@ mod tests {
 
     #[test]
     fn test_invalid_message() {
-        let (runner, mut context, _) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, mut runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
-                context.clone(),
+                runtime.clone(),
                 network::Config {
                     max_message_size: 1024 * 1024,
                 },
@@ -165,15 +165,15 @@ mod tests {
             }
 
             // Start network
-            context.spawn(network.run());
+            runtime.spawn(network.run());
 
             // Send invalid message
             let keys = agents.keys().collect::<Vec<_>>();
-            let index = context.gen_range(0..keys.len());
+            let index = runtime.gen_range(0..keys.len());
             let sender = keys[index];
             let mut message_sender = agents.get(sender).unwrap().clone();
             let mut msg = vec![0u8; 1024 * 1024 + 1];
-            context.fill(&mut msg[..]);
+            runtime.fill(&mut msg[..]);
             let result = message_sender
                 .send(Recipients::All, msg.into(), false)
                 .await

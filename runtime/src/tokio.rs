@@ -256,10 +256,7 @@ impl crate::Listener<Sink, Stream> for Listener {
                 context: context.clone(),
                 sink,
             },
-            Stream {
-                context: context.clone(),
-                stream,
-            },
+            Stream { context, stream },
         ))
     }
 }
