@@ -242,6 +242,7 @@ mod tests {
         mocks::{MockSink, MockStream},
         Runner,
     };
+    use futures::SinkExt;
     use std::time::Duration;
 
     #[test]
@@ -313,6 +314,28 @@ mod tests {
             };
             let nonce_result = receiver.peer_nonce().unwrap();
             assert_eq!(nonce_result, nonce_bytes(true, 1, 0));
+        });
+    }
+
+    #[test]
+    fn test_decryption_failure() {
+        let (executor, _, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+            let (stream, mut sender) = MockStream::new();
+            let mut receiver = Receiver {
+                cipher,
+                stream,
+                dialer: false,
+                iter: 0,
+                seq: 0,
+            };
+
+            // Send invalid ciphertext
+            sender.send(Bytes::from("invalid data")).await.unwrap();
+
+            let result = receiver.receive().await;
+            assert!(matches!(result, Err(Error::DecryptionFailed)));
         });
     }
 }
