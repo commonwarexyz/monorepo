@@ -175,7 +175,12 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 mod tests {
     use super::*;
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, Listener, Network, Runner};
+    use commonware_runtime::{
+        deterministic::Executor,
+        mocks::{MockSink, MockStream},
+        Listener, Network, Runner,
+    };
+    use futures::SinkExt;
     use std::net::SocketAddr;
     use x25519_dalek::PublicKey;
 
@@ -386,15 +391,14 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Setup a mock listener
-            let addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
-            let mut listener = runtime.bind(addr).await.unwrap();
+            let (sink, _) = MockSink::new();
+            let (stream, mut stream_sender) = MockStream::new();
 
             // Accept connections but do nothing
             runtime.spawn({
                 let runtime = runtime.clone();
                 let recipient = recipient.clone();
                 async move {
-                    let (_, mut sink, _) = listener.accept().await.unwrap();
                     runtime.sleep(Duration::from_secs(10)).await;
                     let handshake_bytes = create_handshake(
                         runtime.clone(),
@@ -403,12 +407,9 @@ mod tests {
                         ephemeral_public_key,
                     )
                     .unwrap();
-                    sink.send(handshake_bytes).await.unwrap();
+                    stream_sender.send(handshake_bytes).await.unwrap();
                 }
             });
-
-            // Dial listener
-            let (sink, stream) = runtime.dial(addr).await.unwrap();
 
             // Call the verify function
             let result = IncomingHandshake::verify(
