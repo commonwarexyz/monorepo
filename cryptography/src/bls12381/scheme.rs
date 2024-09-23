@@ -16,7 +16,7 @@
 //! let signature = signer.sign(namespace, msg);
 //!
 //! // Verify the signature
-//! assert!(Bls12381::verify(namespace, msg, &signer.me(), &signature));
+//! assert!(Bls12381::verify(namespace, msg, &signer.public_key(), &signature));
 //! ```
 
 use super::primitives::{

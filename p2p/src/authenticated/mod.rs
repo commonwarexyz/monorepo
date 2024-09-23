@@ -156,7 +156,7 @@
 //!
 //! ```rust
 //! use commonware_p2p::authenticated::{self, Network};
-//! use commonware_cryptography::{ed25519, Scheme};
+//! use commonware_cryptography::{Ed25519, Scheme};
 //! use commonware_runtime::{tokio::{self, Executor}, Spawner, Runner};
 //! use governor::Quota;
 //! use prometheus_client::registry::Registry;

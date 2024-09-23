@@ -21,7 +21,7 @@
 //! let signature = signer.sign(namespace, msg);
 //!
 //! // Verify the signature
-//! assert!(Ed25519::verify(namespace, msg, &signer.me(), &signature));
+//! assert!(Ed25519::verify(namespace, msg, &signer.public_key(), &signature));
 //! ```
 
 use crate::{utils::payload, PrivateKey, PublicKey, Scheme, Signature};
