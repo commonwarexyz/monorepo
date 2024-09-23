@@ -25,9 +25,9 @@
 //! When establishing a connection with a peer, a simple handshake is performed between
 //! peers to authenticate each other and to establish a shared secret for connection encryption (explained below).
 //! This simple handshake is done in lieu of using TLS, Noise, WireGuard, etc. because it supports
-//! the usage of arbitrary cryptographic schemes, there is no protocol negotation (only one way to connect), and
+//! the usage of arbitrary cryptographic schemes, there is no protocol negotation (only one way to connect),
 //! because it only takes a few hundred lines of code to implement (not having any features is a feature
-//! in safety-critical code).
+//! in safety-critical code), and because it can be simulated deterministically.
 //!
 //! In any handshake, the dialer is the party that attempts to connect to some known address/identity (public key)
 //! and the recipient of this connection is the dialee. Upon forming a TCP connection, the dialer sends a signed
@@ -49,8 +49,11 @@
 //!
 //! Upon receiving the dialee's handshake message, the dialer verifies the same data as the dialee and additionally verifies
 //! that the public key returned matches what they expected at the address. If all these checks pass, the dialer considers the
-//! connection established. If not, the dialer drops the connection (the dialee will eventually drop the connection after
-//! some timeout).
+//! connection established. If not, the dialer drops the connection.
+//!
+//! To better protect against malicious peers that create and/or accept connections but do not participate in handshakes,
+//! a configurable deadline is enforced for any handshake to be completed. This allows for the underlying runtime to maintain
+//! a standard read/write timeout for connections without making it easier for malicious peers to keep useless connections open.
 //!
 //! ## Encryption
 //!

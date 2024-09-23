@@ -102,10 +102,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                 })),
             };
             trace!(
-                "Sending chunk {}/{} to {}",
-                part,
-                total_parts - 1,
-                hex(peer)
+                part = part,
+                total_parts = total_parts - 1,
+                peer = hex(peer),
+                "sending chunk",
             );
             sender.send(msg).await.map_err(Error::SendFailed)?;
             sent_messages
