@@ -171,6 +171,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     let recipient = recipient.clone();
                     let message = message.clone();
                     let mut acquired_sender = acquired_sender.clone();
+                    let origin = origin.clone();
                     async move {
                         // Mark as sent as soon as soon as execution starts
                         acquired_sender.send(()).await.unwrap();
@@ -184,16 +185,22 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                         // Drop message if success rate is too low
                         if !should_deliver {
                             debug!(
-                                "dropping message to {}: random link failure",
-                                hex(&recipient)
+                                recipient = hex(&recipient),
+                                reason = "random link failure",
+                                "dropping message",
                             );
                             return;
                         }
 
                         // Send message
-                        if let Err(err) = sender.send((recipient.clone(), message)).await {
+                        if let Err(err) = sender.send((origin.clone(), message)).await {
                             // This can only happen if the receiver exited.
-                            error!("failed to send to {}: {:?}", hex(&recipient), err);
+                            error!(
+                                origin = hex(&origin),
+                                recipient = hex(&recipient),
+                                ?err,
+                                "failed to send",
+                            );
                         }
                     }
                 });

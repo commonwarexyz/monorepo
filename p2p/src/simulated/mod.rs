@@ -183,4 +183,137 @@ mod tests {
             assert!(matches!(result, Error::MessageTooLarge(_)));
         });
     }
+
+    #[test]
+    fn test_linking_self() {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            // Create simulated network
+            let mut network = network::Network::new(
+                runtime.clone(),
+                network::Config {
+                    max_message_size: 1024 * 1024,
+                },
+            );
+
+            // Register agents
+            let pk = Ed25519::from_seed(0).public_key();
+            network.register(pk.clone());
+
+            // Attempt to link self
+            let result = network.link(
+                pk.clone(),
+                pk.clone(),
+                network::Link {
+                    latency_mean: 5.0,
+                    latency_stddev: 2.5,
+                    success_rate: 0.75,
+                },
+            );
+
+            // Confirm error is correct
+            assert!(matches!(result, Err(Error::LinkingSelf)));
+        });
+    }
+
+    #[test]
+    fn test_invalid_success_rate() {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            // Create simulated network
+            let mut network = network::Network::new(
+                runtime.clone(),
+                network::Config {
+                    max_message_size: 1024 * 1024,
+                },
+            );
+
+            // Register agents
+            let pk1 = Ed25519::from_seed(0).public_key();
+            let pk2 = Ed25519::from_seed(1).public_key();
+            network.register(pk1.clone());
+            network.register(pk2.clone());
+
+            // Attempt to link with invalid success rate
+            let result = network.link(
+                pk1.clone(),
+                pk2.clone(),
+                network::Link {
+                    latency_mean: 5.0,
+                    latency_stddev: 2.5,
+                    success_rate: 1.5,
+                },
+            );
+
+            // Confirm error is correct
+            assert!(matches!(result, Err(Error::InvalidSuccessRate(_))));
+        });
+    }
+
+    #[test]
+    fn test_simple_message_delivery() {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            // Create simulated network
+            let mut network = network::Network::new(
+                runtime.clone(),
+                network::Config {
+                    max_message_size: 1024 * 1024,
+                },
+            );
+
+            // Register agents
+            let pk1 = Ed25519::from_seed(0).public_key();
+            let pk2 = Ed25519::from_seed(1).public_key();
+            let (mut sender1, mut receiver1) = network.register(pk1.clone());
+            let (mut sender2, mut receiver2) = network.register(pk2.clone());
+
+            // Link agents
+            network
+                .link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    network::Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .unwrap();
+            network
+                .link(
+                    pk2.clone(),
+                    pk1.clone(),
+                    network::Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .unwrap();
+
+            // Start network
+            runtime.spawn(network.run());
+
+            // Send messages
+            let msg1 = Bytes::from("hello from pk1");
+            let msg2 = Bytes::from("hello from pk2");
+            sender1
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
+                .await
+                .unwrap();
+            sender2
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
+                .await
+                .unwrap();
+
+            // Confirm message delivery
+            let (sender, message) = receiver1.recv().await.unwrap();
+            assert_eq!(sender, pk2);
+            assert_eq!(message, msg2);
+            let (sender, message) = receiver2.recv().await.unwrap();
+            assert_eq!(sender, pk1);
+            assert_eq!(message, msg1);
+        });
+    }
 }
