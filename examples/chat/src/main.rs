@@ -46,7 +46,7 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{ed25519, utils::hex, Scheme};
+use commonware_cryptography::{ed25519::Ed25519, utils::hex, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -101,8 +101,8 @@ fn main() {
         .expect("Please provide identity");
     let parts = me.split('@').collect::<Vec<&str>>();
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
-    let signer = ed25519::insecure_signer(key);
-    info!(key = hex(&signer.me()), "loaded signer");
+    let signer = Ed25519::from_seed(key);
+    info!(key = hex(&signer.public_key()), "loaded signer");
 
     // Configure my port
     let port = parts[1].parse::<u16>().expect("Port not well-formed");
@@ -118,7 +118,7 @@ fn main() {
         panic!("Please provide at least one friend");
     }
     for peer in allowed_keys {
-        let verifier = ed25519::insecure_signer(peer).me();
+        let verifier = Ed25519::from_seed(peer).public_key();
         info!(key = hex(&verifier), "registered authorized key",);
         recipients.push(verifier);
     }
@@ -132,7 +132,7 @@ fn main() {
             let bootstrapper_key = parts[0]
                 .parse::<u64>()
                 .expect("Bootstrapper key not well-formed");
-            let verifier = ed25519::insecure_signer(bootstrapper_key).me();
+            let verifier = Ed25519::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
             bootstrapper_identities.push((verifier, bootstrapper_address));
@@ -175,7 +175,7 @@ fn main() {
         // Start chat
         handler::run(
             runtime,
-            hex(&signer.me()),
+            hex(&signer.public_key()),
             registry,
             logs,
             chat_sender,

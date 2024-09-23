@@ -80,12 +80,7 @@
 mod handlers;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{
-    bls12381::dkg::utils,
-    ed25519::{insecure_signer, Ed25519},
-    utils::hex,
-    Scheme,
-};
+use commonware_cryptography::{bls12381::dkg::utils, ed25519::Ed25519, utils::hex, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -171,8 +166,8 @@ fn main() {
         panic!("Identity not well-formed");
     }
     let key = parts[0].parse::<u64>().expect("Key not well-formed");
-    let signer = insecure_signer(key);
-    tracing::info!(key = hex(&signer.me()), "loaded signer");
+    let signer = Ed25519::from_seed(key);
+    tracing::info!(key = hex(&signer.public_key()), "loaded signer");
 
     // Configure my port
     let port = parts[1].parse::<u16>().expect("Port not well-formed");
@@ -188,7 +183,7 @@ fn main() {
         panic!("Please provide at least one participant");
     }
     for peer in participants {
-        let verifier = insecure_signer(peer).me();
+        let verifier = Ed25519::from_seed(peer).public_key();
         tracing::info!(key = hex(&verifier), "registered authorized key",);
         recipients.push(verifier);
     }
@@ -202,7 +197,7 @@ fn main() {
             let bootstrapper_key = parts[0]
                 .parse::<u64>()
                 .expect("Bootstrapper key not well-formed");
-            let verifier = insecure_signer(bootstrapper_key).me();
+            let verifier = Ed25519::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
             bootstrapper_identities.push((verifier, bootstrapper_address));
@@ -239,7 +234,7 @@ fn main() {
             panic!("Please provide at least one contributor");
         }
         for peer in participants {
-            let verifier = insecure_signer(peer).me();
+            let verifier = Ed25519::from_seed(peer).public_key();
             tracing::info!(key = hex(&verifier), "registered contributor",);
             contributors.push(verifier);
         }
@@ -263,7 +258,7 @@ fn main() {
                 256,         // 256 messages in flight
                 Some(3),
             );
-            let arbiter = insecure_signer(*arbiter).me();
+            let arbiter = Ed25519::from_seed(*arbiter).public_key();
             let (contributor, requests) = handlers::Contributor::new(
                 signer,
                 arbiter,
