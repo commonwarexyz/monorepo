@@ -55,6 +55,12 @@ pub struct Config<C: Scheme> {
     /// Duration after which a handshake message is considered stale.
     pub max_handshake_age: Duration,
 
+    /// Timeout for the handshake process.
+    ///
+    /// This is often set to some value less than the connection read timeout to prevent
+    /// unauthenticated peers from holding open connection.
+    pub handshake_timeout: Duration,
+
     /// Quota for connection attempts per peer (incoming or outgoing).
     pub allowed_connection_rate_per_peer: Quota,
 
@@ -117,6 +123,7 @@ impl<C: Scheme> Config<C> {
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
+            handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_minute(NonZeroU32::new(1).unwrap()),
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
             dial_frequency: Duration::from_secs(60),
@@ -153,6 +160,7 @@ impl<C: Scheme> Config<C> {
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
+            handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(256).unwrap()),
             dial_frequency: Duration::from_secs(5),
@@ -185,6 +193,7 @@ impl<C: Scheme> Config<C> {
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
+            handshake_timeout: Duration::from_secs(5),
             allowed_connection_rate_per_peer: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
             allowed_incoming_connection_rate: Quota::per_second(NonZeroU32::new(1_024).unwrap()),
             dial_frequency: Duration::from_secs(1),

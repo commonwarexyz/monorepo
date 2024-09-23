@@ -10,7 +10,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::{Clock, Sink, Spawner, Stream};
+use commonware_runtime::{select, Clock, Sink, Spawner, Stream};
 use prost::Message;
 use rand::{CryptoRng, Rng};
 
@@ -32,16 +32,37 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         mut stream: St,
         peer: PublicKey,
     ) -> Result<Self, Error> {
+        // Set handshake deadline
+        let deadline = context.current() + config.handshake_timeout;
+
         // Generate shared secret
         let secret = x25519::new(&mut context);
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
         let msg = create_handshake(context.clone(), &mut config.crypto, peer.clone(), ephemeral)?;
-        sink.send(msg).await.map_err(|_| Error::SendFailed)?;
+
+        // Wait for up to handshake timeout to send
+        select! {
+            _timeout = context.sleep_until(deadline) => {
+                return Err(Error::HandshakeTimeout)
+            },
+            result = sink.send(msg) => {
+                result.map_err(|_| Error::SendFailed)?;
+            },
+        }
+
+        // Wait for up to handshake timeout for response
+        let msg = select! {
+            _timeout = context.sleep_until(deadline) => {
+                return Err(Error::HandshakeTimeout)
+            },
+            result = stream.recv() => {
+                result.map_err(|_| Error::ReadFailed)?
+            },
+        };
 
         // Verify handshake message from peer
-        let msg = stream.recv().await.map_err(|_| Error::ReadFailed)?;
         let handshake = Handshake::verify(
             context,
             &config.crypto,
@@ -86,11 +107,16 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
             handshake.peer_public_key.clone(),
             ephemeral,
         )?;
-        handshake
-            .sink
-            .send(msg)
-            .await
-            .map_err(|_| Error::SendFailed)?;
+
+        // Wait for up to handshake timeout
+        select! {
+            _timeout = context.sleep_until(handshake.deadline) => {
+                return Err(Error::HandshakeTimeout)
+            },
+            result = handshake.sink.send(msg) => {
+                result.map_err(|_| Error::SendFailed)?;
+            },
+        }
 
         // Create cipher
         let shared_secret = secret.diffie_hellman(&handshake.ephemeral_public_key);
