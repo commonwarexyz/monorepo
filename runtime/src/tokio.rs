@@ -12,7 +12,7 @@
 //! use commonware_runtime::{Spawner, Runner, tokio::{Config, Executor}};
 //!
 //! let cfg = Config::default();
-//! let (runner, context) = Executor::init(cfg);
+//! let (executor, runtime) = Executor::init(cfg);
 //! runner.start(async move {
 //!     println!("Parent started");
 //!     let result = context.spawn(async move {
@@ -324,8 +324,8 @@ mod tests {
     #[test]
     fn test_runs_tasks() {
         let cfg = Config::default();
-        let (runner, context) = Executor::init(cfg);
-        run_tasks(10, runner, context);
+        let (executor, runtime) = Executor::init(cfg);
+        run_tasks(10, executor, runtime);
     }
 
     #[test]

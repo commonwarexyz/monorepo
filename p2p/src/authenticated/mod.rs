@@ -163,7 +163,7 @@
 //!
 //! // Configure runtime
 //! let runtime_cfg = tokio::Config::default();
-//! let (runner, context) = Executor::init(runtime_cfg);
+//! let (executor, runtime) = Executor::init(runtime_cfg);
 //!
 //! // Generate identity
 //! //
@@ -488,15 +488,15 @@ mod tests {
     #[test]
     fn test_deterministic_connectivity() {
         let max_message_size = 1_024 * 1_024; // 1MB
-        let (runner, context, _) = deterministic::Executor::init(1, Duration::from_millis(1));
-        run_network(runner, context, max_message_size, 3000, 35, Mode::One); // 35 is greater than the max number of peers per response
+        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        run_network(executor, runtime, max_message_size, 3000, 35, Mode::One); // 35 is greater than the max number of peers per response
     }
 
     #[test]
     fn test_tokio_connectivity() {
         let cfg = tokio::Config::default();
-        let (runner, context) = tokio::Executor::init(cfg);
-        run_network(runner, context, cfg.max_message_size, 3000, 50, Mode::One);
+        let (executor, runtime) = tokio::Executor::init(cfg);
+        run_network(executor, runtime, cfg.max_message_size, 3000, 50, Mode::One);
     }
 
     #[test]
@@ -506,8 +506,8 @@ mod tests {
         let n: usize = 100;
 
         // Initialize runtime
-        let (runner, context, _) = deterministic::Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
             for i in 0..n {
@@ -540,7 +540,7 @@ mod tests {
                     bootstrappers,
                     1_024 * 1_024, // 1MB
                 );
-                let (mut network, mut oracle) = Network::new(context.clone(), config);
+                let (mut network, mut oracle) = Network::new(runtime.clone(), config);
 
                 // Register peers at separate indices
                 oracle.register(0, vec![addresses[0].clone()]).await;
@@ -561,11 +561,11 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                context.spawn(network.run());
+                runtime.spawn(network.run());
 
                 // Send/Recieve messages
-                let handler = context.spawn({
-                    let context = context.clone();
+                let handler = runtime.spawn({
+                    let context = runtime.clone();
                     async move {
                         if i == 0 {
                             // Loop until success
