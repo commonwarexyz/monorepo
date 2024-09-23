@@ -178,10 +178,9 @@ mod tests {
     use commonware_runtime::{
         deterministic::Executor,
         mocks::{MockSink, MockStream},
-        Listener, Network, Runner,
+        Runner,
     };
     use futures::SinkExt;
-    use std::net::SocketAddr;
     use x25519_dalek::PublicKey;
 
     #[test]
@@ -271,18 +270,16 @@ mod tests {
             )
             .unwrap();
 
-            // Setup a mock TcpStream that will listen for the response
-            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let mut listener = runtime.bind(addr).await.unwrap();
+            // Setup a mock sink and stream
+            let (sink, _) = MockSink::new();
+            let (stream, mut stream_sender) = MockStream::new();
 
             // Send message over stream
             runtime.spawn(async move {
-                let (_, mut sink, _) = listener.accept().await.unwrap();
-                sink.send(handshake_bytes).await.unwrap();
+                stream_sender.send(handshake_bytes).await.unwrap();
             });
 
             // Call the verify function
-            let (sink, stream) = runtime.dial(addr).await.unwrap();
             let result = IncomingHandshake::verify(
                 runtime,
                 &recipient,
@@ -319,18 +316,16 @@ mod tests {
             )
             .unwrap();
 
-            // Setup a mock TcpStream that will listen for the response
-            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let mut listener = runtime.bind(addr).await.unwrap();
+            // Setup a mock sink and stream
+            let (sink, _) = MockSink::new();
+            let (stream, mut stream_sender) = MockStream::new();
 
             // Send message over stream
             runtime.spawn(async move {
-                let (_, mut sink, _) = listener.accept().await.unwrap();
-                sink.send(handshake_bytes).await.unwrap();
+                stream_sender.send(handshake_bytes).await.unwrap();
             });
 
             // Call the verify function
-            let (sink, stream) = runtime.dial(addr).await.unwrap();
             let result = IncomingHandshake::verify(
                 runtime,
                 &Ed25519::from_seed(2),
@@ -352,18 +347,16 @@ mod tests {
         // Initialize runtime
         let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
         executor.start(async move {
-            // Setup a mock listener that will listen for the response
-            let addr: SocketAddr = "127.0.0.1:300".parse().unwrap();
-            let mut listener = runtime.bind(addr).await.unwrap();
+            // Setup a mock sink and stream
+            let (sink, _) = MockSink::new();
+            let (stream, mut stream_sender) = MockStream::new();
 
             // Send invalid data over stream
             runtime.spawn(async move {
-                let (_, mut sink, _) = listener.accept().await.unwrap();
-                sink.send(Bytes::from("mock data")).await.unwrap();
+                stream_sender.send(Bytes::from("mock data")).await.unwrap();
             });
 
             // Call the verify function
-            let (sink, stream) = runtime.dial(addr).await.unwrap();
             let result = IncomingHandshake::verify(
                 runtime,
                 &Ed25519::from_seed(0),
@@ -390,7 +383,7 @@ mod tests {
             let recipient = Ed25519::from_seed(1);
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
-            // Setup a mock listener
+            // Setup a mock sink and stream
             let (sink, _) = MockSink::new();
             let (stream, mut stream_sender) = MockStream::new();
 
@@ -401,7 +394,7 @@ mod tests {
                 async move {
                     runtime.sleep(Duration::from_secs(10)).await;
                     let handshake_bytes = create_handshake(
-                        runtime.clone(),
+                        runtime,
                         &mut sender,
                         recipient.public_key(),
                         ephemeral_public_key,
