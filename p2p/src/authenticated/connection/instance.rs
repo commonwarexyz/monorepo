@@ -263,6 +263,24 @@ mod tests {
     }
 
     #[test]
+    fn test_sender_seq_overflow() {
+        let (executuor, _, _) = Executor::init(0, Duration::from_millis(1));
+        executuor.start(async {
+            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+            let (sink, _) = MockSink::new();
+            let mut sender = Sender {
+                cipher,
+                sink,
+                dialer: true,
+                iter: 0,
+                seq: u64::MAX,
+            };
+            let nonce_result = sender.my_nonce().unwrap();
+            assert_eq!(nonce_result, nonce_bytes(true, 1, 0));
+        });
+    }
+
+    #[test]
     fn test_receiver_nonce_overflow() {
         let (executuor, _, _) = Executor::init(0, Duration::from_millis(1));
         executuor.start(async {
@@ -277,6 +295,24 @@ mod tests {
             };
             let nonce_result = receiver.peer_nonce();
             assert!(matches!(nonce_result, Err(Error::PeerNonceOverflow)));
+        });
+    }
+
+    #[test]
+    fn test_receiver_seq_overflow() {
+        let (executuor, _, _) = Executor::init(0, Duration::from_millis(1));
+        executuor.start(async {
+            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+            let (stream, _) = MockStream::new();
+            let mut receiver = Receiver {
+                cipher,
+                stream,
+                dialer: false,
+                iter: 0,
+                seq: u64::MAX,
+            };
+            let nonce_result = receiver.peer_nonce().unwrap();
+            assert_eq!(nonce_result, nonce_bytes(true, 1, 0));
         });
     }
 }
