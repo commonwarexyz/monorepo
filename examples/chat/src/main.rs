@@ -46,7 +46,7 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{ed25519::Ed25519, utils::hex, Scheme};
+use commonware_cryptography::{utils::hex, Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},

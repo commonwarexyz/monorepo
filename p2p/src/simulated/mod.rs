@@ -23,7 +23,7 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_cryptography::{ed25519::Ed25519, utils::hex, Scheme};
+    use commonware_cryptography::{utils::hex, Ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;

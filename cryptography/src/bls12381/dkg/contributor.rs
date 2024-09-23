@@ -363,7 +363,7 @@ impl P2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519::Ed25519, Scheme};
+    use crate::{Ed25519, Scheme};
     use std::collections::HashMap;
 
     fn create_and_verify_shares(n: u32, t: u32, dealers: u32, concurrency: usize) {

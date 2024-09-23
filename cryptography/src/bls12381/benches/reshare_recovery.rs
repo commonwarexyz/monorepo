@@ -1,7 +1,6 @@
 use commonware_cryptography::{
     bls12381::{dkg, primitives::poly},
-    ed25519::Ed25519,
-    Scheme,
+    Ed25519, Scheme,
 };
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;

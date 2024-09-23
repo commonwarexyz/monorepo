@@ -1,4 +1,4 @@
-use commonware_cryptography::ed25519::Ed25519;
+use commonware_cryptography::Ed25519;
 use commonware_cryptography::{bls12381::dkg, Scheme};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;

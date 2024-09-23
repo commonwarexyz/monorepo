@@ -643,7 +643,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 mod tests {
     use super::*;
     use crate::authenticated::{actors::peer, config::Bootstrapper};
-    use commonware_cryptography::ed25519::Ed25519;
+    use commonware_cryptography::Ed25519;
     use commonware_runtime::{deterministic::Executor, Clock, Runner};
     use governor::Quota;
     use std::net::{IpAddr, Ipv4Addr};

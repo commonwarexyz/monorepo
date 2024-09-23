@@ -174,7 +174,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{ed25519::Ed25519, Scheme};
+    use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, Listener, Network, Runner};
     use std::net::SocketAddr;
     use x25519_dalek::PublicKey;
