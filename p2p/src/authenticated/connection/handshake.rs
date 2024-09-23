@@ -9,13 +9,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_HANDSHAKE_";
 
 pub fn create_handshake<E: Clock, C: Scheme>(
-    context: E,
+    runtime: E,
     crypto: &mut C,
     recipient_public_key: PublicKey,
     ephemeral_public_key: x25519_dalek::PublicKey,
 ) -> Result<Bytes, Error> {
     // Get current time
-    let timestamp = context
+    let timestamp = runtime
         .current()
         .duration_since(UNIX_EPOCH)
         .expect("failed to get current time")
@@ -51,7 +51,7 @@ pub struct Handshake {
 
 impl Handshake {
     pub fn verify<E: Clock, C: Scheme>(
-        context: E,
+        runtime: E,
         crypto: &C,
         synchrony_bound: Duration,
         max_handshake_age: Duration,
@@ -90,7 +90,7 @@ impl Handshake {
         // unlike the peer identity) and/or from blocking a peer from connecting
         // to others (if an adversary recovered a handshake message could open a
         // connection to a peer first, peers only maintain one connection per peer).
-        let current_time = context
+        let current_time = runtime
             .current()
             .duration_since(UNIX_EPOCH)
             .expect("failed to get current time")
@@ -137,7 +137,7 @@ pub struct IncomingHandshake<Si: Sink, St: Stream> {
 
 impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
     pub async fn verify<E: Clock + Spawner, C: Scheme>(
-        context: E,
+        runtime: E,
         crypto: &C,
         synchrony_bound: Duration,
         max_handshake_age: Duration,
@@ -146,11 +146,11 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
         mut stream: St,
     ) -> Result<Self, Error> {
         // Set handshake deadline
-        let deadline = context.current() + handshake_timeout;
+        let deadline = runtime.current() + handshake_timeout;
 
         // Wait for up to handshake timeout for response
         let msg = select! {
-            _timeout = context.sleep_until(deadline) => {
+            _timeout = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout);
             },
             result = stream.recv() => {
@@ -160,7 +160,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 
         // Verify handshake message from peer
         let handshake =
-            Handshake::verify(context, crypto, synchrony_bound, max_handshake_age, msg)?;
+            Handshake::verify(runtime, crypto, synchrony_bound, max_handshake_age, msg)?;
         Ok(Self {
             sink,
             stream,
@@ -185,8 +185,8 @@ mod tests {
     #[test]
     fn test_handshake_create_verify() {
         // Initialize runtime
-        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
             // Create participants
             let mut sender = ed25519::insecure_signer(0);
             let recipient = ed25519::insecure_signer(1);
@@ -194,7 +194,7 @@ mod tests {
 
             // Create handshake message
             let handshake_bytes = create_handshake(
-                context.clone(),
+                runtime.clone(),
                 &mut sender,
                 recipient.me(),
                 ephemeral_public_key,
@@ -209,7 +209,7 @@ mod tests {
             };
 
             // Verify the timestamp
-            let current_timestamp = context
+            let current_timestamp = runtime
                 .current()
                 .duration_since(UNIX_EPOCH)
                 .expect("failed to get current time")
@@ -238,7 +238,7 @@ mod tests {
 
             // Verify using the handshake struct
             let handshake = Handshake::verify(
-                context,
+                runtime,
                 &recipient,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -253,8 +253,8 @@ mod tests {
     #[test]
     fn test_handshake() {
         // Initialize runtime
-        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
             // Create participants
             let mut sender = ed25519::insecure_signer(0);
             let recipient = ed25519::insecure_signer(1);
@@ -262,7 +262,7 @@ mod tests {
 
             // Create handshake message
             let handshake_bytes = create_handshake(
-                context.clone(),
+                runtime.clone(),
                 &mut sender,
                 recipient.me(),
                 ephemeral_public_key,
@@ -271,18 +271,18 @@ mod tests {
 
             // Setup a mock TcpStream that will listen for the response
             let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-            let mut listener = context.bind(addr).await.unwrap();
+            let mut listener = runtime.bind(addr).await.unwrap();
 
             // Send message over stream
-            context.spawn(async move {
+            runtime.spawn(async move {
                 let (_, mut sink, _) = listener.accept().await.unwrap();
                 sink.send(handshake_bytes).await.unwrap();
             });
 
             // Call the verify function
-            let (sink, stream) = context.dial(addr).await.unwrap();
+            let (sink, stream) = runtime.dial(addr).await.unwrap();
             let result = IncomingHandshake::verify(
-                context,
+                runtime,
                 &recipient,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -302,22 +302,22 @@ mod tests {
     #[test]
     fn test_incoming_handshake_invalid_data() {
         // Initialize runtime
-        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
             // Setup a mock listener that will listen for the response
             let addr: SocketAddr = "127.0.0.1:300".parse().unwrap();
-            let mut listener = context.bind(addr).await.unwrap();
+            let mut listener = runtime.bind(addr).await.unwrap();
 
             // Send invalid data over stream
-            context.spawn(async move {
+            runtime.spawn(async move {
                 let (_, mut sink, _) = listener.accept().await.unwrap();
                 sink.send(Bytes::from("mock data")).await.unwrap();
             });
 
             // Call the verify function
-            let (sink, stream) = context.dial(addr).await.unwrap();
+            let (sink, stream) = runtime.dial(addr).await.unwrap();
             let result = IncomingHandshake::verify(
-                context,
+                runtime,
                 &ed25519::insecure_signer(0),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
@@ -335,8 +335,8 @@ mod tests {
     #[test]
     fn test_incoming_handshake_verify_timeout() {
         // Initialize runtime
-        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
-        runner.start(async move {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
             // Create participants
             let mut sender = ed25519::insecure_signer(0);
             let recipient = ed25519::insecure_signer(1);
@@ -344,17 +344,17 @@ mod tests {
 
             // Setup a mock listener
             let addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
-            let mut listener = context.bind(addr).await.unwrap();
+            let mut listener = runtime.bind(addr).await.unwrap();
 
             // Accept connections but do nothing
-            context.spawn({
-                let context = context.clone();
+            runtime.spawn({
+                let runtime = runtime.clone();
                 let recipient = recipient.clone();
                 async move {
                     let (_, mut sink, _) = listener.accept().await.unwrap();
-                    context.sleep(Duration::from_secs(10)).await;
+                    runtime.sleep(Duration::from_secs(10)).await;
                     let handshake_bytes = create_handshake(
-                        context.clone(),
+                        runtime.clone(),
                         &mut sender,
                         recipient.me(),
                         ephemeral_public_key,
@@ -365,11 +365,11 @@ mod tests {
             });
 
             // Dial listener
-            let (sink, stream) = context.dial(addr).await.unwrap();
+            let (sink, stream) = runtime.dial(addr).await.unwrap();
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                context,
+                runtime,
                 &recipient,
                 Duration::from_secs(1),
                 Duration::from_secs(1),

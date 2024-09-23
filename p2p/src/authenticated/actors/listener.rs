@@ -36,7 +36,7 @@ pub struct Actor<
     E: Spawner + Clock + ReasonablyRealtime + Network<L, Si, St> + Rng + CryptoRng,
     C: Scheme,
 > {
-    context: E,
+    runtime: E,
 
     address: SocketAddr,
     connection: connection::Config<C>,
@@ -57,7 +57,7 @@ impl<
         C: Scheme,
     > Actor<Si, St, L, E, C>
 {
-    pub fn new(context: E, cfg: Config<C>) -> Self {
+    pub fn new(runtime: E, cfg: Config<C>) -> Self {
         // Create metrics
         let handshakes_rate_limited = Counter::default();
         {
@@ -70,13 +70,13 @@ impl<
         }
 
         Self {
-            context: context.clone(),
+            runtime: runtime.clone(),
 
             address: cfg.address,
             connection: cfg.connection,
             rate_limiter: RateLimiter::direct_with_clock(
                 cfg.allowed_incoming_connectioned_rate,
-                &context,
+                &runtime,
             ),
 
             handshakes_rate_limited,
@@ -88,7 +88,7 @@ impl<
     }
 
     async fn handshake(
-        context: E,
+        runtime: E,
         connection: connection::Config<C>,
         sink: Si,
         stream: St,
@@ -100,7 +100,7 @@ impl<
         // PartialHandshake limits how long we will wait for the peer to send us their public key
         // to ensure an adversary can't force us to hold many pending connections open.
         let handshake = match IncomingHandshake::verify(
-            context.clone(),
+            runtime.clone(),
             &connection.crypto,
             connection.synchrony_bound,
             connection.max_handshake_age,
@@ -130,7 +130,7 @@ impl<
         };
 
         // Perform handshake
-        let stream = match Instance::upgrade_listener(context, connection, handshake).await {
+        let stream = match Instance::upgrade_listener(runtime, connection, handshake).await {
             Ok(connection) => connection,
             Err(e) => {
                 debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");
@@ -150,7 +150,7 @@ impl<
     ) {
         // Start listening for incoming connections
         let mut listener = self
-            .context
+            .runtime
             .bind(self.address)
             .await
             .expect("failed to bind listener");
@@ -162,8 +162,8 @@ impl<
                 Ok(_) => {}
                 Err(negative) => {
                     self.handshakes_rate_limited.inc();
-                    let wait = negative.wait_time_from(self.context.now());
-                    self.context.sleep(wait).await;
+                    let wait = negative.wait_time_from(self.runtime.now());
+                    self.runtime.sleep(wait).await;
                 }
             }
 
@@ -178,8 +178,8 @@ impl<
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
             // Spawn a new handshaker to upgrade connection
-            self.context.spawn(Self::handshake(
-                self.context.clone(),
+            self.runtime.spawn(Self::handshake(
+                self.runtime.clone(),
                 self.connection.clone(),
                 sink,
                 stream,

@@ -12,10 +12,10 @@
 //! use commonware_runtime::{Spawner, Runner, tokio::{Config, Executor}};
 //!
 //! let cfg = Config::default();
-//! let (runner, context) = Executor::init(cfg);
-//! runner.start(async move {
+//! let (executor, runtime) = Executor::init(cfg);
+//! executor.start(async move {
 //!     println!("Parent started");
-//!     let result = context.spawn(async move {
+//!     let result = runtime.spawn(async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });
@@ -256,10 +256,7 @@ impl crate::Listener<Sink, Stream> for Listener {
                 context: context.clone(),
                 sink,
             },
-            Stream {
-                context: context.clone(),
-                stream,
-            },
+            Stream { context, stream },
         ))
     }
 }
@@ -324,8 +321,8 @@ mod tests {
     #[test]
     fn test_runs_tasks() {
         let cfg = Config::default();
-        let (runner, context) = Executor::init(cfg);
-        run_tasks(10, runner, context);
+        let (executor, runtime) = Executor::init(cfg);
+        run_tasks(10, executor, runtime);
     }
 
     #[test]

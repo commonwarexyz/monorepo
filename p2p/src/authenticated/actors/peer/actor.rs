@@ -16,7 +16,7 @@ use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
-    context: E,
+    runtime: E,
 
     gossip_bit_vec_frequency: Duration,
     allowed_bit_vec_rate: Quota,
@@ -36,14 +36,14 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
 }
 
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
-    pub fn new(context: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
+    pub fn new(runtime: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
         let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
         let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
 
         (
             Self {
-                context,
+                runtime,
                 mailbox: Mailbox::new(control_sender),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
@@ -122,7 +122,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
         for (channel, (rate, max_size, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.context);
+            let rate_limiter = RateLimiter::direct_with_clock(rate, &self.runtime);
             rate_limits.insert(channel, (rate_limiter, max_size));
             senders.insert(channel, sender);
         }
@@ -130,22 +130,22 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
 
         // Send/Receive messages from the peer
         let (max_content_size, mut conn_sender, mut conn_receiver) = connection.split();
-        let mut send_handler: Handle<Result<(), Error>> = self.context.spawn({
-            let context = self.context.clone();
+        let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn({
+            let runtime = self.runtime.clone();
             let mut tracker = tracker.clone();
             let peer = peer.clone();
             let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
             async move {
-                let mut deadline = context.current() + self.gossip_bit_vec_frequency;
+                let mut deadline = runtime.current() + self.gossip_bit_vec_frequency;
                 loop {
                     select! {
-                        _timeout = context.sleep_until(deadline) => {
+                        _timeout = runtime.sleep_until(deadline) => {
                             // Get latest bitset from tracker (also used as ping)
                             tracker.construct(peer.clone(), mailbox.clone()).await;
 
                             // Reset ticker
-                            deadline = context.current() + self.gossip_bit_vec_frequency;
+                            deadline = runtime.current() + self.gossip_bit_vec_frequency;
                         },
                         msg_control = self.control.next() => {
                             let msg = match msg_control {
@@ -202,13 +202,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                 }
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self.context.spawn({
-            let context = self.context.clone();
+        let mut receive_handler: Handle<Result<(), Error>> = self.runtime.spawn({
+            let runtime = self.runtime.clone();
             async move {
                 let bit_vec_rate_limiter =
-                    RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, &context);
+                    RateLimiter::direct_with_clock(self.allowed_bit_vec_rate, &runtime);
                 let peers_rate_limiter =
-                    RateLimiter::direct_with_clock(self.allowed_peers_rate, &context);
+                    RateLimiter::direct_with_clock(self.allowed_peers_rate, &runtime);
                 loop {
                     match conn_receiver
                         .receive()
@@ -228,8 +228,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                     self.rate_limited
                                         .get_or_create(&metrics::Message::new_bit_vec(&peer))
                                         .inc();
-                                    let wait = negative.wait_time_from(context.now());
-                                    context.sleep(wait).await;
+                                    let wait = negative.wait_time_from(runtime.now());
+                                    runtime.sleep(wait).await;
                                 }
                             }
 
@@ -248,8 +248,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                     self.rate_limited
                                         .get_or_create(&metrics::Message::new_peers(&peer))
                                         .inc();
-                                    let wait = negative.wait_time_from(context.now());
-                                    context.sleep(wait).await;
+                                    let wait = negative.wait_time_from(runtime.now());
+                                    runtime.sleep(wait).await;
                                 }
                             }
 
@@ -278,8 +278,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                             chunk.channel,
                                         ))
                                         .inc();
-                                    let wait = negative.wait_time_from(context.now());
-                                    context.sleep(wait).await;
+                                    let wait = negative.wait_time_from(runtime.now());
+                                    runtime.sleep(wait).await;
                                 }
                             }
 

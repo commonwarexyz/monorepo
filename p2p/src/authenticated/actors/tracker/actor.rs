@@ -131,7 +131,7 @@ impl AddressCount {
 }
 
 pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
-    context: E,
+    runtime: E,
 
     crypto: C,
     allow_private_ips: bool,
@@ -156,9 +156,9 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
 }
 
 impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
-    pub fn new(context: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
+    pub fn new(runtime: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
         // Construct IP signature
-        let current_time = context
+        let current_time = runtime
             .current()
             .duration_since(UNIX_EPOCH)
             .expect("failed to get current time")
@@ -195,7 +195,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
         // Create connections
         let connections_rate_limiter =
-            RateLimiter::hashmap_with_clock(cfg.allowed_connection_rate_per_peer, &context);
+            RateLimiter::hashmap_with_clock(cfg.allowed_connection_rate_per_peer, &runtime);
 
         // Create metrics
         let tracked_peers = Gauge::default();
@@ -224,7 +224,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
         (
             Self {
-                context,
+                runtime,
                 crypto: cfg.crypto,
                 allow_private_ips: cfg.allow_private_ips,
                 synchrony_bound: cfg.synchrony_bound,
@@ -423,7 +423,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
             // If any timestamp is too far into the future, disconnect from the peer
             let current_time = self
-                .context
+                .runtime
                 .current()
                 .duration_since(UNIX_EPOCH)
                 .expect("failed to get current time")
@@ -519,7 +519,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         // select a subset to send (this increases the likelihood that
         // the recipient will hear about different peers from different sources)
         if peers.len() > self.peer_gossip_max_count {
-            peers.shuffle(&mut self.context);
+            peers.shuffle(&mut self.runtime);
             peers.truncate(self.peer_gossip_max_count);
         }
         Ok(Some(wire::Peers { peers }))
@@ -546,7 +546,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         self.connections.insert(peer.clone());
         self.reserved_connections.inc();
         Some(Reservation::new(
-            self.context.clone(),
+            self.runtime.clone(),
             peer,
             Mailbox::new(self.sender.clone()),
         ))
@@ -567,7 +567,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
                     // Select a random peer set (we want to learn about all peers in
                     // our tracked sets)
-                    let set = match self.sets.values().choose(&mut self.context) {
+                    let set = match self.sets.values().choose(&mut self.runtime) {
                         Some(set) => set,
                         None => {
                             debug!("no peer sets available");
@@ -606,7 +606,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                     let mut dialable = self.handle_dialable();
 
                     // Shuffle to prevent starvation
-                    dialable.shuffle(&mut self.context);
+                    dialable.shuffle(&mut self.runtime);
 
                     // Inform dialer of dialable peers
                     let _ = peers.send(dialable);
@@ -669,13 +669,13 @@ mod tests {
     #[test]
     fn test_reserve_peer() {
         // Create actor
-        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
         let cfg = test_config(ed25519::insecure_signer(0), Vec::new());
-        runner.start(async move {
-            let (actor, mut mailbox, mut oracle) = Actor::new(context.clone(), cfg);
+        executor.start(async move {
+            let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
             // Run actor in background
-            context.spawn(async move {
+            runtime.spawn(async move {
                 actor.run().await;
             });
 
@@ -706,7 +706,7 @@ mod tests {
                 if reservation.is_some() {
                     break;
                 }
-                context.sleep(Duration::from_millis(10)).await;
+                runtime.sleep(Duration::from_millis(10)).await;
             }
         });
     }
@@ -714,14 +714,14 @@ mod tests {
     #[test]
     fn test_bit_vec() {
         // Create actor
-        let (runner, context, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
         let peer0 = ed25519::insecure_signer(0);
         let cfg = test_config(peer0.clone(), Vec::new());
-        runner.start(async move {
-            let (actor, mut mailbox, mut oracle) = Actor::new(context.clone(), cfg);
+        executor.start(async move {
+            let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
             // Run actor in background
-            context.spawn(async move {
+            runtime.spawn(async move {
                 actor.run().await;
             });
 

@@ -35,7 +35,7 @@ pub struct Actor<
     E: Spawner + Clock + GClock + Network<L, Si, St>,
     C: Scheme,
 > {
-    context: E,
+    runtime: E,
 
     connection: connection::Config<C>,
     dial_frequency: Duration,
@@ -57,7 +57,7 @@ impl<
         C: Scheme,
     > Actor<Si, St, L, E, C>
 {
-    pub fn new(context: E, cfg: Config<C>) -> Self {
+    pub fn new(runtime: E, cfg: Config<C>) -> Self {
         let dial_attempts = Family::<metrics::Peer, Counter>::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
@@ -68,10 +68,10 @@ impl<
             );
         }
         Self {
-            context: context.clone(),
+            runtime: runtime.clone(),
             connection: cfg.connection,
             dial_frequency: cfg.dial_frequency,
-            dial_limiter: RateLimiter::direct_with_clock(cfg.dial_rate, &context),
+            dial_limiter: RateLimiter::direct_with_clock(cfg.dial_rate, &runtime),
             dial_attempts,
             _phantom_si: PhantomData,
             _phantom_st: PhantomData,
@@ -96,13 +96,13 @@ impl<
                 .inc();
 
             // Spawn dialer to connect to peer
-            self.context.spawn({
-                let context = self.context.clone();
+            self.runtime.spawn({
+                let runtime = self.runtime.clone();
                 let config = self.connection.clone();
                 let mut supervisor = supervisor.clone();
                 async move {
                     // Attempt to dial peer
-                    let (sink, stream) = match context.dial(address).await {
+                    let (sink, stream) = match runtime.dial(address).await {
                         Ok(stream) => stream,
                         Err(e) => {
                             debug!(peer=hex(&peer), error = ?e, "failed to dial peer");
@@ -117,7 +117,7 @@ impl<
 
                     // Upgrade connection
                     let instance =
-                        match Instance::upgrade_dialer(context, config, sink, stream, peer.clone())
+                        match Instance::upgrade_dialer(runtime, config, sink, stream, peer.clone())
                             .await
                         {
                             Ok(instance) => instance,
@@ -146,10 +146,10 @@ impl<
 
             // Sleep for a random amount of time up to the dial frequency
             let wait = Duration::from_millis(
-                self.context
+                self.runtime
                     .gen_range(0..self.dial_frequency.as_millis() as u64),
             );
-            self.context.sleep(wait).await;
+            self.runtime.sleep(wait).await;
         }
     }
 }

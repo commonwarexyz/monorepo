@@ -26,7 +26,7 @@ type Task = (
 
 /// Implementation of a `simulated` network.
 pub struct Network<E: Spawner + Rng + Clock> {
-    context: E,
+    runtime: E,
     cfg: Config,
 
     sender: mpsc::UnboundedSender<Task>,
@@ -57,11 +57,11 @@ pub struct Config {
 }
 
 impl<E: Spawner + Rng + Clock> Network<E> {
-    /// Create a new simulated network with a given context and configuration.
-    pub fn new(context: E, cfg: Config) -> Self {
+    /// Create a new simulated network with a given runtime and configuration.
+    pub fn new(runtime: E, cfg: Config) -> Self {
         let (sender, receiver) = mpsc::unbounded();
         Self {
-            context,
+            runtime,
             cfg,
             sender,
             receiver,
@@ -77,7 +77,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         let (sender, receiver) = mpsc::unbounded();
         self.agents.insert(public_key.clone(), sender);
         (
-            Sender::new(self.context.clone(), public_key, self.sender.clone()),
+            Sender::new(self.runtime.clone(), public_key, self.sender.clone()),
             Receiver { receiver },
         )
     }
@@ -158,15 +158,15 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 };
 
                 // Apply link settings
-                let should_deliver = self.context.gen_bool(link.success_rate);
+                let should_deliver = self.runtime.gen_bool(link.success_rate);
                 let delay = Normal::new(link.latency_mean, link.latency_stddev)
                     .unwrap()
-                    .sample(&mut self.context);
+                    .sample(&mut self.runtime);
                 debug!("sending message to {}: delay={}ms", hex(&recipient), delay);
 
                 // Send message
-                self.context.spawn({
-                    let context = self.context.clone();
+                self.runtime.spawn({
+                    let runtime = self.runtime.clone();
                     let mut sender = sender.clone();
                     let recipient = recipient.clone();
                     let message = message.clone();
@@ -179,7 +179,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                         //
                         // Note: messages can be sent out of order (will not occur when using a
                         // stable TCP connection)
-                        context.sleep(Duration::from_millis(delay as u64)).await;
+                        runtime.sleep(Duration::from_millis(delay as u64)).await;
 
                         // Drop message if success rate is too low
                         if !should_deliver {
@@ -201,7 +201,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             }
 
             // Notify sender of successful sends
-            self.context.spawn(async move {
+            self.runtime.spawn(async move {
                 // Wait for semaphore to be acquired on all sends
                 for _ in 0..sent.len() {
                     acquired_receiver.next().await.unwrap();
@@ -226,11 +226,11 @@ pub struct Sender {
 }
 
 impl Sender {
-    fn new(context: impl Spawner, me: PublicKey, mut sender: mpsc::UnboundedSender<Task>) -> Self {
+    fn new(runtime: impl Spawner, me: PublicKey, mut sender: mpsc::UnboundedSender<Task>) -> Self {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
-        context.spawn(async move {
+        runtime.spawn(async move {
             loop {
                 select! {
                     high_task = high_receiver.next() => {

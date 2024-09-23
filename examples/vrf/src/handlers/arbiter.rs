@@ -23,7 +23,7 @@ use std::{
 use tracing::{debug, info, warn};
 
 pub struct Arbiter<E: Clock> {
-    context: E,
+    runtime: E,
 
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
@@ -39,7 +39,7 @@ pub struct Arbiter<E: Clock> {
 /// updated to use the "replicated arbiter" pattern.
 impl<E: Clock> Arbiter<E> {
     pub fn new(
-        context: E,
+        runtime: E,
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,
         mut players: Vec<PublicKey>,
@@ -47,7 +47,7 @@ impl<E: Clock> Arbiter<E> {
     ) -> Self {
         players.sort();
         Self {
-            context,
+            runtime,
 
             dkg_frequency,
             dkg_phase_timeout,
@@ -65,7 +65,7 @@ impl<E: Clock> Arbiter<E> {
         receiver: &mut impl Receiver,
     ) -> (Option<poly::Public>, HashSet<PublicKey>) {
         // Create a new round
-        let start = self.context.current();
+        let start = self.runtime.current();
         let t_commitment = start + self.dkg_phase_timeout;
         let t_ack = start + self.dkg_phase_timeout * 2;
         let t_repair = start + self.dkg_phase_timeout * 3;
@@ -103,7 +103,7 @@ impl<E: Clock> Arbiter<E> {
         );
         loop {
             select! {
-                _timeout = self.context.sleep_until(t_commitment) => {
+                _timeout = self.runtime.sleep_until(t_commitment) => {
                     debug!("commitment phase timed out");
                     break
                 },
@@ -206,7 +206,7 @@ impl<E: Clock> Arbiter<E> {
         // Collect acks and complaints
         loop {
             select! {
-                _timeout = self.context.sleep_until(t_ack) => {
+                _timeout = self.runtime.sleep_until(t_ack) => {
                     debug!("ack phase timed out");
                     break
                 },
@@ -372,7 +372,7 @@ impl<E: Clock> Arbiter<E> {
         let mut signatures = HashMap::new();
         loop {
             select! {
-                _timeout = self.context.sleep_until(t_repair) => {
+                _timeout = self.runtime.sleep_until(t_repair) => {
                     break
                 },
                 result = receiver.recv() => {
@@ -527,7 +527,7 @@ impl<E: Clock> Arbiter<E> {
             round += 1;
 
             // Wait for next round
-            self.context.sleep(self.dkg_frequency).await;
+            self.runtime.sleep(self.dkg_frequency).await;
         }
     }
 }

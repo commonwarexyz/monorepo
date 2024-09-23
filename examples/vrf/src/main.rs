@@ -104,7 +104,7 @@ use tracing::info;
 fn main() {
     // Initialize runtime
     let runtime_cfg = tokio::Config::default();
-    let (runner, context) = Executor::init(runtime_cfg);
+    let (executor, runtime) = Executor::init(runtime_cfg);
 
     // Parse arguments
     let matches = Command::new("commonware-vrf")
@@ -220,8 +220,8 @@ fn main() {
     );
 
     // Start runtime
-    runner.start(async move {
-        let (mut network, mut oracle) = Network::new(context.clone(), p2p_cfg);
+    executor.start(async move {
+        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -273,7 +273,7 @@ fn main() {
                 lazy,
                 defiant,
             );
-            context.spawn(contributor.run(contributor_sender, contributor_receiver));
+            runtime.spawn(contributor.run(contributor_sender, contributor_receiver));
 
             // Create vrf
             let (vrf_sender, vrf_receiver) = network.register(
@@ -284,13 +284,13 @@ fn main() {
                 None,
             );
             let signer = handlers::Vrf::new(
-                context.clone(),
+                runtime.clone(),
                 Duration::from_secs(5),
                 threshold,
                 contributors,
                 requests,
             );
-            context.spawn(signer.run(vrf_sender, vrf_receiver));
+            runtime.spawn(signer.run(vrf_sender, vrf_receiver));
         } else {
             let (arbiter_sender, arbiter_receiver) = network.register(
                 handlers::DKG_CHANNEL,
@@ -300,13 +300,13 @@ fn main() {
                 Some(3),
             );
             let arbiter = handlers::Arbiter::new(
-                context.clone(),
+                runtime.clone(),
                 Duration::from_secs(10),
                 Duration::from_secs(5),
                 contributors,
                 threshold,
             );
-            context.spawn(arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver));
+            runtime.spawn(arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver));
         }
         network.run().await;
     });

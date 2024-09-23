@@ -10,10 +10,10 @@
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use std::time::Duration;
 //!
-//! let (runner, context, auditor) = Executor::init(42, Duration::from_millis(1));
-//! runner.start(async move {
+//! let (executor, runtime, auditor) = Executor::init(42, Duration::from_millis(1));
+//! executor.start(async move {
 //!     println!("Parent started");
-//!     let result = context.spawn(async move {
+//!     let result = runtime.spawn(async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });
@@ -695,8 +695,8 @@ mod tests {
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
-        let (runner, context, auditor) = Executor::init(seed, Duration::from_millis(1));
-        let messages = run_tasks(5, runner, context);
+        let (executor, runtime, auditor) = Executor::init(seed, Duration::from_millis(1));
+        let messages = run_tasks(5, executor, runtime);
         (auditor.state(), messages)
     }
 

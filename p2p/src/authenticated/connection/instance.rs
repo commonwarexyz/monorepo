@@ -26,25 +26,25 @@ pub struct Instance<C: Scheme, Si: Sink, St: Stream> {
 
 impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
     pub async fn upgrade_dialer(
-        mut context: impl Rng + CryptoRng + Spawner + Clock,
+        mut runtime: impl Rng + CryptoRng + Spawner + Clock,
         mut config: Config<C>,
         mut sink: Si,
         mut stream: St,
         peer: PublicKey,
     ) -> Result<Self, Error> {
         // Set handshake deadline
-        let deadline = context.current() + config.handshake_timeout;
+        let deadline = runtime.current() + config.handshake_timeout;
 
         // Generate shared secret
-        let secret = x25519::new(&mut context);
+        let secret = x25519::new(&mut runtime);
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
-        let msg = create_handshake(context.clone(), &mut config.crypto, peer.clone(), ephemeral)?;
+        let msg = create_handshake(runtime.clone(), &mut config.crypto, peer.clone(), ephemeral)?;
 
         // Wait for up to handshake timeout to send
         select! {
-            _timeout = context.sleep_until(deadline) => {
+            _timeout = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = sink.send(msg) => {
@@ -54,7 +54,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
 
         // Wait for up to handshake timeout for response
         let msg = select! {
-            _timeout = context.sleep_until(deadline) => {
+            _timeout = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = stream.recv() => {
@@ -64,7 +64,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
 
         // Verify handshake message from peer
         let handshake = Handshake::verify(
-            context,
+            runtime,
             &config.crypto,
             config.synchrony_bound,
             config.max_handshake_age,
@@ -92,17 +92,17 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
     }
 
     pub async fn upgrade_listener(
-        mut context: impl Rng + CryptoRng + Spawner + Clock,
+        mut runtime: impl Rng + CryptoRng + Spawner + Clock,
         mut config: Config<C>,
         mut handshake: IncomingHandshake<Si, St>,
     ) -> Result<Self, Error> {
         // Generate shared secret
-        let secret = x25519::new(&mut context);
+        let secret = x25519::new(&mut runtime);
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
         let msg = create_handshake(
-            context.clone(),
+            runtime.clone(),
             &mut config.crypto,
             handshake.peer_public_key.clone(),
             ephemeral,
@@ -110,7 +110,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
 
         // Wait for up to handshake timeout
         select! {
-            _timeout = context.sleep_until(handshake.deadline) => {
+            _timeout = runtime.sleep_until(handshake.deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = handshake.sink.send(msg) => {

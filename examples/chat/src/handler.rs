@@ -32,7 +32,7 @@ enum Event<I> {
 }
 
 pub async fn run(
-    context: impl Spawner,
+    runtime: impl Spawner,
     me: String,
     registry: Arc<Mutex<Registry>>,
     logs: Arc<Mutex<Vec<String>>>,
@@ -48,7 +48,7 @@ pub async fn run(
 
     // Listen for input
     let (mut tx, mut rx) = mpsc::channel(100);
-    context.spawn(async move {
+    runtime.spawn(async move {
         loop {
             match event::poll(Duration::from_millis(500)) {
                 Ok(true) => {}

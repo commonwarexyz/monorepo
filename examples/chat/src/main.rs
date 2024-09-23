@@ -64,7 +64,7 @@ use tracing::info;
 fn main() {
     // Initialize runtime
     let runtime_cfg = tokio::Config::default();
-    let (runner, context) = Executor::init(runtime_cfg);
+    let (executor, runtime) = Executor::init(runtime_cfg);
 
     // Parse arguments
     let matches = Command::new("commonware-chat")
@@ -150,9 +150,9 @@ fn main() {
     );
 
     // Start runtime
-    runner.start(async move {
+    executor.start(async move {
         // Initialize network
-        let (mut network, mut oracle) = Network::new(context.clone(), p2p_cfg);
+        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -170,11 +170,11 @@ fn main() {
         );
 
         // Start network
-        let network_handler = context.spawn(network.run());
+        let network_handler = runtime.spawn(network.run());
 
         // Start chat
         handler::run(
-            context,
+            runtime,
             hex(&signer.me()),
             registry,
             logs,
