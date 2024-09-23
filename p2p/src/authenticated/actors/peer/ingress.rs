@@ -78,3 +78,90 @@ impl Relay {
             .map_err(|_| Error::MessageDropped)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authenticated::wire::{BitVec, Peers};
+
+    #[tokio::test]
+    async fn test_mailbox_bit_vec() {
+        let (mut mailbox, mut receiver) = Mailbox::test();
+        let bit_vec = BitVec {
+            index: 1,
+            bits: vec![0, 1, 0, 1],
+        };
+        mailbox.bit_vec(bit_vec.clone()).await;
+        match receiver.try_next() {
+            Ok(Some(Message::BitVec { bit_vec: received_bit_vec })) => {
+                assert_eq!(bit_vec, received_bit_vec);
+            }
+            _ => panic!("Expected BitVec message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_peers() {
+        let (mut mailbox, mut receiver) = Mailbox::test();
+        let peers = Peers {
+            peers: vec![],
+        };
+        mailbox.peers(peers.clone()).await;
+        match receiver.try_next() {
+            Ok(Some(Message::Peers { peers: received_peers })) => {
+                assert_eq!(peers, received_peers);
+            }
+            _ => panic!("Expected Peers message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mailbox_kill() {
+        let (mut mailbox, mut receiver) = Mailbox::test();
+        mailbox.kill().await;
+        match receiver.try_next() {
+            Ok(Some(Message::Kill)) => {}
+            _ => panic!("Expected Kill message"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_relay_content_priority() {
+        let (low_sender, mut low_receiver) = mpsc::channel(1);
+        let (high_sender, mut high_receiver) = mpsc::channel(1);
+        let mut relay = Relay::new(low_sender, high_sender);
+        let data = Data {
+            channel: 1,
+            message: Bytes::from("test message"),
+        };
+        relay.content(data.channel, data.message.clone(), true).await.unwrap();
+        match high_receiver.try_next() {
+            Ok(Some(received_data)) => {
+                assert_eq!(data.channel, received_data.channel);
+                assert_eq!(data.message, received_data.message);
+            }
+            _ => panic!("Expected high priority message"),
+        }
+        assert!(low_receiver.try_next().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_relay_content_non_priority() {
+        let (low_sender, mut low_receiver) = mpsc::channel(1);
+        let (high_sender, mut high_receiver) = mpsc::channel(1);
+        let mut relay = Relay::new(low_sender, high_sender);
+        let data = Data {
+            channel: 1,
+            message: Bytes::from("test message"),
+        };
+        relay.content(data.channel, data.message.clone(), false).await.unwrap();
+        match low_receiver.try_next() {
+            Ok(Some(received_data)) => {
+                assert_eq!(data.channel, received_data.channel);
+                assert_eq!(data.message, received_data.message);
+            }
+            _ => panic!("Expected low priority message"),
+        }
+        assert!(high_receiver.try_next().is_err());
+    }
+}

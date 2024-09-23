@@ -170,6 +170,9 @@ impl Channels {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Recipients;
+    use futures::channel::mpsc;
+    use futures::SinkExt;
 
     #[test]
     fn test_compression() {
@@ -177,5 +180,65 @@ mod tests {
         let compressed = compress(message, 3).unwrap();
         let buf = decompress(&compressed, message.len()).unwrap();
         assert_eq!(message, buf.as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_sender_send() {
+        let (messenger_sender, mut messenger_receiver) = mpsc::channel(1);
+        let messenger = Messenger::new(messenger_sender);
+        let mut sender = Sender::new(1, 1024, None, messenger);
+
+        let recipients = Recipients::All;
+        let message = Bytes::from("test message");
+        let result = sender.send(recipients, message.clone(), false).await;
+
+        assert!(result.is_ok());
+        let sent_message = messenger_receiver.next().await.unwrap();
+        assert_eq!(sent_message.2, message);
+    }
+
+    #[tokio::test]
+    async fn test_receiver_recv() {
+        let (sender, receiver) = mpsc::channel(1);
+        let mut receiver = Receiver::new(1024, false, receiver);
+
+        let message = Bytes::from("test message");
+        let sender_key = PublicKey::from([0u8; 32]);
+        sender.send((sender_key.clone(), message.clone())).await.unwrap();
+
+        let received_message = receiver.recv().await.unwrap();
+        assert_eq!(received_message.0, sender_key);
+        assert_eq!(received_message.1, message);
+    }
+
+    #[tokio::test]
+    async fn test_sender_send_with_compression() {
+        let (messenger_sender, mut messenger_receiver) = mpsc::channel(1);
+        let messenger = Messenger::new(messenger_sender);
+        let mut sender = Sender::new(1, 1024, Some(3), messenger);
+
+        let recipients = Recipients::All;
+        let message = Bytes::from("test message");
+        let result = sender.send(recipients, message.clone(), false).await;
+
+        assert!(result.is_ok());
+        let sent_message = messenger_receiver.next().await.unwrap();
+        let decompressed_message = decompress(&sent_message.2, 1024).unwrap();
+        assert_eq!(decompressed_message, message);
+    }
+
+    #[tokio::test]
+    async fn test_receiver_recv_with_compression() {
+        let (sender, receiver) = mpsc::channel(1);
+        let mut receiver = Receiver::new(1024, true, receiver);
+
+        let message = Bytes::from("test message");
+        let compressed_message = compress(&message, 3).unwrap();
+        let sender_key = PublicKey::from([0u8; 32]);
+        sender.send((sender_key.clone(), compressed_message.into())).await.unwrap();
+
+        let received_message = receiver.recv().await.unwrap();
+        assert_eq!(received_message.0, sender_key);
+        assert_eq!(received_message.1, message);
     }
 }

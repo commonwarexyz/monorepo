@@ -380,4 +380,113 @@ mod tests {
             assert!(matches!(result, Err(Error::HandshakeTimeout)));
         });
     }
+
+    #[test]
+    async fn test_create_handshake() {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            let mut crypto = Ed25519::from_seed(0);
+            let recipient_public_key = crypto.public_key();
+            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
+
+            let handshake = create_handshake(
+                runtime.clone(),
+                &mut crypto,
+                recipient_public_key,
+                ephemeral_public_key,
+            )
+            .unwrap();
+
+            let decoded_handshake = wire::Message::decode(handshake).unwrap();
+            if let Some(wire::message::Payload::Handshake(handshake)) = decoded_handshake.payload {
+                assert_eq!(handshake.recipient_public_key, recipient_public_key);
+                assert_eq!(handshake.ephemeral_public_key, x25519::encode_public_key(ephemeral_public_key));
+                assert!(handshake.timestamp > 0);
+                assert!(handshake.signature.is_some());
+            } else {
+                panic!("Expected Handshake message");
+            }
+        });
+    }
+
+    #[test]
+    async fn test_handshake_verify_invalid_signature() {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            let mut crypto = Ed25519::from_seed(0);
+            let recipient_public_key = crypto.public_key();
+            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
+
+            let mut handshake = create_handshake(
+                runtime.clone(),
+                &mut crypto,
+                recipient_public_key,
+                ephemeral_public_key,
+            )
+            .unwrap();
+
+            // Tamper with the handshake to make the signature invalid
+            let decoded_handshake = wire::Message::decode(handshake.clone()).unwrap();
+            if let Some(wire::message::Payload::Handshake(mut handshake)) = decoded_handshake.payload {
+                handshake.signature.as_mut().unwrap().signature[0] ^= 0xFF;
+                handshake = wire::Message {
+                    payload: Some(wire::message::Payload::Handshake(handshake)),
+                }
+                .encode_to_vec()
+                .into();
+            }
+
+            let result = Handshake::verify(
+                runtime,
+                &crypto,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                handshake,
+            );
+
+            assert!(matches!(result, Err(Error::InvalidSignature)));
+        });
+    }
+
+    #[test]
+    async fn test_incoming_handshake_verify_invalid_timestamp() {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            let mut crypto = Ed25519::from_seed(0);
+            let recipient_public_key = crypto.public_key();
+            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
+
+            let mut handshake = create_handshake(
+                runtime.clone(),
+                &mut crypto,
+                recipient_public_key,
+                ephemeral_public_key,
+            )
+            .unwrap();
+
+            // Tamper with the handshake to make the timestamp invalid
+            let decoded_handshake = wire::Message::decode(handshake.clone()).unwrap();
+            if let Some(wire::message::Payload::Handshake(mut handshake)) = decoded_handshake.payload {
+                handshake.timestamp = 0;
+                handshake = wire::Message {
+                    payload: Some(wire::message::Payload::Handshake(handshake)),
+                }
+                .encode_to_vec()
+                .into();
+            }
+
+            let result = IncomingHandshake::verify(
+                runtime,
+                &crypto,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                sink,
+                stream,
+            )
+            .await;
+
+            assert!(matches!(result, Err(Error::InvalidTimestamp)));
+        });
+    }
 }
