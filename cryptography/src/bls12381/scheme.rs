@@ -107,16 +107,14 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let mut rng = OsRng;
-        let signer = Bls12381::new(&mut rng);
+        let signer = Bls12381::new(&mut OsRng);
         let public_key = signer.me();
         assert!(Bls12381::validate(&public_key));
     }
 
     #[test]
     fn test_from_valid_secret() {
-        let mut rng = OsRng;
-        let signer = Bls12381::new(&mut rng);
+        let signer = Bls12381::new(&mut OsRng);
         let secret_key = signer.private.serialize();
         let signer_from_secret = Bls12381::from(
             secret_key
