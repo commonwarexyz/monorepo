@@ -297,6 +297,52 @@ mod tests {
     }
 
     #[test]
+    fn test_handshake_not_for_us() {
+        // Initialize runtime
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            // Create participants
+            let mut sender = Ed25519::from_seed(0);
+            let ephemeral_public_key = PublicKey::from([3u8; 32]);
+
+            // Create handshake message
+            let handshake_bytes = create_handshake(
+                runtime.clone(),
+                &mut sender,
+                Ed25519::from_seed(1).public_key(),
+                ephemeral_public_key,
+            )
+            .unwrap();
+
+            // Setup a mock TcpStream that will listen for the response
+            let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+            let mut listener = runtime.bind(addr).await.unwrap();
+
+            // Send message over stream
+            runtime.spawn(async move {
+                let (_, mut sink, _) = listener.accept().await.unwrap();
+                sink.send(handshake_bytes).await.unwrap();
+            });
+
+            // Call the verify function
+            let (sink, stream) = runtime.dial(addr).await.unwrap();
+            let result = IncomingHandshake::verify(
+                runtime,
+                &Ed25519::from_seed(2),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                sink,
+                stream,
+            )
+            .await;
+
+            // Assert that the result is an error
+            assert!(matches!(result, Err(Error::HandshakeNotForUs)));
+        });
+    }
+
+    #[test]
     fn test_incoming_handshake_invalid_data() {
         // Initialize runtime
         let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
@@ -378,6 +424,100 @@ mod tests {
 
             // Assert that the result is an Err of type Error::HandshakeTimeout
             assert!(matches!(result, Err(Error::HandshakeTimeout)));
+        });
+    }
+
+    #[test]
+    fn test_handshake_verify_invalid_public_key() {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            let mut crypto = Ed25519::from_seed(0);
+            let recipient_public_key = crypto.public_key();
+            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
+
+            let handshake = create_handshake(
+                runtime.clone(),
+                &mut crypto,
+                recipient_public_key,
+                ephemeral_public_key,
+            )
+            .unwrap();
+
+            // Tamper with the handshake to make the signature invalid
+            let mut handshake = match wire::Message::decode(handshake).unwrap().payload {
+                Some(wire::message::Payload::Handshake(handshake)) => handshake,
+                _ => panic!("unexpected message"),
+            };
+            let (public_key, signature) = match handshake.signature {
+                Some(wire::Signature {
+                    public_key,
+                    signature,
+                }) => (public_key, signature),
+                _ => panic!("signature missing"),
+            };
+            let mut public_key = public_key.to_vec();
+            public_key.truncate(28);
+            handshake.signature = Some(wire::Signature {
+                public_key: public_key.into(),
+                signature,
+            });
+            let handshake = wire::Message {
+                payload: Some(wire::message::Payload::Handshake(handshake)),
+            }
+            .encode_to_vec()
+            .into();
+
+            // Verify the handshake
+            let result = Handshake::verify(
+                runtime,
+                &crypto,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                handshake,
+            );
+            assert!(matches!(result, Err(Error::InvalidPeerPublicKey)));
+        });
+    }
+
+    #[test]
+    fn test_handshake_verify_invalid_ephemeral_public_key() {
+        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        executor.start(async move {
+            let mut crypto = Ed25519::from_seed(0);
+            let recipient_public_key = crypto.public_key();
+            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
+
+            let handshake = create_handshake(
+                runtime.clone(),
+                &mut crypto,
+                recipient_public_key,
+                ephemeral_public_key,
+            )
+            .unwrap();
+
+            // Tamper with the handshake to make the signature invalid
+            let mut handshake = match wire::Message::decode(handshake).unwrap().payload {
+                Some(wire::message::Payload::Handshake(handshake)) => handshake,
+                _ => panic!("unexpected message"),
+            };
+            let mut ephemeral_public_key = handshake.ephemeral_public_key.to_vec();
+            ephemeral_public_key.truncate(28);
+            handshake.ephemeral_public_key = ephemeral_public_key.into();
+            let handshake = wire::Message {
+                payload: Some(wire::message::Payload::Handshake(handshake)),
+            }
+            .encode_to_vec()
+            .into();
+
+            // Verify the handshake
+            let result = Handshake::verify(
+                runtime,
+                &crypto,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                handshake,
+            );
+            assert!(matches!(result, Err(Error::InvalidEphemeralPublicKey)));
         });
     }
 
