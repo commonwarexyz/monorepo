@@ -104,6 +104,7 @@ impl<
             &connection.crypto,
             connection.synchrony_bound,
             connection.max_handshake_age,
+            connection.handshake_timeout,
             sink,
             stream,
         )

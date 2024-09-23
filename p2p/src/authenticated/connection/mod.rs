@@ -19,6 +19,7 @@ pub struct Config<C: Scheme> {
     pub max_message_size: usize,
     pub synchrony_bound: Duration,
     pub max_handshake_age: Duration,
+    pub handshake_timeout: Duration,
 }
 
 #[derive(Error, Debug)]
@@ -35,6 +36,8 @@ pub enum Error {
     InvalidPeerPublicKey,
     #[error("handshake not for us")]
     HandshakeNotForUs,
+    #[error("handshake timeout")]
+    HandshakeTimeout,
     #[error("missing signature")]
     MissingSignature,
     #[error("invalid signature")]
