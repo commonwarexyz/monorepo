@@ -13,7 +13,7 @@ use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::{CryptoRng, Rng};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
-use tracing::{debug, info};
+use tracing::{debug, trace};
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
     runtime: E,
@@ -101,7 +101,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                     }
                 })),
             };
-            info!("Sending chunk {}/{} to {}", part, total_parts, hex(peer));
+            trace!(
+                "Sending chunk {}/{} to {}",
+                part,
+                total_parts - 1,
+                hex(peer)
+            );
             sender.send(msg).await.map_err(Error::SendFailed)?;
             sent_messages
                 .get_or_create(&metrics::Message::new_chunk(peer, channel))
