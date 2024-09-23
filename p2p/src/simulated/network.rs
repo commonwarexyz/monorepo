@@ -113,7 +113,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             if message.len() > self.cfg.max_message_size {
                 if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
                     // This can only happen if the sender exited.
-                    error!("failed to send error: {:?}", err);
+                    error!(?err, "failed to send error");
                 }
                 continue;
             }
@@ -131,7 +131,11 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             for recipient in recipients {
                 // Skip self
                 if recipient == origin {
-                    debug!("dropping message to {}: self", hex(&recipient));
+                    debug!(
+                        recipient = hex(&recipient),
+                        reason = "self",
+                        "dropping message",
+                    );
                     continue;
                 }
 
@@ -139,7 +143,11 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 let sender = match self.agents.get(&recipient) {
                     Some(sender) => sender,
                     None => {
-                        debug!("dropping message to {}: no agent", hex(&recipient));
+                        debug!(
+                            recipient = hex(&recipient),
+                            reason = "no agent",
+                            "dropping message",
+                        );
                         continue;
                     }
                 };
@@ -152,7 +160,11 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 {
                     Some(link) => link,
                     None => {
-                        debug!("dropping message to {}: no link", hex(&recipient));
+                        debug!(
+                            recipient = hex(&recipient),
+                            reason = "no link",
+                            "dropping message",
+                        );
                         continue;
                     }
                 };
@@ -162,7 +174,12 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 let delay = Normal::new(link.latency_mean, link.latency_stddev)
                     .unwrap()
                     .sample(&mut self.runtime);
-                debug!("sending message to {}: delay={}ms", hex(&recipient), delay);
+                debug!(
+                    origin = hex(&origin),
+                    recipient = hex(&recipient),
+                    ?delay,
+                    "sending message",
+                );
 
                 // Send message
                 self.runtime.spawn({
@@ -171,6 +188,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     let recipient = recipient.clone();
                     let message = message.clone();
                     let mut acquired_sender = acquired_sender.clone();
+                    let origin = origin.clone();
                     async move {
                         // Mark as sent as soon as soon as execution starts
                         acquired_sender.send(()).await.unwrap();
@@ -184,16 +202,22 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                         // Drop message if success rate is too low
                         if !should_deliver {
                             debug!(
-                                "dropping message to {}: random link failure",
-                                hex(&recipient)
+                                recipient = hex(&recipient),
+                                reason = "random link failure",
+                                "dropping message",
                             );
                             return;
                         }
 
                         // Send message
-                        if let Err(err) = sender.send((recipient.clone(), message)).await {
+                        if let Err(err) = sender.send((origin.clone(), message)).await {
                             // This can only happen if the receiver exited.
-                            error!("failed to send to {}: {:?}", hex(&recipient), err);
+                            error!(
+                                origin = hex(&origin),
+                                recipient = hex(&recipient),
+                                ?err,
+                                "failed to send",
+                            );
                         }
                     }
                 });
@@ -210,7 +234,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 // Notify sender of successful sends
                 if let Err(err) = reply.send(Ok(sent)) {
                     // This can only happen if the sender exited.
-                    error!("failed to send ack: {:?}", err);
+                    error!(?err, "failed to send ack");
                 }
             });
         }
@@ -235,12 +259,12 @@ impl Sender {
                 select! {
                     high_task = high_receiver.next() => {
                         if let Err(err) = sender.send(high_task.unwrap()).await{
-                            error!("failed to send high priority task: {:?}", err);
+                            error!(?err, "failed to send high priority task");
                         }
                     },
                     low_task = low_receiver.next() => {
                         if let Err(err) = sender.send(low_task.unwrap()).await{
-                            error!("failed to send low priority task: {:?}", err);
+                            error!(?err, "failed to send low priority task");
                         }
                     }
                 }
