@@ -196,7 +196,7 @@
 //! );
 //!
 //! // Start runtime
-//! runner.start(async move {
+//! executor.start(async move {
 //!     // Initialize network
 //!     let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
 //!

@@ -11,9 +11,9 @@
 //! use std::time::Duration;
 //!
 //! let (executor, runtime, auditor) = Executor::init(42, Duration::from_millis(1));
-//! runner.start(async move {
+//! executor.start(async move {
 //!     println!("Parent started");
-//!     let result = context.spawn(async move {
+//!     let result = runtime.spawn(async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });
