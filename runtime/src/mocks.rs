@@ -1,3 +1,5 @@
+//! Mock implementations of `commonware-runtime` traits for focused, upstream testing.
+
 use crate::{Error, Sink, Stream};
 use bytes::Bytes;
 use futures::{channel::mpsc, SinkExt, StreamExt};
