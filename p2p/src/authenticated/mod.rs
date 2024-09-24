@@ -336,7 +336,7 @@ mod tests {
             // Register basic application
             let (mut sender, mut receiver) = network.register(
                 0,
-                Quota::per_second(NonZeroU32::new(1).unwrap()), // Ensure we hit the rate limit
+                Quota::per_second(NonZeroU32::new(5).unwrap()), // Ensure we hit the rate limit
                 1_024,
                 128,
                 None,
@@ -451,44 +451,48 @@ mod tests {
         }
     }
 
-    fn run_deterministic_test(mode: Mode) {
+    fn run_deterministic_test(seed: u64, mode: Mode) {
+        // Configure test
         let max_message_size = 1_024 * 1_024; // 1MB
+        let n = 25;
+        let base_port = 3000;
+
+        // Run first instance
         let (executor, runtime, auditor) =
-            deterministic::Executor::init(0, Duration::from_millis(1));
+            deterministic::Executor::init(seed, Duration::from_millis(1));
         executor.start(async move {
-            run_network(runtime, max_message_size, 3000, 10, mode).await;
+            run_network(runtime, max_message_size, base_port, n, mode).await;
         });
         let state = auditor.state();
+
+        // Compare result to second instance
         let (executor, runtime, auditor) =
-            deterministic::Executor::init(0, Duration::from_millis(1));
+            deterministic::Executor::init(seed, Duration::from_millis(1));
         executor.start(async move {
-            run_network(runtime, max_message_size, 3000, 10, mode).await;
+            run_network(runtime, max_message_size, base_port, n, mode).await;
         });
         assert_eq!(state, auditor.state());
     }
 
     #[test]
     fn test_determinism_one() {
-        run_deterministic_test(Mode::One);
+        for i in 0..10 {
+            run_deterministic_test(i, Mode::One);
+        }
     }
 
     #[test]
     fn test_determinism_some() {
-        run_deterministic_test(Mode::Some);
+        for i in 0..10 {
+            run_deterministic_test(i, Mode::Some);
+        }
     }
 
     #[test]
     fn test_determinism_all() {
-        run_deterministic_test(Mode::All);
-    }
-
-    #[test]
-    fn test_deterministic_connectivity() {
-        let max_message_size = 1_024 * 1_024; // 1MB
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1));
-        executor.start(async move {
-            run_network(runtime, max_message_size, 3000, 10, Mode::One).await;
-        });
+        for i in 0..10 {
+            run_deterministic_test(i, Mode::All);
+        }
     }
 
     #[test]
