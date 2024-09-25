@@ -1,6 +1,5 @@
+use crate::Hash;
 use bytes::Bytes;
-
-type Hash = [u8; 32];
 
 pub struct Signer {
     pub public_key: Bytes,
@@ -23,5 +22,6 @@ pub struct Block {
 impl Block {
     pub fn hash(&self) -> Hash {
         // H(timestamp, H(parent, epoch, view, height), payload_hash)
+        Hash::default()
     }
 }

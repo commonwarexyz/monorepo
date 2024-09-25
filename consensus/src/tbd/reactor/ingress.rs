@@ -1,7 +1,8 @@
+use crate::tbd::block::Block;
+use crate::Hash;
 use bytes::Bytes;
 use commonware_cryptography::Signature;
-
-type BlockHash = [u8; 32];
+use futures::channel::mpsc;
 
 pub enum Message {
     // Block Notarization
@@ -15,13 +16,13 @@ pub enum Message {
     Vote {
         epoch: u64,
         view: u64,
-        block: BlockHash,
+        block: Hash,
         signature: Signature,
     },
     Finalize {
         epoch: u64,
         view: u64,
-        block: BlockHash,
+        block: Hash,
         notarization: Bytes,
         signature: Signature,
     },
@@ -30,13 +31,13 @@ pub enum Message {
     Advance {
         epoch: u64,
         view: u64,
-        block: BlockHash,
+        block: Hash,
         notarization: Bytes,
     },
     Lock {
         epoch: u64,
         view: u64,
-        block: BlockHash,
+        block: Hash,
         notarization: Bytes,
         finalization: Bytes,
     },
