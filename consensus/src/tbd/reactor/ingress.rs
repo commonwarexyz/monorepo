@@ -4,6 +4,7 @@ use bytes::Bytes;
 use commonware_cryptography::Signature;
 use futures::channel::mpsc;
 
+// TODO: use protobuf directly (or have a layer that converts to it)
 pub enum Message {
     // Block Notarization
     Propose {
