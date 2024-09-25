@@ -398,6 +398,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-consensus"
+version = "0.0.2"
+dependencies = [
+ "bitvec",
+ "bytes",
+ "chacha20poly1305",
+ "commonware-cryptography",
+ "commonware-runtime",
+ "futures",
+ "governor",
+ "prometheus-client",
+ "prost",
+ "prost-build",
+ "rand",
+ "rand_distr",
+ "sha2 0.10.8",
+ "thiserror",
+ "tracing",
+ "x25519-dalek",
+ "zstd",
+]
+
+[[package]]
 name = "commonware-cryptography"
 version = "0.0.8"
 dependencies = [

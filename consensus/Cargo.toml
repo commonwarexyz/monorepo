@@ -1,0 +1,32 @@
+[package]
+name = "commonware-consensus"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "TBD"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/consensus"
+documentation = "https://docs.rs/commonware-consensus"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-runtime = { workspace = true }
+bytes = { workspace = true } 
+sha2 = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true } 
+prost = { workspace = true }
+governor = { workspace = true }
+prometheus-client = { workspace = true } 
+x25519-dalek = "2"
+chacha20poly1305 = "0.10"
+bitvec = "1"
+zstd = "0.13"
+rand_distr = "0.4"
+
+[build-dependencies]
+prost-build = { workspace = true } 
