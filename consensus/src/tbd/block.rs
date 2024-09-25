@@ -15,7 +15,7 @@ pub struct Block {
 
     pub epoch: u64,
     pub view: u64,
-    pub partials: Vec<Signer>, // TODO: sorted by public key
+    pub partials: Vec<Signer>, // TODO: sorted by public key, included to provide voting rewards/track uptime
 
     pub payload: Bytes, // TODO: use function that returns hash for constructing block header (most wont want to just hash)
 }

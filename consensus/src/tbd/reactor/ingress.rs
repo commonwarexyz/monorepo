@@ -49,6 +49,8 @@ pub enum Message {
         view: u64,
         signature: Signature,
     },
+    // Faults
+    // TODO: add verification of conflicting messages (signature by same person for different blocks)
 }
 
 #[derive(Clone)]
