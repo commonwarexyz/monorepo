@@ -6,10 +6,14 @@
 pub mod block;
 pub mod reactor;
 
+mod wire {
+    include!(concat!(env!("OUT_DIR"), "/wire.rs"));
+}
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("Sender closed")]
-    SenderClosed,
+    #[error("Network closed")]
+    NetworkClosed,
 }

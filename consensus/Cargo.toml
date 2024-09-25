@@ -12,6 +12,7 @@ documentation = "https://docs.rs/commonware-consensus"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
+commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 bytes = { workspace = true } 
 sha2 = { workspace = true }

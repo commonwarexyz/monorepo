@@ -1,5 +1,12 @@
-use crate::Hash;
 use bytes::Bytes;
+
+const HASH_LENGTH: usize = 32;
+
+pub type Hash = Bytes;
+
+pub fn verify_hash(hash: &Hash) -> bool {
+    hash.len() == HASH_LENGTH
+}
 
 pub struct Signer {
     pub public_key: Bytes,
