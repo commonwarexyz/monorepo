@@ -19,6 +19,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+const VRF_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_VRF_";
+
 /// Generate bias-resistant, verifiable randomness using BLS12-381
 /// Threshold Signatures.
 pub struct Vrf<E: Clock> {
@@ -63,7 +65,7 @@ impl<E: Clock> Vrf<E> {
     ) -> Option<group::Signature> {
         // Construct payload
         let payload = round.to_be_bytes();
-        let signature = ops::partial_sign(&output.share, &payload);
+        let signature = ops::partial_sign(&output.share, VRF_NAMESPACE, &payload);
 
         // Construct partial signature
         let mut partials = vec![signature.clone()];
@@ -128,7 +130,7 @@ impl<E: Clock> Vrf<E> {
                                     continue;
                                 }
                             };
-                            match ops::partial_verify(&output.public, &payload, &signature) {
+                            match ops::partial_verify(&output.public, VRF_NAMESPACE, &payload, &signature) {
                                 Ok(_) => {
                                     partials.push(signature);
                                     debug!(round, dealer, "received partial signature");
