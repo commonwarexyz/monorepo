@@ -8,6 +8,7 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 //! use std::time::Duration;
 //!
 //! let (executor, runtime, auditor) = Executor::init(42, Duration::from_millis(1));
@@ -31,6 +32,7 @@ use futures::{
     SinkExt, StreamExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
+use prometheus_client::{encoding::EncodeLabelSet, metrics::{counter::Counter, family::Family}, registry::Registry};
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::{
@@ -45,6 +47,49 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::trace;
+
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct BandwidthLabels {
+    socket: SocketAddr,
+    direction: String,
+}
+
+impl EncodeLabelSet for BandwidthLabels {
+    fn encode(&self, mut encoder: prometheus_client::encoding::LabelSetEncoder) -> Result<(), std::fmt::Error> {
+        encoder.encode_label();
+        encoder.encode_label();
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Metrics {
+    bandwidth_usage: Family<BandwidthLabels, Counter>,
+    tasks_spawned: Counter,
+    task_polls: Counter,
+}
+
+impl Metrics {
+    fn record_bandwidth(&self, socket: SocketAddr, direction: &str, bytes: usize) {
+        let labels = BandwidthLabels {
+            socket,
+            direction: direction.to_string(),
+        };
+        self
+            .bandwidth_usage
+            .get_or_create(&labels)
+            .inc_by(bytes as u64);
+    }
+
+    fn record_task_spawned(&self) {
+        self.tasks_spawned.inc();
+    }
+
+    fn record_task_poll(&self) {
+        self.task_polls.inc();
+    }
+}
 
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
@@ -206,6 +251,7 @@ pub struct Executor {
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
+    metrics: Arc<Metrics>,
 }
 
 impl Executor {
@@ -214,7 +260,14 @@ impl Executor {
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
     pub fn init(seed: u64, cycle: Duration) -> (Runner, Context, Arc<Auditor>) {
+        let metrics = Arc::new(Metrics {
+            bandwidth_usage: Family::default(),
+            tasks_spawned: Counter::default(),
+            task_polls: Counter::default(),
+        });
+
         let auditor = Arc::new(Auditor::new());
+        let registry = Arc::new(Mutex::new(Registry::default()));
         let executor = Arc::new(Self {
             cycle,
             auditor: auditor.clone(),
@@ -225,20 +278,38 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
+            metrics: metrics.clone(),
         });
+        {
+            let mut registry = registry.lock().unwrap();
+            registry.register(
+                "bandwidth_usage",
+                "Bandwidth usage by socket and direction",
+                metrics.bandwidth_usage.clone(),
+            );
+            registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                metrics.tasks_spawned.clone(),
+            );
+            registry.register(
+                "task_polls",
+                "Total number of task polls",
+                metrics.task_polls.clone(),
+            );
+        }
         (
             Runner {
                 executor: executor.clone(),
             },
             Context {
                 executor,
-                networking: Arc::new(Networking::new(auditor.clone())),
+                networking: Arc::new(Networking::new(auditor.clone(), metrics.clone())),
             },
             auditor,
         )
     }
 }
-
 /// Implementation of [`crate::Runner`] for the `deterministic` runtime.
 pub struct Runner {
     executor: Arc<Executor>,
@@ -297,8 +368,9 @@ impl crate::Runner for Runner {
                 let mut context = task::Context::from_waker(&waker);
                 let mut future = task.future.lock().unwrap();
 
-                // Poll the task
-                //
+                // Record task poll
+                self.executor.metrics.record_task_poll();
+
                 // Task is re-queued in its `wake_by_ref` implementation as soon as we poll here (regardless
                 // of whether it is Pending/Ready).
                 let pending = future.as_mut().poll(&mut context).is_pending();
@@ -404,6 +476,7 @@ impl crate::Spawner for Context {
     {
         let (f, handle) = Handle::init(f, false);
         Tasks::register(&self.executor.tasks, false, Box::pin(f));
+        self.executor.metrics.record_task_spawned();
         handle
     }
 }
@@ -515,14 +588,16 @@ struct Networking {
     auditor: Arc<Auditor>,
     ephemeral: Mutex<u16>,
     listeners: Mutex<HashMap<SocketAddr, Dialable>>,
+    metrics: Arc<Metrics>,
 }
 
 impl Networking {
-    fn new(auditor: Arc<Auditor>) -> Self {
+    fn new(auditor: Arc<Auditor>, metrics: Arc<Metrics>) -> Self {
         Self {
             auditor,
             ephemeral: Mutex::new(EPHEMERAL_PORT_RANGE.start),
             listeners: Mutex::new(HashMap::new()),
+            metrics,
         }
     }
 
@@ -547,6 +622,7 @@ impl Networking {
             auditor: self.auditor.clone(),
             address: socket,
             listener: receiver,
+            metrics: self.metrics.clone(), 
         })
     }
 
@@ -582,12 +658,14 @@ impl Networking {
                 me: dialer,
                 peer: socket,
                 sender: dialee_sender,
+                metrics: self.metrics.clone(),
             },
             Stream {
                 auditor: self.auditor.clone(),
                 me: dialer,
                 peer: socket,
                 receiver: dialer_receiver,
+                metrics: self.metrics.clone(),
             },
         ))
     }
@@ -611,6 +689,7 @@ pub struct Listener {
         mpsc::UnboundedSender<Bytes>,
         mpsc::UnboundedReceiver<Bytes>,
     )>,
+    metrics: Arc<Metrics>,
 }
 
 impl crate::Listener<Sink, Stream> for Listener {
@@ -624,12 +703,14 @@ impl crate::Listener<Sink, Stream> for Listener {
                 me: self.address,
                 peer: socket,
                 sender,
+                metrics: self.metrics.clone()
             },
             Stream {
                 auditor: self.auditor.clone(),
                 me: self.address,
                 peer: socket,
                 receiver,
+                metrics: self.metrics.clone()
             },
         ))
     }
@@ -640,11 +721,13 @@ pub struct Sink {
     me: SocketAddr,
     peer: SocketAddr,
     sender: mpsc::UnboundedSender<Bytes>,
+    metrics: Arc<Metrics>,
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
         self.auditor.send(self.me, self.peer, msg.clone());
+        self.metrics.record_bandwidth(self.me, "outgoing", msg.len());
         self.sender.send(msg).await.map_err(|_| Error::WriteFailed)
     }
 }
@@ -654,12 +737,14 @@ pub struct Stream {
     me: SocketAddr,
     peer: SocketAddr,
     receiver: mpsc::UnboundedReceiver<Bytes>,
+    metrics: Arc<Metrics>,
 }
 
 impl crate::Stream for Stream {
     async fn recv(&mut self) -> Result<Bytes, Error> {
         let bytes = self.receiver.next().await.ok_or(Error::ReadFailed)?;
         self.auditor.recv(self.me, self.peer, bytes.clone());
+        self.metrics.record_bandwidth(self.me, "incoming", bytes.len());
         Ok(bytes)
     }
 }
@@ -693,6 +778,54 @@ mod tests {
     use super::*;
     use crate::utils::run_tasks;
     use futures::task::noop_waker;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn test_bandwidth_metrics() {
+        let (runner, _, _) = Executor::init(42, Duration::from_millis(1));
+        let metrics = runner.executor.metrics.clone();
+
+        let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+        let socket2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8081);
+
+        metrics.record_bandwidth(socket1, "incoming", 100);
+        metrics.record_bandwidth(socket1, "outgoing", 200);
+        metrics.record_bandwidth(socket2, "incoming", 150);
+
+        let labels1_in = BandwidthLabels {
+            socket: socket1,
+            direction: "incoming".to_string(),
+        };
+        let labels1_out = BandwidthLabels {
+            socket: socket1,
+            direction: "outgoing".to_string(),
+        };
+        let labels2_in = BandwidthLabels {
+            socket: socket2,
+            direction: "incoming".to_string(),
+        };
+
+        assert_eq!(metrics.bandwidth_usage.get_or_create(&labels1_in).get(), 100);
+        assert_eq!(metrics.bandwidth_usage.get_or_create(&labels1_out).get(), 200);
+        assert_eq!(metrics.bandwidth_usage.get_or_create(&labels2_in).get(), 150);
+    }
+
+    #[test]
+    fn test_task_metrics() {
+        let (runner, _, _) = Executor::init(42, Duration::from_millis(1));
+        let metrics = runner.executor.metrics.clone();
+
+        for _ in 0..5 {
+            metrics.record_task_spawned();
+        }
+
+        for _ in 0..10 {
+            metrics.record_task_poll();
+        }
+
+        assert_eq!(metrics.tasks_spawned.get(), 5);
+        assert_eq!(metrics.task_polls.get(), 10);
+    }
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let (executor, runtime, auditor) = Executor::init(seed, Duration::from_millis(1));
