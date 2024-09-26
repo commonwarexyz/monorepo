@@ -2,6 +2,7 @@
 //!
 //! To make the simulation deterministic, employ `commonware-runtime`'s `deterministic::Executor` (with a given seed).
 
+mod metrics;
 pub mod network;
 
 use thiserror::Error;
@@ -26,7 +27,9 @@ mod tests {
     use commonware_cryptography::{utils::hex, Ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
+    use prometheus_client::registry::Registry;
     use rand::Rng;
+    use std::sync::{Arc, Mutex};
     use std::{
         collections::{BTreeMap, HashMap},
         time::Duration,
@@ -40,6 +43,7 @@ mod tests {
                 runtime.clone(),
                 network::Config {
                     max_message_size: 1024 * 1024,
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
@@ -153,6 +157,7 @@ mod tests {
                 runtime.clone(),
                 network::Config {
                     max_message_size: 1024 * 1024,
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
@@ -193,6 +198,7 @@ mod tests {
                 runtime.clone(),
                 network::Config {
                     max_message_size: 1024 * 1024,
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
@@ -225,6 +231,7 @@ mod tests {
                 runtime.clone(),
                 network::Config {
                     max_message_size: 1024 * 1024,
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
@@ -259,6 +266,7 @@ mod tests {
                 runtime.clone(),
                 network::Config {
                     max_message_size: 1024 * 1024,
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 

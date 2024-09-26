@@ -1,5 +1,6 @@
 //! Implementation of a `simulated` network.
 
+use super::metrics;
 use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
@@ -9,8 +10,11 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
+use prometheus_client::metrics::{counter::Counter, family::Family};
+use prometheus_client::registry::Registry;
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
+use std::sync::{Arc, Mutex};
 use std::{
     collections::{BTreeMap, HashMap},
     time::Duration,
@@ -33,6 +37,9 @@ pub struct Network<E: Spawner + Rng + Clock> {
     receiver: mpsc::UnboundedReceiver<Task>,
     links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
     agents: BTreeMap<PublicKey, mpsc::UnboundedSender<Message>>,
+
+    received_messages: Family<metrics::ReceivedMessage, Counter>,
+    sent_messages: Family<metrics::SentMessage, Counter>,
 }
 
 /// Describes a connection between two peers.
@@ -54,12 +61,26 @@ pub struct Link {
 pub struct Config {
     /// Maximum size of a message in bytes.
     pub max_message_size: usize,
+    pub registry: Arc<Mutex<Registry>>,
 }
 
 impl<E: Spawner + Rng + Clock> Network<E> {
     /// Create a new simulated network with a given runtime and configuration.
     pub fn new(runtime: E, cfg: Config) -> Self {
+        let sent_messages = Family::<metrics::SentMessage, Counter>::default();
+        let received_messages = Family::<metrics::ReceivedMessage, Counter>::default();
+        {
+            let mut registry = cfg.registry.lock().unwrap();
+            registry.register("messages_sent", "messages sent", sent_messages.clone());
+            registry.register(
+                "messages_received",
+                "messages received",
+                received_messages.clone(),
+            );
+        }
+
         let (sender, receiver) = mpsc::unbounded();
+
         Self {
             runtime,
             cfg,
@@ -67,6 +88,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             receiver,
             links: HashMap::new(),
             agents: BTreeMap::new(),
+            received_messages,
+            sent_messages,
         }
     }
 
@@ -109,14 +132,21 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     pub async fn run(mut self) {
         // Process messages
         while let Some((origin, recipients, message, reply)) = self.receiver.next().await {
+            let received_messages = self.received_messages.clone();
             // Ensure message is valid
             if message.len() > self.cfg.max_message_size {
                 if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
                     // This can only happen if the sender exited.
                     error!(?err, "failed to send error");
                 }
+                received_messages
+                    .get_or_create(&metrics::ReceivedMessage::new_too_large(&origin))
+                    .inc();
                 continue;
             }
+            received_messages
+                .get_or_create(&metrics::ReceivedMessage::new_unknown(&origin))
+                .inc();
 
             // Collect recipients
             let recipients = match recipients {
@@ -129,6 +159,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             let mut sent = Vec::new();
             let (acquired_sender, mut acquired_receiver) = mpsc::channel(recipients.len());
             for recipient in recipients {
+                let sent_messages = self.sent_messages.clone();
                 // Skip self
                 if recipient == origin {
                     debug!(
@@ -201,6 +232,9 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 
                         // Drop message if success rate is too low
                         if !should_deliver {
+                            sent_messages
+                                .get_or_create(&metrics::SentMessage::new_dropped(&recipient))
+                                .inc();
                             debug!(
                                 recipient = hex(&recipient),
                                 reason = "random link failure",
@@ -218,6 +252,13 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                                 ?err,
                                 "failed to send",
                             );
+                            sent_messages
+                                .get_or_create(&metrics::SentMessage::new_failed(&recipient))
+                                .inc();
+                        } else {
+                            sent_messages
+                                .get_or_create(&metrics::SentMessage::new_success(&recipient))
+                                .inc();
                         }
                     }
                 });
