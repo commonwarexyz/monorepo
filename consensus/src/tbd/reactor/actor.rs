@@ -26,6 +26,8 @@ fn block_hash(
     parent: Bytes,
     payload: Bytes,
 ) -> Bytes {
+    // TODO: hash everything other than payload together first to make proof against payload
+    // minimal
     let mut hasher = Sha256::new();
     hasher.update(timestamp.to_be_bytes());
     hasher.update(epoch.to_be_bytes());
