@@ -49,21 +49,14 @@ use std::{
 use tracing::trace;
 
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct BandwidthLabels {
-    socket: SocketAddr,
+    socket: String,
     direction: String,
 }
 
-impl EncodeLabelSet for BandwidthLabels {
-    fn encode(&self, mut encoder: prometheus_client::encoding::LabelSetEncoder) -> Result<(), std::fmt::Error> {
-        encoder.encode_label();
-        encoder.encode_label();
-        Ok(())
-    }
-}
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Metrics {
     bandwidth_usage: Family<BandwidthLabels, Counter>,
     tasks_spawned: Counter,
@@ -73,7 +66,7 @@ struct Metrics {
 impl Metrics {
     fn record_bandwidth(&self, socket: SocketAddr, direction: &str, bytes: usize) {
         let labels = BandwidthLabels {
-            socket,
+            socket: socket.to_string(),
             direction: direction.to_string(),
         };
         self
@@ -793,15 +786,15 @@ mod tests {
         metrics.record_bandwidth(socket2, "incoming", 150);
 
         let labels1_in = BandwidthLabels {
-            socket: socket1,
+            socket: socket1.to_string(),
             direction: "incoming".to_string(),
         };
         let labels1_out = BandwidthLabels {
-            socket: socket1,
+            socket: socket1.to_string(),
             direction: "outgoing".to_string(),
         };
         let labels2_in = BandwidthLabels {
-            socket: socket2,
+            socket: socket2.to_string(),
             direction: "incoming".to_string(),
         };
 
