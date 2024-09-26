@@ -109,12 +109,22 @@ mod tests {
     }
 
     #[test]
+    fn test_bad_namespace() {
+        let (private, public) = keypair(&mut thread_rng());
+        let msg = &[1, 9, 6, 9];
+        let sig = sign(&private, b"good", msg);
+        verify(&public, b"bad", msg, &sig).expect("signature should be valid");
+    }
+
+    #[test]
     fn test_single_compatibility() {
         let (private, public) = keypair(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
-        let sig = sign(&private, msg);
-        verify(&public, msg, &sig).expect("signature should be valid");
-        blst_verify(&public, msg, &sig).expect("signature should be valid");
+        let namespace = b"test";
+        let sig = sign(&private, namespace, msg);
+        verify(&public, namespace, msg, &sig).expect("signature should be valid");
+        let payload = payload(namespace, msg);
+        blst_verify(&public, &payload, &sig).expect("signature should be valid");
     }
 
     #[test]
@@ -122,13 +132,18 @@ mod tests {
         let (n, t) = (5, 4);
         let (public, shares) = generate_shares(None, n, t);
         let msg = &[1, 9, 6, 9];
-        let partials: Vec<_> = shares.iter().map(|s| partial_sign(s, msg)).collect();
+        let namespace = b"test";
+        let partials: Vec<_> = shares
+            .iter()
+            .map(|s| partial_sign(s, namespace, msg))
+            .collect();
         for p in &partials {
-            partial_verify(&public, msg, p).expect("signature should be valid");
+            partial_verify(&public, msg, namespace, p).expect("signature should be valid");
         }
         let threshold_sig = aggregate(t, partials).unwrap();
         let threshold_pub = poly::public(&public);
-        verify(&threshold_pub, msg, &threshold_sig).expect("signature should be valid");
-        blst_verify(&threshold_pub, msg, &threshold_sig).expect("signature should be valid");
+        verify(&threshold_pub, namespace, msg, &threshold_sig).expect("signature should be valid");
+        let payload = payload(namespace, msg);
+        blst_verify(&threshold_pub, &payload, &threshold_sig).expect("signature should be valid");
     }
 }

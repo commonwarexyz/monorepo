@@ -23,7 +23,7 @@ use super::primitives::{
     group::{self, Element, Scalar},
     ops,
 };
-use crate::{utils::payload, PrivateKey, PublicKey, Scheme, Signature};
+use crate::{PrivateKey, PublicKey, Scheme, Signature};
 use rand::{CryptoRng, Rng, SeedableRng};
 
 /// BLS12-381 implementation of the `Scheme` trait.
@@ -69,8 +69,7 @@ impl Scheme for Bls12381 {
     }
 
     fn sign(&mut self, namespace: &[u8], message: &[u8]) -> Signature {
-        let payload = payload(namespace, message);
-        let signature = ops::sign(&self.private, &payload);
+        let signature = ops::sign(&self.private, namespace, message);
         signature.serialize().into()
     }
 
@@ -92,7 +91,6 @@ impl Scheme for Bls12381 {
             Some(signature) => signature,
             None => return false,
         };
-        let payload = payload(namespace, message);
-        ops::verify(&public, &payload, &signature).is_ok()
+        ops::verify(&public, namespace, message, &signature).is_ok()
     }
 }
