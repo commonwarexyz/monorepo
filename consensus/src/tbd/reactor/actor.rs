@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::time::{Duration, UNIX_EPOCH};
 
 const BLOCK_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_TBD_BLOCK_";
+const SEED_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_TBD_SEED_";
 const VOTE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_TBD_VOTE_";
 
 // TODO: include partials (need to if determine execution)?
@@ -36,6 +37,13 @@ fn block_hash(
     hasher.update(height.to_be_bytes());
     hasher.update(parent);
     hasher.update(payload);
+    hasher.finalize().to_vec().into()
+}
+
+fn seed_hash(epoch: u64, view: u64) -> Bytes {
+    let mut hasher = Sha256::new();
+    hasher.update(epoch.to_be_bytes());
+    hasher.update(view.to_be_bytes());
     hasher.finalize().to_vec().into()
 }
 
@@ -218,6 +226,22 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                                 payload: Some(wire::message::Payload::Vote(msg)),
                             }.encode_to_vec().into();
                             self.sender.send(Recipients::All, msg, false).await.map_err(|_| Error::NetworkClosed)?;
+
+                            // Send seed
+                            let seed_hash = seed_hash(self.epoch, self.view);
+                            let msg = wire::Seed {
+                                epoch: self.epoch,
+                                view: self.view,
+                                signature: Some(wire::Signature {
+                                    public_key: self.crypto.public_key(),
+                                    signature: self.crypto.sign(SEED_NAMESPACE, &seed_hash),
+                                }),
+                            };
+                            let msg = wire::Message {
+                                payload: Some(wire::message::Payload::Seed(msg)),
+                            }.encode_to_vec().into();
+                            self.sender.send(Recipients::All, msg, false).await.map_err(|_| Error::NetworkClosed)?;
+
                         },
                         Some(wire::message::Payload::Vote(vote)) => {
                             // If 2f + 1,
