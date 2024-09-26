@@ -19,4 +19,6 @@ pub enum Error {
     InvalidMessage,
     #[error("Invalid block")]
     InvalidBlock,
+    #[error("Invalid signature")]
+    InvalidSignature,
 }

@@ -2,7 +2,12 @@ use super::ingress::Message;
 use crate::tbd::wire;
 use crate::tbd::Error;
 use bytes::Bytes;
-use commonware_cryptography::{utils::hex, PublicKey, Scheme};
+use commonware_cryptography::bls12381::primitives::poly;
+use commonware_cryptography::{
+    bls12381,
+    utils::{hex, payload},
+    PublicKey, Scheme,
+};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
 use futures::{
@@ -106,7 +111,7 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
 
     pub async fn run(mut self) {}
 
-    async fn run_view(&mut self, seed: Bytes) -> Result<(u64, u64), Error> {
+    async fn run_view(&mut self, group: &poly::Public, seed: Bytes) -> Result<(u64, u64), Error> {
         // Configure round
         let now = self.runtime.current();
         let mut leader_timeout = now + Duration::from_secs(2);
@@ -247,6 +252,7 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                                 payload_hash,
                             );
                             let vote_hash = vote_hash(self.epoch, self.view, block_hash.clone());
+                            // TODO: change to partial sign
                             let msg = wire::Vote {
                                 epoch: self.epoch,
                                 view: self.view,
@@ -262,6 +268,7 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                             self.sender.send(Recipients::All, msg, true).await.map_err(|_| Error::NetworkClosed)?;
 
                             // Send seed
+                            // TODO: change to partial sign
                             let seed_hash = seed_hash(self.epoch, self.view);
                             let msg = wire::Seed {
                                 epoch: self.epoch,
@@ -278,6 +285,13 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
 
                         },
                         Some(wire::message::Payload::Vote(vote)) => {
+                            // Verify vote against public polynomial
+                            let vote_hash = vote_hash(vote.epoch, vote.view, vote.block.clone());
+                            let digest = payload(VOTE_NAMESPACE, &vote_hash);
+                            let signature = vote.signature.ok_or(Error::InvalidSignature)?;
+                            let signature = bls12381::primitives::poly::Eval<group::Signature>::deserialize(signature.as_ref()).ok_or(Error::InvalidSignature)?;
+                            bls12381::primitives::ops::partial_verify(&group, &digest, &signature.signature);
+
                             // If 2f + 1,
                             advance_timeout = UNIX_EPOCH + Duration::MAX;
                             // TODO: move signature aggregation outside of this loop to continue processing messages
