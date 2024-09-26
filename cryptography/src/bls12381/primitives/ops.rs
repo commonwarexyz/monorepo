@@ -113,7 +113,10 @@ mod tests {
         let (private, public) = keypair(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
         let sig = sign(&private, b"good", msg);
-        verify(&public, b"bad", msg, &sig).expect("signature should be valid");
+        assert!(matches!(
+            verify(&public, b"bad", msg, &sig).unwrap_err(),
+            Error::InvalidSignature
+        ));
     }
 
     #[test]
@@ -138,7 +141,7 @@ mod tests {
             .map(|s| partial_sign(s, namespace, msg))
             .collect();
         for p in &partials {
-            partial_verify(&public, msg, namespace, p).expect("signature should be valid");
+            partial_verify(&public, namespace, msg, p).expect("signature should be valid");
         }
         let threshold_sig = aggregate(t, partials).unwrap();
         let threshold_pub = poly::public(&public);
