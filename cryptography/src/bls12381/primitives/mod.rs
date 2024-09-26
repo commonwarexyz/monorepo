@@ -24,12 +24,13 @@
 //! let (commitment, shares) = generate_shares(None, n, t);
 //!
 //! // Generate partial signatures from shares
-//! let msg = b"hello world";
-//! let partials: Vec<_> = shares.iter().map(|s| partial_sign(s, msg)).collect();
+//! let namespace = b"demo";
+//! let message = b"hello world";
+//! let partials: Vec<_> = shares.iter().map(|s| partial_sign(s, namespace, message)).collect();
 //!
 //! // Verify partial signatures
 //! for p in &partials {
-//!     partial_verify(&commitment, msg, p).expect("signature should be valid");
+//!     partial_verify(&commitment, namespace, message, p).expect("signature should be valid");
 //! }
 //!
 //! // Aggregate partial signatures
@@ -37,7 +38,7 @@
 //!
 //! // Verify threshold signature
 //! let threshold_pub = public(&commitment);
-//! verify(&threshold_pub, msg, &threshold_sig).expect("signature should be valid");
+//! verify(&threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
 //! ```
 
 pub mod group;
