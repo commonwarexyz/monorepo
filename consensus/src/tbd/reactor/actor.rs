@@ -1,8 +1,9 @@
 use super::ingress::Message;
+use crate::tbd::wire;
 use crate::tbd::Error;
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
-use commonware_p2p::{Receiver, Sender};
+use commonware_cryptography::{PublicKey, Scheme};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
 use futures::{
     channel::{mpsc, oneshot},
@@ -10,9 +11,11 @@ use futures::{
 };
 use num_bigint::BigUint;
 use num_traits::cast::ToPrimitive;
+use prost::Message as _;
 use std::time::{Duration, UNIX_EPOCH};
 
-pub struct Actor<E: Clock, S: Sender, R: Receiver> {
+pub struct Actor<C: Scheme, E: Clock, S: Sender, R: Receiver> {
+    crypto: C,
     runtime: E,
 
     sender: S,
@@ -31,8 +34,9 @@ pub struct Actor<E: Clock, S: Sender, R: Receiver> {
     participants: Vec<PublicKey>,
 }
 
-impl<E: Clock, S: Sender, R: Receiver> Actor<E, S, R> {
+impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
     pub fn new(
+        crypto: C,
         runtime: E,
         sender: S,
         receiver: R,
@@ -41,6 +45,7 @@ impl<E: Clock, S: Sender, R: Receiver> Actor<E, S, R> {
         let (control, handler) = mpsc::channel(1024);
         (
             Self {
+                crypto,
                 runtime,
                 sender,
                 receiver,
@@ -64,29 +69,60 @@ impl<E: Clock, S: Sender, R: Receiver> Actor<E, S, R> {
         let now = self.runtime.current();
         let mut leader_timeout = now + Duration::from_secs(2);
         let mut advance_timeout = leader_timeout + Duration::from_secs(1);
+        let timestamp = now.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let mut timed_out = false;
+
+        // Get parent block info
+        let height = self.notarized + 1;
+        let parent = Bytes::default(); // TODO: populate with parent block hash
 
         // Select leader
         let seed_number = BigUint::from_bytes_be(&seed);
         let leader_index = seed_number % self.participants.len();
         let leader = self.participants[leader_index.to_usize().unwrap()].clone();
 
-        // TODO: If leader, propose block
-        let (payload_sender, payload_receiver) = oneshot::channel();
-        let block = self
-            .control
-            .send({
-                Message::Payload {
-                    timestamp: now.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
-                    parent: Bytes::default(),
-                    payload: payload_sender,
-                }
-            })
-            .await
-            .map_err(|_| Error::NetworkClosed)?;
-        let payload = payload_receiver.await.map_err(|_| Error::NetworkClosed)?;
+        // If leader, propose and broadcast block
+        if leader == self.crypto.public_key() {
+            // Get payload from application
+            let (payload_sender, payload_receiver) = oneshot::channel();
+            let block = self
+                .control
+                .send({
+                    Message::Payload {
+                        timestamp,
+                        parent,
+                        height,
+                        payload: payload_sender,
+                    }
+                })
+                .await
+                .map_err(|_| Error::NetworkClosed)?;
+            let (hash, payload) = payload_receiver.await.map_err(|_| Error::NetworkClosed)?;
 
-        // TODO: broadcast block
+            // Broadcast block to other peers
+            let msg = wire::Propose {
+                timestamp,
+                epoch: self.epoch,
+                view: self.view,
+                height,
+                partials: Vec::new(),
+                parent,
+                payload,
+                signature: Some(wire::Signature {
+                    public_key: self.crypto.public_key(),
+                    signature: self.crypto.sign("block", &[u8; 32]),
+                }),
+            };
+            let msg = wire::Message {
+                payload: Some(wire::message::Payload::Propose(msg)),
+            }
+            .encode_to_vec()
+            .into();
+            self.sender
+                .send(Recipients::All, msg, true)
+                .await
+                .map_err(|_| Error::NetworkClosed)?;
+        }
 
         // Process messages
         loop {

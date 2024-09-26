@@ -14,11 +14,14 @@ message Message {
 }
 
 message Propose {
-    uint64 epoch = 1;
-    uint64 view = 2;
-    bytes block = 3;
-    bytes payload = 4;
-    Signature signature = 5;
+    uint64 timestamp = 1;
+    uint64 epoch = 2;
+    uint64 view = 3;
+    uint64 height = 4;
+    repeated Signature partials = 5;
+    bytes parent = 6;
+    bytes payload = 7;
+    Signature signature = 8;
 }
 
 message Vote {

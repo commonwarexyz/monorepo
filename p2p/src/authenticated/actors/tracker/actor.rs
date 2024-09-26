@@ -26,7 +26,7 @@ use std::{
 };
 use tracing::{debug, trace};
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_IP_";
+const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_AUTHENTICATED_IP_";
 
 struct PeerSet {
     index: u64,

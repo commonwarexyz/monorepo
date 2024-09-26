@@ -5,8 +5,9 @@ use futures::channel::oneshot;
 pub enum Message {
     Payload {
         timestamp: u64,
+        height: u64,
         parent: Hash,
-        payload: oneshot::Sender<Bytes>,
+        payload: oneshot::Sender<(Hash, Bytes)>,
     },
     Verify {
         timestamp: u64,
