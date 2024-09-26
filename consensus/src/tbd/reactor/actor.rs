@@ -2,7 +2,7 @@ use super::ingress::Message;
 use crate::tbd::wire;
 use crate::tbd::Error;
 use bytes::Bytes;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
 use futures::{
@@ -14,6 +14,7 @@ use num_traits::cast::ToPrimitive;
 use prost::Message as _;
 use sha2::{Digest, Sha256};
 use std::time::{Duration, UNIX_EPOCH};
+use tracing::debug;
 
 const BLOCK_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_TBD_BLOCK_";
 const SEED_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_TBD_SEED_";
@@ -188,6 +189,18 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                     let msg = wire::Message::decode(msg).map_err(|_| Error::InvalidMessage)?;
                     match msg.payload{
                         Some(wire::message::Payload::Propose(propose)) => {
+                            // Check if timed out
+                            if timed_out {
+                                continue;
+                            }
+
+                            // Verify leader
+                            if propose.epoch != self.epoch || propose.view != self.view || sender != leader {
+                                // Drop any unexpected blocks (and collect signature for fault if a validator)
+                                debug!(epoch = propose.epoch, view = propose.view, leader = hex(&leader), sender = hex(&sender), "unexpected block");
+                                continue;
+                            }
+
                             // Verify block (need to ensure anyone that can veriy against header)
                             let (sender, receiver) = oneshot::channel();
                             self.control.send(Message::Verify{
