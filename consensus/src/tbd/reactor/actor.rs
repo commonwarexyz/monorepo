@@ -171,6 +171,27 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                 .send(Recipients::All, msg, true)
                 .await
                 .map_err(|_| Error::NetworkClosed)?;
+
+            // Broadcast vote to other peers
+            let vote_hash = vote_hash(self.epoch, self.view, block_hash.clone());
+            let msg = wire::Vote {
+                epoch: self.epoch,
+                view: self.view,
+                block: block_hash.clone(),
+                signature: Some(wire::Signature {
+                    public_key: self.crypto.public_key(),
+                    signature: self.crypto.sign(VOTE_NAMESPACE, &vote_hash),
+                }),
+            };
+            let msg = wire::Message {
+                payload: Some(wire::message::Payload::Vote(msg)),
+            }
+            .encode_to_vec()
+            .into();
+            self.sender
+                .send(Recipients::All, msg, true)
+                .await
+                .map_err(|_| Error::NetworkClosed)?;
         }
 
         // Process messages
@@ -238,7 +259,7 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                             let msg = wire::Message {
                                 payload: Some(wire::message::Payload::Vote(msg)),
                             }.encode_to_vec().into();
-                            self.sender.send(Recipients::All, msg, false).await.map_err(|_| Error::NetworkClosed)?;
+                            self.sender.send(Recipients::All, msg, true).await.map_err(|_| Error::NetworkClosed)?;
 
                             // Send seed
                             let seed_hash = seed_hash(self.epoch, self.view);
@@ -253,7 +274,7 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                             let msg = wire::Message {
                                 payload: Some(wire::message::Payload::Seed(msg)),
                             }.encode_to_vec().into();
-                            self.sender.send(Recipients::All, msg, false).await.map_err(|_| Error::NetworkClosed)?;
+                            self.sender.send(Recipients::All, msg, true).await.map_err(|_| Error::NetworkClosed)?;
 
                         },
                         Some(wire::message::Payload::Vote(vote)) => {
