@@ -1,5 +1,7 @@
 //! Digital signatures over the BLS12-381 curve.
 
+use crate::utils::payload;
+
 use super::{
     group::{self, equal, Element, Point, Share},
     poly::{self, Eval},
@@ -23,9 +25,10 @@ pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
 ///
 /// Signatures produced by this function are deterministic and are safe
 /// to use in a consensus-critical context.
-pub fn sign(private: &group::Private, msg: &[u8]) -> group::Signature {
+pub fn sign(private: &group::Private, namespace: &[u8], message: &[u8]) -> group::Signature {
+    let payload = payload(namespace, message);
     let mut s = group::Signature::zero();
-    s.map(msg);
+    s.map(&payload);
     s.mul(private);
     s
 }
@@ -33,11 +36,13 @@ pub fn sign(private: &group::Private, msg: &[u8]) -> group::Signature {
 /// Verifies the signature with the provided public key.
 pub fn verify(
     public: &group::Public,
-    msg: &[u8],
+    namespace: &[u8],
+    message: &[u8],
     signature: &group::Signature,
 ) -> Result<(), Error> {
+    let payload = payload(namespace, message);
     let mut hm = group::Signature::zero();
-    hm.map(msg);
+    hm.map(&payload);
     if !equal(public, signature, &hm) {
         return Err(Error::InvalidSignature);
     }
@@ -45,8 +50,8 @@ pub fn verify(
 }
 
 /// Signs the provided message with the key share.
-pub fn partial_sign(private: &Share, msg: &[u8]) -> Eval<group::Signature> {
-    let sig = sign(&private.private, msg);
+pub fn partial_sign(private: &Share, namespace: &[u8], message: &[u8]) -> Eval<group::Signature> {
+    let sig = sign(&private.private, namespace, message);
     Eval {
         value: sig,
         index: private.index,
@@ -56,11 +61,12 @@ pub fn partial_sign(private: &Share, msg: &[u8]) -> Eval<group::Signature> {
 /// Verifies the partial signature against the public polynomial.
 pub fn partial_verify(
     public: &poly::Public,
-    msg: &[u8],
+    namespace: &[u8],
+    message: &[u8],
     partial: &Eval<group::Signature>,
 ) -> Result<(), Error> {
     let public = public.evaluate(partial.index);
-    verify(&public.value, msg, &partial.value)
+    verify(&public.value, namespace, message, &partial.value)
 }
 
 /// Aggregates the partial signatures into a final signature.
