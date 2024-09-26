@@ -159,18 +159,18 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                     timed_out = true;
                 },
                 msg = self.receiver.recv() => {
-                    let msg = match msg {
-                        Ok(msg) => msg,
-                        Err(e) => { return Err(Error::NetworkClosed) },
-                    };
-                    match msg {
-                        Message::Propose { epoch, view, block, signature, payload } => {
+                    // Parse message
+                    let (sender, msg) = msg.map_err(|_| Error::NetworkClosed)?;
+                    // TODO: continue here rather than exiting
+                    let msg = wire::Message::decode(msg).map_err(|_| Error::InvalidMessage)?;
+                    match msg.payload{
+                        Some(wire::message::Payload::Propose(propose)) => {
                             // TODO: verify block (need to ensure anyone that can veriy against header)
 
                             // Set leader timeout to be infinite
                             leader_timeout = UNIX_EPOCH + Duration::MAX;
                         },
-                        Message::Vote { epoch, view, block, signature } => {
+                        Some(wire::message::Payload::Vote(vote)) => {
                             // If 2f + 1,
                             advance_timeout = UNIX_EPOCH + Duration::MAX;
                             // TODO: move signature aggregation outside of this loop to continue processing messages
@@ -178,17 +178,20 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                             // If dummy,
                             break;
                         },
-                        Message::Finalize { epoch, view, block, notarization, signature } => {
+                        Some(wire::message::Payload::Finalize(finalize)) => {
                             // TODO: need to continue processing finalize messages in next view
                         },
-                        Message::Advance { epoch, view, block, notarization } => {
+                        Some(wire::message::Payload::Advance(advance)) => {
                             break;
                         },
-                        Message::Lock { epoch, view, block, notarization, finalization } => {
+                        Some(wire::message::Payload::Lock(lock)) => {
                             // TODO: send ancestors along finalization channel if not sent yet
                             break;
                         },
-                        Message::Seed { epoch, view, signature } => {},
+                        Some(wire::message::Payload::Seed(seed)) => {}
+                        None => {
+                            // TODO: could get messages from a newer version we don't know about
+                        }
                     };
                 },
             };

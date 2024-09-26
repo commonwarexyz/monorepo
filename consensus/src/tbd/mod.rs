@@ -15,4 +15,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("Network closed")]
     NetworkClosed,
+    #[error("Invalid message")]
+    InvalidMessage,
 }
