@@ -1,4 +1,3 @@
-use crate::tbd::block::Hash;
 use bytes::Bytes;
 use futures::channel::oneshot;
 
@@ -6,14 +5,14 @@ pub enum Message {
     Payload {
         timestamp: u64,
         height: u64,
-        parent: Hash,
-        payload: oneshot::Sender<(Hash, Bytes)>,
+        parent: Bytes,
+        payload: oneshot::Sender<(Bytes, Bytes)>,
     },
     Verify {
         timestamp: u64,
-        parent: Hash,
+        parent: Bytes,
         payload: Bytes,
-        result: oneshot::Sender<Option<Hash>>,
+        result: oneshot::Sender<Option<Bytes>>,
     },
     Notarized {
         seed: Bytes,

@@ -12,7 +12,29 @@ use futures::{
 use num_bigint::BigUint;
 use num_traits::cast::ToPrimitive;
 use prost::Message as _;
+use sha2::{Digest, Sha256};
 use std::time::{Duration, UNIX_EPOCH};
+
+const BLOCK_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_TBD_BLOCK_";
+
+// TODO: include partials (need to if determine execution)?
+fn block_hash(
+    timestamp: u64,
+    epoch: u64,
+    view: u64,
+    height: u64,
+    parent: Bytes,
+    payload: Bytes,
+) -> Bytes {
+    let mut hasher = Sha256::new();
+    hasher.update(timestamp.to_be_bytes());
+    hasher.update(epoch.to_be_bytes());
+    hasher.update(view.to_be_bytes());
+    hasher.update(height.to_be_bytes());
+    hasher.update(parent);
+    hasher.update(payload);
+    hasher.finalize().to_vec().into()
+}
 
 pub struct Actor<C: Scheme, E: Clock, S: Sender, R: Receiver> {
     crypto: C,
@@ -100,6 +122,7 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
             let (hash, payload) = payload_receiver.await.map_err(|_| Error::NetworkClosed)?;
 
             // Broadcast block to other peers
+            let block_hash = block_hash(timestamp, self.epoch, self.view, height, parent, payload);
             let msg = wire::Propose {
                 timestamp,
                 epoch: self.epoch,
@@ -110,7 +133,7 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                 payload,
                 signature: Some(wire::Signature {
                     public_key: self.crypto.public_key(),
-                    signature: self.crypto.sign("block", &[u8; 32]),
+                    signature: self.crypto.sign(BLOCK_NAMESPACE, &block_hash),
                 }),
             };
             let msg = wire::Message {
