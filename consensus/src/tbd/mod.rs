@@ -17,4 +17,6 @@ pub enum Error {
     NetworkClosed,
     #[error("Invalid message")]
     InvalidMessage,
+    #[error("Invalid block")]
+    InvalidBlock,
 }

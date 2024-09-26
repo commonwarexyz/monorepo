@@ -7,6 +7,7 @@ fn main() -> Result<()> {
         "Signature.signature",
         "Propose.payload",
         "Propose.parent",
+        "Vote.block",
     ]);
     config.compile_protos(&["src/tbd/wire.proto"], &["src/tbd/"])?;
     Ok(())

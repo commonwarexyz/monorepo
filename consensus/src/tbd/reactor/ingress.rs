@@ -10,6 +10,7 @@ pub enum Message {
     },
     Verify {
         timestamp: u64,
+        height: u64,
         parent: Bytes,
         payload: Bytes,
         result: oneshot::Sender<Option<Bytes>>,

@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::time::{Duration, UNIX_EPOCH};
 
 const BLOCK_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_TBD_BLOCK_";
+const VOTE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_TBD_VOTE_";
 
 // TODO: include partials (need to if determine execution)?
 fn block_hash(
@@ -35,6 +36,14 @@ fn block_hash(
     hasher.update(height.to_be_bytes());
     hasher.update(parent);
     hasher.update(payload);
+    hasher.finalize().to_vec().into()
+}
+
+fn vote_hash(epoch: u64, view: u64, block: Bytes) -> Bytes {
+    let mut hasher = Sha256::new();
+    hasher.update(epoch.to_be_bytes());
+    hasher.update(view.to_be_bytes());
+    hasher.update(block);
     hasher.finalize().to_vec().into()
 }
 
@@ -171,10 +180,44 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                     let msg = wire::Message::decode(msg).map_err(|_| Error::InvalidMessage)?;
                     match msg.payload{
                         Some(wire::message::Payload::Propose(propose)) => {
-                            // TODO: verify block (need to ensure anyone that can veriy against header)
+                            // Verify block (need to ensure anyone that can veriy against header)
+                            let (sender, receiver) = oneshot::channel();
+                            self.control.send(Message::Verify{
+                                timestamp: propose.timestamp,
+                                height: propose.height,
+                                parent: propose.parent.clone(),
+                                payload: propose.payload,
+                                result: sender,
+                            }).await.map_err(|_| Error::NetworkClosed)?;
+                            let payload_hash = receiver.await.map_err(|_| Error::NetworkClosed)?.ok_or(Error::InvalidBlock)?;
 
                             // Set leader timeout to be infinite
                             leader_timeout = UNIX_EPOCH + Duration::MAX;
+
+                            // Send vote if correct leader and first block at (epoch, view)
+                            // TODO: assert correct leader and first block
+                            let block_hash = block_hash(
+                                propose.timestamp,
+                                self.epoch,
+                                self.view,
+                                propose.height,
+                                propose.parent.clone(),
+                                payload_hash,
+                            );
+                            let vote_hash = vote_hash(self.epoch, self.view, block_hash.clone());
+                            let msg = wire::Vote {
+                                epoch: self.epoch,
+                                view: self.view,
+                                block: block_hash.clone(),
+                                signature: Some(wire::Signature {
+                                    public_key: self.crypto.public_key(),
+                                    signature: self.crypto.sign(VOTE_NAMESPACE, &vote_hash),
+                                }),
+                            };
+                            let msg = wire::Message {
+                                payload: Some(wire::message::Payload::Vote(msg)),
+                            }.encode_to_vec().into();
+                            self.sender.send(Recipients::All, msg, false).await.map_err(|_| Error::NetworkClosed)?;
                         },
                         Some(wire::message::Payload::Vote(vote)) => {
                             // If 2f + 1,
@@ -188,6 +231,7 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
                             // TODO: need to continue processing finalize messages in next view
                         },
                         Some(wire::message::Payload::Advance(advance)) => {
+                            // TODO: handle view moving ahead view we are finalizing
                             break;
                         },
                         Some(wire::message::Payload::Lock(lock)) => {
