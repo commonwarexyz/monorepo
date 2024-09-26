@@ -109,30 +109,36 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
         if leader == self.crypto.public_key() {
             // Get payload from application
             let (payload_sender, payload_receiver) = oneshot::channel();
-            let block = self
-                .control
+            self.control
                 .send({
                     Message::Payload {
                         timestamp,
-                        parent,
+                        parent: parent.clone(),
                         height,
                         payload: payload_sender,
                     }
                 })
                 .await
                 .map_err(|_| Error::NetworkClosed)?;
-            let (hash, payload) = payload_receiver.await.map_err(|_| Error::NetworkClosed)?;
+            let (payload_hash, payload) =
+                payload_receiver.await.map_err(|_| Error::NetworkClosed)?;
 
             // Broadcast block to other peers
-            let block_hash = block_hash(timestamp, self.epoch, self.view, height, parent, payload);
+            let block_hash = block_hash(
+                timestamp,
+                self.epoch,
+                self.view,
+                height,
+                parent.clone(),
+                payload_hash,
+            );
             let msg = wire::Propose {
                 timestamp,
                 epoch: self.epoch,
                 view: self.view,
                 height,
-                partials: Vec::new(),
-                parent,
-                payload,
+                parent: parent.clone(),
+                payload: payload.clone(),
                 signature: Some(wire::Signature {
                     public_key: self.crypto.public_key(),
                     signature: self.crypto.sign(BLOCK_NAMESPACE, &block_hash),

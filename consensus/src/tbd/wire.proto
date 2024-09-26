@@ -18,10 +18,10 @@ message Propose {
     uint64 epoch = 2;
     uint64 view = 3;
     uint64 height = 4;
-    repeated Signature partials = 5;
-    bytes parent = 6;
-    bytes payload = 7;
-    Signature signature = 8;
+    bytes parent = 5;
+    bytes payload = 6;
+    Signature signature = 7;
+    // TODO: add partial signatures
 }
 
 message Vote {
