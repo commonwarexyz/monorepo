@@ -213,8 +213,12 @@ impl<E: Clock> Manager<E> {
     }
 
     /// Jump ahead to a particular view when observing a notarization.
+    ///
+    /// Note: May need to backfill some number of views to handle Resharing.
     pub fn advance() {}
 
     /// Jump ahead to a particular view when observing a finalization.
+    ///
+    /// Note: May need to backfill some number of views to handle Resharing.
     pub fn lock() {}
 }
