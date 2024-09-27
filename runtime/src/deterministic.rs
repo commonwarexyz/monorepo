@@ -55,6 +55,7 @@ use tracing::trace;
 
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
+const ROOT_TASK = "root";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
@@ -338,7 +339,7 @@ impl crate::Runner for Runner {
         let output = Arc::new(Mutex::new(None));
         Tasks::register(
             &self.executor.tasks,
-            "root",
+            ROOT_TASK,
             true,
             Box::pin({
                 let output = output.clone();
@@ -494,6 +495,9 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        if label == ROOT_TASK {
+            panic!("root label cannot be reused in spawn");
+        }
         let gauge = self
             .executor
             .metrics
