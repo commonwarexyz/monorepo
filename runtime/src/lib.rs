@@ -15,7 +15,6 @@ pub mod deterministic;
 pub mod mocks;
 pub mod tokio;
 
-mod metrics;
 mod utils;
 pub use utils::{reschedule, Handle};
 

@@ -24,15 +24,17 @@
 //! });
 //! ```
 
-use crate::metrics::Metrics;
-use crate::{Clock, Error, Handle};
+use crate::{utils::Link, Clock, Error, Handle};
 use bytes::Bytes;
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    metrics::{counter::Counter, family::Family},
+    registry::Registry,
+};
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     future::Future,
@@ -47,6 +49,49 @@ use tokio::{
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::warn;
+
+#[derive(Debug)]
+struct Metrics {
+    tasks_spawned: Counter,
+    bandwidth: Family<Link, Counter>,
+}
+
+impl Metrics {
+    pub fn record_task_spawned(&self) {
+        self.tasks_spawned.inc();
+    }
+
+    pub fn record_bandwidth(&self, origin: SocketAddr, destination: SocketAddr, bytes: usize) {
+        let link = Link {
+            origin: origin.to_string(),
+            destination: destination.to_string(),
+        };
+        self.bandwidth.get_or_create(&link).inc_by(bytes as u64);
+    }
+}
+
+impl Metrics {
+    pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
+        let metrics = Self {
+            bandwidth: Family::default(),
+            tasks_spawned: Counter::default(),
+        };
+        {
+            let mut registry = registry.lock().unwrap();
+            registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                metrics.tasks_spawned.clone(),
+            );
+            registry.register(
+                "bandwidth",
+                "Bandwidth usage by origin and destination",
+                metrics.bandwidth.clone(),
+            );
+        }
+        metrics
+    }
+}
 
 /// Configuration for the `tokio` runtime.
 #[derive(Clone)]
@@ -362,6 +407,7 @@ mod tests {
     use crate::utils::run_tasks;
     use crate::Runner;
     use std::io::Cursor;
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn test_runs_tasks() {
@@ -414,5 +460,52 @@ mod tests {
             // Ensure that encoding fails due to exceeding max_frame_len
             assert!(result.is_ok());
         });
+    }
+
+    #[test]
+    fn test_bandwidth_metrics() {
+        let registry = Arc::new(Mutex::new(Registry::default()));
+        let metrics = Metrics::init(registry.clone());
+
+        // Send some data
+        let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+        let socket2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);
+        metrics.record_bandwidth(socket1, socket2, 100);
+        metrics.record_bandwidth(socket2, socket1, 200);
+        metrics.record_bandwidth(socket2, socket1, 150);
+
+        // Verify tracking
+        assert_eq!(
+            metrics
+                .bandwidth
+                .get_or_create(&Link {
+                    origin: socket1.to_string(),
+                    destination: socket2.to_string(),
+                })
+                .get(),
+            100
+        );
+        assert_eq!(
+            metrics
+                .bandwidth
+                .get_or_create(&Link {
+                    origin: socket2.to_string(),
+                    destination: socket1.to_string(),
+                })
+                .get(),
+            350
+        );
+    }
+
+    #[test]
+    fn test_task_metrics() {
+        let registry = Arc::new(Mutex::new(Registry::default()));
+        let metrics = Metrics::init(registry.clone());
+
+        for _ in 0..5 {
+            metrics.record_task_spawned();
+        }
+
+        assert_eq!(metrics.tasks_spawned.get(), 5);
     }
 }
