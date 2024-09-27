@@ -734,7 +734,6 @@ mod tests {
     use super::*;
     use crate::utils::run_tasks;
     use futures::task::noop_waker;
-    use std::net::{IpAddr, Ipv4Addr};
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
         let cfg = Config {

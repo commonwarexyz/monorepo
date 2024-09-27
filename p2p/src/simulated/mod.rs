@@ -24,17 +24,21 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{utils::hex, Ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
-    use futures::{channel::mpsc, SinkExt, StreamExt};
-    use prometheus_client::registry::Registry;
-    use rand::Rng;
-    use std::{
-        collections::{BTreeMap, HashMap}, sync::{Arc, Mutex}, time::Duration
+    use commonware_runtime::{
+        deterministic::{Config, Executor},
+        Runner, Spawner,
     };
+    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use rand::Rng;
+    use std::collections::{BTreeMap, HashMap};
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         // Create simulated network
-        let (executor, runtime, auditor) = Executor::init(seed, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config {
+            seed,
+            ..Default::default()
+        };
+        let (executor, runtime, auditor) = Executor::init(cfg);
         executor.start(async move {
             let mut network = network::Network::new(
                 runtime.clone(),
@@ -146,7 +150,8 @@ mod tests {
 
     #[test]
     fn test_invalid_message() {
-        let (executor, mut runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, mut runtime, _) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
@@ -186,7 +191,8 @@ mod tests {
 
     #[test]
     fn test_linking_self() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
@@ -218,7 +224,8 @@ mod tests {
 
     #[test]
     fn test_invalid_success_rate() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
@@ -252,7 +259,8 @@ mod tests {
 
     #[test]
     fn test_simple_message_delivery() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
