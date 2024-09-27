@@ -4,7 +4,7 @@ package wire;
 // Message is the only allowed message format that can be sent between participants.
 message Message {
     oneof payload {
-        Propose propose = 1;
+        Proposal proposal = 1;
         Vote vote = 2;
         Finalize finalize = 3;  
         Advance advance = 4;
@@ -13,7 +13,7 @@ message Message {
     }
 }
 
-message Propose {
+message Proposal {
     uint64 timestamp = 1;
     uint64 epoch = 2;
     uint64 view = 3;
@@ -44,6 +44,7 @@ message Advance {
     uint64 view = 2;
     bytes block = 3; // hash 
     bytes notarization = 4;
+    bytes beacon = 5;
 }
 
 message Lock {
