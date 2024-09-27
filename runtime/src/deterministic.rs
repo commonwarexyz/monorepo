@@ -34,6 +34,7 @@ use futures::{
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
+    encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::Registry,
 };
@@ -55,11 +56,16 @@ use tracing::trace;
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct Work {
+    label: String,
+}
+
 #[derive(Debug)]
 struct Metrics {
-    tasks_spawned: Counter,
-    tasks_running: Gauge,
-    task_polls: Counter,
+    tasks_spawned: Family<Work, Counter>,
+    tasks_running: Family<Work, Gauge>,
+    task_polls: Family<Work, Counter>,
 
     bandwidth: Counter,
 }
@@ -67,9 +73,9 @@ struct Metrics {
 impl Metrics {
     pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
         let metrics = Self {
-            task_polls: Counter::default(),
-            tasks_running: Gauge::default(),
-            tasks_spawned: Counter::default(),
+            task_polls: Family::default(),
+            tasks_running: Family::default(),
+            tasks_spawned: Family::default(),
             bandwidth: Counter::default(),
         };
         {
@@ -111,12 +117,13 @@ impl Auditor {
         }
     }
 
-    fn process_task(&self, task: u128) {
+    fn process_task(&self, task: u128, label: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"process_task");
         hasher.update(task.to_be_bytes());
+        hasher.update(label.as_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
@@ -191,6 +198,8 @@ impl Auditor {
 
 struct Task {
     id: u128,
+    label: String,
+
     tasks: Arc<Tasks>,
 
     root: bool,
@@ -213,6 +222,7 @@ struct Tasks {
 impl Tasks {
     fn register(
         arc_self: &Arc<Self>,
+        label: &str,
         root: bool,
         future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     ) {
@@ -225,6 +235,7 @@ impl Tasks {
         };
         queue.push(Arc::new(Task {
             id,
+            label: label.to_string(),
             root,
             future: Mutex::new(future),
             tasks: arc_self.clone(),
@@ -327,6 +338,7 @@ impl crate::Runner for Runner {
         let output = Arc::new(Mutex::new(None));
         Tasks::register(
             &self.executor.tasks,
+            "root",
             true,
             Box::pin({
                 let output = output.clone();
@@ -356,7 +368,7 @@ impl crate::Runner for Runner {
             trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
                 // Record task for auditing
-                self.executor.auditor.process_task(task.id);
+                self.executor.auditor.process_task(task.id, &task.label);
 
                 // Check if task is already complete
                 if *task.completed.lock().unwrap() {
@@ -371,7 +383,13 @@ impl crate::Runner for Runner {
                 let mut future = task.future.lock().unwrap();
 
                 // Record task poll
-                self.executor.metrics.task_polls.inc();
+                self.executor
+                    .metrics
+                    .task_polls
+                    .get_or_create(&Work {
+                        label: task.label.clone(),
+                    })
+                    .inc();
 
                 // Task is re-queued in its `wake_by_ref` implementation as soon as we poll here (regardless
                 // of whether it is Pending/Ready).
@@ -471,14 +489,28 @@ pub struct Context {
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F, T>(&self, f: F) -> Handle<T>
+    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (f, handle) = Handle::init(f, self.executor.metrics.tasks_running.clone(), false);
-        Tasks::register(&self.executor.tasks, false, Box::pin(f));
-        self.executor.metrics.tasks_spawned.inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&Work {
+                label: label.to_string(),
+            })
+            .clone();
+        let (f, handle) = Handle::init(f, gauge, false);
+        Tasks::register(&self.executor.tasks, label, false, Box::pin(f));
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&Work {
+                label: label.to_string(),
+            })
+            .inc();
         handle
     }
 }

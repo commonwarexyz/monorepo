@@ -167,9 +167,9 @@ pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Ve
         // Randomly schedule tasks
         let mut handles = FuturesUnordered::new();
         for i in 0..tasks - 1 {
-            handles.push(context.spawn(task(i)));
+            handles.push(context.spawn("test", task(i)));
         }
-        handles.push(context.spawn(task(tasks - 1)));
+        handles.push(context.spawn("test", task(tasks - 1)));
 
         // Collect output order
         let mut outputs = Vec::new();

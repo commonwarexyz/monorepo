@@ -52,14 +52,19 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::warn;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Peer {
+struct Work {
+    label: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct Peer {
     address: String,
 }
 
 #[derive(Debug)]
 struct Metrics {
-    tasks_spawned: Counter,
-    tasks_running: Gauge,
+    tasks_spawned: Family<Work, Counter>,
+    tasks_running: Family<Work, Gauge>,
 
     inbound_connections: Family<Peer, Counter>,
     outbound_connections: Family<Peer, Counter>,
@@ -71,8 +76,8 @@ struct Metrics {
 impl Metrics {
     pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
         let metrics = Self {
-            tasks_spawned: Counter::default(),
-            tasks_running: Gauge::default(),
+            tasks_spawned: Family::default(),
+            tasks_running: Family::default(),
             inbound_connections: Family::default(),
             outbound_connections: Family::default(),
             inbound_bandwidth: Family::default(),
@@ -225,18 +230,28 @@ pub struct Context {
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F, T>(&self, f: F) -> Handle<T>
+    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (f, handle) = Handle::init(
-            f,
-            self.executor.metrics.tasks_running.clone(),
-            self.executor.cfg.catch_panics,
-        );
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&Work {
+                label: label.to_string(),
+            })
+            .clone();
+        let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
         self.executor.runtime.spawn(f);
-        self.executor.metrics.tasks_spawned.inc();
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&Work {
+                label: label.to_string(),
+            })
+            .inc();
         handle
     }
 }

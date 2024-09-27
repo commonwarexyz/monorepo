@@ -59,9 +59,13 @@ pub trait Runner {
 pub trait Spawner: Clone + Send + Sync + 'static {
     /// Enqueues a task to be executed.
     ///
+    /// Label can be used to track how many instances of a specific type of
+    /// task have been spawned or are running concurrently (and is appened to all
+    /// logs/metrics).
+    ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
     /// does not await the handle).
-    fn spawn<F, T>(&self, f: F) -> Handle<T>
+    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
@@ -83,32 +87,41 @@ pub trait Clock: Clone + Send + Sync + 'static {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
-/// Interface that any runtime must implement to provide
-/// network operations.
+/// Interface that any runtime must implement to create
+/// network connections.
 pub trait Network<L, Si, St>: Clone + Send + Sync + 'static
 where
     L: Listener<Si, St>,
     Si: Sink,
     St: Stream,
 {
+    /// Bind to the given socket address.
     fn bind(&self, socket: SocketAddr) -> impl Future<Output = Result<L, Error>> + Send;
+
+    /// Dial the given socket address.
     fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
 }
 
+/// Interface that any runtime must implement to handle
+/// incoming network connections.
 pub trait Listener<Si, St>: Sync + Send + 'static
 where
     Si: Sink,
     St: Stream,
 {
+    /// Accept an incoming connection.
     fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Si, St), Error>> + Send;
 }
 
-/// Interface that any runtime must implement to provide
-/// stream operations.
+/// Interface that any runtime must implement to send
+/// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
+    /// Send a message.
     fn send(&mut self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
+/// Interface that any runtime must implement to receive
+/// messages over a network connection.
 pub trait Stream: Sync + Send + 'static {
     fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }
@@ -184,7 +197,7 @@ mod tests {
 
     fn test_root_finishes(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            context.spawn(async move {
+            context.spawn("test", async move {
                 loop {
                     reschedule().await;
                 }
@@ -194,7 +207,7 @@ mod tests {
 
     fn test_spawn_abort(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            let handle = context.spawn(async move {
+            let handle = context.spawn("test", async move {
                 loop {
                     reschedule().await;
                 }
@@ -215,7 +228,7 @@ mod tests {
 
     fn test_panic_aborts_spawn(runner: impl Runner, context: impl Spawner) {
         let result = runner.start(async move {
-            let result = context.spawn(async move {
+            let result = context.spawn("test", async move {
                 panic!("blah");
             });
             assert_eq!(result.await, Err(Error::Exited));
@@ -230,10 +243,10 @@ mod tests {
         runner.start(async move {
             let output = Mutex::new(0);
             select! {
-                v1 = context.spawn(async { 1 }) => {
+                v1 = context.spawn("test", async { 1 }) => {
                     *output.lock().unwrap() = v1.unwrap();
                 },
-                v2 = context.spawn(async { 2 }) => {
+                v2 = context.spawn("test", async { 2 }) => {
                     *output.lock().unwrap() = v2.unwrap();
                 },
             };
