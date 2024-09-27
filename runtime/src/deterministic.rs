@@ -239,12 +239,12 @@ impl Tasks {
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     cycle: Duration,
+    metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
-    metrics: Arc<Metrics>,
 }
 
 impl Executor {
@@ -265,6 +265,7 @@ impl Executor {
         let auditor = Arc::new(Auditor::new());
         let executor = Arc::new(Self {
             cycle,
+            metrics: metrics.clone(),
             auditor: auditor.clone(),
             rng: Mutex::new(StdRng::seed_from_u64(seed)),
             time: Mutex::new(UNIX_EPOCH),
@@ -273,15 +274,9 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
-            metrics: metrics.clone(),
         });
         {
             let mut registry = registry.lock().unwrap();
-            registry.register(
-                "bandwidth",
-                "Bandwidth usage by origin and destination",
-                metrics.bandwidth.clone(),
-            );
             registry.register(
                 "tasks_spawned",
                 "Total number of tasks spawned",
@@ -291,6 +286,11 @@ impl Executor {
                 "task_polls",
                 "Total number of task polls",
                 metrics.task_polls.clone(),
+            );
+            registry.register(
+                "bandwidth",
+                "Bandwidth usage by origin and destination",
+                metrics.bandwidth.clone(),
             );
         }
         (
