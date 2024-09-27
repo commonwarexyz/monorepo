@@ -67,7 +67,7 @@ impl<E: Clock> Manager<E> {
     }
 
     // TODO: call from result of finalize
-    pub fn start_epoch(&mut self, participants: Vec<PublicKey>) {
+    fn start_epoch(&mut self, participants: Vec<PublicKey>) {
         // TODO: create a Resharing arbiter to handle key management (wait for
         // commitments up to some view, acks to some view, etc)
     }
@@ -205,6 +205,7 @@ impl<E: Clock> Manager<E> {
             // TODO: fetch missing blocks from ancestry
 
             // TODO: call start view
+            // TODO: get validator set changes from payload
         }
 
         // Maybe next time
