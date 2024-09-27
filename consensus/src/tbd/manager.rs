@@ -55,6 +55,9 @@ pub struct Manager<E: Clock> {
 }
 
 impl<E: Clock> Manager<E> {
+    // TODO: allow the manager to be initialized at some view with some number
+    // of previous views
+    // TODO: backfill some number of views from peers when joining (historical sync)
     pub fn init(cfg: Config, runtime: E) -> Self {
         Self {
             cfg,
@@ -207,4 +210,10 @@ impl<E: Clock> Manager<E> {
         // Maybe next time
         None
     }
+
+    /// Jump ahead to a particular view when observing a notarization.
+    pub fn advance() {}
+
+    /// Jump ahead to a particular view when observing a finalization.
+    pub fn lock() {}
 }
