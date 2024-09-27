@@ -34,7 +34,8 @@ enum Event<I> {
 pub async fn run(
     runtime: impl Spawner,
     me: String,
-    registry: Arc<Mutex<Registry>>,
+    runtime_registry: Arc<Mutex<Registry>>,
+    p2p_registry: Arc<Mutex<Registry>>,
     logs: Arc<Mutex<Vec<String>>>,
     mut sender: impl Sender,
     mut receiver: impl Receiver,
@@ -105,7 +106,11 @@ pub async fn run(
                 // Display metrics
                 let mut buffer = String::new();
                 {
-                    let registry = registry.lock().unwrap();
+                    let registry = runtime_registry.lock().unwrap();
+                    encode(&mut buffer, &registry).unwrap();
+                }
+                {
+                    let registry = p2p_registry.lock().unwrap();
                     encode(&mut buffer, &registry).unwrap();
                 }
                 let metrics_text = Text::from(buffer);
