@@ -1,4 +1,4 @@
-use super::{config::Config, wire};
+use super::config::Config;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Signature};
 use commonware_runtime::Clock;
@@ -10,7 +10,7 @@ struct Info {
     leader_deadline: SystemTime,
     advance_deadline: SystemTime,
 
-    proposal: Option<wire::Proposal>,
+    proposal: Option<Bytes>,
     // other_proposals: HashMap<Bytes, wire::Proposal>, // Faults (TODO: this is an OOM if we aren't careful -> should just store info needed to post a complaint)
     proposal_votes: HashMap<PublicKey, Signature>,
     // other_votes: HashMap<PublicKey, Signature>, // Faults
@@ -51,6 +51,19 @@ impl<E: Clock> Manager<E> {
             Info {
                 leader_deadline,
                 advance_deadline,
+
+                proposal: None,
+                proposal_votes: HashMap::new(),
+                proposal_notarization: None,
+
+                null_votes: HashMap::new(),
+                null_notarization: None,
+
+                seeds: HashMap::new(),
+                beacon: None,
+
+                finalizes: HashMap::new(),
+                finalization: None,
             },
         );
     }
