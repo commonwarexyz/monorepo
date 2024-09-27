@@ -24,6 +24,7 @@
 //! });
 //! ```
 
+use crate::metrics::Metrics;
 use crate::{Clock, Error, Handle};
 use bytes::Bytes;
 use futures::{
@@ -107,18 +108,24 @@ impl Default for Config {
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
     cfg: Config,
+    metrics: Arc<Metrics>,
     runtime: Runtime,
 }
 
 impl Executor {
     /// Initialize a new `tokio` runtime with the given number of threads.
     pub fn init(cfg: Config) -> (Runner, Context) {
+        let metrics = Arc::new(Metrics::init(cfg.registry.clone()));
         let runtime = Builder::new_multi_thread()
             .worker_threads(cfg.threads)
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let executor = Arc::new(Self { cfg, runtime });
+        let executor = Arc::new(Self {
+            cfg,
+            metrics,
+            runtime,
+        });
         (
             Runner {
                 executor: executor.clone(),
@@ -158,6 +165,7 @@ impl crate::Spawner for Context {
     {
         let (f, handle) = Handle::init(f, self.executor.cfg.catch_panics);
         self.executor.runtime.spawn(f);
+        self.executor.metrics.record_task_spawned();
         handle
     }
 }
@@ -205,6 +213,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
             .await
             .map_err(|_| Error::BindFailed)
             .map(|listener| Listener {
+                address: socket,
                 context: self.clone(),
                 listener,
             })
@@ -224,20 +233,29 @@ impl crate::Network<Listener, Sink, Stream> for Context {
         }
 
         // Create a new framed stream
+        let me = stream.local_addr().map_err(|_| Error::ConnectionFailed)?;
         let context = self.clone();
         let framed = Framed::new(stream, codec(self.executor.cfg.max_message_size));
         let (sink, stream) = framed.split();
         Ok((
             Sink {
+                me,
+                peer: socket,
                 context: context.clone(),
                 sink,
             },
-            Stream { context, stream },
+            Stream {
+                me,
+                peer: socket,
+                context,
+                stream,
+            },
         ))
     }
 }
 
 pub struct Listener {
+    address: SocketAddr,
     context: Context,
     listener: TcpListener,
 }
@@ -259,29 +277,46 @@ impl crate::Listener<Sink, Stream> for Listener {
         Ok((
             addr,
             Sink {
+                me: self.address,
+                peer: addr,
                 context: context.clone(),
                 sink,
             },
-            Stream { context, stream },
+            Stream {
+                me: self.address,
+                peer: addr,
+                context,
+                stream,
+            },
         ))
     }
 }
 
 pub struct Sink {
+    me: SocketAddr,
+    peer: SocketAddr,
     context: Context,
     sink: SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>,
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
+        let len = msg.len();
         timeout(self.context.executor.cfg.write_timeout, self.sink.send(msg))
             .await
             .map_err(|_| Error::WriteFailed)?
-            .map_err(|_| Error::WriteFailed)
+            .map_err(|_| Error::WriteFailed)?;
+        self.context
+            .executor
+            .metrics
+            .record_bandwidth(self.me, self.peer, len);
+        Ok(())
     }
 }
 
 pub struct Stream {
+    me: SocketAddr,
+    peer: SocketAddr,
     context: Context,
     stream: SplitStream<Framed<TcpStream, LengthDelimitedCodec>>,
 }
@@ -293,6 +328,10 @@ impl crate::Stream for Stream {
             .map_err(|_| Error::ReadFailed)?
             .ok_or(Error::Closed)?
             .map_err(|_| Error::ReadFailed)?;
+        self.context
+            .executor
+            .metrics
+            .record_bandwidth(self.peer, self.me, result.len());
         Ok(result.freeze())
     }
 }

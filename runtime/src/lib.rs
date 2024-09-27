@@ -15,10 +15,11 @@ pub mod deterministic;
 pub mod mocks;
 pub mod tokio;
 
+mod metrics;
 mod utils;
-use bytes::Bytes;
 pub use utils::{reschedule, Handle};
 
+use bytes::Bytes;
 use std::{
     future::Future,
     net::SocketAddr,
