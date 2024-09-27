@@ -443,6 +443,7 @@ dependencies = [
  "bytes",
  "futures",
  "governor",
+ "prometheus-client",
  "rand",
  "sha2 0.10.8",
  "thiserror",

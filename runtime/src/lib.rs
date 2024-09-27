@@ -146,8 +146,9 @@ mod tests {
     use crate::tokio::Config;
     use core::panic;
     use futures::{channel::mpsc, SinkExt, StreamExt};
+    use prometheus_client::registry::Registry;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use utils::reschedule;
 
     fn test_error_future(runner: impl Runner) {
@@ -288,57 +289,57 @@ mod tests {
 
     #[test]
     fn test_deterministic_future() {
-        let (runner, _, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        let (runner, _, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         test_error_future(runner);
     }
 
     #[test]
     fn test_deterministic_clock_sleep() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         assert_eq!(runtime.current(), SystemTime::UNIX_EPOCH);
         test_clock_sleep(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_clock_sleep_until() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         test_clock_sleep_until(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_root_finishes() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         test_root_finishes(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_spawn_abort() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         test_spawn_abort(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_panic_aborts_root() {
-        let (runner, _, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        let (runner, _, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         test_panic_aborts_root(runner);
     }
 
     #[test]
     #[should_panic(expected = "blah")]
     fn test_deterministic_panic_aborts_spawn() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         test_panic_aborts_spawn(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_select() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         test_select(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_select_loop() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1));
+        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         test_select_loop(executor, runtime);
     }
 

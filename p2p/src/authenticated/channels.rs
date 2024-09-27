@@ -9,7 +9,7 @@ use zstd::bulk::{compress, decompress};
 
 /// Sender is the mechanism used to send arbitrary bytes to
 /// a set of recipients over a pre-defined channel.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Sender {
     channel: u32,
     max_size: usize,
