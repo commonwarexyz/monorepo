@@ -31,6 +31,13 @@ enum Event<I> {
     Tick,
 }
 
+enum Focus {
+    Input,
+    Logs,
+    Metrics,
+    Messages,
+}
+
 pub async fn run(
     runtime: impl Spawner,
     me: String,
@@ -77,6 +84,10 @@ pub async fn run(
     let mut messages = Vec::new();
     let mut input = String::new();
     let mut cursor_visible = true;
+    let mut logs_scroll: u16 = 0;
+    let mut metrics_scroll: u16 = 0;
+    let mut messages_scroll: u16 = 0;
+    let mut focused_window = Focus::Input;
 
     // Print messages received from peers
     loop {
@@ -100,7 +111,16 @@ pub async fn run(
                 let messages_text = Text::from(messages.clone());
                 let messages_block = Paragraph::new(messages_text)
                     .style(Style::default().fg(Color::Cyan))
-                    .block(Block::default().borders(Borders::ALL).title("Messages"));
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Messages")
+                            .border_style(match focused_window {
+                                Focus::Messages => Style::default().fg(Color::Red),
+                                _ => Style::default(),
+                            }),
+                    )
+                    .scroll((messages_scroll, 0));
                 f.render_widget(messages_block, messages_chunks[0]);
 
                 // Display metrics
@@ -115,7 +135,17 @@ pub async fn run(
                 }
                 let metrics_text = Text::from(buffer);
                 let metrics_block = Paragraph::new(metrics_text)
-                    .block(Block::default().borders(Borders::ALL).title("Metrics"));
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Metrics")
+                            .border_style(match focused_window {
+                                Focus::Metrics => Style::default().fg(Color::Red),
+                                _ => Style::default(),
+                            }),
+                    )
+                    .scroll((metrics_scroll, 0));
+
                 f.render_widget(metrics_block, horizontal_chunks[1]);
 
                 // Display input
@@ -131,7 +161,11 @@ pub async fn run(
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title("Input (ESC to quit | ENTER to send)"),
+                            .title("Input (TAB to switch panes | ESC to quit | ENTER to send)")
+                            .border_style(match focused_window {
+                                Focus::Input => Style::default().fg(Color::Red),
+                                _ => Style::default(),
+                            }),
                     );
                 f.render_widget(input_block, messages_chunks[1]);
 
@@ -143,7 +177,16 @@ pub async fn run(
                         .collect::<Vec<Line>>(),
                 );
                 let logs_block = Paragraph::new(logs_text)
-                    .block(Block::default().borders(Borders::ALL).title("Logs"));
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Logs")
+                            .border_style(match focused_window {
+                                Focus::Logs => Style::default().fg(Color::Red),
+                                _ => Style::default(),
+                            }),
+                    )
+                    .scroll((logs_scroll, 0));
                 f.render_widget(logs_block, chunks[1]);
             })
             .unwrap();
@@ -163,6 +206,30 @@ pub async fn run(
                         }
                         KeyCode::Backspace => {
                             input.pop();
+                        }
+                        KeyCode::Tab => {
+                            focused_window = match focused_window {
+                                Focus::Input => Focus::Logs,
+                                Focus::Logs => Focus::Metrics,
+                                Focus::Metrics => Focus::Messages,
+                                Focus::Messages => Focus::Input,
+                            };
+                        }
+                        KeyCode::Up => {
+                            match focused_window {
+                                Focus::Logs => logs_scroll = logs_scroll.saturating_sub(1),
+                                Focus::Metrics => metrics_scroll = metrics_scroll.saturating_sub(1),
+                                Focus::Messages => messages_scroll = messages_scroll.saturating_sub(1),
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Down => {
+                            match focused_window {
+                                Focus::Logs => logs_scroll = logs_scroll.saturating_add(1),
+                                Focus::Metrics => metrics_scroll = metrics_scroll.saturating_add(1),
+                                Focus::Messages => messages_scroll = messages_scroll.saturating_add(1),
+                                _ => {}
+                            }
                         }
                         KeyCode::Enter => {
                             if input.is_empty() {
