@@ -15,7 +15,7 @@
 //! let (executor, runtime) = Executor::init(cfg);
 //! executor.start(async move {
 //!     println!("Parent started");
-//!     let result = runtime.spawn(async move {
+//!     let result = runtime.spawn("child", async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });

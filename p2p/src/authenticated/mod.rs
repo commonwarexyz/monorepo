@@ -219,7 +219,7 @@
 //!     );
 //!
 //!     // Run network
-//!     let network_handler = runtime.spawn(network.run());
+//!     let network_handler = runtime.spawn("network", network.run());
 //!
 //!     // ... Use sender and receiver ...
 //!
