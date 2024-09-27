@@ -63,7 +63,10 @@ impl<E: Clock> Manager<E> {
         }
     }
 
-    pub fn start_epoch(&mut self, participants: Vec<PublicKey>) {}
+    pub fn start_epoch(&mut self, participants: Vec<PublicKey>) {
+        // TODO: create a Resharing arbiter to handle key management (wait for
+        // commitments up to some view, acks to some view, etc)
+    }
 
     pub fn start_view(&mut self, epoch: u64, view: u64) {
         let now = self.runtime.current();

@@ -21,7 +21,8 @@ message Proposal {
     bytes parent = 5;
     bytes payload = 6;
     Signature signature = 7;
-    // TODO: add partial signatures
+    // TODO: add partial signatures over parent
+    // TODO: add DKG/Resharing fields (Commitments/Acks/Reveals)
 }
 
 message Vote {
