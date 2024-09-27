@@ -166,7 +166,7 @@
 //!
 //! // Configure runtime
 //! let runtime_cfg = tokio::Config::default();
-//! let (executor, runtime) = Executor::init(runtime_cfg);
+//! let (executor, runtime) = Executor::init(runtime_cfg.clone());
 //!
 //! // Generate identity
 //! //
