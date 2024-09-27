@@ -51,8 +51,17 @@ impl Info {
 pub struct Manager<E: Clock> {
     cfg: Config,
     runtime: E,
+
     rounds: HashMap<View, Info>,
+
+    notarized: HashMap<u64, Bytes>, // notarized blocks
+    finalized: HashMap<u64, Bytes>, // finalized blocks
 }
+
+// Min sync state:
+// - last notarized block
+// - finalization from 2 epochs ago (contains all validators active in next epoch)
+// - notarized blocks from last epoch (all new diffs to validator sets coming)
 
 impl<E: Clock> Manager<E> {
     // TODO: allow the manager to be initialized at some view with some number
