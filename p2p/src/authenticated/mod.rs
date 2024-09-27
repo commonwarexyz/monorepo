@@ -459,7 +459,7 @@ mod tests {
 
         // Run first instance
         let (executor, runtime, auditor) =
-            deterministic::Executor::init(seed, Duration::from_millis(1));
+            deterministic::Executor::init(seed, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
         executor.start(async move {
             run_network(runtime, max_message_size, base_port, n, mode).await;
         });
@@ -467,7 +467,7 @@ mod tests {
 
         // Compare result to second instance
         let (executor, runtime, auditor) =
-            deterministic::Executor::init(seed, Duration::from_millis(1));
+            deterministic::Executor::init(seed, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
         executor.start(async move {
             run_network(runtime, max_message_size, base_port, n, mode).await;
         });
@@ -511,7 +511,7 @@ mod tests {
         let n: usize = 100;
 
         // Initialize runtime
-        let (executor, runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -614,7 +614,7 @@ mod tests {
         let n: usize = 2;
 
         // Initialize runtime
-        let (executor, mut runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1));
+        let (executor, mut runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -735,7 +735,7 @@ mod tests {
         let n: usize = 2;
 
         // Initialize runtime
-        let (executor, mut runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1));
+        let (executor, mut runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();

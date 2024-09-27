@@ -252,7 +252,7 @@ impl Executor {
     ///
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
-    pub fn init(seed: u64, cycle: Duration) -> (Runner, Context, Arc<Auditor>) {
+    pub fn init(seed: u64, cycle: Duration, registry: Arc<Mutex<Registry>>) -> (Runner, Context, Arc<Auditor>) {
         let metrics = Arc::new(Metrics {
             bandwidth_usage: Family::default(),
             tasks_spawned: Counter::default(),
@@ -260,7 +260,6 @@ impl Executor {
         });
 
         let auditor = Arc::new(Auditor::new());
-        let registry = Arc::new(Mutex::new(Registry::default()));
         let executor = Arc::new(Self {
             cycle,
             auditor: auditor.clone(),
@@ -775,7 +774,7 @@ mod tests {
 
     #[test]
     fn test_bandwidth_metrics() {
-        let (runner, _, _) = Executor::init(42, Duration::from_millis(1));
+        let (runner, _, _) = Executor::init(42, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         let metrics = runner.executor.metrics.clone();
 
         let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
@@ -805,7 +804,7 @@ mod tests {
 
     #[test]
     fn test_task_metrics() {
-        let (runner, _, _) = Executor::init(42, Duration::from_millis(1));
+        let (runner, _, _) = Executor::init(42, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         let metrics = runner.executor.metrics.clone();
 
         for _ in 0..5 {
@@ -821,7 +820,7 @@ mod tests {
     }
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
-        let (executor, runtime, auditor) = Executor::init(seed, Duration::from_millis(1));
+        let (executor, runtime, auditor) = Executor::init(seed, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
         let messages = run_tasks(5, executor, runtime);
         (auditor.state(), messages)
     }
