@@ -3,6 +3,8 @@
 //! Produces threshold signatures over each notarization/finalization. Produces
 //! a separate threshold signature for producer selection.
 
+pub mod config;
+pub mod manager;
 pub mod reactor;
 
 mod wire {
