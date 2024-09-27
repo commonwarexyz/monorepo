@@ -56,8 +56,14 @@ pub struct Manager<E: Clock> {
 
 impl<E: Clock> Manager<E> {
     // TODO: allow the manager to be initialized at some view with some number
-    // of previous views
+    // of previous oviews
+    //
     // TODO: backfill some number of views from peers when joining (historical sync)
+    // at a minimum just need this epoch and last to determine validator set changes? we shouldn't
+    // burden consensus with historical sync and should allow all historical data to be gathered externally
+    // we just need some way to collect outstanding validators at end of an epoch? maybe
+    // we could just attach them to the epoch finalization message for easy syncing (then we don't
+    // need to worry about state at all in consensus)
     pub fn init(cfg: Config, runtime: E) -> Self {
         Self {
             cfg,
