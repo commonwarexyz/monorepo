@@ -7,12 +7,12 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_runtime::{Spawner, Runner, deterministic::{Executor, Config}};
 //! use prometheus_client::{registry::Registry, metrics::{counter::Counter, family::Family, gauge::Gauge}};
 //! use std::{sync::{Mutex, Arc}, time::Duration};
 //!
-//! let registry = Arc::new(Mutex::new(Registry::with_prefix("runtime")));
-//! let (executor, runtime, auditor) = Executor::init(42, Duration::from_millis(1), registry);
+//! let cfg = Config::default();
+//! let (executor, runtime, auditor) = Executor::init(cfg);
 //! executor.start(async move {
 //!     println!("Parent started");
 //!     let result = runtime.spawn(async move {
@@ -236,6 +236,30 @@ impl Tasks {
     }
 }
 
+/// Configuration for the `deterministic` runtime.
+#[derive(Clone)]
+pub struct Config {
+    /// Registry for metrics.
+    pub registry: Arc<Mutex<Registry>>,
+
+    /// Seed for the random number generator.
+    pub seed: u64,
+
+    /// The cycle duration determines how much time is advanced after each iteration of the event
+    /// loop. This is useful to prevent starvation if some task never yields.
+    pub cycle: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            registry: Arc::new(Mutex::new(Registry::default())),
+            seed: 42,
+            cycle: Duration::from_millis(1),
+        }
+    }
+}
+
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     cycle: Duration,
@@ -249,14 +273,7 @@ pub struct Executor {
 
 impl Executor {
     /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
-    ///
-    /// The cycle duration determines how much time is advanced after each iteration of the event
-    /// loop. This is useful to prevent starvation if some task never yields.
-    pub fn init(
-        seed: u64,
-        cycle: Duration,
-        registry: Arc<Mutex<Registry>>,
-    ) -> (Runner, Context, Arc<Auditor>) {
+    pub fn init(cfg: Config) -> (Runner, Context, Arc<Auditor>) {
         let metrics = Arc::new(Metrics {
             tasks_spawned: Counter::default(),
             task_polls: Counter::default(),
@@ -264,10 +281,10 @@ impl Executor {
         });
         let auditor = Arc::new(Auditor::new());
         let executor = Arc::new(Self {
-            cycle,
+            cycle: cfg.cycle,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
-            rng: Mutex::new(StdRng::seed_from_u64(seed)),
+            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
             time: Mutex::new(UNIX_EPOCH),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
@@ -276,7 +293,7 @@ impl Executor {
             sleeping: Mutex::new(BinaryHeap::new()),
         });
         {
-            let mut registry = registry.lock().unwrap();
+            let mut registry = cfg.registry.lock().unwrap();
             registry.register(
                 "tasks_spawned",
                 "Total number of tasks spawned",
@@ -777,11 +794,8 @@ mod tests {
 
     #[test]
     fn test_bandwidth_metrics() {
-        let (runner, _, _) = Executor::init(
-            42,
-            Duration::from_millis(1),
-            Arc::new(Mutex::new(Registry::default())),
-        );
+        let cfg = Config::default();
+        let (runner, _, _) = Executor::init(cfg);
         let metrics = runner.executor.metrics.clone();
 
         // Send some data
@@ -816,11 +830,8 @@ mod tests {
 
     #[test]
     fn test_task_metrics() {
-        let (runner, _, _) = Executor::init(
-            42,
-            Duration::from_millis(1),
-            Arc::new(Mutex::new(Registry::default())),
-        );
+        let cfg = Config::default();
+        let (runner, _, _) = Executor::init(cfg);
         let metrics = runner.executor.metrics.clone();
 
         for _ in 0..5 {
@@ -836,11 +847,11 @@ mod tests {
     }
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
-        let (executor, runtime, auditor) = Executor::init(
+        let cfg = Config {
             seed,
-            Duration::from_millis(1),
-            Arc::new(Mutex::new(Registry::default())),
-        );
+            ..Default::default()
+        };
+        let (executor, runtime, auditor) = Executor::init(cfg);
         let messages = run_tasks(5, executor, runtime);
         (auditor.state(), messages)
     }

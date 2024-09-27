@@ -31,11 +31,12 @@ use futures::{
     SinkExt, StreamExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
+use prometheus_client::registry::Registry;
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     future::Future,
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 use tokio::{
@@ -46,8 +47,12 @@ use tokio::{
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::warn;
 
-#[derive(Copy, Clone)]
+/// Configuration for the `tokio` runtime.
+#[derive(Clone)]
 pub struct Config {
+    /// Registry for metrics.
+    pub registry: Arc<Mutex<Registry>>,
+
     /// Number of threads to use for the runtime.
     pub threads: usize,
 
@@ -88,6 +93,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            registry: Arc::new(Mutex::new(Registry::default())),
             threads: 2,
             catch_panics: true,
             max_message_size: 1024 * 1024, // 1 MB
