@@ -63,7 +63,9 @@ impl<E: Clock> Manager<E> {
         }
     }
 
-    pub fn start(&mut self, epoch: u64, view: u64) {
+    pub fn start_epoch(&mut self, participants: Vec<PublicKey>) {}
+
+    pub fn start_view(&mut self, epoch: u64, view: u64) {
         let now = self.runtime.current();
         let leader_deadline = now + self.cfg.leader_timeout;
         let advance_deadline = now + self.cfg.advance_timeout;
@@ -79,7 +81,7 @@ impl<E: Clock> Manager<E> {
         block: Bytes, // hash
         public_key: PublicKey,
         signature: Signature,
-    ) {
+    ) -> Option<Bytes> {
         // Get view info
         let view = (epoch, view);
         let info = match self.rounds.get_mut(&view) {
@@ -92,7 +94,7 @@ impl<E: Clock> Manager<E> {
                 //
                 // TODO: consider being a bit more flexible here and allow
                 // vote collection for next view.
-                return;
+                return None;
             }
         };
 
@@ -101,7 +103,7 @@ impl<E: Clock> Manager<E> {
             Some(proposal) => proposal,
             None => {
                 // If we have yet to receive a proposal, ignore the vote.
-                return;
+                return None;
             }
         };
 
@@ -114,6 +116,17 @@ impl<E: Clock> Manager<E> {
             // This vote is for a different proposal than what we have,
             // this means either the proposer sent conflicting blocks
             // or the voter is malicious.
+            return None;
+        }
+
+        // If we already have a notarization, we are done.
+        if info.proposal_notarization.is_some() || info.null_notarization.is_some() {
+            return None;
+        }
+
+        // If we have threshold votes, generate notarization and return.
+        if info.proposal_votes.len() >= self.cfg.threshold {
+        } else if info.null_votes.len() >= self.cfg.threshold {
         }
     }
 }

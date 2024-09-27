@@ -111,6 +111,7 @@ impl<C: Scheme, E: Clock, S: Sender, R: Receiver> Actor<C, E, S, R> {
 
     pub async fn run(mut self) {}
 
+    // TODO: every x seconds stuck in timeout, resend null vote
     async fn run_view(&mut self, group: &poly::Public, seed: Bytes) -> Result<(u64, u64), Error> {
         // Configure round
         let now = self.runtime.current();
