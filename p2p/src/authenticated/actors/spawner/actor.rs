@@ -101,7 +101,7 @@ impl<
                         .inc();
 
                     // Spawn peer
-                    self.runtime.spawn({
+                    self.runtime.spawn("peer", {
                         let runtime = self.runtime.clone();
                         async move {
                             // Create peer

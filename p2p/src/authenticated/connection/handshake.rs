@@ -277,7 +277,7 @@ mod tests {
             let (stream, mut stream_sender) = MockStream::new();
 
             // Send message over stream
-            runtime.spawn(async move {
+            runtime.spawn("stream_sender", async move {
                 stream_sender.send(handshake_bytes).await.unwrap();
             });
 
@@ -324,7 +324,7 @@ mod tests {
             let (stream, mut stream_sender) = MockStream::new();
 
             // Send message over stream
-            runtime.spawn(async move {
+            runtime.spawn("stream_sender", async move {
                 stream_sender.send(handshake_bytes).await.unwrap();
             });
 
@@ -356,7 +356,7 @@ mod tests {
             let (stream, mut stream_sender) = MockStream::new();
 
             // Send invalid data over stream
-            runtime.spawn(async move {
+            runtime.spawn("stream_sender", async move {
                 stream_sender.send(Bytes::from("mock data")).await.unwrap();
             });
 
@@ -393,7 +393,7 @@ mod tests {
             let (stream, mut stream_sender) = MockStream::new();
 
             // Accept connections but do nothing
-            runtime.spawn({
+            runtime.spawn("stream_sender", {
                 let runtime = runtime.clone();
                 let recipient = recipient.clone();
                 async move {

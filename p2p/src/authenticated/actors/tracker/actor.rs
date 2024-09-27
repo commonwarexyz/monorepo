@@ -679,7 +679,7 @@ mod tests {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
             // Run actor in background
-            runtime.spawn(async move {
+            runtime.spawn("actor", async move {
                 actor.run().await;
             });
 
@@ -726,7 +726,7 @@ mod tests {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
             // Run actor in background
-            runtime.spawn(async move {
+            runtime.spawn("actor", async move {
                 actor.run().await;
             });
 

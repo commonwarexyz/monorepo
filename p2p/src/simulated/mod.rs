@@ -55,7 +55,7 @@ mod tests {
                 let (sender, mut receiver) = network.register(pk.clone());
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
-                runtime.spawn(async move {
+                runtime.spawn("agent_receiver", async move {
                     for _ in 0..size {
                         receiver.recv().await.unwrap();
                     }
@@ -91,7 +91,7 @@ mod tests {
             }
 
             // Send messages
-            runtime.spawn({
+            runtime.spawn("agent_sender", {
                 let mut runtime = runtime.clone();
                 async move {
                     // Sort agents for deterministic output
@@ -118,7 +118,7 @@ mod tests {
             });
 
             // Start network
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Wait for all recipients
             let mut results = Vec::new();
@@ -170,7 +170,7 @@ mod tests {
             }
 
             // Start network
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Send invalid message
             let keys = agents.keys().collect::<Vec<_>>();
@@ -301,7 +301,7 @@ mod tests {
                 .unwrap();
 
             // Start network
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Send messages
             let msg1 = Bytes::from("hello from pk1");

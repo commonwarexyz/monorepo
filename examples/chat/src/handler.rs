@@ -49,7 +49,7 @@ pub async fn run(
 
     // Listen for input
     let (mut tx, mut rx) = mpsc::channel(100);
-    runtime.spawn(async move {
+    runtime.spawn("inputter", async move {
         loop {
             match event::poll(Duration::from_millis(500)) {
                 Ok(true) => {}

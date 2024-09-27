@@ -177,7 +177,7 @@ fn main() {
         );
 
         // Start network
-        let network_handler = runtime.spawn(network.run());
+        let network_handler = runtime.spawn("network", network.run());
 
         // Start chat
         handler::run(

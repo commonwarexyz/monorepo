@@ -55,7 +55,7 @@ use tracing::trace;
 
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
-const ROOT_TASK = "root";
+const ROOT_TASK: &str = "root";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {

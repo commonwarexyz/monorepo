@@ -267,7 +267,10 @@ fn main() {
                 lazy,
                 defiant,
             );
-            runtime.spawn(contributor.run(contributor_sender, contributor_receiver));
+            runtime.spawn(
+                "contributor",
+                contributor.run(contributor_sender, contributor_receiver),
+            );
 
             // Create vrf
             let (vrf_sender, vrf_receiver) = network.register(
@@ -284,7 +287,7 @@ fn main() {
                 contributors,
                 requests,
             );
-            runtime.spawn(signer.run(vrf_sender, vrf_receiver));
+            runtime.spawn("signer", signer.run(vrf_sender, vrf_receiver));
         } else {
             let (arbiter_sender, arbiter_receiver) = network.register(
                 handlers::DKG_CHANNEL,
@@ -300,7 +303,10 @@ fn main() {
                 contributors,
                 threshold,
             );
-            runtime.spawn(arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver));
+            runtime.spawn(
+                "arbiter",
+                arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver),
+            );
         }
         network.run().await;
     });

@@ -343,15 +343,15 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Send/Recieve messages
-            let handler = runtime.spawn({
+            let handler = runtime.spawn("agent", {
                 let addresses = addresses.clone();
                 let runtime = runtime.clone();
                 async move {
                     // Wait for all peers to send their identity
-                    let acker = runtime.spawn(async move {
+                    let acker = runtime.spawn("agent_receiver", async move {
                         let mut received = HashSet::new();
                         while received.len() < n - 1 {
                             // Ensure message equals sender identity
@@ -573,10 +573,10 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                runtime.spawn(network.run());
+                runtime.spawn("network", network.run());
 
                 // Send/Recieve messages
-                let handler = runtime.spawn({
+                let handler = runtime.spawn("agent", {
                     let runtime = runtime.clone();
                     async move {
                         if i == 0 {
@@ -675,13 +675,13 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                runtime.spawn(network.run());
+                runtime.spawn("network", network.run());
 
                 // Send/Recieve messages
                 let msg = Bytes::from(msg.clone());
                 let msg_sender = addresses[0].clone();
                 let msg_recipient = addresses[1].clone();
-                let peer_handler = runtime.spawn({
+                let peer_handler = runtime.spawn("agent", {
                     let runtime = runtime.clone();
                     async move {
                         if i == 0 {
@@ -778,7 +778,7 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Crate random message
             let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)

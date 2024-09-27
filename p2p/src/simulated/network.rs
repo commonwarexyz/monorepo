@@ -182,7 +182,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 );
 
                 // Send message
-                self.runtime.spawn({
+                self.runtime.spawn("messenger", {
                     let runtime = self.runtime.clone();
                     let mut sender = sender.clone();
                     let recipient = recipient.clone();
@@ -225,7 +225,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             }
 
             // Notify sender of successful sends
-            self.runtime.spawn(async move {
+            self.runtime.spawn("notifier", async move {
                 // Wait for semaphore to be acquired on all sends
                 for _ in 0..sent.len() {
                     acquired_receiver.next().await.unwrap();
@@ -254,7 +254,7 @@ impl Sender {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
-        runtime.spawn(async move {
+        runtime.spawn("sender", async move {
             loop {
                 select! {
                     high_task = high_receiver.next() => {
