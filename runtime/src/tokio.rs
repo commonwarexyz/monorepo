@@ -32,7 +32,7 @@ use futures::{
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    metrics::{counter::Counter, family::Family},
+    metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::Registry,
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
@@ -53,28 +53,16 @@ use tracing::warn;
 #[derive(Debug)]
 struct Metrics {
     tasks_spawned: Counter,
+    tasks_running: Gauge,
     bandwidth: Family<Link, Counter>,
-}
-
-impl Metrics {
-    pub fn record_task_spawned(&self) {
-        self.tasks_spawned.inc();
-    }
-
-    pub fn record_bandwidth(&self, origin: SocketAddr, destination: SocketAddr, bytes: usize) {
-        let link = Link {
-            origin: origin.to_string(),
-            destination: destination.to_string(),
-        };
-        self.bandwidth.get_or_create(&link).inc_by(bytes as u64);
-    }
 }
 
 impl Metrics {
     pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
         let metrics = Self {
-            bandwidth: Family::default(),
             tasks_spawned: Counter::default(),
+            tasks_running: Gauge::default(),
+            bandwidth: Family::default(),
         };
         {
             let mut registry = registry.lock().unwrap();
@@ -82,6 +70,11 @@ impl Metrics {
                 "tasks_spawned",
                 "Total number of tasks spawned",
                 metrics.tasks_spawned.clone(),
+            );
+            registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                metrics.tasks_running.clone(),
             );
             registry.register(
                 "bandwidth",
@@ -208,9 +201,13 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (f, handle) = Handle::init(f, self.executor.cfg.catch_panics);
+        let (f, handle) = Handle::init(
+            f,
+            self.executor.metrics.tasks_running.clone(),
+            self.executor.cfg.catch_panics,
+        );
         self.executor.runtime.spawn(f);
-        self.executor.metrics.record_task_spawned();
+        self.executor.metrics.tasks_spawned.inc();
         handle
     }
 }
@@ -354,7 +351,12 @@ impl crate::Sink for Sink {
         self.context
             .executor
             .metrics
-            .record_bandwidth(self.me, self.peer, len);
+            .bandwidth
+            .get_or_create(&Link {
+                origin: self.me.to_string(),
+                destination: self.peer.to_string(),
+            })
+            .inc_by(len as u64);
         Ok(())
     }
 }
@@ -376,7 +378,12 @@ impl crate::Stream for Stream {
         self.context
             .executor
             .metrics
-            .record_bandwidth(self.peer, self.me, result.len());
+            .bandwidth
+            .get_or_create(&Link {
+                origin: self.peer.to_string(),
+                destination: self.me.to_string(),
+            })
+            .inc_by(result.len() as u64);
         Ok(result.freeze())
     }
 }
@@ -407,7 +414,6 @@ mod tests {
     use crate::utils::run_tasks;
     use crate::Runner;
     use std::io::Cursor;
-    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn test_runs_tasks() {
@@ -460,52 +466,5 @@ mod tests {
             // Ensure that encoding fails due to exceeding max_frame_len
             assert!(result.is_ok());
         });
-    }
-
-    #[test]
-    fn test_bandwidth_metrics() {
-        let registry = Arc::new(Mutex::new(Registry::default()));
-        let metrics = Metrics::init(registry.clone());
-
-        // Send some data
-        let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
-        let socket2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);
-        metrics.record_bandwidth(socket1, socket2, 100);
-        metrics.record_bandwidth(socket2, socket1, 200);
-        metrics.record_bandwidth(socket2, socket1, 150);
-
-        // Verify tracking
-        assert_eq!(
-            metrics
-                .bandwidth
-                .get_or_create(&Link {
-                    origin: socket1.to_string(),
-                    destination: socket2.to_string(),
-                })
-                .get(),
-            100
-        );
-        assert_eq!(
-            metrics
-                .bandwidth
-                .get_or_create(&Link {
-                    origin: socket2.to_string(),
-                    destination: socket1.to_string(),
-                })
-                .get(),
-            350
-        );
-    }
-
-    #[test]
-    fn test_task_metrics() {
-        let registry = Arc::new(Mutex::new(Registry::default()));
-        let metrics = Metrics::init(registry.clone());
-
-        for _ in 0..5 {
-            metrics.record_task_spawned();
-        }
-
-        assert_eq!(metrics.tasks_spawned.get(), 5);
     }
 }

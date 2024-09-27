@@ -34,7 +34,7 @@ use futures::{
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
-    metrics::{counter::Counter, family::Family},
+    metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::Registry,
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
@@ -58,34 +58,18 @@ const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 #[derive(Debug)]
 struct Metrics {
     tasks_spawned: Counter,
+    tasks_running: Gauge,
     task_polls: Counter,
     bandwidth: Family<Link, Counter>,
 }
 
 impl Metrics {
-    pub fn record_task_spawned(&self) {
-        self.tasks_spawned.inc();
-    }
-
-    pub fn record_task_poll(&self) {
-        self.task_polls.inc();
-    }
-
-    pub fn record_bandwidth(&self, origin: SocketAddr, destination: SocketAddr, bytes: usize) {
-        let link = Link {
-            origin: origin.to_string(),
-            destination: destination.to_string(),
-        };
-        self.bandwidth.get_or_create(&link).inc_by(bytes as u64);
-    }
-}
-
-impl Metrics {
     pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
         let metrics = Self {
-            bandwidth: Family::default(),
             task_polls: Counter::default(),
+            tasks_running: Gauge::default(),
             tasks_spawned: Counter::default(),
+            bandwidth: Family::default(),
         };
         {
             let mut registry = registry.lock().unwrap();
@@ -93,6 +77,11 @@ impl Metrics {
                 "tasks_spawned",
                 "Total number of tasks spawned",
                 metrics.tasks_spawned.clone(),
+            );
+            registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                metrics.tasks_running.clone(),
             );
             registry.register(
                 "task_polls",
@@ -381,7 +370,7 @@ impl crate::Runner for Runner {
                 let mut future = task.future.lock().unwrap();
 
                 // Record task poll
-                self.executor.metrics.record_task_poll();
+                self.executor.metrics.task_polls.inc();
 
                 // Task is re-queued in its `wake_by_ref` implementation as soon as we poll here (regardless
                 // of whether it is Pending/Ready).
@@ -486,9 +475,9 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (f, handle) = Handle::init(f, false);
+        let (f, handle) = Handle::init(f, self.executor.metrics.tasks_running.clone(), false);
         Tasks::register(&self.executor.tasks, false, Box::pin(f));
-        self.executor.metrics.record_task_spawned();
+        self.executor.metrics.tasks_spawned.inc();
         handle
     }
 }
@@ -738,9 +727,20 @@ pub struct Sink {
 
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
+        let len = msg.len();
         self.auditor.send(self.me, self.peer, msg.clone());
-        self.metrics.record_bandwidth(self.me, self.peer, msg.len());
-        self.sender.send(msg).await.map_err(|_| Error::WriteFailed)
+        self.sender
+            .send(msg)
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+        self.metrics
+            .bandwidth
+            .get_or_create(&Link {
+                origin: self.me.to_string(),
+                destination: self.peer.to_string(),
+            })
+            .inc_by(len as u64);
+        Ok(())
     }
 }
 
@@ -756,7 +756,13 @@ impl crate::Stream for Stream {
     async fn recv(&mut self) -> Result<Bytes, Error> {
         let msg = self.receiver.next().await.ok_or(Error::ReadFailed)?;
         self.auditor.recv(self.me, self.peer, msg.clone());
-        self.metrics.record_bandwidth(self.peer, self.me, msg.len());
+        self.metrics
+            .bandwidth
+            .get_or_create(&Link {
+                origin: self.peer.to_string(),
+                destination: self.me.to_string(),
+            })
+            .inc_by(msg.len() as u64);
         Ok(msg)
     }
 }
@@ -865,57 +871,5 @@ mod tests {
                 now + Duration::new(15, 0),
             ]
         );
-    }
-
-    #[test]
-    fn test_bandwidth_metrics() {
-        let registry = Arc::new(Mutex::new(Registry::default()));
-        let metrics = Metrics::init(registry.clone());
-
-        // Send some data
-        let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
-        let socket2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);
-        metrics.record_bandwidth(socket1, socket2, 100);
-        metrics.record_bandwidth(socket2, socket1, 200);
-        metrics.record_bandwidth(socket2, socket1, 150);
-
-        // Verify tracking
-        assert_eq!(
-            metrics
-                .bandwidth
-                .get_or_create(&Link {
-                    origin: socket1.to_string(),
-                    destination: socket2.to_string(),
-                })
-                .get(),
-            100
-        );
-        assert_eq!(
-            metrics
-                .bandwidth
-                .get_or_create(&Link {
-                    origin: socket2.to_string(),
-                    destination: socket1.to_string(),
-                })
-                .get(),
-            350
-        );
-    }
-
-    #[test]
-    fn test_task_metrics() {
-        let registry = Arc::new(Mutex::new(Registry::default()));
-        let metrics = Metrics::init(registry.clone());
-
-        for _ in 0..5 {
-            metrics.record_task_spawned();
-        }
-
-        for _ in 0..10 {
-            metrics.record_task_poll();
-        }
-
-        assert_eq!(metrics.tasks_spawned.get(), 5);
-        assert_eq!(metrics.task_polls.get(), 10);
     }
 }
