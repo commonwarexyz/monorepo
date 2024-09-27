@@ -25,7 +25,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{utils::Link, Clock, Error, Handle};
+use crate::{Clock, Error, Handle};
 use bytes::Bytes;
 use futures::{
     channel::mpsc,
@@ -60,7 +60,8 @@ struct Metrics {
     tasks_spawned: Counter,
     tasks_running: Gauge,
     task_polls: Counter,
-    bandwidth: Family<Link, Counter>,
+
+    bandwidth: Counter,
 }
 
 impl Metrics {
@@ -69,7 +70,7 @@ impl Metrics {
             task_polls: Counter::default(),
             tasks_running: Gauge::default(),
             tasks_spawned: Counter::default(),
-            bandwidth: Family::default(),
+            bandwidth: Counter::default(),
         };
         {
             let mut registry = registry.lock().unwrap();
@@ -90,7 +91,7 @@ impl Metrics {
             );
             registry.register(
                 "bandwidth",
-                "Bandwidth usage by origin and destination",
+                "Total amount of bandwidth sent over network",
                 metrics.bandwidth.clone(),
             );
         }
@@ -655,18 +656,17 @@ impl Networking {
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
             Sink {
+                metrics: self.metrics.clone(),
                 auditor: self.auditor.clone(),
                 me: dialer,
                 peer: socket,
                 sender: dialee_sender,
-                metrics: self.metrics.clone(),
             },
             Stream {
                 auditor: self.auditor.clone(),
                 me: dialer,
                 peer: socket,
                 receiver: dialer_receiver,
-                metrics: self.metrics.clone(),
             },
         ))
     }
@@ -707,7 +707,6 @@ impl crate::Listener<Sink, Stream> for Listener {
                 sender,
             },
             Stream {
-                metrics: self.metrics.clone(),
                 auditor: self.auditor.clone(),
                 me: self.address,
                 peer: socket,
@@ -733,19 +732,12 @@ impl crate::Sink for Sink {
             .send(msg)
             .await
             .map_err(|_| Error::WriteFailed)?;
-        self.metrics
-            .bandwidth
-            .get_or_create(&Link {
-                origin: self.me.to_string(),
-                destination: self.peer.to_string(),
-            })
-            .inc_by(len as u64);
+        self.metrics.bandwidth.inc_by(len as u64);
         Ok(())
     }
 }
 
 pub struct Stream {
-    metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     me: SocketAddr,
     peer: SocketAddr,
@@ -756,13 +748,6 @@ impl crate::Stream for Stream {
     async fn recv(&mut self) -> Result<Bytes, Error> {
         let msg = self.receiver.next().await.ok_or(Error::ReadFailed)?;
         self.auditor.recv(self.me, self.peer, msg.clone());
-        self.metrics
-            .bandwidth
-            .get_or_create(&Link {
-                origin: self.peer.to_string(),
-                destination: self.me.to_string(),
-            })
-            .inc_by(msg.len() as u64);
         Ok(msg)
     }
 }

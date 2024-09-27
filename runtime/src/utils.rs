@@ -10,7 +10,7 @@ use futures::{
     stream::{AbortHandle, Abortable},
     FutureExt,
 };
-use prometheus_client::{encoding::EncodeLabelSet, metrics::gauge::Gauge};
+use prometheus_client::metrics::gauge::Gauge;
 use std::{
     any::Any,
     future::Future,
@@ -151,12 +151,6 @@ where
             .poll(cx)
             .map(|res| res.map_err(|_| Error::Closed).and_then(|r| r))
     }
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct Link {
-    pub origin: String,
-    pub destination: String,
 }
 
 #[cfg(test)]

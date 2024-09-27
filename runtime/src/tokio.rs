@@ -24,7 +24,7 @@
 //! });
 //! ```
 
-use crate::{utils::Link, Clock, Error, Handle};
+use crate::{Clock, Error, Handle};
 use bytes::Bytes;
 use futures::{
     stream::{SplitSink, SplitStream},
@@ -32,6 +32,7 @@ use futures::{
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
+    encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::Registry,
 };
@@ -50,11 +51,17 @@ use tokio::{
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::warn;
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct Peer {
+    address: String,
+}
+
 #[derive(Debug)]
 struct Metrics {
     tasks_spawned: Counter,
     tasks_running: Gauge,
-    bandwidth: Family<Link, Counter>,
+    inbound_bandwidth: Family<Peer, Counter>,
+    outbound_bandwidth: Family<Peer, Counter>,
 }
 
 impl Metrics {
@@ -62,7 +69,8 @@ impl Metrics {
         let metrics = Self {
             tasks_spawned: Counter::default(),
             tasks_running: Gauge::default(),
-            bandwidth: Family::default(),
+            inbound_bandwidth: Family::default(),
+            outbound_bandwidth: Family::default(),
         };
         {
             let mut registry = registry.lock().unwrap();
@@ -77,9 +85,14 @@ impl Metrics {
                 metrics.tasks_running.clone(),
             );
             registry.register(
-                "bandwidth",
-                "Bandwidth usage by origin and destination",
-                metrics.bandwidth.clone(),
+                "inbound_bandwidth",
+                "Bandwidth inbound by socket",
+                metrics.inbound_bandwidth.clone(),
+            );
+            registry.register(
+                "outbound_bandwidth",
+                "Bandwidth outbound by socket",
+                metrics.outbound_bandwidth.clone(),
             );
         }
         metrics
@@ -351,10 +364,9 @@ impl crate::Sink for Sink {
         self.context
             .executor
             .metrics
-            .bandwidth
-            .get_or_create(&Link {
-                origin: self.me.to_string(),
-                destination: self.peer.to_string(),
+            .outbound_bandwidth
+            .get_or_create(&Peer {
+                address: self.peer.to_string(),
             })
             .inc_by(len as u64);
         Ok(())
@@ -378,10 +390,9 @@ impl crate::Stream for Stream {
         self.context
             .executor
             .metrics
-            .bandwidth
-            .get_or_create(&Link {
-                origin: self.peer.to_string(),
-                destination: self.me.to_string(),
+            .inbound_bandwidth
+            .get_or_create(&Peer {
+                address: self.peer.to_string(),
             })
             .inc_by(result.len() as u64);
         Ok(result.freeze())
