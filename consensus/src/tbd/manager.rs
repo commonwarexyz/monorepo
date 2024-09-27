@@ -73,7 +73,7 @@ impl<E: Clock> Manager<E> {
     }
 
     // TODO: call from result of finalize
-    fn start_epoch(&mut self, participants: Vec<PublicKey>) {
+    fn start_epoch(&mut self, epoch: u64) {
         // TODO: create a Resharing arbiter to handle key management (wait for
         // commitments up to some view, acks to some view, etc)
     }
