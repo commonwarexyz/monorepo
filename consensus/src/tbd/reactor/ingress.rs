@@ -24,5 +24,6 @@ pub enum Message {
     Finalized {
         seed: Bytes,
         payload: Bytes,
+        // TODO: pass partial signatures for h-1
     },
 }

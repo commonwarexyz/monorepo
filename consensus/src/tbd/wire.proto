@@ -21,7 +21,7 @@ message Proposal {
     uint64 height = 4;
     bytes parent = 5;
     bytes payload = 6;
-    // TODO: add partial signatures over parent
+    // TODO: add partial signatures (votes) over parent
     // TODO: add DKG/Resharing fields (Commitments/Acks/Reveals) -> will also
     // include interactions for validators in e+1
     Signature signature = 7;
