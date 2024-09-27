@@ -82,13 +82,15 @@ impl Relay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{deterministic::Executor, Runner};
-    use prometheus_client::registry::Registry;
-    use std::{sync::{Arc, Mutex}, time::Duration};
+    use commonware_runtime::{
+        deterministic::{Config, Executor},
+        Runner,
+    };
 
     #[test]
     fn test_relay_content_priority() {
-        let (executor, _, _) = Executor::init(0, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, _, _) = Executor::init(cfg);
         executor.start(async move {
             let (low_sender, mut low_receiver) = mpsc::channel(1);
             let (high_sender, mut high_receiver) = mpsc::channel(1);

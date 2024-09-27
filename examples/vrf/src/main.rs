@@ -99,7 +99,7 @@ use tracing::info;
 fn main() {
     // Initialize runtime
     let runtime_cfg = tokio::Config::default();
-    let (executor, runtime) = Executor::init(runtime_cfg);
+    let (executor, runtime) = Executor::init(runtime_cfg.clone());
 
     // Parse arguments
     let matches = Command::new("commonware-vrf")
@@ -205,10 +205,9 @@ fn main() {
     }
 
     // Configure network
-    let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        registry.clone(),
+        Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         runtime_cfg.max_message_size,

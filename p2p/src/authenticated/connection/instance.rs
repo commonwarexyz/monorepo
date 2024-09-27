@@ -238,17 +238,16 @@ impl<St: Stream> Receiver<St> {
 mod tests {
     use super::*;
     use commonware_runtime::{
-        deterministic::Executor,
+        deterministic::{Config, Executor},
         mocks::{MockSink, MockStream},
         Runner,
     };
     use futures::SinkExt;
-    use prometheus_client::registry::Registry;
-    use std::{sync::{Arc, Mutex}, time::Duration};
 
     #[test]
     fn test_sender_nonce_overflow() {
-        let (executuor, _, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executuor, _, _) = Executor::init(cfg);
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (sink, _) = MockSink::new();
@@ -266,7 +265,8 @@ mod tests {
 
     #[test]
     fn test_sender_seq_overflow() {
-        let (executuor, _, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executuor, _, _) = Executor::init(cfg);
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (sink, _) = MockSink::new();
@@ -284,7 +284,8 @@ mod tests {
 
     #[test]
     fn test_receiver_nonce_overflow() {
-        let (executuor, _, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executuor, _, _) = Executor::init(cfg);
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (stream, _) = MockStream::new();
@@ -302,7 +303,8 @@ mod tests {
 
     #[test]
     fn test_receiver_seq_overflow() {
-        let (executuor, _, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executuor, _, _) = Executor::init(cfg);
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (stream, _) = MockStream::new();
@@ -320,7 +322,8 @@ mod tests {
 
     #[test]
     fn test_decryption_failure() {
-        let (executor, _, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, _, _) = Executor::init(cfg);
         executor.start(async move {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (stream, mut sender) = MockStream::new();

@@ -458,16 +458,22 @@ mod tests {
         let base_port = 3000;
 
         // Run first instance
-        let (executor, runtime, auditor) =
-            deterministic::Executor::init(seed, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = deterministic::Config {
+            seed,
+            ..deterministic::Config::default()
+        };
+        let (executor, runtime, auditor) = deterministic::Executor::init(cfg);
         executor.start(async move {
             run_network(runtime, max_message_size, base_port, n, mode).await;
         });
         let state = auditor.state();
 
         // Compare result to second instance
-        let (executor, runtime, auditor) =
-            deterministic::Executor::init(seed, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = deterministic::Config {
+            seed,
+            ..deterministic::Config::default()
+        };
+        let (executor, runtime, auditor) = deterministic::Executor::init(cfg);
         executor.start(async move {
             run_network(runtime, max_message_size, base_port, n, mode).await;
         });
@@ -498,7 +504,7 @@ mod tests {
     #[test]
     fn test_tokio_connectivity() {
         let cfg = tokio::Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::init(cfg.clone());
         executor.start(async move {
             run_network(runtime, cfg.max_message_size, 3000, 10, Mode::One).await;
         });
@@ -511,7 +517,8 @@ mod tests {
         let n: usize = 100;
 
         // Initialize runtime
-        let (executor, runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = deterministic::Config::default();
+        let (executor, runtime, _) = deterministic::Executor::init(cfg);
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -614,7 +621,8 @@ mod tests {
         let n: usize = 2;
 
         // Initialize runtime
-        let (executor, mut runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = deterministic::Config::default();
+        let (executor, mut runtime, _) = deterministic::Executor::init(cfg);
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -735,7 +743,8 @@ mod tests {
         let n: usize = 2;
 
         // Initialize runtime
-        let (executor, mut runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = deterministic::Config::default();
+        let (executor, mut runtime, _) = deterministic::Executor::init(cfg);
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();

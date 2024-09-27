@@ -173,23 +173,21 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
     use super::*;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{
-        deterministic::Executor,
+        deterministic::{Config, Executor},
         mocks::{MockSink, MockStream},
         Runner,
     };
     use futures::SinkExt;
-    use prometheus_client::registry::Registry;
     use x25519_dalek::PublicKey;
 
     #[test]
     fn test_handshake_create_verify() {
         // Initialize runtime
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -257,7 +255,8 @@ mod tests {
     #[test]
     fn test_handshake() {
         // Initialize runtime
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -304,7 +303,8 @@ mod tests {
     #[test]
     fn test_handshake_not_for_us() {
         // Initialize runtime
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -348,7 +348,8 @@ mod tests {
     #[test]
     fn test_incoming_handshake_invalid_data() {
         // Initialize runtime
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             // Setup a mock sink and stream
             let (sink, _) = MockSink::new();
@@ -379,7 +380,8 @@ mod tests {
     #[test]
     fn test_incoming_handshake_verify_timeout() {
         // Initialize runtime
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -426,7 +428,8 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_public_key() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -478,7 +481,8 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_ephemeral_public_key() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -520,7 +524,8 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_signature() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -572,7 +577,8 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_timestamp() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let cfg = Config::default();
+        let (executor, runtime, _) = Executor::init(cfg);
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
