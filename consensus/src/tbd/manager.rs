@@ -136,7 +136,7 @@ impl<E: Clock> Manager<E> {
         None
     }
 
-    fn seed(
+    pub fn seed(
         &mut self,
         epoch: u64,
         view: u64,
@@ -160,6 +160,38 @@ impl<E: Clock> Manager<E> {
 
         // If we have threshold seeds, generate beacon and return.
         if info.seeds.len() >= self.cfg.threshold {}
+
+        // Maybe next time
+        None
+    }
+
+    pub fn finalize(
+        &mut self,
+        epoch: u64,
+        view: u64,
+        public_key: PublicKey,
+        signature: Signature,
+    ) -> Option<Bytes> {
+        // Get view info
+        let view = (epoch, view);
+        let info = match self.rounds.get_mut(&view) {
+            Some(info) => info,
+            None => return None,
+        };
+
+        // Store finalization
+        info.finalizes.insert(public_key, signature);
+
+        // If we have already generated a finalization, we are done.
+        if info.finalization.is_some() {
+            return None;
+        }
+
+        // If we have threshold finalizations, generate finalization and return.
+        if info.finalizes.len() >= self.cfg.threshold {
+            // TODO: apply DKG/Resharing from ancestry to arbiter
+            // TODO: fetch missing blocks from ancestry
+        }
 
         // Maybe next time
         None

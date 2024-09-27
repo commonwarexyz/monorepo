@@ -13,6 +13,7 @@ message Message {
     }
 }
 
+// Reward issued based on partial signatures and participation in DKG
 message Proposal {
     uint64 timestamp = 1;
     uint64 epoch = 2;
