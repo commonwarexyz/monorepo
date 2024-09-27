@@ -205,7 +205,7 @@ impl<E: Clock> Manager<E> {
             // TODO: fetch missing blocks from ancestry
 
             // TODO: call start view
-            // TODO: get validator set changes from payload
+            // TODO: get validator set changes from payload (effective in e + 2)
         }
 
         // Maybe next time
