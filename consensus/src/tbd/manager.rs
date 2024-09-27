@@ -215,10 +215,16 @@ impl<E: Clock> Manager<E> {
     /// Jump ahead to a particular view when observing a notarization.
     ///
     /// Note: May need to backfill some number of views to handle Resharing.
-    pub fn advance() {}
+    pub fn advance() {
+        // Don't need to fetch views, just need to fetch any missing heights
+        // between this view and the last we know about.
+    }
 
     /// Jump ahead to a particular view when observing a finalization.
     ///
     /// Note: May need to backfill some number of views to handle Resharing.
-    pub fn lock() {}
+    pub fn lock() {
+        // Don't need to fetch views, just need to fetch any missing heights
+        // between this view and the last we know about.
+    }
 }
