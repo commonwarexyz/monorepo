@@ -63,18 +63,23 @@ impl<E: Clock> Manager<E> {
         }
     }
 
+    // TODO: call from result of finalize
     pub fn start_epoch(&mut self, participants: Vec<PublicKey>) {
         // TODO: create a Resharing arbiter to handle key management (wait for
         // commitments up to some view, acks to some view, etc)
     }
 
+    // TODO: call from result of finalize
     pub fn start_view(&mut self, epoch: u64, view: u64) {
+        // Create new view
         let now = self.runtime.current();
         let leader_deadline = now + self.cfg.leader_timeout;
         let advance_deadline = now + self.cfg.advance_timeout;
         let view = (epoch, view);
         self.rounds
             .insert(view, Info::new(leader_deadline, advance_deadline));
+
+        // TODO: Try to compute leader from last round?
     }
 
     pub fn vote(
@@ -84,7 +89,7 @@ impl<E: Clock> Manager<E> {
         block: Bytes, // hash
         public_key: PublicKey,
         signature: Signature,
-    ) -> Option<Bytes> {
+    ) -> Option<(Bytes, Bytes)> {
         // Get view info
         let view = (epoch, view);
         let info = match self.rounds.get_mut(&view) {
@@ -132,6 +137,8 @@ impl<E: Clock> Manager<E> {
         } else if info.null_votes.len() >= self.cfg.threshold {
         }
 
+        // TODO: If we already have beacon and we just generated notarization, send advance.
+
         // Maybe next time
         None
     }
@@ -142,7 +149,7 @@ impl<E: Clock> Manager<E> {
         view: u64,
         public_key: PublicKey,
         signature: Signature,
-    ) -> Option<Bytes> {
+    ) -> Option<(Bytes, Bytes)> {
         // Get view info
         let view = (epoch, view);
         let info = match self.rounds.get_mut(&view) {
@@ -160,6 +167,8 @@ impl<E: Clock> Manager<E> {
 
         // If we have threshold seeds, generate beacon and return.
         if info.seeds.len() >= self.cfg.threshold {}
+
+        // TODO: If we already have beacon and we just generated notarization, send advance.
 
         // Maybe next time
         None
@@ -191,6 +200,8 @@ impl<E: Clock> Manager<E> {
         if info.finalizes.len() >= self.cfg.threshold {
             // TODO: apply DKG/Resharing from ancestry to arbiter
             // TODO: fetch missing blocks from ancestry
+
+            // TODO: call start view
         }
 
         // Maybe next time
