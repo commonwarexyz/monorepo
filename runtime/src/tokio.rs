@@ -236,7 +236,7 @@ pub struct Context {
 }
 
 impl crate::Spawner for Context {
-    fn clone_with_prefix(&self, prefix: &str) -> Self {
+    fn with_prefix(&self, prefix: &str) -> Self {
         if self.prefix.is_empty() {
             Self {
                 prefix: prefix.to_string(),

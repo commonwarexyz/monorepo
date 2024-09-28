@@ -156,7 +156,7 @@ fn main() {
     // Start runtime
     executor.start(async move {
         // Initialize network
-        let (mut network, mut oracle) = Network::new(runtime.clone_with_prefix("p2p"), p2p_cfg);
+        let (mut network, mut oracle) = Network::new(runtime.with_prefix("p2p"), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -178,7 +178,7 @@ fn main() {
 
         // Start chat
         handler::run(
-            runtime,
+            runtime.with_prefix("handler"),
             hex(&signer.public_key()),
             runtime_registry,
             p2p_registry,

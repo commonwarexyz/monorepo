@@ -102,7 +102,7 @@ impl<
 
                     // Spawn peer
                     self.runtime.spawn("peer", {
-                        let runtime = self.runtime.clone_with_prefix("peer");
+                        let runtime = self.runtime.with_prefix("peer");
                         async move {
                             // Create peer
                             info!(peer = hex(&peer), "peer started");

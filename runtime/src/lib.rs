@@ -58,8 +58,8 @@ pub trait Runner {
 /// sub-tasks in a given root task.
 pub trait Spawner: Clone + Send + Sync + 'static {
     /// Clones the spawner with a given prefix (that will be prepended
-    /// to any labels used by `spawn`).
-    fn clone_with_prefix(&self, prefix: &str) -> Self;
+    /// to any labels used by `spawn`). Added prefixes are additive.
+    fn with_prefix(&self, prefix: &str) -> Self;
 
     /// Enqueues a task to be executed.
     ///
