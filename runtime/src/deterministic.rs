@@ -497,9 +497,6 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        if label == ROOT_TASK {
-            panic!("root label cannot be reused in spawn");
-        }
         let file = Location::caller().file();
         let label = format!("{}:{}", extract_crate_from_caller(file), label);
         let gauge = self
