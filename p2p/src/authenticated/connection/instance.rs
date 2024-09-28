@@ -238,7 +238,7 @@ impl<St: Stream> Receiver<St> {
 mod tests {
     use super::*;
     use commonware_runtime::{
-        deterministic::{Config, Executor},
+        deterministic::Executor,
         mocks::{MockSink, MockStream},
         Runner,
     };
@@ -246,8 +246,7 @@ mod tests {
 
     #[test]
     fn test_sender_nonce_overflow() {
-        let cfg = Config::default();
-        let (executuor, _, _) = Executor::init(cfg);
+        let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (sink, _) = MockSink::new();
@@ -265,8 +264,7 @@ mod tests {
 
     #[test]
     fn test_sender_seq_overflow() {
-        let cfg = Config::default();
-        let (executuor, _, _) = Executor::init(cfg);
+        let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (sink, _) = MockSink::new();
@@ -284,8 +282,7 @@ mod tests {
 
     #[test]
     fn test_receiver_nonce_overflow() {
-        let cfg = Config::default();
-        let (executuor, _, _) = Executor::init(cfg);
+        let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (stream, _) = MockStream::new();
@@ -303,8 +300,7 @@ mod tests {
 
     #[test]
     fn test_receiver_seq_overflow() {
-        let cfg = Config::default();
-        let (executuor, _, _) = Executor::init(cfg);
+        let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (stream, _) = MockStream::new();
@@ -322,8 +318,7 @@ mod tests {
 
     #[test]
     fn test_decryption_failure() {
-        let cfg = Config::default();
-        let (executor, _, _) = Executor::init(cfg);
+        let (executor, _, _) = Executor::default();
         executor.start(async move {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let (stream, mut sender) = MockStream::new();

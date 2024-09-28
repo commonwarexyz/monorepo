@@ -11,8 +11,7 @@
 //! use prometheus_client::{registry::Registry, metrics::{counter::Counter, family::Family, gauge::Gauge}};
 //! use std::{sync::{Mutex, Arc}, time::Duration};
 //!
-//! let cfg = Config::default();
-//! let (executor, runtime, auditor) = Executor::init(cfg);
+//! let (executor, runtime, auditor) = Executor::default(42);
 //! executor.start(async move {
 //!     println!("Parent started");
 //!     let result = runtime.spawn("child", async move {
@@ -324,7 +323,25 @@ impl Executor {
             auditor,
         )
     }
+
+    /// Initialize a new `deterministic` runtime with the default configuration
+    /// and the provided seed.
+    pub fn seeded(seed: u64) -> (Runner, Context, Arc<Auditor>) {
+        let cfg = Config {
+            seed,
+            ..Config::default()
+        };
+        Self::init(cfg)
+    }
+
+    /// Initialize a new `deterministic` runtime with the default configuration.
+    // We'd love to implement the trait but we can't because of the return type.
+    #[allow(clippy::should_implement_trait)]
+    pub fn default() -> (Runner, Context, Arc<Auditor>) {
+        Self::init(Config::default())
+    }
 }
+
 /// Implementation of [`crate::Runner`] for the `deterministic` runtime.
 pub struct Runner {
     executor: Arc<Executor>,
@@ -841,11 +858,7 @@ mod tests {
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
-        let cfg = Config {
-            seed,
-            ..Default::default()
-        };
-        let (executor, runtime, auditor) = Executor::init(cfg);
+        let (executor, runtime, auditor) = Executor::seeded(seed);
         let messages = run_tasks(5, executor, runtime);
         (auditor.state(), messages)
     }

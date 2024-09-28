@@ -11,8 +11,7 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, tokio::{Config, Executor}};
 //!
-//! let cfg = Config::default();
-//! let (executor, runtime) = Executor::init(cfg);
+//! let (executor, runtime) = Executor::default();
 //! executor.start(async move {
 //!     println!("Parent started");
 //!     let result = runtime.spawn("child", async move {
@@ -203,6 +202,13 @@ impl Executor {
                 executor,
             },
         )
+    }
+
+    /// Initialize a new `tokio` runtime with default configuration.
+    // We'd love to implement the trait but we can't because of the return type.
+    #[allow(clippy::should_implement_trait)]
+    pub fn default() -> (Runner, Context) {
+        Self::init(Config::default())
     }
 }
 
@@ -452,16 +458,14 @@ mod tests {
 
     #[test]
     fn test_runs_tasks() {
-        let cfg = Config::default();
-        let (executor, runtime) = Executor::init(cfg);
+        let (executor, runtime) = Executor::default();
         run_tasks(10, executor, runtime);
     }
 
     #[test]
     fn test_codec_invalid_frame_len() {
         // Initalize runtime
-        let cfg = Config::default();
-        let (runner, _) = Executor::init(cfg);
+        let (runner, _) = Executor::default();
         runner.start(async move {
             // Create a stream
             let max_frame_len = 10;
@@ -483,8 +487,7 @@ mod tests {
     #[test]
     fn test_codec_valid_frame_len() {
         // Initialize runtime
-        let cfg = Config::default();
-        let (runner, _) = Executor::init(cfg);
+        let (runner, _) = Executor::default();
         runner.start(async move {
             // Create a stream
             let max_frame_len = 10;

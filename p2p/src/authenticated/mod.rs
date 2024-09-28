@@ -165,8 +165,7 @@
 //! use std::sync::{Arc, Mutex};
 //!
 //! // Configure runtime
-//! let runtime_cfg = tokio::Config::default();
-//! let (executor, runtime) = Executor::init(runtime_cfg.clone());
+//! let (executor, runtime) = Executor::default();
 //!
 //! // Generate identity
 //! //
@@ -458,22 +457,14 @@ mod tests {
         let base_port = 3000;
 
         // Run first instance
-        let cfg = deterministic::Config {
-            seed,
-            ..deterministic::Config::default()
-        };
-        let (executor, runtime, auditor) = deterministic::Executor::init(cfg);
+        let (executor, runtime, auditor) = deterministic::Executor::seeded(seed);
         executor.start(async move {
             run_network(runtime, max_message_size, base_port, n, mode).await;
         });
         let state = auditor.state();
 
         // Compare result to second instance
-        let cfg = deterministic::Config {
-            seed,
-            ..deterministic::Config::default()
-        };
-        let (executor, runtime, auditor) = deterministic::Executor::init(cfg);
+        let (executor, runtime, auditor) = deterministic::Executor::seeded(seed);
         executor.start(async move {
             run_network(runtime, max_message_size, base_port, n, mode).await;
         });
@@ -517,8 +508,7 @@ mod tests {
         let n: usize = 100;
 
         // Initialize runtime
-        let cfg = deterministic::Config::default();
-        let (executor, runtime, _) = deterministic::Executor::init(cfg);
+        let (executor, runtime, _) = deterministic::Executor::default();
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -621,8 +611,7 @@ mod tests {
         let n: usize = 2;
 
         // Initialize runtime
-        let cfg = deterministic::Config::default();
-        let (executor, mut runtime, _) = deterministic::Executor::init(cfg);
+        let (executor, mut runtime, _) = deterministic::Executor::default();
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -743,8 +732,7 @@ mod tests {
         let n: usize = 2;
 
         // Initialize runtime
-        let cfg = deterministic::Config::default();
-        let (executor, mut runtime, _) = deterministic::Executor::init(cfg);
+        let (executor, mut runtime, _) = deterministic::Executor::seeded(0);
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();

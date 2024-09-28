@@ -176,7 +176,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{
-        deterministic::{Config, Executor},
+        deterministic::Executor,
         mocks::{MockSink, MockStream},
         Runner,
     };
@@ -186,8 +186,7 @@ mod tests {
     #[test]
     fn test_handshake_create_verify() {
         // Initialize runtime
-        let cfg = Config::default();
-        let (executor, runtime, _) = Executor::init(cfg);
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -255,8 +254,7 @@ mod tests {
     #[test]
     fn test_handshake() {
         // Initialize runtime
-        let cfg = Config::default();
-        let (executor, runtime, _) = Executor::init(cfg);
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -303,8 +301,7 @@ mod tests {
     #[test]
     fn test_handshake_not_for_us() {
         // Initialize runtime
-        let cfg = Config::default();
-        let (executor, runtime, _) = Executor::init(cfg);
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -348,8 +345,7 @@ mod tests {
     #[test]
     fn test_incoming_handshake_invalid_data() {
         // Initialize runtime
-        let cfg = Config::default();
-        let (executor, runtime, _) = Executor::init(cfg);
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Setup a mock sink and stream
             let (sink, _) = MockSink::new();
@@ -380,8 +376,7 @@ mod tests {
     #[test]
     fn test_incoming_handshake_verify_timeout() {
         // Initialize runtime
-        let cfg = Config::default();
-        let (executor, runtime, _) = Executor::init(cfg);
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -428,8 +423,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_public_key() {
-        let cfg = Config::default();
-        let (executor, runtime, _) = Executor::init(cfg);
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -481,8 +475,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_ephemeral_public_key() {
-        let cfg = Config::default();
-        let (executor, runtime, _) = Executor::init(cfg);
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -524,8 +517,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_signature() {
-        let cfg = Config::default();
-        let (executor, runtime, _) = Executor::init(cfg);
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -577,8 +569,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_timestamp() {
-        let cfg = Config::default();
-        let (executor, runtime, _) = Executor::init(cfg);
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();

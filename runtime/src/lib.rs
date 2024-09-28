@@ -304,129 +304,111 @@ mod tests {
 
     #[test]
     fn test_deterministic_future() {
-        let cfg = deterministic::Config::default();
-        let (runner, _, _) = deterministic::Executor::init(cfg);
+        let (runner, _, _) = deterministic::Executor::default();
         test_error_future(runner);
     }
 
     #[test]
     fn test_deterministic_clock_sleep() {
-        let cfg = deterministic::Config::default();
-        let (executor, runtime, _) = deterministic::Executor::init(cfg);
+        let (executor, runtime, _) = deterministic::Executor::default();
         assert_eq!(runtime.current(), SystemTime::UNIX_EPOCH);
         test_clock_sleep(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_clock_sleep_until() {
-        let cfg = deterministic::Config::default();
-        let (executor, runtime, _) = deterministic::Executor::init(cfg);
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_clock_sleep_until(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_root_finishes() {
-        let cfg = deterministic::Config::default();
-        let (executor, runtime, _) = deterministic::Executor::init(cfg);
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_root_finishes(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_spawn_abort() {
-        let cfg = deterministic::Config::default();
-        let (executor, runtime, _) = deterministic::Executor::init(cfg);
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_spawn_abort(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_panic_aborts_root() {
-        let cfg = deterministic::Config::default();
-        let (runner, _, _) = deterministic::Executor::init(cfg);
+        let (runner, _, _) = deterministic::Executor::default();
         test_panic_aborts_root(runner);
     }
 
     #[test]
     #[should_panic(expected = "blah")]
     fn test_deterministic_panic_aborts_spawn() {
-        let cfg = deterministic::Config::default();
-        let (executor, runtime, _) = deterministic::Executor::init(cfg);
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_panic_aborts_spawn(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_select() {
-        let cfg = deterministic::Config::default();
-        let (executor, runtime, _) = deterministic::Executor::init(cfg);
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_select(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_select_loop() {
-        let cfg = deterministic::Config::default();
-        let (executor, runtime, _) = deterministic::Executor::init(cfg);
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_select_loop(executor, runtime);
     }
 
     #[test]
     fn test_tokio_error_future() {
-        let cfg = tokio::Config::default();
-        let (runner, _) = tokio::Executor::init(cfg);
+        let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
     }
 
     #[test]
     fn test_tokio_clock_sleep() {
-        let cfg = tokio::Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_clock_sleep(executor, runtime);
     }
 
     #[test]
     fn test_tokio_clock_sleep_until() {
-        let cfg = tokio::Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_clock_sleep_until(executor, runtime);
     }
 
     #[test]
     fn test_tokio_root_finishes() {
-        let cfg = tokio::Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_root_finishes(executor, runtime);
     }
 
     #[test]
     fn test_tokio_spawn_abort() {
-        let cfg = tokio::Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_spawn_abort(executor, runtime);
     }
 
     #[test]
     fn test_tokio_panic_aborts_root() {
-        let cfg = tokio::Config::default();
-        let (runner, _) = tokio::Executor::init(cfg);
+        let (runner, _) = tokio::Executor::default();
         test_panic_aborts_root(runner);
     }
 
     #[test]
     fn test_tokio_panic_aborts_spawn() {
-        let cfg = tokio::Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_panic_aborts_spawn(executor, runtime);
     }
 
     #[test]
     fn test_tokio_select() {
-        let cfg = tokio::Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_select(executor, runtime);
     }
 
     #[test]
     fn test_tokio_select_loop() {
-        let cfg = tokio::Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_select_loop(executor, runtime);
     }
 }
