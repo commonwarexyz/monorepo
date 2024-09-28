@@ -57,21 +57,17 @@ struct Work {
     label: String,
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Peer {
-    address: String,
-}
-
 #[derive(Debug)]
 struct Metrics {
     tasks_spawned: Family<Work, Counter>,
     tasks_running: Family<Work, Gauge>,
 
-    inbound_connections: Family<Peer, Counter>,
-    outbound_connections: Family<Peer, Counter>,
-
-    inbound_bandwidth: Family<Peer, Counter>,
-    outbound_bandwidth: Family<Peer, Counter>,
+    // As nice as it would be to track each of these by socket address,
+    // it quickly becomes an OOM attack vector.
+    inbound_connections: Counter,
+    outbound_connections: Counter,
+    inbound_bandwidth: Counter,
+    outbound_bandwidth: Counter,
 }
 
 impl Metrics {
@@ -79,10 +75,10 @@ impl Metrics {
         let metrics = Self {
             tasks_spawned: Family::default(),
             tasks_running: Family::default(),
-            inbound_connections: Family::default(),
-            outbound_connections: Family::default(),
-            inbound_bandwidth: Family::default(),
-            outbound_bandwidth: Family::default(),
+            inbound_connections: Counter::default(),
+            outbound_connections: Counter::default(),
+            inbound_bandwidth: Counter::default(),
+            outbound_bandwidth: Counter::default(),
         };
         {
             let mut registry = registry.lock().unwrap();
@@ -108,12 +104,12 @@ impl Metrics {
             );
             registry.register(
                 "inbound_bandwidth",
-                "Bandwidth inbound by socket",
+                "Bandwidth used by receiving data from others",
                 metrics.inbound_bandwidth.clone(),
             );
             registry.register(
                 "outbound_bandwidth",
-                "Bandwidth outbound by socket",
+                "Bandwidth used by sending data to others",
                 metrics.outbound_bandwidth.clone(),
             );
         }
@@ -316,13 +312,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
         let stream = TcpStream::connect(socket)
             .await
             .map_err(|_| Error::ConnectionFailed)?;
-        self.executor
-            .metrics
-            .outbound_connections
-            .get_or_create(&Peer {
-                address: socket.to_string(),
-            })
-            .inc();
+        self.executor.metrics.outbound_connections.inc();
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.executor.cfg.tcp_nodelay {
@@ -337,15 +327,10 @@ impl crate::Network<Listener, Sink, Stream> for Context {
         let (sink, stream) = framed.split();
         Ok((
             Sink {
-                peer: socket,
                 context: context.clone(),
                 sink,
             },
-            Stream {
-                peer: socket,
-                context,
-                stream,
-            },
+            Stream { context, stream },
         ))
     }
 }
@@ -359,14 +344,7 @@ impl crate::Listener<Sink, Stream> for Listener {
     async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
-        self.context
-            .executor
-            .metrics
-            .inbound_connections
-            .get_or_create(&Peer {
-                address: addr.to_string(),
-            })
-            .inc();
+        self.context.executor.metrics.inbound_connections.inc();
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.context.executor.cfg.tcp_nodelay {
@@ -380,21 +358,15 @@ impl crate::Listener<Sink, Stream> for Listener {
         Ok((
             addr,
             Sink {
-                peer: addr,
                 context: context.clone(),
                 sink,
             },
-            Stream {
-                peer: addr,
-                context,
-                stream,
-            },
+            Stream { context, stream },
         ))
     }
 }
 
 pub struct Sink {
-    peer: SocketAddr,
     context: Context,
     sink: SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>,
 }
@@ -410,16 +382,12 @@ impl crate::Sink for Sink {
             .executor
             .metrics
             .outbound_bandwidth
-            .get_or_create(&Peer {
-                address: self.peer.to_string(),
-            })
             .inc_by(len as u64);
         Ok(())
     }
 }
 
 pub struct Stream {
-    peer: SocketAddr,
     context: Context,
     stream: SplitStream<Framed<TcpStream, LengthDelimitedCodec>>,
 }
@@ -435,9 +403,6 @@ impl crate::Stream for Stream {
             .executor
             .metrics
             .inbound_bandwidth
-            .get_or_create(&Peer {
-                address: self.peer.to_string(),
-            })
             .inc_by(result.len() as u64);
         Ok(result.freeze())
     }

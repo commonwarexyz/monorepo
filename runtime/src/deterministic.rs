@@ -99,7 +99,7 @@ impl Metrics {
             );
             registry.register(
                 "bandwidth",
-                "Total amount of bandwidth sent over network",
+                "Total amount of data sent over network",
                 metrics.bandwidth.clone(),
             );
         }
