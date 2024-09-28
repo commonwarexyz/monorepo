@@ -25,6 +25,7 @@ use std::{
 use tracing::{debug, warn};
 
 pub const CHANNEL: u32 = 0;
+const HEIGHT_OFFSET: u16 = 2;
 
 enum Event<I> {
     Input(I),
@@ -109,7 +110,7 @@ pub async fn run(
                     .split(horizontal_chunks[0]);
 
                 // Display messages
-                let messages_height = messages_chunks[0].height;
+                let messages_height = messages_chunks[0].height - HEIGHT_OFFSET;
                 let messages_len = messages.len() as u16;
                 let messages_max_scroll = messages_len.saturating_sub(messages_height);
                 if focused_window != Focus::Messages {
@@ -177,7 +178,7 @@ pub async fn run(
                 f.render_widget(input_block, messages_chunks[1]);
 
                 // Display logs
-                let logs_height = chunks[1].height;
+                let logs_height = chunks[1].height - HEIGHT_OFFSET;
                 let logs = logs.lock().unwrap();
                 let logs_len = logs.len() as u16;
                 let logs_max_scroll = logs_len.saturating_sub(logs_height);
