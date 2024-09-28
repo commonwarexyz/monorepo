@@ -31,6 +31,7 @@ enum Event<I> {
     Tick,
 }
 
+#[derive(PartialEq, Eq)]
 enum Focus {
     Input,
     Logs,
@@ -108,6 +109,12 @@ pub async fn run(
                     .split(horizontal_chunks[0]);
 
                 // Display messages
+                let messages_height = messages_chunks[0].height;
+                let messages_len = messages.len() as u16;
+                let messages_max_scroll = messages_len.saturating_sub(messages_height);
+                if focused_window != Focus::Messages {
+                    messages_scroll = messages_max_scroll;
+                }
                 let messages_text = Text::from(messages.clone());
                 let messages_block = Paragraph::new(messages_text)
                     .style(Style::default().fg(Color::Cyan))
@@ -170,7 +177,13 @@ pub async fn run(
                 f.render_widget(input_block, messages_chunks[1]);
 
                 // Display logs
+                let logs_height = chunks[1].height;
                 let logs = logs.lock().unwrap();
+                let logs_len = logs.len() as u16;
+                let logs_max_scroll = logs_len.saturating_sub(logs_height);
+                if focused_window != Focus::Logs {
+                    logs_scroll = logs_max_scroll;
+                }
                 let logs_text = Text::from(
                     logs.iter()
                         .map(|log| Line::raw(log.clone()))
@@ -257,7 +270,7 @@ pub async fn run(
                                 formatted_me,
                                 input,
                             ), Style::default().fg(Color::Yellow));
-                            messages.insert(0, msg);
+                            messages.push(msg);
                             input = String::new();
                         }
                         KeyCode::Esc => {
@@ -277,7 +290,7 @@ pub async fn run(
                 match result {
                     Ok((peer, msg)) => {
                         let peer = hex(&peer);
-                        messages.insert(0, format!(
+                        messages.push(format!(
                             "[{}] {}**{}: {}",
                             chrono::Local::now().format("%m/%d %H:%M:%S"),
                             &peer[..4],
