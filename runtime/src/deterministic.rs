@@ -54,6 +54,7 @@ use tracing::trace;
 
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
+
 const ROOT_TASK: &str = "root";
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -289,6 +290,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
+    prefix: Mutex<String>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
@@ -304,6 +306,7 @@ impl Executor {
             metrics: metrics.clone(),
             auditor: auditor.clone(),
             rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            prefix: Mutex::new(String::new()),
             time: Mutex::new(UNIX_EPOCH),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
@@ -316,7 +319,6 @@ impl Executor {
                 executor: executor.clone(),
             },
             Context {
-                prefix: String::new(),
                 executor,
                 networking: Arc::new(Networking::new(metrics, auditor.clone())),
             },
@@ -386,6 +388,12 @@ impl crate::Runner for Runner {
             // processing a different task required for other tasks to make progress).
             trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
+                // Set current task prefix
+                {
+                    let mut prefix = self.executor.prefix.lock().unwrap();
+                    prefix.clone_from(&task.label);
+                }
+
                 // Record task for auditing
                 self.executor.auditor.process_task(task.id, &task.label);
 
@@ -503,57 +511,43 @@ impl crate::Runner for Runner {
 /// for the `deterministic` runtime.
 #[derive(Clone)]
 pub struct Context {
-    prefix: String,
     executor: Arc<Executor>,
     networking: Arc<Networking>,
 }
 
 impl crate::Spawner for Context {
-    fn with_prefix(&self, prefix: &str) -> Self {
-        if self.prefix.is_empty() {
-            Self {
-                prefix: prefix.to_string(),
-                executor: self.executor.clone(),
-                networking: self.networking.clone(),
-            }
-        } else {
-            Self {
-                prefix: format!("{}_{}", self.prefix, prefix),
-                executor: self.executor.clone(),
-                networking: self.networking.clone(),
-            }
-        }
-    }
-
     fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let label = match self.prefix.is_empty() {
-            true => label.to_string(),
-            false => format!("{}_{}", self.prefix, label),
+        let label = {
+            let prefix = self.executor.prefix.lock().unwrap();
+            if prefix.is_empty() || *prefix == ROOT_TASK {
+                label.to_string()
+            } else {
+                format!("{}_{}", *prefix, label)
+            }
         };
         if label == ROOT_TASK {
             panic!("root task cannot be spawned");
         }
+        let work = Work {
+            label: label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
         let gauge = self
             .executor
             .metrics
             .tasks_running
-            .get_or_create(&Work {
-                label: label.to_string(),
-            })
+            .get_or_create(&work)
             .clone();
         let (f, handle) = Handle::init(f, gauge, false);
         Tasks::register(&self.executor.tasks, &label, false, Box::pin(f));
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&Work {
-                label: label.to_string(),
-            })
-            .inc();
         handle
     }
 }

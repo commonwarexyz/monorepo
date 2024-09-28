@@ -389,7 +389,7 @@ mod tests {
 
             // Accept connections but do nothing
             runtime.spawn("stream_sender", {
-                let runtime = runtime.with_prefix("stream_sender");
+                let runtime = runtime.clone();
                 let recipient = recipient.clone();
                 async move {
                     runtime.sleep(Duration::from_secs(10)).await;

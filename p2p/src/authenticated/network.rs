@@ -171,7 +171,7 @@ impl<
 
         // Start dialer
         let dialer = dialer::Actor::new(
-            self.runtime.with_prefix("dialer"),
+            self.runtime.clone(),
             dialer::Config {
                 registry: self.cfg.registry,
                 connection,

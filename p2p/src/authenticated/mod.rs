@@ -347,7 +347,7 @@ mod tests {
             // Send/Recieve messages
             let handler = runtime.spawn("agent", {
                 let addresses = addresses.clone();
-                let runtime = runtime.with_prefix("agent");
+                let runtime = runtime.clone();
                 async move {
                     // Wait for all peers to send their identity
                     let acker = runtime.spawn("receiver", async move {
@@ -567,7 +567,7 @@ mod tests {
 
                 // Send/Recieve messages
                 let handler = runtime.spawn("agent", {
-                    let runtime = runtime.with_prefix("agent");
+                    let runtime = runtime.clone();
                     async move {
                         if i == 0 {
                             // Loop until success
@@ -671,7 +671,7 @@ mod tests {
                 let msg_sender = addresses[0].clone();
                 let msg_recipient = addresses[1].clone();
                 let peer_handler = runtime.spawn("agent", {
-                    let runtime = runtime.with_prefix("agent");
+                    let runtime = runtime.clone();
                     async move {
                         if i == 0 {
                             // Loop until success

@@ -45,6 +45,7 @@ use std::{
 use tokio::{
     net::{TcpListener, TcpStream},
     runtime::{Builder, Runtime},
+    task_local,
     time::timeout,
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -197,10 +198,7 @@ impl Executor {
             Runner {
                 executor: executor.clone(),
             },
-            Context {
-                prefix: String::new(),
-                executor,
-            },
+            Context { executor },
         )
     }
 
@@ -231,51 +229,37 @@ impl crate::Runner for Runner {
 /// for the `tokio` runtime.
 #[derive(Clone)]
 pub struct Context {
-    prefix: String,
     executor: Arc<Executor>,
 }
 
-impl crate::Spawner for Context {
-    fn with_prefix(&self, prefix: &str) -> Self {
-        if self.prefix.is_empty() {
-            Self {
-                prefix: prefix.to_string(),
-                executor: self.executor.clone(),
-            }
-        } else {
-            Self {
-                prefix: format!("{}_{}", self.prefix, prefix),
-                executor: self.executor.clone(),
-            }
-        }
-    }
+task_local! {
+    static PREFIX: String;
+}
 
+impl crate::Spawner for Context {
     fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let label = match self.prefix.is_empty() {
-            true => label.to_string(),
-            false => format!("{}_{}", self.prefix, label),
-        };
+        let label = PREFIX
+            .try_with(|prefix| format!("{}_{}", prefix, label))
+            .unwrap_or_else(|_| label.to_string());
+        let f = PREFIX.scope(label.clone(), f);
+        let work = Work { label };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
         let gauge = self
             .executor
             .metrics
             .tasks_running
-            .get_or_create(&Work {
-                label: label.to_string(),
-            })
+            .get_or_create(&work)
             .clone();
         let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
         self.executor.runtime.spawn(f);
-        self.executor
-            .metrics
-            .tasks_spawned
-            .get_or_create(&Work {
-                label: label.to_string(),
-            })
-            .inc();
         handle
     }
 }
