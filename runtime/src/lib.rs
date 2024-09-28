@@ -61,7 +61,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     ///
     /// Label can be used to track how many instances of a specific type of
     /// task have been spawned or are running concurrently (and is appened to all
-    /// logs/metrics).
+    /// logs/metrics). To avoid unintended conflicts, the label is prepended with
+    /// the name of the directory of the crate that spawned the task (parent of "src").
     ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
     /// does not await the handle).

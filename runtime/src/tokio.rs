@@ -24,7 +24,7 @@
 //! });
 //! ```
 
-use crate::{Clock, Error, Handle};
+use crate::{utils::extract_crate_from_caller, Clock, Error, Handle};
 use bytes::Bytes;
 use futures::{
     stream::{SplitSink, SplitStream},
@@ -40,6 +40,7 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     future::Future,
     net::SocketAddr,
+    panic::Location,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -230,11 +231,14 @@ pub struct Context {
 }
 
 impl crate::Spawner for Context {
+    #[track_caller]
     fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        let file = Location::caller().file();
+        let label = format!("{}:{}", extract_crate_from_caller(file), label);
         let gauge = self
             .executor
             .metrics

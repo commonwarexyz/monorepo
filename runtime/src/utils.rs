@@ -54,6 +54,21 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
     }
 }
 
+// Helper function to extract crate name from file path.
+pub fn extract_crate_from_caller(caller: &str) -> String {
+    // Split the file path and attempt to find the crate name.
+    let parts: Vec<&str> = caller.split(std::path::MAIN_SEPARATOR).collect();
+    if let Some(pos) = parts.iter().position(|&s| s == "src") {
+        if pos > 0 {
+            return parts[pos - 1].into();
+        }
+    }
+    if !parts.is_empty() {
+        return parts[0].into();
+    }
+    "unknown".into()
+}
+
 /// Handle to a spawned task.
 pub struct Handle<T>
 where

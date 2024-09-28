@@ -25,7 +25,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{Clock, Error, Handle};
+use crate::{utils::extract_crate_from_caller, Clock, Error, Handle};
 use bytes::Bytes;
 use futures::{
     channel::mpsc,
@@ -46,6 +46,7 @@ use std::{
     mem::replace,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
+    panic::Location,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
@@ -490,6 +491,7 @@ pub struct Context {
 }
 
 impl crate::Spawner for Context {
+    #[track_caller]
     fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
@@ -498,6 +500,8 @@ impl crate::Spawner for Context {
         if label == ROOT_TASK {
             panic!("root label cannot be reused in spawn");
         }
+        let file = Location::caller().file();
+        let label = format!("{}:{}", extract_crate_from_caller(file), label);
         let gauge = self
             .executor
             .metrics
@@ -507,7 +511,7 @@ impl crate::Spawner for Context {
             })
             .clone();
         let (f, handle) = Handle::init(f, gauge, false);
-        Tasks::register(&self.executor.tasks, label, false, Box::pin(f));
+        Tasks::register(&self.executor.tasks, &label, false, Box::pin(f));
         self.executor
             .metrics
             .tasks_spawned
