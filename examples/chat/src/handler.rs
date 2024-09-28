@@ -58,7 +58,7 @@ pub async fn run(
 
     // Listen for input
     let (mut tx, mut rx) = mpsc::channel(100);
-    runtime.spawn("inputter", async move {
+    runtime.spawn("keyboard", async move {
         loop {
             match event::poll(Duration::from_millis(500)) {
                 Ok(true) => {}
