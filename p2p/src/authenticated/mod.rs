@@ -166,7 +166,7 @@
 //!
 //! // Configure runtime
 //! let runtime_cfg = tokio::Config::default();
-//! let (executor, runtime) = Executor::init(runtime_cfg);
+//! let (executor, runtime) = Executor::init(runtime_cfg.clone());
 //!
 //! // Generate identity
 //! //
@@ -219,7 +219,7 @@
 //!     );
 //!
 //!     // Run network
-//!     let network_handler = runtime.spawn(network.run());
+//!     let network_handler = runtime.spawn("network", network.run());
 //!
 //!     // ... Use sender and receiver ...
 //!
@@ -343,15 +343,15 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Send/Recieve messages
-            let handler = runtime.spawn({
+            let handler = runtime.spawn("agent", {
                 let addresses = addresses.clone();
                 let runtime = runtime.clone();
                 async move {
                     // Wait for all peers to send their identity
-                    let acker = runtime.spawn(async move {
+                    let acker = runtime.spawn("receiver", async move {
                         let mut received = HashSet::new();
                         while received.len() < n - 1 {
                             // Ensure message equals sender identity
@@ -458,16 +458,14 @@ mod tests {
         let base_port = 3000;
 
         // Run first instance
-        let (executor, runtime, auditor) =
-            deterministic::Executor::init(seed, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, auditor) = deterministic::Executor::seeded(seed);
         executor.start(async move {
             run_network(runtime, max_message_size, base_port, n, mode).await;
         });
         let state = auditor.state();
 
         // Compare result to second instance
-        let (executor, runtime, auditor) =
-            deterministic::Executor::init(seed, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, auditor) = deterministic::Executor::seeded(seed);
         executor.start(async move {
             run_network(runtime, max_message_size, base_port, n, mode).await;
         });
@@ -498,7 +496,7 @@ mod tests {
     #[test]
     fn test_tokio_connectivity() {
         let cfg = tokio::Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::init(cfg.clone());
         executor.start(async move {
             run_network(runtime, cfg.max_message_size, 3000, 10, Mode::One).await;
         });
@@ -511,7 +509,7 @@ mod tests {
         let n: usize = 100;
 
         // Initialize runtime
-        let (executor, runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, _) = deterministic::Executor::default();
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -566,10 +564,10 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                runtime.spawn(network.run());
+                runtime.spawn("network", network.run());
 
                 // Send/Recieve messages
-                let handler = runtime.spawn({
+                let handler = runtime.spawn("agent", {
                     let runtime = runtime.clone();
                     async move {
                         if i == 0 {
@@ -614,7 +612,7 @@ mod tests {
         let n: usize = 2;
 
         // Initialize runtime
-        let (executor, mut runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let (executor, mut runtime, _) = deterministic::Executor::default();
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -667,13 +665,13 @@ mod tests {
                 );
 
                 // Wait to connect to all peers, and then send messages to everyone
-                runtime.spawn(network.run());
+                runtime.spawn("network", network.run());
 
                 // Send/Recieve messages
                 let msg = Bytes::from(msg.clone());
                 let msg_sender = addresses[0].clone();
                 let msg_recipient = addresses[1].clone();
-                let peer_handler = runtime.spawn({
+                let peer_handler = runtime.spawn("agent", {
                     let runtime = runtime.clone();
                     async move {
                         if i == 0 {
@@ -735,7 +733,7 @@ mod tests {
         let n: usize = 2;
 
         // Initialize runtime
-        let (executor, mut runtime, _) = deterministic::Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let (executor, mut runtime, _) = deterministic::Executor::seeded(0);
         executor.start(async move {
             // Create peers
             let mut peers = Vec::new();
@@ -769,7 +767,7 @@ mod tests {
             );
 
             // Wait to connect to all peers, and then send messages to everyone
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Crate random message
             let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)

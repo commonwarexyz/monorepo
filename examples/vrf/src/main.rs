@@ -99,7 +99,7 @@ use tracing::info;
 fn main() {
     // Initialize runtime
     let runtime_cfg = tokio::Config::default();
-    let (executor, runtime) = Executor::init(runtime_cfg);
+    let (executor, runtime) = Executor::init(runtime_cfg.clone());
 
     // Parse arguments
     let matches = Command::new("commonware-vrf")
@@ -205,10 +205,9 @@ fn main() {
     }
 
     // Configure network
-    let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        registry.clone(),
+        Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         runtime_cfg.max_message_size,
@@ -268,7 +267,10 @@ fn main() {
                 lazy,
                 defiant,
             );
-            runtime.spawn(contributor.run(contributor_sender, contributor_receiver));
+            runtime.spawn(
+                "contributor",
+                contributor.run(contributor_sender, contributor_receiver),
+            );
 
             // Create vrf
             let (vrf_sender, vrf_receiver) = network.register(
@@ -285,7 +287,7 @@ fn main() {
                 contributors,
                 requests,
             );
-            runtime.spawn(signer.run(vrf_sender, vrf_receiver));
+            runtime.spawn("signer", signer.run(vrf_sender, vrf_receiver));
         } else {
             let (arbiter_sender, arbiter_receiver) = network.register(
                 handlers::DKG_CHANNEL,
@@ -301,7 +303,10 @@ fn main() {
                 contributors,
                 threshold,
             );
-            runtime.spawn(arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver));
+            runtime.spawn(
+                "arbiter",
+                arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver),
+            );
         }
         network.run().await;
     });

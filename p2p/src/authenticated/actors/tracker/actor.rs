@@ -646,7 +646,6 @@ mod tests {
     use commonware_cryptography::Ed25519;
     use commonware_runtime::{deterministic::Executor, Clock, Runner};
     use governor::Quota;
-    use prometheus_client::registry::Registry;
     use std::net::{IpAddr, Ipv4Addr};
     use std::num::NonZeroU32;
     use std::sync::{Arc, Mutex};
@@ -670,13 +669,13 @@ mod tests {
     #[test]
     fn test_reserve_peer() {
         // Create actor
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, _) = Executor::default();
         let cfg = test_config(Ed25519::from_seed(0), Vec::new());
         executor.start(async move {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
             // Run actor in background
-            runtime.spawn(async move {
+            runtime.spawn("actor", async move {
                 actor.run().await;
             });
 
@@ -715,14 +714,14 @@ mod tests {
     #[test]
     fn test_bit_vec() {
         // Create actor
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1), Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, _) = Executor::default();
         let peer0 = Ed25519::from_seed(0);
         let cfg = test_config(peer0.clone(), Vec::new());
         executor.start(async move {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
             // Run actor in background
-            runtime.spawn(async move {
+            runtime.spawn("actor", async move {
                 actor.run().await;
             });
 

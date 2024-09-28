@@ -7,15 +7,14 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_runtime::{Spawner, Runner, deterministic::{Executor, Config}};
 //! use prometheus_client::{registry::Registry, metrics::{counter::Counter, family::Family, gauge::Gauge}};
 //! use std::{sync::{Mutex, Arc}, time::Duration};
 //!
-//! let registry = Arc::new(Mutex::new(Registry::with_prefix("runtime")));
-//! let (executor, runtime, auditor) = Executor::init(42, Duration::from_millis(1), registry);
+//! let (executor, runtime, auditor) = Executor::default();
 //! executor.start(async move {
 //!     println!("Parent started");
-//!     let result = runtime.spawn(async move {
+//!     let result = runtime.spawn("child", async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });
@@ -35,7 +34,7 @@ use futures::{
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::EncodeLabelSet,
-    metrics::{counter::Counter, family::Family},
+    metrics::{counter::Counter, family::Family, gauge::Gauge},
     registry::Registry,
 };
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
@@ -53,39 +52,59 @@ use std::{
 };
 use tracing::trace;
 
+/// Range of ephemeral ports assigned to dialers.
+const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
+
+const ROOT_TASK: &str = "root";
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct Link {
-    origin: String,
-    destination: String,
+struct Work {
+    label: String,
 }
 
 #[derive(Debug)]
 struct Metrics {
-    tasks_spawned: Counter,
-    task_polls: Counter,
-    bandwidth: Family<Link, Counter>,
+    tasks_spawned: Family<Work, Counter>,
+    tasks_running: Family<Work, Gauge>,
+    task_polls: Family<Work, Counter>,
+
+    bandwidth: Counter,
 }
 
 impl Metrics {
-    fn record_task_spawned(&self) {
-        self.tasks_spawned.inc();
-    }
-
-    fn record_task_poll(&self) {
-        self.task_polls.inc();
-    }
-
-    fn record_bandwidth(&self, origin: SocketAddr, destination: SocketAddr, bytes: usize) {
-        let link = Link {
-            origin: origin.to_string(),
-            destination: destination.to_string(),
+    pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
+        let metrics = Self {
+            task_polls: Family::default(),
+            tasks_running: Family::default(),
+            tasks_spawned: Family::default(),
+            bandwidth: Counter::default(),
         };
-        self.bandwidth.get_or_create(&link).inc_by(bytes as u64);
+        {
+            let mut registry = registry.lock().unwrap();
+            registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                metrics.tasks_spawned.clone(),
+            );
+            registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                metrics.tasks_running.clone(),
+            );
+            registry.register(
+                "task_polls",
+                "Total number of task polls",
+                metrics.task_polls.clone(),
+            );
+            registry.register(
+                "bandwidth",
+                "Total amount of data sent over network",
+                metrics.bandwidth.clone(),
+            );
+        }
+        metrics
     }
 }
-
-/// Range of ephemeral ports assigned to dialers.
-const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
 /// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
@@ -99,12 +118,13 @@ impl Auditor {
         }
     }
 
-    fn process_task(&self, task: u128) {
+    fn process_task(&self, task: u128, label: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"process_task");
         hasher.update(task.to_be_bytes());
+        hasher.update(label.as_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
@@ -179,6 +199,8 @@ impl Auditor {
 
 struct Task {
     id: u128,
+    label: String,
+
     tasks: Arc<Tasks>,
 
     root: bool,
@@ -201,6 +223,7 @@ struct Tasks {
 impl Tasks {
     fn register(
         arc_self: &Arc<Self>,
+        label: &str,
         root: bool,
         future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     ) {
@@ -213,6 +236,7 @@ impl Tasks {
         };
         queue.push(Arc::new(Task {
             id,
+            label: label.to_string(),
             root,
             future: Mutex::new(future),
             tasks: arc_self.clone(),
@@ -236,12 +260,37 @@ impl Tasks {
     }
 }
 
+/// Configuration for the `deterministic` runtime.
+#[derive(Clone)]
+pub struct Config {
+    /// Registry for metrics.
+    pub registry: Arc<Mutex<Registry>>,
+
+    /// Seed for the random number generator.
+    pub seed: u64,
+
+    /// The cycle duration determines how much time is advanced after each iteration of the event
+    /// loop. This is useful to prevent starvation if some task never yields.
+    pub cycle: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            registry: Arc::new(Mutex::new(Registry::default())),
+            seed: 42,
+            cycle: Duration::from_millis(1),
+        }
+    }
+}
+
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     cycle: Duration,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
+    prefix: Mutex<String>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
@@ -249,25 +298,15 @@ pub struct Executor {
 
 impl Executor {
     /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
-    ///
-    /// The cycle duration determines how much time is advanced after each iteration of the event
-    /// loop. This is useful to prevent starvation if some task never yields.
-    pub fn init(
-        seed: u64,
-        cycle: Duration,
-        registry: Arc<Mutex<Registry>>,
-    ) -> (Runner, Context, Arc<Auditor>) {
-        let metrics = Arc::new(Metrics {
-            tasks_spawned: Counter::default(),
-            task_polls: Counter::default(),
-            bandwidth: Family::default(),
-        });
+    pub fn init(cfg: Config) -> (Runner, Context, Arc<Auditor>) {
+        let metrics = Arc::new(Metrics::init(cfg.registry));
         let auditor = Arc::new(Auditor::new());
         let executor = Arc::new(Self {
-            cycle,
+            cycle: cfg.cycle,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
-            rng: Mutex::new(StdRng::seed_from_u64(seed)),
+            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            prefix: Mutex::new(String::new()),
             time: Mutex::new(UNIX_EPOCH),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
@@ -275,24 +314,6 @@ impl Executor {
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
         });
-        {
-            let mut registry = registry.lock().unwrap();
-            registry.register(
-                "tasks_spawned",
-                "Total number of tasks spawned",
-                metrics.tasks_spawned.clone(),
-            );
-            registry.register(
-                "task_polls",
-                "Total number of task polls",
-                metrics.task_polls.clone(),
-            );
-            registry.register(
-                "bandwidth",
-                "Bandwidth usage by origin and destination",
-                metrics.bandwidth.clone(),
-            );
-        }
         (
             Runner {
                 executor: executor.clone(),
@@ -304,7 +325,25 @@ impl Executor {
             auditor,
         )
     }
+
+    /// Initialize a new `deterministic` runtime with the default configuration
+    /// and the provided seed.
+    pub fn seeded(seed: u64) -> (Runner, Context, Arc<Auditor>) {
+        let cfg = Config {
+            seed,
+            ..Config::default()
+        };
+        Self::init(cfg)
+    }
+
+    /// Initialize a new `deterministic` runtime with the default configuration.
+    // We'd love to implement the trait but we can't because of the return type.
+    #[allow(clippy::should_implement_trait)]
+    pub fn default() -> (Runner, Context, Arc<Auditor>) {
+        Self::init(Config::default())
+    }
 }
+
 /// Implementation of [`crate::Runner`] for the `deterministic` runtime.
 pub struct Runner {
     executor: Arc<Executor>,
@@ -320,6 +359,7 @@ impl crate::Runner for Runner {
         let output = Arc::new(Mutex::new(None));
         Tasks::register(
             &self.executor.tasks,
+            ROOT_TASK,
             true,
             Box::pin({
                 let output = output.clone();
@@ -348,8 +388,14 @@ impl crate::Runner for Runner {
             // processing a different task required for other tasks to make progress).
             trace!(iter, tasks = tasks.len(), "starting loop");
             for task in tasks {
+                // Set current task prefix
+                {
+                    let mut prefix = self.executor.prefix.lock().unwrap();
+                    prefix.clone_from(&task.label);
+                }
+
                 // Record task for auditing
-                self.executor.auditor.process_task(task.id);
+                self.executor.auditor.process_task(task.id, &task.label);
 
                 // Check if task is already complete
                 if *task.completed.lock().unwrap() {
@@ -364,7 +410,13 @@ impl crate::Runner for Runner {
                 let mut future = task.future.lock().unwrap();
 
                 // Record task poll
-                self.executor.metrics.record_task_poll();
+                self.executor
+                    .metrics
+                    .task_polls
+                    .get_or_create(&Work {
+                        label: task.label.clone(),
+                    })
+                    .inc();
 
                 // Task is re-queued in its `wake_by_ref` implementation as soon as we poll here (regardless
                 // of whether it is Pending/Ready).
@@ -464,14 +516,38 @@ pub struct Context {
 }
 
 impl crate::Spawner for Context {
-    fn spawn<F, T>(&self, f: F) -> Handle<T>
+    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (f, handle) = Handle::init(f, false);
-        Tasks::register(&self.executor.tasks, false, Box::pin(f));
-        self.executor.metrics.record_task_spawned();
+        let label = {
+            let prefix = self.executor.prefix.lock().unwrap();
+            if prefix.is_empty() || *prefix == ROOT_TASK {
+                label.to_string()
+            } else {
+                format!("{}_{}", *prefix, label)
+            }
+        };
+        if label == ROOT_TASK {
+            panic!("root task cannot be spawned");
+        }
+        let work = Work {
+            label: label.clone(),
+        };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+        let (f, handle) = Handle::init(f, gauge, false);
+        Tasks::register(&self.executor.tasks, &label, false, Box::pin(f));
         handle
     }
 }
@@ -649,18 +725,17 @@ impl Networking {
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
             Sink {
+                metrics: self.metrics.clone(),
                 auditor: self.auditor.clone(),
                 me: dialer,
                 peer: socket,
                 sender: dialee_sender,
-                metrics: self.metrics.clone(),
             },
             Stream {
                 auditor: self.auditor.clone(),
                 me: dialer,
                 peer: socket,
                 receiver: dialer_receiver,
-                metrics: self.metrics.clone(),
             },
         ))
     }
@@ -701,7 +776,6 @@ impl crate::Listener<Sink, Stream> for Listener {
                 sender,
             },
             Stream {
-                metrics: self.metrics.clone(),
                 auditor: self.auditor.clone(),
                 me: self.address,
                 peer: socket,
@@ -721,14 +795,18 @@ pub struct Sink {
 
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
+        let len = msg.len();
         self.auditor.send(self.me, self.peer, msg.clone());
-        self.metrics.record_bandwidth(self.me, self.peer, msg.len());
-        self.sender.send(msg).await.map_err(|_| Error::WriteFailed)
+        self.sender
+            .send(msg)
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+        self.metrics.bandwidth.inc_by(len as u64);
+        Ok(())
     }
 }
 
 pub struct Stream {
-    metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     me: SocketAddr,
     peer: SocketAddr,
@@ -739,7 +817,6 @@ impl crate::Stream for Stream {
     async fn recv(&mut self) -> Result<Bytes, Error> {
         let msg = self.receiver.next().await.ok_or(Error::ReadFailed)?;
         self.auditor.recv(self.me, self.peer, msg.clone());
-        self.metrics.record_bandwidth(self.peer, self.me, msg.len());
         Ok(msg)
     }
 }
@@ -773,74 +850,9 @@ mod tests {
     use super::*;
     use crate::utils::run_tasks;
     use futures::task::noop_waker;
-    use std::net::{IpAddr, Ipv4Addr};
-
-    #[test]
-    fn test_bandwidth_metrics() {
-        let (runner, _, _) = Executor::init(
-            42,
-            Duration::from_millis(1),
-            Arc::new(Mutex::new(Registry::default())),
-        );
-        let metrics = runner.executor.metrics.clone();
-
-        // Send some data
-        let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
-        let socket2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);
-        metrics.record_bandwidth(socket1, socket2, 100);
-        metrics.record_bandwidth(socket2, socket1, 200);
-        metrics.record_bandwidth(socket2, socket1, 150);
-
-        // Verify tracking
-        assert_eq!(
-            metrics
-                .bandwidth
-                .get_or_create(&Link {
-                    origin: socket1.to_string(),
-                    destination: socket2.to_string(),
-                })
-                .get(),
-            100
-        );
-        assert_eq!(
-            metrics
-                .bandwidth
-                .get_or_create(&Link {
-                    origin: socket2.to_string(),
-                    destination: socket1.to_string(),
-                })
-                .get(),
-            350
-        );
-    }
-
-    #[test]
-    fn test_task_metrics() {
-        let (runner, _, _) = Executor::init(
-            42,
-            Duration::from_millis(1),
-            Arc::new(Mutex::new(Registry::default())),
-        );
-        let metrics = runner.executor.metrics.clone();
-
-        for _ in 0..5 {
-            metrics.record_task_spawned();
-        }
-
-        for _ in 0..10 {
-            metrics.record_task_poll();
-        }
-
-        assert_eq!(metrics.tasks_spawned.get(), 5);
-        assert_eq!(metrics.task_polls.get(), 10);
-    }
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
-        let (executor, runtime, auditor) = Executor::init(
-            seed,
-            Duration::from_millis(1),
-            Arc::new(Mutex::new(Registry::default())),
-        );
+        let (executor, runtime, auditor) = Executor::seeded(seed);
         let messages = run_tasks(5, executor, runtime);
         (auditor.state(), messages)
     }

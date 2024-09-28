@@ -126,10 +126,10 @@ impl<
     /// After the network is started, it is not possible to add more channels.
     pub async fn run(self) {
         // Start tracker
-        let mut tracker_task = self.runtime.spawn(self.tracker.run());
+        let mut tracker_task = self.runtime.spawn("tracker", self.tracker.run());
 
         // Start router
-        let mut router_task = self.runtime.spawn(self.router.run(self.channels));
+        let mut router_task = self.runtime.spawn("router", self.router.run(self.channels));
 
         // Start spawner
         let (spawner, spawner_mailbox) = spawner::Actor::new(
@@ -142,9 +142,10 @@ impl<
                 allowed_peers_rate: self.cfg.allowed_peers_rate,
             },
         );
-        let mut spawner_task = self
-            .runtime
-            .spawn(spawner.run(self.tracker_mailbox.clone(), self.router_mailbox));
+        let mut spawner_task = self.runtime.spawn(
+            "spawner",
+            spawner.run(self.tracker_mailbox.clone(), self.router_mailbox),
+        );
 
         // Start listener
         let connection = connection::Config {
@@ -163,9 +164,10 @@ impl<
                 allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
             },
         );
-        let mut listener_task = self
-            .runtime
-            .spawn(listener.run(self.tracker_mailbox.clone(), spawner_mailbox.clone()));
+        let mut listener_task = self.runtime.spawn(
+            "listener",
+            listener.run(self.tracker_mailbox.clone(), spawner_mailbox.clone()),
+        );
 
         // Start dialer
         let dialer = dialer::Actor::new(
@@ -179,7 +181,7 @@ impl<
         );
         let mut dialer_task = self
             .runtime
-            .spawn(dialer.run(self.tracker_mailbox, spawner_mailbox));
+            .spawn("dialer", dialer.run(self.tracker_mailbox, spawner_mailbox));
 
         // Wait for first actor to exit
         info!("network started");

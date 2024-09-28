@@ -16,9 +16,9 @@ pub mod mocks;
 pub mod tokio;
 
 mod utils;
-use bytes::Bytes;
 pub use utils::{reschedule, Handle};
 
+use bytes::Bytes;
 use std::{
     future::Future,
     net::SocketAddr,
@@ -59,9 +59,14 @@ pub trait Runner {
 pub trait Spawner: Clone + Send + Sync + 'static {
     /// Enqueues a task to be executed.
     ///
+    /// Label can be used to track how many instances of a specific type of
+    /// task have been spawned or are running concurrently (and is appened to all
+    /// metrics). Label is automatially appended to the parent task labels (i.e. spawning
+    /// "fun" from "have" will be labeled "have_fun").
+    ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
     /// does not await the handle).
-    fn spawn<F, T>(&self, f: F) -> Handle<T>
+    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
@@ -83,32 +88,41 @@ pub trait Clock: Clone + Send + Sync + 'static {
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
 }
 
-/// Interface that any runtime must implement to provide
-/// network operations.
+/// Interface that any runtime must implement to create
+/// network connections.
 pub trait Network<L, Si, St>: Clone + Send + Sync + 'static
 where
     L: Listener<Si, St>,
     Si: Sink,
     St: Stream,
 {
+    /// Bind to the given socket address.
     fn bind(&self, socket: SocketAddr) -> impl Future<Output = Result<L, Error>> + Send;
+
+    /// Dial the given socket address.
     fn dial(&self, socket: SocketAddr) -> impl Future<Output = Result<(Si, St), Error>> + Send;
 }
 
+/// Interface that any runtime must implement to handle
+/// incoming network connections.
 pub trait Listener<Si, St>: Sync + Send + 'static
 where
     Si: Sink,
     St: Stream,
 {
+    /// Accept an incoming connection.
     fn accept(&mut self) -> impl Future<Output = Result<(SocketAddr, Si, St), Error>> + Send;
 }
 
-/// Interface that any runtime must implement to provide
-/// stream operations.
+/// Interface that any runtime must implement to send
+/// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
+    /// Send a message.
     fn send(&mut self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
+/// Interface that any runtime must implement to receive
+/// messages over a network connection.
 pub trait Stream: Sync + Send + 'static {
     fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }
@@ -143,12 +157,10 @@ macro_rules! select {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tokio::Config;
     use core::panic;
     use futures::{channel::mpsc, SinkExt, StreamExt};
-    use prometheus_client::registry::Registry;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use utils::reschedule;
 
     fn test_error_future(runner: impl Runner) {
@@ -186,7 +198,7 @@ mod tests {
 
     fn test_root_finishes(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            context.spawn(async move {
+            context.spawn("test", async move {
                 loop {
                     reschedule().await;
                 }
@@ -196,7 +208,7 @@ mod tests {
 
     fn test_spawn_abort(runner: impl Runner, context: impl Spawner) {
         runner.start(async move {
-            let handle = context.spawn(async move {
+            let handle = context.spawn("test", async move {
                 loop {
                     reschedule().await;
                 }
@@ -217,7 +229,7 @@ mod tests {
 
     fn test_panic_aborts_spawn(runner: impl Runner, context: impl Spawner) {
         let result = runner.start(async move {
-            let result = context.spawn(async move {
+            let result = context.spawn("test", async move {
                 panic!("blah");
             });
             assert_eq!(result.await, Err(Error::Exited));
@@ -232,10 +244,10 @@ mod tests {
         runner.start(async move {
             let output = Mutex::new(0);
             select! {
-                v1 = context.spawn(async { 1 }) => {
+                v1 = context.spawn("test", async { 1 }) => {
                     *output.lock().unwrap() = v1.unwrap();
                 },
-                v2 = context.spawn(async { 2 }) => {
+                v2 = context.spawn("test", async { 2 }) => {
                     *output.lock().unwrap() = v2.unwrap();
                 },
             };
@@ -289,120 +301,111 @@ mod tests {
 
     #[test]
     fn test_deterministic_future() {
-        let (runner, _, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
+        let (runner, _, _) = deterministic::Executor::default();
         test_error_future(runner);
     }
 
     #[test]
     fn test_deterministic_clock_sleep() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, _) = deterministic::Executor::default();
         assert_eq!(runtime.current(), SystemTime::UNIX_EPOCH);
         test_clock_sleep(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_clock_sleep_until() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_clock_sleep_until(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_root_finishes() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_root_finishes(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_spawn_abort() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_spawn_abort(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_panic_aborts_root() {
-        let (runner, _, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
+        let (runner, _, _) = deterministic::Executor::default();
         test_panic_aborts_root(runner);
     }
 
     #[test]
     #[should_panic(expected = "blah")]
     fn test_deterministic_panic_aborts_spawn() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_panic_aborts_spawn(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_select() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_select(executor, runtime);
     }
 
     #[test]
     fn test_deterministic_select_loop() {
-        let (executor, runtime, _) = deterministic::Executor::init(1, Duration::from_millis(1),  Arc::new(Mutex::new(Registry::default())));
+        let (executor, runtime, _) = deterministic::Executor::default();
         test_select_loop(executor, runtime);
     }
 
     #[test]
     fn test_tokio_error_future() {
-        let cfg = Config::default();
-        let (runner, _) = tokio::Executor::init(cfg);
+        let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
     }
 
     #[test]
     fn test_tokio_clock_sleep() {
-        let cfg = Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_clock_sleep(executor, runtime);
     }
 
     #[test]
     fn test_tokio_clock_sleep_until() {
-        let cfg = Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_clock_sleep_until(executor, runtime);
     }
 
     #[test]
     fn test_tokio_root_finishes() {
-        let cfg = Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_root_finishes(executor, runtime);
     }
 
     #[test]
     fn test_tokio_spawn_abort() {
-        let cfg = Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_spawn_abort(executor, runtime);
     }
 
     #[test]
     fn test_tokio_panic_aborts_root() {
-        let cfg = Config::default();
-        let (runner, _) = tokio::Executor::init(cfg);
+        let (runner, _) = tokio::Executor::default();
         test_panic_aborts_root(runner);
     }
 
     #[test]
     fn test_tokio_panic_aborts_spawn() {
-        let cfg = Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_panic_aborts_spawn(executor, runtime);
     }
 
     #[test]
     fn test_tokio_select() {
-        let cfg = Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_select(executor, runtime);
     }
 
     #[test]
     fn test_tokio_select_loop() {
-        let cfg = Config::default();
-        let (executor, runtime) = tokio::Executor::init(cfg);
+        let (executor, runtime) = tokio::Executor::default();
         test_select_loop(executor, runtime);
     }
 }
