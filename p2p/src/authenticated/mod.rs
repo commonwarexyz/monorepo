@@ -348,10 +348,10 @@ mod tests {
             // Send/Recieve messages
             let handler = runtime.spawn("agent", {
                 let addresses = addresses.clone();
-                let runtime = runtime.clone();
+                let runtime = runtime.clone_with_prefix("agent");
                 async move {
                     // Wait for all peers to send their identity
-                    let acker = runtime.spawn("agent_receiver", async move {
+                    let acker = runtime.spawn("receiver", async move {
                         let mut received = HashSet::new();
                         while received.len() < n - 1 {
                             // Ensure message equals sender identity
