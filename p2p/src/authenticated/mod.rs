@@ -165,7 +165,8 @@
 //! use std::sync::{Arc, Mutex};
 //!
 //! // Configure runtime
-//! let (executor, runtime) = Executor::default();
+//! let runtime_cfg = tokio::Config::default();
+//! let (executor, runtime) = Executor::init(runtime_cfg.clone());
 //!
 //! // Generate identity
 //! //

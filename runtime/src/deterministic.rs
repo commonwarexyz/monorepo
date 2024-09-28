@@ -11,7 +11,7 @@
 //! use prometheus_client::{registry::Registry, metrics::{counter::Counter, family::Family, gauge::Gauge}};
 //! use std::{sync::{Mutex, Arc}, time::Duration};
 //!
-//! let (executor, runtime, auditor) = Executor::default(42);
+//! let (executor, runtime, auditor) = Executor::default();
 //! executor.start(async move {
 //!     println!("Parent started");
 //!     let result = runtime.spawn("child", async move {
