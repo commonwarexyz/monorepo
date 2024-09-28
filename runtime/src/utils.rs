@@ -15,6 +15,7 @@ use std::{
     any::Any,
     future::Future,
     panic::{resume_unwind, AssertUnwindSafe},
+    path::{Component, PathBuf},
     pin::Pin,
     sync::{Arc, Once},
     task::{Context, Poll},
@@ -44,6 +45,33 @@ pub async fn reschedule() {
     Reschedule { yielded: false }.await
 }
 
+pub fn extract_crate_from_caller(caller: &str) -> String {
+    // Parse the path and reverse it to search upwards.
+    let caller = caller.replace('\\', "/");
+    let path = PathBuf::from(caller);
+    let mut components = path.components().collect::<Vec<_>>();
+    components.reverse();
+
+    // Look for the first "src" component with a parent directory.
+    let mut found_src = false;
+    for component in components {
+        match component {
+            Component::Normal(os_str) => {
+                let part = os_str.to_string_lossy();
+                if found_src {
+                    return part.into_owned();
+                } else if part == "src" {
+                    found_src = true;
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    // If no "src" was found, return "unknown".
+    "unknown".into()
+}
+
 fn extract_panic_message(err: &(dyn Any + Send)) -> String {
     if let Some(s) = err.downcast_ref::<&str>() {
         s.to_string()
@@ -52,21 +80,6 @@ fn extract_panic_message(err: &(dyn Any + Send)) -> String {
     } else {
         format!("{:?}", err)
     }
-}
-
-// Helper function to extract crate name from file path.
-pub fn extract_crate_from_caller(caller: &str) -> String {
-    // Split the file path and attempt to find the crate name.
-    let parts: Vec<&str> = caller.split(std::path::MAIN_SEPARATOR).collect();
-    if let Some(pos) = parts.iter().position(|&s| s == "src") {
-        if pos > 0 {
-            return parts[pos - 1].into();
-        }
-    }
-    if !parts.is_empty() {
-        return parts[0].into();
-    }
-    "unknown".into()
 }
 
 /// Handle to a spawned task.
@@ -194,4 +207,91 @@ pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Ve
         assert_eq!(outputs.len(), tasks);
         outputs
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_with_src_in_path() {
+        // Scenario where "src" is in the path and there's a parent directory.
+        let file_path = "/home/user/my_crate/src/lib.rs";
+        let crate_name = extract_crate_from_caller(file_path);
+        assert_eq!(crate_name, "my_crate");
+    }
+
+    #[test]
+    fn test_without_src_in_path() {
+        // Scenario where "src" is not in the path but the path is not empty.
+        let file_path = "/home/user/other_crate/main.rs";
+        let crate_name = extract_crate_from_caller(file_path);
+        assert_eq!(crate_name, "unknown");
+    }
+
+    #[test]
+    fn test_with_src_at_root() {
+        // Scenario where "src" is the first element in the path.
+        let file_path = "src/lib.rs";
+        let crate_name = extract_crate_from_caller(file_path);
+        assert_eq!(crate_name, "unknown");
+    }
+
+    #[test]
+    fn test_with_empty_path() {
+        // Scenario where the file path is empty.
+        let file_path = "";
+        let crate_name = extract_crate_from_caller(file_path);
+        assert_eq!(crate_name, "unknown");
+    }
+
+    #[test]
+    fn test_with_only_src() {
+        // Scenario where the file path is only "src".
+        let file_path = "src";
+        let crate_name = extract_crate_from_caller(file_path);
+        assert_eq!(crate_name, "unknown");
+    }
+
+    #[test]
+    fn test_with_multiple_src_in_path() {
+        // Scenario with multiple "src" occurrences in the path.
+        let file_path = "/home/user/src/my_crate/src/lib.rs";
+        let crate_name = extract_crate_from_caller(file_path);
+        // It should find the first "src" with a parent directory.
+        assert_eq!(crate_name, "my_crate");
+    }
+
+    #[test]
+    fn test_windows_path() {
+        // Scenario with Windows-style path separators.
+        let file_path = r"C:\Users\User\my_crate\src\lib.rs";
+        let crate_name = extract_crate_from_caller(file_path);
+        assert_eq!(crate_name, "my_crate");
+    }
+
+    #[test]
+    fn test_with_no_parent_before_src() {
+        // Scenario where "src" is at the beginning with no parent directory.
+        let file_path = "/src/lib.rs";
+        let crate_name = extract_crate_from_caller(file_path);
+        assert_eq!(crate_name, "unknown");
+    }
+
+    #[test]
+    fn test_with_nested_src_directories() {
+        // Scenario with nested "src" directories.
+        let file_path = "/home/user/my_crate/src/nested/src/lib.rs";
+        let crate_name = extract_crate_from_caller(file_path);
+        // It should return "nested" from the first "src" occurrence.
+        assert_eq!(crate_name, "nested");
+    }
+
+    #[test]
+    fn test_with_nonstandard_structure() {
+        // Scenario where the structure doesn't follow the standard.
+        let file_path = "/some/odd/path/without/src/anywhere";
+        let crate_name = extract_crate_from_caller(file_path);
+        assert_eq!(crate_name, "without");
+    }
 }
