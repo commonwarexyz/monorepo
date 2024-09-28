@@ -144,9 +144,6 @@ fn main() {
     }
 
     // Configure network
-    //
-    // TODO: migrate to using a default registry as the base and passing prefixed registries to
-    // individual components.
     let p2p_registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
