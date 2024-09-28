@@ -86,9 +86,12 @@ pub async fn run(
     let mut messages = Vec::new();
     let mut input = String::new();
     let mut cursor_visible = true;
-    let mut logs_scroll: u16 = 0;
-    let mut metrics_scroll: u16 = 0;
-    let mut messages_scroll: u16 = 0;
+    let mut logs_scroll_vertical: u16 = 0;
+    let mut logs_scroll_horizontal: u16 = 0;
+    let mut metrics_scroll_vertical: u16 = 0;
+    let mut metrics_scroll_horizontal: u16 = 0;
+    let mut messages_scroll_vertical: u16 = 0;
+    let mut messages_scroll_horizontal: u16 = 0;
     let mut focused_window = Focus::Input;
 
     // Print messages received from peers
@@ -114,7 +117,7 @@ pub async fn run(
                 let messages_len = messages.len() as u16;
                 let messages_max_scroll = messages_len.saturating_sub(messages_height);
                 if focused_window != Focus::Messages {
-                    messages_scroll = messages_max_scroll;
+                    messages_scroll_vertical = messages_max_scroll;
                 }
                 let messages_text = Text::from(messages.clone());
                 let messages_block = Paragraph::new(messages_text)
@@ -128,7 +131,7 @@ pub async fn run(
                                 _ => Style::default(),
                             }),
                     )
-                    .scroll((messages_scroll, 0));
+                    .scroll((messages_scroll_vertical, messages_scroll_horizontal));
                 f.render_widget(messages_block, messages_chunks[0]);
 
                 // Display metrics
@@ -152,7 +155,7 @@ pub async fn run(
                                 _ => Style::default(),
                             }),
                     )
-                    .scroll((metrics_scroll, 0));
+                    .scroll((metrics_scroll_vertical, metrics_scroll_horizontal));
 
                 f.render_widget(metrics_block, horizontal_chunks[1]);
 
@@ -183,7 +186,7 @@ pub async fn run(
                 let logs_len = logs.len() as u16;
                 let logs_max_scroll = logs_len.saturating_sub(logs_height);
                 if focused_window != Focus::Logs {
-                    logs_scroll = logs_max_scroll;
+                    logs_scroll_vertical = logs_max_scroll;
                 }
                 let logs_text = Text::from(
                     logs.iter()
@@ -200,7 +203,7 @@ pub async fn run(
                                 _ => Style::default(),
                             }),
                     )
-                    .scroll((logs_scroll, 0));
+                    .scroll((logs_scroll_vertical, logs_scroll_horizontal));
                 f.render_widget(logs_block, chunks[1]);
             })
             .unwrap();
@@ -231,17 +234,33 @@ pub async fn run(
                         }
                         KeyCode::Up => {
                             match focused_window {
-                                Focus::Logs => logs_scroll = logs_scroll.saturating_sub(1),
-                                Focus::Metrics => metrics_scroll = metrics_scroll.saturating_sub(1),
-                                Focus::Messages => messages_scroll = messages_scroll.saturating_sub(1),
+                                Focus::Logs => logs_scroll_vertical = logs_scroll_vertical.saturating_sub(1),
+                                Focus::Metrics => metrics_scroll_vertical = metrics_scroll_vertical.saturating_sub(1),
+                                Focus::Messages => messages_scroll_vertical = messages_scroll_vertical.saturating_sub(1),
                                 _ => {}
                             }
                         }
                         KeyCode::Down => {
                             match focused_window {
-                                Focus::Logs => logs_scroll = logs_scroll.saturating_add(1),
-                                Focus::Metrics => metrics_scroll = metrics_scroll.saturating_add(1),
-                                Focus::Messages => messages_scroll = messages_scroll.saturating_add(1),
+                                Focus::Logs => logs_scroll_vertical = logs_scroll_vertical.saturating_add(1),
+                                Focus::Metrics => metrics_scroll_vertical = metrics_scroll_vertical.saturating_add(1),
+                                Focus::Messages => messages_scroll_vertical = messages_scroll_vertical.saturating_add(1),
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Left => {
+                            match focused_window {
+                                Focus::Logs => logs_scroll_horizontal = logs_scroll_horizontal.saturating_sub(1),
+                                Focus::Metrics => metrics_scroll_horizontal = metrics_scroll_horizontal.saturating_sub(1),
+                                Focus::Messages => messages_scroll_horizontal = messages_scroll_horizontal.saturating_sub(1),
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Right => {
+                            match focused_window {
+                                Focus::Logs => logs_scroll_horizontal = logs_scroll_horizontal.saturating_add(1),
+                                Focus::Metrics => metrics_scroll_horizontal = metrics_scroll_horizontal.saturating_add(1),
+                                Focus::Messages => messages_scroll_horizontal = messages_scroll_horizontal.saturating_add(1),
                                 _ => {}
                             }
                         }
