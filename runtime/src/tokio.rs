@@ -237,8 +237,11 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        // Prefix label with crate name
         let file = Location::caller().file();
         let label = format!("{}:{}", extract_crate_from_caller(file), label);
+
+        // Spawn the task
         let gauge = self
             .executor
             .metrics
