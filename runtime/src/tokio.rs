@@ -24,7 +24,7 @@
 //! });
 //! ```
 
-use crate::{utils::extract_crate_from_caller, Clock, Error, Handle};
+use crate::{Clock, Error, Handle};
 use bytes::Bytes;
 use futures::{
     stream::{SplitSink, SplitStream},
@@ -40,7 +40,6 @@ use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     future::Future,
     net::SocketAddr,
-    panic::Location,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -199,7 +198,10 @@ impl Executor {
             Runner {
                 executor: executor.clone(),
             },
-            Context { executor },
+            Context {
+                prefix: String::new(),
+                executor,
+            },
         )
     }
 }
@@ -223,21 +225,34 @@ impl crate::Runner for Runner {
 /// for the `tokio` runtime.
 #[derive(Clone)]
 pub struct Context {
+    prefix: String,
     executor: Arc<Executor>,
 }
 
 impl crate::Spawner for Context {
-    #[track_caller]
+    fn clone_with_prefix(&self, prefix: &str) -> Self {
+        if self.prefix.is_empty() {
+            Self {
+                prefix: prefix.to_string(),
+                executor: self.executor.clone(),
+            }
+        } else {
+            Self {
+                prefix: format!("{}_{}", self.prefix, prefix),
+                executor: self.executor.clone(),
+            }
+        }
+    }
+
     fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        // Prefix label with crate name
-        let file = Location::caller().file();
-        let label = format!("{}:{}", extract_crate_from_caller(file), label);
-
-        // Spawn the task
+        let label = match self.prefix.is_empty() {
+            true => label.to_string(),
+            false => format!("{}_{}", self.prefix, label),
+        };
         let gauge = self
             .executor
             .metrics

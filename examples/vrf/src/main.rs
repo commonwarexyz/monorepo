@@ -215,7 +215,7 @@ fn main() {
 
     // Start runtime
     executor.start(async move {
-        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+        let (mut network, mut oracle) = Network::new(runtime.clone_with_prefix("p2p"), p2p_cfg);
 
         // Provide authorized peers
         //

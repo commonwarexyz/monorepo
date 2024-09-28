@@ -57,12 +57,15 @@ pub trait Runner {
 /// Interface that any task scheduler must implement to spawn
 /// sub-tasks in a given root task.
 pub trait Spawner: Clone + Send + Sync + 'static {
+    /// Clones the spawner with a given prefix (that will be prepended
+    /// to any labels used by `spawn`).
+    fn clone_with_prefix(&self, prefix: &str) -> Self;
+
     /// Enqueues a task to be executed.
     ///
     /// Label can be used to track how many instances of a specific type of
     /// task have been spawned or are running concurrently (and is appened to all
-    /// logs/metrics). To avoid unintended conflicts, the label is prepended with
-    /// the name of the directory of the crate that spawned the task (parent of "src").
+    /// metrics).
     ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
     /// does not await the handle).
