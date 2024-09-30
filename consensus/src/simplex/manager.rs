@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     time::{Duration, SystemTime},
 };
-use tracing::debug;
+use tracing::{debug, trace};
 
 // TODO: move to config
 const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
@@ -356,8 +356,119 @@ impl<E: Clock, C: Scheme> Store<E, C> {
     }
 
     pub fn notarization(&mut self, notarization: wire::Notarization) -> Option<wire::Notarization> {
-        // Store any signatures we have yet to see
-        None
+        // Store any signatures we have yet to see on current or previous view
+        let view = match self.views.get_mut(&notarization.view) {
+            Some(view) => view,
+            None => {
+                debug!(
+                    view = notarization.view,
+                    reason = "unknown view",
+                    "dropping notarization"
+                );
+                return None;
+            }
+        };
+
+        // Get proposal
+        let proposal_hash = match &view.proposal {
+            Some((hash, _)) => hash,
+            None => {
+                debug!(reason = "missing proposal", "dropping notarization");
+                return None;
+            }
+        };
+
+        // If notarization is not for proposal, drop
+        if proposal_hash != &notarization.block {
+            debug!(
+                notarization_block = hex(&notarization.block),
+                proposal_block = hex(&proposal_hash),
+                reason = "block mismatch",
+                "dropping notarization"
+            );
+            return None;
+        }
+
+        // Verify and store missing signatures
+        //
+        // TODO: verify that well-formed notarization (has threshold signatures)?
+        for signature in notarization.signatures {
+            if !C::validate(&signature.public_key) {
+                debug!(
+                    signer = hex(&signature.public_key),
+                    reason = "invalid validator",
+                    "dropping notarization"
+                );
+                return None;
+            }
+            if view.proposal_votes.contains_key(&signature.public_key) {
+                trace!(
+                    signer = hex(&signature.public_key),
+                    reason = "already voted",
+                    "skipping notarization vote"
+                );
+                continue;
+            }
+            if !C::verify(
+                VOTE_NAMESPACE,
+                &vote_digest(notarization.view, proposal_hash.clone()),
+                &signature.public_key,
+                &signature.signature,
+            ) {
+                debug!(reason = "invalid signature", "dropping notarization");
+                return None;
+            }
+            view.proposal_votes.insert(
+                signature.public_key.clone(),
+                wire::Vote {
+                    view: notarization.view,
+                    block: proposal_hash.clone(),
+                    signature: Some(signature),
+                },
+            );
+        }
+
+        // Return if we don't have threshold votes and or have already broadcast notarization
+        if (view.proposal_votes.len() as u32) < self.threshold
+            || view.broadcast_proposal_notarization
+        {
+            return None;
+        }
+
+        // Construct notarization
+        let mut signatures = Vec::new();
+        for validator in self.validators.iter() {
+            if let Some(vote) = view.proposal_votes.get(validator) {
+                signatures.push(vote.signature.clone().unwrap());
+            }
+        }
+        let notarization = wire::Notarization {
+            view: self.view,
+            block: proposal_hash.clone(),
+            signatures,
+        };
+        view.broadcast_proposal_notarization = true;
+        self.blocks.insert(
+            proposal_hash.clone(),
+            (self.view, view.proposal.as_ref().unwrap().1.height),
+        );
+
+        // Increment view
+        // TODO: put this logic in a helper
+        self.view += 1;
+        self.views.insert(
+            self.view,
+            View::new(
+                self.validators[self.view as usize % self.validators.len()].clone(),
+                self.runtime.current() + Duration::from_secs(2),
+                self.runtime.current() + Duration::from_secs(3),
+            ),
+        );
+
+        // Return the notarization
+        Some(notarization)
+
+        // TODO: send finalize message
     }
 
     pub fn finalize(finalize: wire::Finalize) -> Option<wire::Finalization> {
