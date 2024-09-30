@@ -68,6 +68,7 @@ impl View {
             leader,
 
             // TODO: need to trigger on these deadlines in reactor to get null vote broadcast
+            // TODO: need to determine if we are the leader and broadcast proposal in reactor
             leader_deadline: Some(leader_deadline),
             notarization_deadline: Some(notarization_deadline),
 
