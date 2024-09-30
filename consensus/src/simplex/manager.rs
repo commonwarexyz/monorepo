@@ -2,6 +2,7 @@ use super::wire;
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme, Signature};
 use commonware_runtime::Clock;
+use sha2::{Digest, Sha256};
 use std::{collections::HashMap, time::SystemTime};
 use tracing::debug;
 
@@ -9,6 +10,29 @@ use tracing::debug;
 const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
 const VOTE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_VOTE_";
 const FINALIZE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_FINALIZE_";
+
+// TODO: get payload as hash
+fn proposal_digest(view: u64, height: u64, parent: Bytes, payload: Bytes) -> Bytes {
+    let mut hash = Vec::new();
+    hash.extend_from_slice(&view.to_be_bytes());
+    hash.extend_from_slice(&height.to_be_bytes());
+    hash.extend_from_slice(&parent);
+    hash.extend_from_slice(&payload);
+    hash.into()
+}
+
+fn hash(bytes: Bytes) -> Bytes {
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    hasher.finalize().to_vec().into()
+}
+
+fn vote_digest(view: u64, proposal_hash: Bytes) -> Bytes {
+    let mut hash = Vec::new();
+    hash.extend_from_slice(&view.to_be_bytes());
+    hash.extend_from_slice(&proposal_hash);
+    hash.into()
+}
 
 pub struct View {
     leader: PublicKey,
@@ -63,6 +87,7 @@ pub struct Store<E: Clock, C: Scheme> {
 
     view: u64,
     views: HashMap<u64, View>,
+    blocks: HashMap<Bytes, (u64, u64)>, // block hash -> (view, height)
 }
 
 impl<E: Clock, C: Scheme> Store<E, C> {
@@ -84,6 +109,7 @@ impl<E: Clock, C: Scheme> Store<E, C> {
 
             view: 0,
             views: HashMap::new(),
+            blocks: HashMap::new(),
         }
     }
 
@@ -100,7 +126,7 @@ impl<E: Clock, C: Scheme> Store<E, C> {
         }
 
         // Parse signature
-        let signature = match proposal.signature {
+        let signature = match &proposal.signature {
             Some(signature) => signature,
             _ => {
                 debug!(reason = "missing signature", "dropping proposal");
@@ -132,9 +158,16 @@ impl<E: Clock, C: Scheme> Store<E, C> {
         }
 
         // Verify the signature
+        // TODO: get payload hash from function (passed as trait)
+        let proposal_digest = proposal_digest(
+            proposal.view,
+            proposal.height,
+            proposal.parent.clone(),
+            proposal.payload.clone(),
+        );
         if !C::verify(
             PROPOSAL_NAMESPACE,
-            &Vec::new(),
+            &proposal_digest,
             &signature.public_key,
             &signature.signature,
         ) {
@@ -155,11 +188,47 @@ impl<E: Clock, C: Scheme> Store<E, C> {
             return None;
         }
 
-        // TODO: Check to see if compatible with notarized tip
+        // Check to see if compatible with notarized tip
+        let (_, parent_height) = match self.blocks.get(&proposal.parent) {
+            Some(view) => view,
+            None => {
+                debug!(reason = "unknown parent", "dropping proposal");
+                return None;
+            }
+        };
+        if parent_height + 1 != proposal.height {
+            debug!(
+                parent_height = parent_height,
+                proposal_height = proposal.height,
+                reason = "invalid height",
+                "dropping proposal"
+            );
+            return None;
+        }
 
         // TODO: verify the proposal
 
-        None
+        // Store the proposal
+        let proposal_hash = hash(proposal_digest);
+        view.proposal = Some((proposal_hash.clone(), proposal));
+        view.leader_deadline = None;
+
+        // Construct vote
+        let vote = wire::Vote {
+            view: self.view,
+            block: proposal_hash.clone(),
+            signature: Some(wire::Signature {
+                public_key: self.crypto.public_key(),
+                signature: self.crypto.sign(VOTE_NAMESPACE, &proposal_hash),
+            }),
+        };
+
+        // Store the vote
+        view.proposal_votes
+            .insert(self.crypto.public_key(), vote.clone());
+
+        // Return the vote for broadcast
+        Some(vote)
     }
 
     pub fn vote(vote: wire::Vote) -> Option<wire::Notarization> {
