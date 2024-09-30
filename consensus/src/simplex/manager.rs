@@ -291,28 +291,36 @@ impl<E: Clock, C: Scheme> Store<E, C> {
 
         // Check to see if vote is for proposal in view
         let view = self.views.get_mut(&vote.view).unwrap();
-        let proposal_hash = match &view.proposal {
-            Some((hash, _)) => hash,
-            None => {
-                debug!(reason = "missing proposal", "dropping vote");
+
+        // Handle vote
+        if vote.block.len() == 0 {
+            view.null_votes
+                .insert(signature.public_key.clone(), vote.clone());
+        } else {
+            let proposal_hash = match &view.proposal {
+                Some((hash, _)) => hash,
+                None => {
+                    debug!(reason = "missing proposal", "dropping vote");
+                    return None;
+                }
+            };
+            if proposal_hash != &vote.block {
+                debug!(
+                    vote_block = hex(&vote.block),
+                    proposal_block = hex(&proposal_hash),
+                    reason = "block mismatch",
+                    "dropping vote"
+                );
                 return None;
             }
-        };
-        if proposal_hash != &vote.block {
-            debug!(
-                vote_block = hex(&vote.block),
-                proposal_block = hex(&proposal_hash),
-                reason = "block mismatch",
-                "dropping vote"
-            );
-            return None;
+
+            // Record the vote
+            view.proposal_votes
+                .insert(signature.public_key.clone(), vote.clone());
         }
 
-        // Record the vote
-        view.proposal_votes
-            .insert(signature.public_key.clone(), vote.clone());
-
         // Return if we don't have threshold votes and or have already broadcast notarization
+        // TODO: also handle threshold null votes
         if (view.proposal_votes.len() as u32) < self.threshold
             || view.broadcast_proposal_notarization
         {
@@ -471,11 +479,11 @@ impl<E: Clock, C: Scheme> Store<E, C> {
         // TODO: send finalize message
     }
 
-    pub fn finalize(finalize: wire::Finalize) -> Option<wire::Finalization> {
+    pub fn finalize(&mut self, finalize: wire::Finalize) -> Option<wire::Finalization> {
         None
     }
 
-    pub fn finalization(finalization: wire::Finalization) -> Option<wire::Finalization> {
+    pub fn finalization(&mut self, finalization: wire::Finalization) -> Option<wire::Finalization> {
         None
     }
 }
