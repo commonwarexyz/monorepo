@@ -7,6 +7,7 @@
 //! Wait for block finalization at tip (2f+1), fetch heights backwards (don't
 //! need to backfill views).
 
+mod config;
 mod manager;
 
 mod wire {

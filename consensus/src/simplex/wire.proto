@@ -6,33 +6,50 @@ message Message {
     oneof payload {
         Proposal proposal = 1;
         Vote vote = 2;
-        Finalize finalize = 3;  
+        Notarization notarization = 3;
+        Finalize finalize = 4;  
+        Finalization finalization = 5;
     }
 }
 
 // Reward issued based on partial signatures and participation in DKG
 message Proposal {
     uint64 timestamp = 1;
-    uint64 epoch = 2;
-    uint64 view = 3;
-    uint64 height = 4;
-    bytes parent = 5;
-    bytes payload = 6;
-    Signature signature = 7;
+    uint64 view = 2;
+    uint64 height = 3;
+    bytes parent = 4;
+
+    bytes payload = 5;
+
+    Signature signature = 6;
 }
 
 message Vote {
-    uint64 epoch = 1;
-    uint64 view = 2;
-    bytes block = 3; // hash 
-    Signature signature = 4;
+    uint64 view = 1;
+    bytes block = 2; // hash 
+
+    Signature signature = 3;
+}
+
+message Notarization {
+    uint64 view = 1;
+    bytes block = 2; // hash 
+    
+    repeated Signature signatures = 3;
 }
 
 message Finalize {
-    uint64 epoch = 1;
-    uint64 view = 2;
-    bytes block = 3; // hash 
-    bytes notarization = 4;
+    uint64 view = 1;
+    bytes block = 2; // hash 
+
+    Signature signature = 3;
+}
+
+message Finalization {
+    uint64 view = 1;
+    bytes block = 2; // hash 
+
+    repeated Signature signatures = 3;
 }
 
 message Signature {
