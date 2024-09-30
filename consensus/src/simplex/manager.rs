@@ -408,6 +408,8 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
                 "dropping notarization"
             );
             return None;
+
+            // TODO: drop proposal block and fetch correct block
         }
 
         // Verify and store missing signatures
