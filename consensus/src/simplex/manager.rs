@@ -1,11 +1,18 @@
 use super::wire;
 use bytes::Bytes;
-use commonware_cryptography::{PublicKey, Signature};
+use commonware_cryptography::{utils::hex, PublicKey, Scheme, Signature};
 use commonware_runtime::Clock;
 use std::{collections::HashMap, time::SystemTime};
 use tracing::debug;
 
+// TODO: move to config
+const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
+const VOTE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_VOTE_";
+const FINALIZE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_FINALIZE_";
+
 pub struct View {
+    leader: PublicKey,
+
     leader_deadline: Option<SystemTime>,
     notarization_deadline: Option<SystemTime>,
 
@@ -22,8 +29,14 @@ pub struct View {
 }
 
 impl View {
-    pub fn new(leader_deadline: SystemTime, notarization_deadline: SystemTime) -> Self {
+    pub fn new(
+        leader: PublicKey,
+        leader_deadline: SystemTime,
+        notarization_deadline: SystemTime,
+    ) -> Self {
         Self {
+            leader,
+
             leader_deadline: Some(leader_deadline),
             notarization_deadline: Some(notarization_deadline),
 
@@ -41,8 +54,9 @@ impl View {
     }
 }
 
-pub struct Store<E: Clock> {
+pub struct Store<E: Clock, C: Scheme> {
     runtime: E,
+    crypto: C,
 
     validators: Vec<PublicKey>,
     validators_ordered: HashMap<PublicKey, u32>,
@@ -51,8 +65,8 @@ pub struct Store<E: Clock> {
     views: HashMap<u64, View>,
 }
 
-impl<E: Clock> Store<E> {
-    pub fn new(runtime: E, mut validators: Vec<PublicKey>) -> Self {
+impl<E: Clock, C: Scheme> Store<E, C> {
+    pub fn new(runtime: E, crypto: C, mut validators: Vec<PublicKey>) -> Self {
         // Initialize ordered validators
         validators.sort();
         let mut validators_ordered = HashMap::new();
@@ -63,6 +77,7 @@ impl<E: Clock> Store<E> {
         // Initialize store
         Self {
             runtime,
+            crypto,
 
             validators,
             validators_ordered,
@@ -72,11 +87,78 @@ impl<E: Clock> Store<E> {
         }
     }
 
-    pub fn propose(&self, proposal: wire::Proposal) -> Option<wire::Vote> {
-        if proposal.view > self.view {
-            debug!(view = proposal.view, "dropping proposal");
+    pub fn propose(&mut self, proposal: wire::Proposal) -> Option<wire::Vote> {
+        // Ensure we are in the right view to process this message
+        if proposal.view != self.view {
+            debug!(
+                proposal_view = proposal.view,
+                our_view = self.view,
+                reason = "incorrect view",
+                "dropping proposal"
+            );
             return None;
         }
+
+        // Parse signature
+        let signature = match proposal.signature {
+            Some(signature) => signature,
+            _ => {
+                debug!(reason = "missing signature", "dropping proposal");
+                return None;
+            }
+        };
+
+        // Check to see if we have already received a proposal for this view
+        let view = self.views.get_mut(&proposal.view).unwrap();
+        if view.proposal.is_some() {
+            debug!(view = proposal.view, "proposal already exists");
+            // TODO: check if different signed proposal and post fault
+            return None;
+        }
+
+        // Check to see if leader is correct
+        if !C::validate(&signature.public_key) {
+            debug!(reason = "invalid signature", "dropping proposal");
+            return None;
+        }
+        if view.leader != signature.public_key {
+            debug!(
+                proposal_leader = hex(&signature.public_key),
+                view_leader = hex(&view.leader),
+                reason = "leader mismatch",
+                "dropping proposal"
+            );
+            return None;
+        }
+
+        // Verify the signature
+        if !C::verify(
+            PROPOSAL_NAMESPACE,
+            &Vec::new(),
+            &signature.public_key,
+            &signature.signature,
+        ) {
+            debug!(reason = "invalid signature", "dropping proposal");
+            return None;
+        }
+
+        // Check to see if we are past the leader deadline
+        let deadline = view.leader_deadline.unwrap();
+        let current = self.runtime.current();
+        if deadline < current {
+            debug!(
+                view = proposal.view,
+                ?deadline,
+                ?current,
+                "leader deadline passed"
+            );
+            return None;
+        }
+
+        // TODO: Check to see if compatible with notarized tip
+
+        // TODO: verify the proposal
+
         None
     }
 
@@ -84,7 +166,7 @@ impl<E: Clock> Store<E> {
         None
     }
 
-    pub fn notarization(notarization: wire::Notarization) -> Option<wire::Notarization> {
+    pub fn notarization(&self, notarization: wire::Notarization) -> Option<wire::Notarization> {
         None
     }
 
