@@ -19,6 +19,8 @@ fn main() -> Result<()> {
         "Proposal.payload",
         "Proposal.parent",
         "Vote.block",
+        "Notarization.block",
+        "Finalize.block",
     ]);
     config.compile_protos(&["src/simplex/wire.proto"], &["src/simplex/"])?;
     Ok(())

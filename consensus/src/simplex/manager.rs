@@ -1,6 +1,8 @@
 use super::wire;
 use bytes::Bytes;
-use commonware_cryptography::{utils::hex, PublicKey, Scheme, Signature};
+use commonware_cryptography::{
+    bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme, Signature,
+};
 use commonware_runtime::Clock;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, time::SystemTime};
@@ -43,13 +45,13 @@ pub struct View {
     proposal: Option<(Bytes, wire::Proposal)>,
 
     proposal_votes: HashMap<PublicKey, wire::Vote>,
-    proposal_notarization: Option<wire::Notarization>,
+    broadcast_proposal_notarization: bool,
 
     null_votes: HashMap<PublicKey, wire::Vote>,
-    null_notarization: Option<wire::Notarization>,
+    broadcast_null_notarization: bool,
 
     finalizes: HashMap<PublicKey, wire::Finalize>,
-    finalization: Option<wire::Finalization>,
+    broadcast_finalization: bool,
 }
 
 impl View {
@@ -67,13 +69,13 @@ impl View {
             proposal: None,
 
             proposal_votes: HashMap::new(),
-            proposal_notarization: None,
+            broadcast_proposal_notarization: false,
 
             null_votes: HashMap::new(),
-            null_notarization: None,
+            broadcast_null_notarization: false,
 
             finalizes: HashMap::new(),
-            finalization: None,
+            broadcast_finalization: false,
         }
     }
 }
@@ -82,6 +84,7 @@ pub struct Store<E: Clock, C: Scheme> {
     runtime: E,
     crypto: C,
 
+    threshold: u32,
     validators: Vec<PublicKey>,
     validators_ordered: HashMap<PublicKey, u32>,
 
@@ -104,6 +107,9 @@ impl<E: Clock, C: Scheme> Store<E, C> {
             runtime,
             crypto,
 
+            // TODO: move this helper
+            threshold: threshold(validators.len() as u32)
+                .expect("not possible to satisfy 2f+1 threshold"),
             validators,
             validators_ordered,
 
@@ -234,6 +240,7 @@ impl<E: Clock, C: Scheme> Store<E, C> {
 
     pub fn vote(&mut self, vote: wire::Vote) -> Option<wire::Notarization> {
         // Ensure we are in the right view to process this message
+        // TODO: consider storing the vote if one ahead of our current view
         if vote.view != self.view {
             debug!(
                 vote_view = vote.view,
@@ -243,7 +250,88 @@ impl<E: Clock, C: Scheme> Store<E, C> {
             );
             return None;
         }
-        None
+
+        // Parse signature
+        let signature = match &vote.signature {
+            Some(signature) => signature,
+            _ => {
+                debug!(reason = "missing signature", "dropping proposal");
+                return None;
+            }
+        };
+        if !C::validate(&signature.public_key) {
+            debug!(reason = "invalid signature", "dropping proposal");
+            return None;
+        }
+
+        // Verify that signer is a validator
+        if !self.validators_ordered.contains_key(&signature.public_key) {
+            debug!(
+                signer = hex(&signature.public_key),
+                reason = "invalid validator",
+                "dropping vote"
+            );
+            return None;
+        }
+
+        // Verify the signature
+        let vote_digest = vote_digest(vote.view, vote.block.clone());
+        if !C::verify(
+            VOTE_NAMESPACE,
+            &vote_digest,
+            &signature.public_key,
+            &signature.signature,
+        ) {
+            debug!(reason = "invalid signature", "dropping vote");
+            return None;
+        }
+
+        // Check to see if vote is for proposal in view
+        let view = self.views.get_mut(&vote.view).unwrap();
+        let proposal_hash = match &view.proposal {
+            Some((hash, _)) => hash,
+            None => {
+                debug!(reason = "missing proposal", "dropping vote");
+                return None;
+            }
+        };
+        if proposal_hash != &vote.block {
+            debug!(
+                vote_block = hex(&vote.block),
+                proposal_block = hex(&proposal_hash),
+                reason = "block mismatch",
+                "dropping vote"
+            );
+            return None;
+        }
+
+        // Record the vote
+        view.proposal_votes
+            .insert(signature.public_key.clone(), vote.clone());
+
+        // Return if we don't have threshold votes and or have already broadcast notarization
+        if (view.proposal_votes.len() as u32) < self.threshold
+            || view.broadcast_proposal_notarization
+        {
+            return None;
+        }
+
+        // Construct notarization
+        let mut signatures = Vec::new();
+        for validator in self.validators.iter() {
+            if let Some(vote) = view.proposal_votes.get(validator) {
+                signatures.push(vote.signature.clone().unwrap());
+            }
+        }
+        let notarization = wire::Notarization {
+            view: self.view,
+            block: proposal_hash.clone(),
+            signatures,
+        };
+        view.broadcast_proposal_notarization = true;
+
+        // Return the notarization
+        Some(notarization)
     }
 
     pub fn notarization(&self, notarization: wire::Notarization) -> Option<wire::Notarization> {
