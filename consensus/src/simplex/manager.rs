@@ -234,6 +234,8 @@ impl<E: Clock, C: Scheme> Store<E, C> {
         };
 
         // Store the vote
+        // TODO: determine if we want to do this in propose or call vote from here (with signature
+        // verification bypass)
         view.proposal_votes
             .insert(self.crypto.public_key(), vote.clone());
 
