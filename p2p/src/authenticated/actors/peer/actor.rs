@@ -135,7 +135,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
 
         // Send/Receive messages from the peer
         let (max_content_size, mut conn_sender, mut conn_receiver) = connection.split();
-        let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn({
+        let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender",{
             let runtime = self.runtime.clone();
             let mut tracker = tracker.clone();
             let peer = peer.clone();
@@ -207,7 +207,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                 }
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self.runtime.spawn({
+        let mut receive_handler: Handle<Result<(), Error>> = self.runtime.spawn("receiver", {
             let runtime = self.runtime.clone();
             async move {
                 let bit_vec_rate_limiter =

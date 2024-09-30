@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn test_handshake_create_verify() {
         // Initialize runtime
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn test_handshake() {
         // Initialize runtime
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -275,7 +275,7 @@ mod tests {
             let (stream, mut stream_sender) = MockStream::new();
 
             // Send message over stream
-            runtime.spawn(async move {
+            runtime.spawn("stream_sender", async move {
                 stream_sender.send(handshake_bytes).await.unwrap();
             });
 
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn test_handshake_not_for_us() {
         // Initialize runtime
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -321,7 +321,7 @@ mod tests {
             let (stream, mut stream_sender) = MockStream::new();
 
             // Send message over stream
-            runtime.spawn(async move {
+            runtime.spawn("stream_sender", async move {
                 stream_sender.send(handshake_bytes).await.unwrap();
             });
 
@@ -345,14 +345,14 @@ mod tests {
     #[test]
     fn test_incoming_handshake_invalid_data() {
         // Initialize runtime
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Setup a mock sink and stream
             let (sink, _) = MockSink::new();
             let (stream, mut stream_sender) = MockStream::new();
 
             // Send invalid data over stream
-            runtime.spawn(async move {
+            runtime.spawn("stream_sender", async move {
                 stream_sender.send(Bytes::from("mock data")).await.unwrap();
             });
 
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn test_incoming_handshake_verify_timeout() {
         // Initialize runtime
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create participants
             let mut sender = Ed25519::from_seed(0);
@@ -388,7 +388,7 @@ mod tests {
             let (stream, mut stream_sender) = MockStream::new();
 
             // Accept connections but do nothing
-            runtime.spawn({
+            runtime.spawn("stream_sender", {
                 let runtime = runtime.clone();
                 let recipient = recipient.clone();
                 async move {
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_public_key() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_ephemeral_public_key() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_signature() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn test_handshake_verify_invalid_timestamp() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();

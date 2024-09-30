@@ -27,14 +27,11 @@ mod tests {
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
-    use std::{
-        collections::{BTreeMap, HashMap},
-        time::Duration,
-    };
+    use std::collections::{BTreeMap, HashMap};
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         // Create simulated network
-        let (executor, runtime, auditor) = Executor::init(seed, Duration::from_millis(1));
+        let (executor, runtime, auditor) = Executor::seeded(seed);
         executor.start(async move {
             let mut network = network::Network::new(
                 runtime.clone(),
@@ -51,7 +48,7 @@ mod tests {
                 let (sender, mut receiver) = network.register(pk.clone());
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
-                runtime.spawn(async move {
+                runtime.spawn("agent_receiver", async move {
                     for _ in 0..size {
                         receiver.recv().await.unwrap();
                     }
@@ -87,7 +84,7 @@ mod tests {
             }
 
             // Send messages
-            runtime.spawn({
+            runtime.spawn("agent_sender", {
                 let mut runtime = runtime.clone();
                 async move {
                     // Sort agents for deterministic output
@@ -114,7 +111,7 @@ mod tests {
             });
 
             // Start network
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Wait for all recipients
             let mut results = Vec::new();
@@ -146,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_invalid_message() {
-        let (executor, mut runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
@@ -165,7 +162,7 @@ mod tests {
             }
 
             // Start network
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Send invalid message
             let keys = agents.keys().collect::<Vec<_>>();
@@ -186,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_linking_self() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
@@ -218,7 +215,7 @@ mod tests {
 
     #[test]
     fn test_invalid_success_rate() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
@@ -252,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_simple_message_delivery() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let mut network = network::Network::new(
@@ -293,7 +290,7 @@ mod tests {
                 .unwrap();
 
             // Start network
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Send messages
             let msg1 = Bytes::from("hello from pk1");

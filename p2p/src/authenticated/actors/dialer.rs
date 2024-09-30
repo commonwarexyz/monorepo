@@ -96,7 +96,7 @@ impl<
                 .inc();
 
             // Spawn dialer to connect to peer
-            self.runtime.spawn({
+            self.runtime.spawn("dialer", {
                 let runtime = self.runtime.clone();
                 let config = self.connection.clone();
                 let mut supervisor = supervisor.clone();

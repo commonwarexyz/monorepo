@@ -63,8 +63,12 @@ use tracing::info;
 #[doc(hidden)]
 fn main() {
     // Initialize runtime
-    let runtime_cfg = tokio::Config::default();
-    let (executor, runtime) = Executor::init(runtime_cfg);
+    let runtime_registry = Arc::new(Mutex::new(Registry::with_prefix("runtime")));
+    let runtime_cfg = tokio::Config {
+        registry: runtime_registry.clone(),
+        ..Default::default()
+    };
+    let (executor, runtime) = Executor::init(runtime_cfg.clone());
 
     // Parse arguments
     let matches = Command::new("commonware-chat")
@@ -140,10 +144,10 @@ fn main() {
     }
 
     // Configure network
-    let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+    let p2p_registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        registry.clone(),
+        p2p_registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         runtime_cfg.max_message_size,
@@ -170,13 +174,14 @@ fn main() {
         );
 
         // Start network
-        let network_handler = runtime.spawn(network.run());
+        let network_handler = runtime.spawn("network", network.run());
 
         // Start chat
         handler::run(
-            runtime,
+            runtime.clone(),
             hex(&signer.public_key()),
-            registry,
+            runtime_registry,
+            p2p_registry,
             logs,
             chat_sender,
             chat_receiver,
