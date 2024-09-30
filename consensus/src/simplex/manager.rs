@@ -1,7 +1,9 @@
 use super::wire;
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{PublicKey, Signature};
+use commonware_runtime::Clock;
 use std::{collections::HashMap, time::SystemTime};
+use tracing::debug;
 
 pub struct View {
     leader_deadline: Option<SystemTime>,
@@ -39,18 +41,58 @@ impl View {
     }
 }
 
-pub struct Store {
-    pub view: u64,
-    pub views: HashMap<u64, View>,
+pub struct Store<E: Clock> {
+    runtime: E,
+
+    validators: Vec<PublicKey>,
+    validators_ordered: HashMap<PublicKey, u32>,
+
+    view: u64,
+    views: HashMap<u64, View>,
 }
 
-impl Store {
-    pub fn new() -> Self {
+impl<E: Clock> Store<E> {
+    pub fn new(runtime: E, mut validators: Vec<PublicKey>) -> Self {
+        // Initialize ordered validators
+        validators.sort();
+        let mut validators_ordered = HashMap::new();
+        for (i, validator) in validators.iter().enumerate() {
+            validators_ordered.insert(validator.clone(), i as u32);
+        }
+
+        // Initialize store
         Self {
+            runtime,
+
+            validators,
+            validators_ordered,
+
             view: 0,
             views: HashMap::new(),
         }
     }
 
-    pub fn 
+    pub fn propose(&self, proposal: wire::Proposal) -> Option<wire::Vote> {
+        if proposal.view > self.view {
+            debug!(view = proposal.view, "dropping proposal");
+            return None;
+        }
+        None
+    }
+
+    pub fn vote(vote: wire::Vote) -> Option<wire::Notarization> {
+        None
+    }
+
+    pub fn notarization(notarization: wire::Notarization) -> Option<wire::Notarization> {
+        None
+    }
+
+    pub fn finalize(finalize: wire::Finalize) -> Option<wire::Finalization> {
+        None
+    }
+
+    pub fn finalization(finalization: wire::Finalization) -> Option<wire::Finalization> {
+        None
+    }
 }
