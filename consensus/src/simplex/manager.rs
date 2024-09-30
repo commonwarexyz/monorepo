@@ -67,6 +67,7 @@ impl View {
         Self {
             leader,
 
+            // TODO: need to trigger on these deadlines in reactor to get null vote broadcast
             leader_deadline: Some(leader_deadline),
             notarization_deadline: Some(notarization_deadline),
 
@@ -329,7 +330,10 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
             view.proposal_votes
                 .insert(signature.public_key.clone(), vote.clone());
         }
+        None
+    }
 
+    pub fn advance(&mut self) -> Option<wire::Notarization> {
         // Return if we don't have threshold votes and or have already broadcast notarization
         // TODO: also handle threshold null votes
         if (view.proposal_votes.len() as u32) < self.threshold
