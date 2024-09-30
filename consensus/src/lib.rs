@@ -13,6 +13,7 @@ use bytes::Bytes;
 // - 33% shutdown and recover
 // - full shutdown and recover (no safety failure from voting incorrectly)
 // - 33% double-voting
+// - block sent to one honest party different than block sent to all others, does it drop at notarization and fetch actual?
 
 pub trait Application {
     fn propose(&mut self) -> Bytes;

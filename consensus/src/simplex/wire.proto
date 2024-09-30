@@ -31,6 +31,9 @@ message Vote {
 
 message Notarization {
     uint64 view = 1;
+
+    // TODO: if party did not vote on block, send to them (otherwise previous height producer may impact
+    // ability of next producer?
     bytes block = 2; // hash 
     
     repeated Signature signatures = 3;

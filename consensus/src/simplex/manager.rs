@@ -414,7 +414,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
             );
             return None;
 
-            // TODO: drop proposal block and fetch correct block
+            // TODO: drop proposal block we were given and fetch correct block
         }
 
         // Verify and store missing signatures
