@@ -1,0 +1,41 @@
+syntax = "proto3";
+package wire;
+
+// Message is the only allowed message format that can be sent between participants.
+message Message {
+    oneof payload {
+        Proposal proposal = 1;
+        Vote vote = 2;
+        Finalize finalize = 3;  
+    }
+}
+
+// Reward issued based on partial signatures and participation in DKG
+message Proposal {
+    uint64 timestamp = 1;
+    uint64 epoch = 2;
+    uint64 view = 3;
+    uint64 height = 4;
+    bytes parent = 5;
+    bytes payload = 6;
+    Signature signature = 7;
+}
+
+message Vote {
+    uint64 epoch = 1;
+    uint64 view = 2;
+    bytes block = 3; // hash 
+    Signature signature = 4;
+}
+
+message Finalize {
+    uint64 epoch = 1;
+    uint64 view = 2;
+    bytes block = 3; // hash 
+    bytes notarization = 4;
+}
+
+message Signature {
+    bytes public_key = 1;
+    bytes signature = 2;
+}
