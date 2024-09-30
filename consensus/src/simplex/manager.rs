@@ -115,6 +115,7 @@ impl<E: Clock, C: Scheme> Store<E, C> {
 
     pub fn propose(&mut self, proposal: wire::Proposal) -> Option<wire::Vote> {
         // Ensure we are in the right view to process this message
+        // TODO: consider storing the proposal if one ahead of our current view
         if proposal.view != self.view {
             debug!(
                 proposal_view = proposal.view,
@@ -231,7 +232,17 @@ impl<E: Clock, C: Scheme> Store<E, C> {
         Some(vote)
     }
 
-    pub fn vote(vote: wire::Vote) -> Option<wire::Notarization> {
+    pub fn vote(&mut self, vote: wire::Vote) -> Option<wire::Notarization> {
+        // Ensure we are in the right view to process this message
+        if vote.view != self.view {
+            debug!(
+                vote_view = vote.view,
+                our_view = self.view,
+                reason = "incorrect view",
+                "dropping vote"
+            );
+            return None;
+        }
         None
     }
 
