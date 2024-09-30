@@ -3,6 +3,8 @@
 pub mod simplex;
 pub mod tbd;
 
+use bytes::Bytes;
+
 // TODO: add simulated dialect for applications to test their execution environments under
 
 // TODO: tests
@@ -11,3 +13,10 @@ pub mod tbd;
 // - 33% shutdown and recover
 // - full shutdown and recover (no safety failure from voting incorrectly)
 // - 33% double-voting
+
+pub trait Application {
+    fn propose(&mut self) -> Bytes;
+    fn verify(&self, block: Bytes) -> Option<Bytes>;
+    fn notarized(&mut self, block: Bytes);
+    fn finalized(&mut self, block: Bytes);
+}

@@ -1,3 +1,5 @@
+use crate::Application;
+
 use super::wire;
 use bytes::Bytes;
 use commonware_cryptography::{
@@ -16,7 +18,6 @@ const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
 const VOTE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_VOTE_";
 const FINALIZE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_FINALIZE_";
 
-// TODO: get payload as hash
 fn proposal_digest(view: u64, height: u64, parent: Bytes, payload: Bytes) -> Bytes {
     let mut hash = Vec::new();
     hash.extend_from_slice(&view.to_be_bytes());
@@ -83,9 +84,10 @@ impl View {
     }
 }
 
-pub struct Store<E: Clock, C: Scheme> {
+pub struct Store<E: Clock, C: Scheme, A: Application> {
     runtime: E,
     crypto: C,
+    application: A,
 
     threshold: u32,
     validators: Vec<PublicKey>,
@@ -93,11 +95,11 @@ pub struct Store<E: Clock, C: Scheme> {
 
     view: u64,
     views: HashMap<u64, View>,
-    blocks: HashMap<Bytes, (u64, u64)>, // block hash -> (view, height)
+    notarized_blocks: HashMap<Bytes, (u64, u64)>, // block hash -> (view, height)
 }
 
-impl<E: Clock, C: Scheme> Store<E, C> {
-    pub fn new(runtime: E, crypto: C, mut validators: Vec<PublicKey>) -> Self {
+impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
+    pub fn new(runtime: E, crypto: C, application: A, mut validators: Vec<PublicKey>) -> Self {
         // Initialize ordered validators
         validators.sort();
         let mut validators_ordered = HashMap::new();
@@ -109,6 +111,7 @@ impl<E: Clock, C: Scheme> Store<E, C> {
         Self {
             runtime,
             crypto,
+            application,
 
             // TODO: move this helper
             threshold: threshold(validators.len() as u32)
@@ -118,7 +121,7 @@ impl<E: Clock, C: Scheme> Store<E, C> {
 
             view: 0,
             views: HashMap::new(),
-            blocks: HashMap::new(),
+            notarized_blocks: HashMap::new(),
         }
     }
 
@@ -167,13 +170,21 @@ impl<E: Clock, C: Scheme> Store<E, C> {
             return None;
         }
 
+        // Verify the payload and get its hash
+        let payload_hash = match self.application.verify(proposal.payload.clone()) {
+            Some(hash) => hash,
+            None => {
+                debug!(reason = "invalid payload", "dropping proposal");
+                return None;
+            }
+        };
+
         // Verify the signature
-        // TODO: get payload hash from function (passed as trait)
         let proposal_digest = proposal_digest(
             proposal.view,
             proposal.height,
             proposal.parent.clone(),
-            proposal.payload.clone(),
+            payload_hash,
         );
         if !C::verify(
             PROPOSAL_NAMESPACE,
@@ -199,7 +210,7 @@ impl<E: Clock, C: Scheme> Store<E, C> {
         }
 
         // Check to see if compatible with notarized tip
-        let (_, parent_height) = match self.blocks.get(&proposal.parent) {
+        let (_, parent_height) = match self.notarized_blocks.get(&proposal.parent) {
             Some(view) => view,
             None => {
                 debug!(reason = "unknown parent", "dropping proposal");
@@ -215,8 +226,6 @@ impl<E: Clock, C: Scheme> Store<E, C> {
             );
             return None;
         }
-
-        // TODO: verify the proposal
 
         // Store the proposal
         let proposal_hash = hash(proposal_digest);
@@ -358,6 +367,8 @@ impl<E: Clock, C: Scheme> Store<E, C> {
                 self.runtime.current() + Duration::from_secs(3),
             ),
         );
+
+        // TODO: if leader, ask for block after sending notarization
 
         // Return the notarization
         Some(notarization)
