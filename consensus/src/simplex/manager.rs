@@ -4,8 +4,11 @@ use commonware_cryptography::{
     bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme, Signature,
 };
 use commonware_runtime::Clock;
-use sha2::{Digest, Sha256};
-use std::{collections::HashMap, time::SystemTime};
+use sha2::{digest::typenum::NInt, Digest, Sha256};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime},
+};
 use tracing::debug;
 
 // TODO: move to config
@@ -329,12 +332,31 @@ impl<E: Clock, C: Scheme> Store<E, C> {
             signatures,
         };
         view.broadcast_proposal_notarization = true;
+        self.blocks.insert(
+            proposal_hash.clone(),
+            (self.view, view.proposal.as_ref().unwrap().1.height),
+        );
+
+        // Increment view
+        // TODO: put this logic in a helper
+        self.view += 1;
+        self.views.insert(
+            self.view,
+            View::new(
+                self.validators[self.view as usize % self.validators.len()].clone(),
+                self.runtime.current() + Duration::from_secs(2),
+                self.runtime.current() + Duration::from_secs(3),
+            ),
+        );
 
         // Return the notarization
         Some(notarization)
+
+        // TODO: send finalize message
     }
 
-    pub fn notarization(&self, notarization: wire::Notarization) -> Option<wire::Notarization> {
+    pub fn notarization(&mut self, notarization: wire::Notarization) -> Option<wire::Notarization> {
+        // Store any signatures we have yet to see
         None
     }
 
