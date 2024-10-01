@@ -33,14 +33,14 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
     ) -> Self {
         validators.sort();
         Self {
-            runtime,
+            runtime: runtime.clone(),
             crypto: crypto.clone(),
             application: application.clone(),
             sender,
             receiver,
 
             validators: validators.clone(),
-            store: Store::new(crypto, application, validators),
+            store: Store::new(runtime, crypto, application, validators),
         }
     }
 

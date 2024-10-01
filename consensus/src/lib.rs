@@ -1,7 +1,6 @@
 //! TBD
 
 pub mod simplex;
-pub mod tbd;
 
 use bytes::Bytes;
 
