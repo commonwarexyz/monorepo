@@ -9,6 +9,7 @@
 
 mod config;
 mod manager;
+mod reactor;
 
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));

@@ -127,7 +127,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         }
     }
 
-    pub fn propose(&mut self, proposal: wire::Proposal) -> Option<wire::Vote> {
+    pub fn proposal(&mut self, proposal: wire::Proposal) -> Option<wire::Vote> {
         // Ensure we are in the right view to process this message
         // TODO: consider storing the proposal if one ahead of our current view
         if proposal.view != self.view {
