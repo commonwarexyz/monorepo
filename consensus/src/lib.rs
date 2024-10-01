@@ -15,7 +15,7 @@ use bytes::Bytes;
 // - 33% double-voting
 // - block sent to one honest party different than block sent to all others, does it drop at notarization and fetch actual?
 
-pub trait Application {
+pub trait Application: Clone {
     fn propose(&mut self) -> Bytes;
     fn verify(&self, block: Bytes) -> Option<Bytes>;
     fn notarized(&mut self, block: Bytes);

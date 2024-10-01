@@ -5,12 +5,8 @@ use bytes::Bytes;
 use commonware_cryptography::{
     bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme, Signature,
 };
-use commonware_runtime::Clock;
-use sha2::{digest::typenum::NInt, Digest, Sha256};
-use std::{
-    collections::HashMap,
-    time::{Duration, SystemTime},
-};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use tracing::{debug, trace};
 
 // TODO: move to config
@@ -43,9 +39,6 @@ fn vote_digest(view: u64, proposal_hash: Bytes) -> Bytes {
 pub struct View {
     leader: PublicKey,
 
-    leader_deadline: Option<SystemTime>,
-    notarization_deadline: Option<SystemTime>,
-
     proposal: Option<(Bytes, wire::Proposal)>,
 
     proposal_votes: HashMap<PublicKey, wire::Vote>,
@@ -59,18 +52,9 @@ pub struct View {
 }
 
 impl View {
-    pub fn new(
-        leader: PublicKey,
-        leader_deadline: SystemTime,
-        notarization_deadline: SystemTime,
-    ) -> Self {
+    pub fn new(leader: PublicKey) -> Self {
         Self {
             leader,
-
-            // TODO: need to trigger on these deadlines in reactor to get null vote broadcast
-            // TODO: need to determine if we are the leader and broadcast proposal in reactor
-            leader_deadline: Some(leader_deadline),
-            notarization_deadline: Some(notarization_deadline),
 
             proposal: None,
 
@@ -86,8 +70,7 @@ impl View {
     }
 }
 
-pub struct Store<E: Clock, C: Scheme, A: Application> {
-    runtime: E,
+pub struct Store<C: Scheme, A: Application> {
     crypto: C,
     application: A,
 
@@ -100,8 +83,8 @@ pub struct Store<E: Clock, C: Scheme, A: Application> {
     notarized_blocks: HashMap<Bytes, (u64, u64)>, // block hash -> (view, height)
 }
 
-impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
-    pub fn new(runtime: E, crypto: C, application: A, mut validators: Vec<PublicKey>) -> Self {
+impl<C: Scheme, A: Application> Store<C, A> {
+    pub fn new(crypto: C, application: A, mut validators: Vec<PublicKey>) -> Self {
         // Initialize ordered validators
         validators.sort();
         let mut validators_ordered = HashMap::new();
@@ -111,7 +94,6 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
 
         // Initialize store
         Self {
-            runtime,
             crypto,
             application,
 
