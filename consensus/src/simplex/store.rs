@@ -579,6 +579,12 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
             proposal_hash.is_empty(),
         );
 
+        // Notify application
+        if notarization.is_some() && !proposal_hash.is_empty() {
+            let payload = view.proposal.as_ref().unwrap().1.payload.clone();
+            self.application.notarized(payload);
+        }
+
         // Increment view
         let timeout_fired = view.timeout_fired;
         self.view += 1;
@@ -811,6 +817,14 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         debug!(added, "finalization verified");
 
         // Construct finalization
-        Self::construct_finalization(&self.validators, self.threshold, view)
+        let finalization = Self::construct_finalization(&self.validators, self.threshold, view);
+        if finalization.is_none() {
+            return None;
+        }
+
+        // Notify application
+        let payload = view.proposal.as_ref().unwrap().1.payload.clone();
+        self.application.finalized(payload);
+        finalization
     }
 }
