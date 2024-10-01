@@ -93,6 +93,7 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Reactor<E, C, 
                     // tip (immediately vote dummy when entering round).
                     match payload {
                         wire::message::Payload::Proposal(proposal) => {
+                            let vote = self.store.proposal(proposal);
                             // TODO
                         },
                         wire::message::Payload::Vote(vote) => {
