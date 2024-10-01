@@ -34,6 +34,8 @@ message Notarization {
 
     // TODO: if party did not vote on block, send to them (otherwise previous height producer may impact
     // ability of next producer?
+    // TODO: if next leader heard about a different block from same leader, it may not be interested
+    // in this block
     bytes block = 2; // hash 
     
     repeated Signature signatures = 3;
