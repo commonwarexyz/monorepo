@@ -16,6 +16,9 @@ pub struct Reactor<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> 
     receiver: R,
 
     view: u64,
+    leader: PublicKey,
+    leader_deadline: SystemTime,
+    notarization_deadline: SystemTime,
     store: Store<C, A>,
 }
 
@@ -26,8 +29,10 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Reactor<E, C, 
         application: A,
         sender: S,
         receiver: R,
-        validators: Vec<PublicKey>,
+        mut validators: Vec<PublicKey>,
     ) -> Self {
+        let now = runtime.current();
+        validators.sort();
         Self {
             runtime,
             crypto: crypto.clone(),
@@ -36,28 +41,31 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Reactor<E, C, 
             receiver,
 
             view: 0,
+            leader: validators[0].clone(),
+            leader_deadline: now + Duration::from_secs(1),
+            notarization_deadline: now + Duration::from_secs(2),
             store: Store::new(crypto, application, validators),
         }
     }
 
     pub async fn run(mut self) -> Result<(), Error> {
-        // Initialize the reactor
-        let now = self.runtime.current();
-        let mut leader_deadline = now + Duration::from_secs(1);
-        let mut noratrization_deadline = now + Duration::from_secs(2);
-
         // Process messages
         loop {
-            // If the view changes and I am now the leader, I need to propose a block
-            // TODO: invoke application
+            // TODO: Determine if we should advance to the next view
+            let now = self.runtime.current();
+            self.leader_deadline = now + Duration::from_secs(1);
+            self.notarization_deadline = now + Duration::from_secs(2);
+            self.view += 1;
+            // TODO: set leader and if leader, build a new block off of last notarized parent
+            // TODO: do this at the top of the block because we need to send first block out.
 
             // Wait for something to happen
             select! {
-                _timeout_leader = self.runtime.sleep_until(leader_deadline) => {
+                _timeout_leader = self.runtime.sleep_until(self.leader_deadline) => {
                     debug!(view = self.view, "leader deadline fired");
                     // TODO
                 },
-                _timeout_notarization = self.runtime.sleep_until(noratrization_deadline) => {
+                _timeout_notarization = self.runtime.sleep_until(self.notarization_deadline) => {
                     debug!(view = self.view, "notarization deadline fired");
                     // TODO
                 },
