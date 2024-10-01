@@ -4,7 +4,10 @@ use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
 use prost::Message as _;
-use std::time::{Duration, SystemTime};
+use std::{
+    ptr::null,
+    time::{Duration, SystemTime},
+};
 use tracing::debug;
 
 pub struct Engine<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> {
@@ -147,43 +150,36 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
         self.store.finalization(finalization);
     }
 
+    async fn handle_timeout(&mut self) {
+        // Trigger the timeout
+        let vote = self.store.timeout();
+    }
+
     pub async fn run(mut self) -> Result<(), Error> {
         // Process messages
         loop {
-            // Initialize the view
-            if !view_initialized {
-                // Propose a block if we are the leader
-                if leader == self.crypto.public_key() {
-                    let payload = self.application.propose();
-                    let payload_hash = self
-                        .application
-                        .verify(payload.clone())
-                        .expect("unable to verify our own proposal");
-                    // TODO: store propose
-                    // TODO: broadcast proposal
-                    // TODO: generate vote
-                    // TODO: store vote
-                    // TODO: broadcast vote
-                }
-
-                // Set timeouts
-                let now = self.runtime.current();
-                leader_deadline = now + Duration::from_secs(1);
-                notarization_deadline = now + Duration::from_secs(2);
-                view_initialized = true;
-            }
             // TODO: set leader and if leader, build a new block off of last notarized parent
             // TODO: do this at the top of the block because we need to send first block out.
+            if let Some(proposal) = self.store.propose() {
+                // Broadcast the proposal
+                let msg = wire::Message {
+                    payload: Some(wire::message::Payload::Proposal(proposal.clone())),
+                };
+                let msg = msg.encode_to_vec();
+                self.sender
+                    .send(Recipients::All, msg.into(), true)
+                    .await
+                    .unwrap();
+
+                // Handle the proposal
+                self.handle_proposal(proposal).await;
+            }
 
             // Wait for something to happen
+            let null_timeout = self.store.timeout_deadline();
             select! {
-                _timeout_leader = self.runtime.sleep_until(leader_deadline) => {
-                    debug!(?view, "leader deadline fired");
-                    // TODO: broadcast null vote and stop accepting proposals at this view
-                },
-                _timeout_notarization = self.runtime.sleep_until(notarization_deadline) => {
-                    debug!(?view, "notarization deadline fired");
-                    // TODO: broadcast null vote
+                _timeout = self.runtime.sleep_until(null_timeout) => {
+                    self.handle_timeout().await;
                 },
                 msg = self.receiver.recv() => {
                     // Parse message
@@ -216,13 +212,13 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
                             self.handle_vote(vote).await;
                         },
                         wire::message::Payload::Notarization(notarization) => {
-                            // TODO
+                            self.handle_notarization(notarization).await;
                         },
                         wire::message::Payload::Finalize(finalize) => {
-                            // TODO
+                            self.handle_finalize(finalize).await;
                         },
                         wire::message::Payload::Finalization(finalization) => {
-                            // TODO
+                            self.handle_finalization(finalization).await;
                         },
                         _ => {
                             debug!(sender = hex(&sender), "unexpected message");
