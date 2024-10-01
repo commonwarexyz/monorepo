@@ -88,6 +88,9 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Reactor<E, C, 
                     };
 
                     // Process message
+                    //
+                    // While syncing any missing blocks, continue to listen to messages at
+                    // tip (immediately vote dummy when entering round).
                     match payload {
                         wire::message::Payload::Proposal(proposal) => {
                             // TODO
