@@ -323,48 +323,43 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         view: &mut View,
         last_vote_null: bool,
     ) -> Option<wire::Notarization> {
-        // If the last vote we received was not null, attempt to broadcast proposal notarization
-        if !last_vote_null {
-            if (view.proposal_votes.len() as u32) < self.threshold
-                || view.broadcast_proposal_notarization
-            {
-                return None;
-            }
-
-            // Construct notarization
-            let mut signatures = Vec::new();
-            for validator in self.validators.iter() {
-                if let Some(vote) = view.proposal_votes.get(validator) {
-                    signatures.push(vote.signature.clone().unwrap());
+        // Determine which votes to use
+        let (proposal_hash, votes) = match last_vote_null {
+            true => {
+                if (view.null_votes.len() as u32) < self.threshold
+                    || view.broadcast_null_notarization
+                {
+                    return None;
                 }
+                view.broadcast_null_notarization = true;
+                (Bytes::new(), &view.null_votes)
             }
-            let notarization = wire::Notarization {
-                view: self.view,
-                block: view.proposal.clone().unwrap().0, // TODO: make more efficient
-                signatures,
-            };
-            view.broadcast_proposal_notarization = true;
-            return Some(notarization);
-        }
-
-        // If the last vote we received was null, attempt to broadcast null notarization
-        if (view.null_votes.len() as u32) < self.threshold || view.broadcast_null_notarization {
-            return None;
-        }
+            false => {
+                if (view.proposal_votes.len() as u32) < self.threshold
+                    || view.broadcast_proposal_notarization
+                {
+                    return None;
+                }
+                view.broadcast_proposal_notarization = true;
+                (
+                    view.proposal.as_ref().unwrap().0.clone(),
+                    &view.proposal_votes,
+                )
+            }
+        };
 
         // Construct notarization
         let mut signatures = Vec::new();
         for validator in self.validators.iter() {
-            if let Some(vote) = view.null_votes.get(validator) {
+            if let Some(vote) = votes.get(validator) {
                 signatures.push(vote.signature.clone().unwrap());
             }
         }
         let notarization = wire::Notarization {
             view: self.view,
-            block: Bytes::new(),
+            block: proposal_hash,
             signatures,
         };
-        view.broadcast_null_notarization = true;
         Some(notarization)
     }
 
@@ -420,6 +415,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         let view = self.views.get_mut(&vote.view).unwrap();
 
         // Handle vote
+        let last_vote_null = vote.block.len() == 0;
         if vote.block.len() == 0 {
             view.null_votes
                 .insert(signature.public_key.clone(), vote.clone());
@@ -445,7 +441,9 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
             view.proposal_votes
                 .insert(signature.public_key.clone(), vote.clone());
         }
-        None
+
+        // Construct notarization
+        self.construct_notarization(view, last_vote_null)
     }
 
     pub fn advance(&mut self) -> Option<wire::Notarization> {
@@ -537,6 +535,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         // Verify and store missing signatures
         //
         // TODO: verify that well-formed notarization (has threshold signatures)?
+        // TODO: limit length of signatures
         for signature in notarization.signatures {
             if !C::validate(&signature.public_key) {
                 debug!(
