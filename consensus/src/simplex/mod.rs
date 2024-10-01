@@ -8,8 +8,8 @@
 //! need to backfill views).
 
 mod config;
-mod manager;
-mod reactor;
+mod engine;
+mod store;
 
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));

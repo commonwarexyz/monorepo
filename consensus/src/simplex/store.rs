@@ -226,12 +226,6 @@ impl<C: Scheme, A: Application> Store<C, A> {
             }),
         };
 
-        // Store the vote
-        // TODO: determine if we want to do this in propose or call vote from here (with signature
-        // verification bypass)
-        view.proposal_votes
-            .insert(self.crypto.public_key(), vote.clone());
-
         // Return the vote for broadcast
         Some(vote)
     }
@@ -363,7 +357,10 @@ impl<C: Scheme, A: Application> Store<C, A> {
         // TODO: send finalize message
     }
 
-    pub fn notarization(&mut self, notarization: wire::Notarization) -> Option<wire::Notarization> {
+    pub fn notarization(
+        &mut self,
+        notarization: wire::Notarization,
+    ) -> (Option<wire::Notarization>, Option<wire::Finalize>) {
         // Store any signatures we have yet to see on current or previous view
         let view = match self.views.get_mut(&notarization.view) {
             Some(view) => view,
