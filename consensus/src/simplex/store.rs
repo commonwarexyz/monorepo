@@ -618,6 +618,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         if (view.finalizes.len() as u32) < threshold || view.broadcast_finalization {
             return None;
         }
+        view.broadcast_finalization = true;
 
         // Construct finalization
         let mut signatures = Vec::new();
@@ -721,6 +722,95 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
     }
 
     pub fn finalization(&mut self, finalization: wire::Finalization) -> Option<wire::Finalization> {
-        None
+        // Ensure not for null
+        // TODO: record faults
+        if finalization.block.len() == 0 {
+            debug!(reason = "finalize for null block", "dropping finalization");
+            return None;
+        }
+
+        // Store any signatures we have yet to see on current or previous view
+        let view = match self.views.get_mut(&finalization.view) {
+            Some(view) => view,
+            None => {
+                // TODO: shouldn't drop this
+                debug!(
+                    view = finalization.view,
+                    reason = "unknown view",
+                    "dropping finalization"
+                );
+                return None;
+            }
+        };
+
+        // Verify signature info
+        if finalization.signatures.len() < self.threshold as usize {
+            debug!(
+                threshold = self.threshold,
+                signatures = finalization.signatures.len(),
+                reason = "insufficient signatures",
+                "dropping finalization"
+            );
+            return None;
+        }
+
+        // Verify and store missing signatures
+        let mut added = 0;
+        let mut seen = HashSet::new();
+        for signature in finalization.signatures {
+            // Verify signature
+            if !C::validate(&signature.public_key) {
+                debug!(
+                    signer = hex(&signature.public_key),
+                    reason = "invalid validator",
+                    "dropping finalization"
+                );
+                return None;
+            }
+
+            // Ensure we haven't seen this signature before
+            if seen.contains(&signature.public_key) {
+                debug!(
+                    signer = hex(&signature.public_key),
+                    reason = "duplicate signature",
+                    "dropping finalization"
+                );
+                return None;
+            }
+            seen.insert(signature.public_key.clone());
+
+            // If we already have this, skip verification
+            if view.finalizes.contains_key(&signature.public_key) {
+                trace!(
+                    signer = hex(&signature.public_key),
+                    reason = "already recorded finalize",
+                    "skipping finalization"
+                );
+                continue;
+            }
+            if !C::verify(
+                FINALIZE_NAMESPACE,
+                &finalize_digest(finalization.view, finalization.block.clone()),
+                &signature.public_key,
+                &signature.signature,
+            ) {
+                debug!(reason = "invalid signature", "dropping finalization");
+                return None;
+            }
+
+            // Store the finalize
+            view.finalizes.insert(
+                signature.public_key.clone(),
+                wire::Finalize {
+                    view: finalization.view,
+                    block: finalization.block.clone(),
+                    signature: Some(signature),
+                },
+            );
+        }
+        debug!(added, "finalization verified");
+
+        // Construct finalization
+        Self::construct_finalization(&self.validators, self.threshold, view)
     }
 }
