@@ -15,10 +15,7 @@ pub struct Reactor<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> 
     sender: S,
     receiver: R,
 
-    view: u64,
-    leader: PublicKey,
-    leader_deadline: SystemTime,
-    notarization_deadline: SystemTime,
+    validators: Vec<PublicKey>,
     store: Store<C, A>,
 }
 
@@ -31,7 +28,6 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Reactor<E, C, 
         receiver: R,
         mut validators: Vec<PublicKey>,
     ) -> Self {
-        let now = runtime.current();
         validators.sort();
         Self {
             runtime,
@@ -40,34 +36,56 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Reactor<E, C, 
             sender,
             receiver,
 
-            view: 0,
-            leader: validators[0].clone(),
-            leader_deadline: now + Duration::from_secs(1),
-            notarization_deadline: now + Duration::from_secs(2),
+            validators: validators.clone(),
             store: Store::new(crypto, application, validators),
         }
     }
 
     pub async fn run(mut self) -> Result<(), Error> {
+        // Initialize the reactor
+        let mut view = 0;
+        let mut leader = self.validators[0].clone();
+        let now = self.runtime.current();
+        let mut leader_deadline = now + Duration::from_secs(1);
+        let mut notarization_deadline = now + Duration::from_secs(2);
+        let mut view_initialized = false;
+
         // Process messages
         loop {
-            // TODO: Determine if we should advance to the next view
-            let now = self.runtime.current();
-            self.leader_deadline = now + Duration::from_secs(1);
-            self.notarization_deadline = now + Duration::from_secs(2);
-            self.view += 1;
+            // Initialize the view
+            if !view_initialized {
+                // Propose a block if we are the leader
+                if leader == self.crypto.public_key() {
+                    let payload = self.application.propose();
+                    let payload_hash = self
+                        .application
+                        .verify(payload.clone())
+                        .expect("unable to verify our own proposal");
+                    // TODO: store propose
+                    // TODO: broadcast proposal
+                    // TODO: generate vote
+                    // TODO: store vote
+                    // TODO: broadcast vote
+                }
+
+                // Set timeouts
+                let now = self.runtime.current();
+                leader_deadline = now + Duration::from_secs(1);
+                notarization_deadline = now + Duration::from_secs(2);
+                view_initialized = true;
+            }
             // TODO: set leader and if leader, build a new block off of last notarized parent
             // TODO: do this at the top of the block because we need to send first block out.
 
             // Wait for something to happen
             select! {
-                _timeout_leader = self.runtime.sleep_until(self.leader_deadline) => {
-                    debug!(view = self.view, "leader deadline fired");
-                    // TODO
+                _timeout_leader = self.runtime.sleep_until(leader_deadline) => {
+                    debug!(?view, "leader deadline fired");
+                    // TODO: broadcast null vote and stop accepting proposals at this view
                 },
-                _timeout_notarization = self.runtime.sleep_until(self.notarization_deadline) => {
-                    debug!(view = self.view, "notarization deadline fired");
-                    // TODO
+                _timeout_notarization = self.runtime.sleep_until(notarization_deadline) => {
+                    debug!(?view, "notarization deadline fired");
+                    // TODO: broadcast null vote
                 },
                 msg = self.receiver.recv() => {
                     // Parse message
