@@ -4,10 +4,6 @@ use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
 use prost::Message as _;
-use std::{
-    ptr::null,
-    time::{Duration, SystemTime},
-};
 use tracing::debug;
 
 pub struct Engine<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> {
@@ -19,7 +15,7 @@ pub struct Engine<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> {
     receiver: R,
 
     validators: Vec<PublicKey>,
-    store: Store<C, A>,
+    store: Store<E, C, A>,
 }
 
 impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A, S, R> {

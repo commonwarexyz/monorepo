@@ -1,11 +1,8 @@
 use super::wire;
 use crate::Application;
 use bytes::Bytes;
-use commonware_cryptography::{
-    bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme, Signature,
-};
+use commonware_cryptography::{bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme};
 use commonware_runtime::Clock;
-use futures::executor::block_on;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -154,9 +151,9 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Select parent block
-        let (height, parent_hash, payload_hash) = match self.last_notarized {
+        let (height, parent_hash, payload_hash) = match &self.last_notarized {
             Some(hash) => {
-                let (parent_view, height) = self.notarized_blocks.get(&hash).unwrap();
+                let (parent_view, height) = self.notarized_blocks.get(hash).unwrap();
                 let payload_hash = self
                     .views
                     .get(parent_view)
@@ -164,8 +161,9 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
                     .proposal
                     .as_ref()
                     .unwrap()
-                    .1;
-                (*parent_height + 1, hash, payload_hash)
+                    .1
+                    .clone();
+                (*height + 1, hash.clone(), payload_hash)
             }
             None => (0, Bytes::new(), Bytes::new()),
         };
@@ -288,7 +286,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
             proposal.view,
             proposal.height,
             proposal.parent.clone(),
-            payload_hash,
+            payload_hash.clone(),
         );
         if !C::verify(
             PROPOSAL_NAMESPACE,
@@ -301,9 +299,9 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Check to see if compatible with notarized tip
-        let (_, last_height) = match self.last_notarized {
-            Some(hash) => self.notarized_blocks.get(&hash).unwrap(),
-            None => (Bytes::new(), 0),
+        let last_height = match &self.last_notarized {
+            Some(hash) => self.notarized_blocks.get(hash).unwrap().1,
+            None => 0,
         };
         if proposal.height < last_height {
             debug!(
@@ -316,21 +314,32 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Confirm parent block is notarized and height is correct
-        let (_, parent_height) = match self.notarized_blocks.get(&proposal.parent) {
-            Some(view) => view,
-            None => {
-                debug!(reason = "unknown parent", "dropping proposal");
+        if last_height > 0 {
+            let (_, parent_height) = match self.notarized_blocks.get(&proposal.parent) {
+                Some(view) => view,
+                None => {
+                    debug!(reason = "unknown parent", "dropping proposal");
+                    return None;
+                }
+            };
+            if parent_height + 1 != proposal.height {
+                debug!(
+                    parent_height = parent_height,
+                    proposal_height = proposal.height,
+                    reason = "invalid height",
+                    "dropping proposal"
+                );
                 return None;
             }
-        };
-        if parent_height + 1 != proposal.height {
-            debug!(
-                parent_height = parent_height,
-                proposal_height = proposal.height,
-                reason = "invalid height",
-                "dropping proposal"
-            );
-            return None;
+        } else {
+            if proposal.parent.len() != 0 {
+                debug!(reason = "invalid parent", "dropping proposal");
+                return None;
+            }
+            if proposal.height != 0 {
+                debug!(reason = "invalid height", "dropping proposal");
+                return None;
+            }
         }
 
         // Store the proposal
@@ -461,7 +470,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
                 .insert(signature.public_key.clone(), vote.clone());
         } else {
             let proposal_hash = match &view.proposal {
-                Some((hash, _)) => hash,
+                Some((hash, _, _)) => hash,
                 None => {
                     debug!(reason = "missing proposal", "dropping vote");
                     return None;
@@ -509,7 +518,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
             _ => {
                 // Get proposal
                 let proposal_hash = match &view.proposal {
-                    Some((hash, _)) => hash,
+                    Some((hash, _, _)) => hash,
                     None => {
                         // TODO: this will require us to fetch the proposal, but should never drop notarization
                         debug!(reason = "missing proposal", "dropping notarization");
@@ -603,7 +612,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         // Mark block as notarized if not already
         self.notarized_blocks.insert(
             proposal_hash.clone(),
-            (notarization.view, view.proposal.as_ref().unwrap().1.height),
+            (notarization.view, view.proposal.as_ref().unwrap().2.height),
         );
 
         // Construct notarization
@@ -616,7 +625,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
 
         // Notify application
         if notarization.is_some() && !proposal_hash.is_empty() {
-            let payload = view.proposal.as_ref().unwrap().1.payload.clone();
+            let payload = view.proposal.as_ref().unwrap().2.payload.clone();
             self.last_notarized = Some(proposal_hash.clone());
             self.application.notarized(payload);
         }
@@ -849,6 +858,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
                     signature: Some(signature),
                 },
             );
+            added += 1;
         }
         debug!(added, "finalization verified");
 
@@ -859,7 +869,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Notify application
-        let payload = view.proposal.as_ref().unwrap().1.payload.clone();
+        let payload = view.proposal.as_ref().unwrap().2.payload.clone();
         self.application.finalized(payload);
         finalization
     }
