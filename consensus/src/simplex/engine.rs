@@ -32,6 +32,7 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
             runtime: runtime.clone(),
             crypto: crypto.clone(),
             application: application.clone(),
+
             sender,
             receiver,
 
@@ -184,56 +185,64 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
             }
 
             // Wait for a timeout to fire or for a message to arrive
+            //
+            // TODO: clean this up (done this way to prevent multiple mutable borrows)
             let null_timeout = self.store.timeout_deadline();
-            select! {
+            let result = select! {
                 _timeout = self.runtime.sleep_until(null_timeout) => {
-                    self.handle_timeout().await;
+                    None
                 },
-                msg = self.receiver.recv() => {
-                    // Parse message
-                    let (sender, msg) = msg.map_err(|_| Error::NetworkClosed)?;
-                    let msg = match wire::Message::decode(msg) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            debug!(?err, sender = hex(&sender), "failed to decode message");
-                            continue;
-                        },
-                    };
-                    let payload = match msg.payload {
-                        Some(payload) => payload,
-                        None => {
-                            debug!(sender = hex(&sender), "message missing payload");
-                            continue;
-                        },
-                    };
+                result = self.receiver.recv() => {
+                    Some(result.map_err(|_| Error::NetworkClosed)?)
+                },
+            };
+            if result.is_none() {
+                self.handle_timeout().await;
+                continue;
+            }
+            let (sender, msg) = result.unwrap();
 
-                    // Process message
-                    //
-                    // While syncing any missing blocks, continue to listen to messages at
-                    // tip (immediately vote dummy when entering round).
-                    match payload {
-                        // TODO: verify signature is from sender
-                        wire::message::Payload::Proposal(proposal) => {
-                            self.handle_proposal(proposal).await;
-                        },
-                        wire::message::Payload::Vote(vote) => {
-                            self.handle_vote(vote).await;
-                        },
-                        wire::message::Payload::Notarization(notarization) => {
-                            self.handle_notarization(notarization).await;
-                        },
-                        wire::message::Payload::Finalize(finalize) => {
-                            self.handle_finalize(finalize).await;
-                        },
-                        wire::message::Payload::Finalization(finalization) => {
-                            self.handle_finalization(finalization).await;
-                        },
-                        _ => {
-                            debug!(sender = hex(&sender), "unexpected message");
-                            continue;
-                        },
-                    };
-                },
+            // Parse message
+            let msg = match wire::Message::decode(msg) {
+                Ok(msg) => msg,
+                Err(err) => {
+                    debug!(?err, sender = hex(&sender), "failed to decode message");
+                    continue;
+                }
+            };
+            let payload = match msg.payload {
+                Some(payload) => payload,
+                None => {
+                    debug!(sender = hex(&sender), "message missing payload");
+                    continue;
+                }
+            };
+
+            // Process message
+            //
+            // While syncing any missing blocks, continue to listen to messages at
+            // tip (immediately vote dummy when entering round).
+            match payload {
+                // TODO: verify signature is from sender
+                wire::message::Payload::Proposal(proposal) => {
+                    self.handle_proposal(proposal).await;
+                }
+                wire::message::Payload::Vote(vote) => {
+                    self.handle_vote(vote).await;
+                }
+                wire::message::Payload::Notarization(notarization) => {
+                    self.handle_notarization(notarization).await;
+                }
+                wire::message::Payload::Finalize(finalize) => {
+                    self.handle_finalize(finalize).await;
+                }
+                wire::message::Payload::Finalization(finalization) => {
+                    self.handle_finalization(finalization).await;
+                }
+                _ => {
+                    debug!(sender = hex(&sender), "unexpected message");
+                    continue;
+                }
             };
         }
     }
