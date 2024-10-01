@@ -39,6 +39,13 @@ fn vote_digest(view: u64, proposal_hash: Bytes) -> Bytes {
     hash.into()
 }
 
+fn finalize_digest(view: u64, proposal_hash: Bytes) -> Bytes {
+    let mut hash = Vec::new();
+    hash.extend_from_slice(&view.to_be_bytes());
+    hash.extend_from_slice(&proposal_hash);
+    hash.into()
+}
+
 pub struct View {
     idx: u64,
 
@@ -378,12 +385,12 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         let signature = match &vote.signature {
             Some(signature) => signature,
             _ => {
-                debug!(reason = "missing signature", "dropping proposal");
+                debug!(reason = "missing signature", "dropping vote");
                 return None;
             }
         };
         if !C::validate(&signature.public_key) {
-            debug!(reason = "invalid signature", "dropping proposal");
+            debug!(reason = "invalid signature", "dropping vote");
             return None;
         }
 
@@ -602,8 +609,115 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         (notarization, Some(finalize))
     }
 
+    fn construct_finalization(
+        validators: &Vec<PublicKey>,
+        threshold: u32,
+        view: &mut View,
+    ) -> Option<wire::Finalization> {
+        // Check if we have enough finalizes
+        if (view.finalizes.len() as u32) < threshold || view.broadcast_finalization {
+            return None;
+        }
+
+        // Construct finalization
+        let mut signatures = Vec::new();
+        for validator in validators.iter() {
+            if let Some(finalize) = view.finalizes.get(validator) {
+                signatures.push(finalize.signature.clone().unwrap());
+            }
+        }
+        let finalization = wire::Finalization {
+            view: view.idx,
+            block: view.proposal.as_ref().unwrap().0.clone(),
+            signatures,
+        };
+        Some(finalization)
+    }
+
     pub fn finalize(&mut self, finalize: wire::Finalize) -> Option<wire::Finalization> {
-        None
+        // Ensure we are in the right view to process this message
+        // TODO: consider storing the finalize if one ahead of our current view
+        if finalize.view < self.view {
+            debug!(
+                finalize_view = finalize.view,
+                our_view = self.view,
+                reason = "incorrect view",
+                "dropping finalize"
+            );
+            return None;
+        }
+
+        // Parse signature
+        let signature = match &finalize.signature {
+            Some(signature) => signature,
+            _ => {
+                debug!(reason = "missing signature", "dropping finalize");
+                return None;
+            }
+        };
+        if !C::validate(&signature.public_key) {
+            debug!(reason = "invalid signature", "dropping finalize");
+            return None;
+        }
+
+        // Verify that signer is a validator
+        if !self.validators_ordered.contains_key(&signature.public_key) {
+            debug!(
+                signer = hex(&signature.public_key),
+                reason = "invalid validator",
+                "dropping finalize"
+            );
+            return None;
+        }
+
+        // Verify the signature
+        let finalize_digest = finalize_digest(finalize.view, finalize.block.clone());
+        if !C::verify(
+            VOTE_NAMESPACE,
+            &finalize_digest,
+            &signature.public_key,
+            &signature.signature,
+        ) {
+            debug!(reason = "invalid signature", "dropping vote");
+            return None;
+        }
+
+        // Get view for finalize
+        let view = match self.views.get_mut(&finalize.view) {
+            Some(view) => view,
+            None => {
+                debug!(
+                    view = finalize.view,
+                    reason = "missing view",
+                    "dropping finalize"
+                );
+                return None;
+            }
+        };
+
+        // Check if finalize vote is for a block (Fault)
+        if finalize.block.len() == 0 {
+            debug!(reason = "finalize for null block", "dropping finalize");
+            return None;
+        }
+        if finalize.block != view.proposal.as_ref().unwrap().0 {
+            // TODO: don't unwrap here
+            // TODO: this could happen if we haven't seen proposal yet
+            debug!(
+                finalize_block = hex(&finalize.block),
+                proposal_block = hex(&view.proposal.as_ref().unwrap().0),
+                reason = "block mismatch",
+                "dropping finalize"
+            );
+            return None;
+        }
+
+        // Record the finalize
+        view.finalizes
+            .insert(signature.public_key.clone(), finalize.clone());
+
+        // Construct finalization
+        Self::construct_finalization(&self.validators, self.threshold, view)
     }
 
     pub fn finalization(&mut self, finalization: wire::Finalization) -> Option<wire::Finalization> {
