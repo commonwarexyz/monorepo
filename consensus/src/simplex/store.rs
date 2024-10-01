@@ -40,6 +40,8 @@ fn vote_digest(view: u64, proposal_hash: Bytes) -> Bytes {
 }
 
 pub struct View {
+    idx: u64,
+
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -60,11 +62,14 @@ pub struct View {
 
 impl View {
     pub fn new(
+        idx: u64,
         leader: PublicKey,
         leader_deadline: SystemTime,
         advance_deadline: SystemTime,
     ) -> Self {
         Self {
+            idx,
+
             leader,
             leader_deadline: Some(leader_deadline),
             advance_deadline: Some(advance_deadline),
@@ -268,19 +273,6 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
             return None;
         }
 
-        // Check to see if we are past the leader deadline
-        let deadline = view.leader_deadline.unwrap();
-        let current = self.runtime.current();
-        if deadline < current {
-            debug!(
-                view = proposal.view,
-                ?deadline,
-                ?current,
-                "leader deadline passed"
-            );
-            return None;
-        }
-
         // Check to see if compatible with notarized tip
         let (_, parent_height) = match self.notarized_blocks.get(&proposal.parent) {
             Some(view) => view,
@@ -301,8 +293,15 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
 
         // Store the proposal
         let proposal_hash = hash(proposal_digest);
+        let proposal_view = proposal.view;
         view.proposal = Some((proposal_hash.clone(), proposal));
         view.leader_deadline = None;
+
+        // Check to see if we are past the leader deadline
+        if view.timeout_fired {
+            debug!(view = proposal_view, "leader deadline passed");
+            return None;
+        }
 
         // Construct vote
         let vote = wire::Vote {
@@ -319,23 +318,22 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
     }
 
     fn construct_notarization(
-        &mut self,
+        validators: &Vec<PublicKey>,
+        threshold: u32,
         view: &mut View,
         last_vote_null: bool,
     ) -> Option<wire::Notarization> {
         // Determine which votes to use
         let (proposal_hash, votes) = match last_vote_null {
             true => {
-                if (view.null_votes.len() as u32) < self.threshold
-                    || view.broadcast_null_notarization
-                {
+                if (view.null_votes.len() as u32) < threshold || view.broadcast_null_notarization {
                     return None;
                 }
                 view.broadcast_null_notarization = true;
                 (Bytes::new(), &view.null_votes)
             }
             false => {
-                if (view.proposal_votes.len() as u32) < self.threshold
+                if (view.proposal_votes.len() as u32) < threshold
                     || view.broadcast_proposal_notarization
                 {
                     return None;
@@ -350,13 +348,13 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
 
         // Construct notarization
         let mut signatures = Vec::new();
-        for validator in self.validators.iter() {
+        for validator in validators.iter() {
             if let Some(vote) = votes.get(validator) {
                 signatures.push(vote.signature.clone().unwrap());
             }
         }
         let notarization = wire::Notarization {
-            view: self.view,
+            view: view.idx,
             block: proposal_hash,
             signatures,
         };
@@ -443,7 +441,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Construct notarization
-        self.construct_notarization(view, last_vote_null)
+        Self::construct_notarization(&self.validators, self.threshold, view, last_vote_null)
     }
 
     pub fn advance(&mut self) -> Option<wire::Notarization> {
