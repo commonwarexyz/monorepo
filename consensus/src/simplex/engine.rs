@@ -153,13 +153,25 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
     async fn handle_timeout(&mut self) {
         // Trigger the timeout
         let vote = self.store.timeout();
+
+        // Broadcast the vote
+        let msg = wire::Message {
+            payload: Some(wire::message::Payload::Vote(vote.clone())),
+        };
+        let msg = msg.encode_to_vec();
+        self.sender
+            .send(Recipients::All, msg.into(), true)
+            .await
+            .unwrap();
+
+        // Handle the vote
+        self.handle_vote(vote).await;
     }
 
     pub async fn run(mut self) -> Result<(), Error> {
         // Process messages
         loop {
-            // TODO: set leader and if leader, build a new block off of last notarized parent
-            // TODO: do this at the top of the block because we need to send first block out.
+            // Attempt to propose a block
             if let Some(proposal) = self.store.propose() {
                 // Broadcast the proposal
                 let msg = wire::Message {
@@ -175,7 +187,7 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
                 self.handle_proposal(proposal).await;
             }
 
-            // Wait for something to happen
+            // Wait for a timeout to fire or for a message to arrive
             let null_timeout = self.store.timeout_deadline();
             select! {
                 _timeout = self.runtime.sleep_until(null_timeout) => {

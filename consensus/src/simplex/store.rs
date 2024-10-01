@@ -1,12 +1,15 @@
-use crate::Application;
-
 use super::wire;
+use crate::Application;
 use bytes::Bytes;
 use commonware_cryptography::{
     bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme, Signature,
 };
+use commonware_runtime::Clock;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime},
+};
 use tracing::{debug, trace};
 
 // TODO: move to config
@@ -38,12 +41,16 @@ fn vote_digest(view: u64, proposal_hash: Bytes) -> Bytes {
 
 pub struct View {
     leader: PublicKey,
+    leader_deadline: Option<SystemTime>,
+    advance_deadline: Option<SystemTime>,
+    null_vote_retry: Option<SystemTime>,
 
     proposal: Option<(Bytes, wire::Proposal)>,
 
     proposal_votes: HashMap<PublicKey, wire::Vote>,
     broadcast_proposal_notarization: bool,
 
+    timeout_fired: bool,
     null_votes: HashMap<PublicKey, wire::Vote>,
     broadcast_null_notarization: bool,
 
@@ -52,15 +59,23 @@ pub struct View {
 }
 
 impl View {
-    pub fn new(leader: PublicKey) -> Self {
+    pub fn new(
+        leader: PublicKey,
+        leader_deadline: SystemTime,
+        advance_deadline: SystemTime,
+    ) -> Self {
         Self {
             leader,
+            leader_deadline: Some(leader_deadline),
+            advance_deadline: Some(advance_deadline),
+            null_vote_retry: None,
 
             proposal: None,
 
             proposal_votes: HashMap::new(),
             broadcast_proposal_notarization: false,
 
+            timeout_fired: false,
             null_votes: HashMap::new(),
             broadcast_null_notarization: false,
 
@@ -70,7 +85,8 @@ impl View {
     }
 }
 
-pub struct Store<C: Scheme, A: Application> {
+pub struct Store<E: Clock, C: Scheme, A: Application> {
+    runtime: E,
     crypto: C,
     application: A,
 
@@ -83,8 +99,8 @@ pub struct Store<C: Scheme, A: Application> {
     notarized_blocks: HashMap<Bytes, (u64, u64)>, // block hash -> (view, height)
 }
 
-impl<C: Scheme, A: Application> Store<C, A> {
-    pub fn new(crypto: C, application: A, mut validators: Vec<PublicKey>) -> Self {
+impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
+    pub fn new(runtime: E, crypto: C, application: A, mut validators: Vec<PublicKey>) -> Self {
         // Initialize ordered validators
         validators.sort();
         let mut validators_ordered = HashMap::new();
@@ -94,6 +110,7 @@ impl<C: Scheme, A: Application> Store<C, A> {
 
         // Initialize store
         Self {
+            runtime,
             crypto,
             application,
 
@@ -106,6 +123,77 @@ impl<C: Scheme, A: Application> Store<C, A> {
             view: 0,
             views: HashMap::new(),
             notarized_blocks: HashMap::new(),
+        }
+    }
+
+    pub fn propose(&mut self) -> Option<wire::Proposal> {
+        // Check if we are leader
+        let view = self.views.get(&self.view).unwrap();
+        if view.leader != self.crypto.public_key() {
+            return None;
+        }
+
+        // Check if we have already proposed
+        if view.proposal.is_some() {
+            return None;
+        }
+
+        // Construct proposal
+        let (payload_hash, payload) = self.application.propose();
+        let proposal = wire::Proposal {
+            view: self.view,
+            height: 0,
+            parent: Bytes::new(),
+            payload,
+            signature: Some(wire::Signature {
+                public_key: self.crypto.public_key(),
+                signature: self.crypto.sign(
+                    PROPOSAL_NAMESPACE,
+                    &proposal_digest(self.view, 0, Bytes::new(), payload_hash),
+                ),
+            }),
+        };
+        Some(proposal)
+    }
+
+    pub fn timeout_deadline(&mut self) -> SystemTime {
+        // Return the earliest deadline
+        let view = self.views.get_mut(&self.view).unwrap();
+        if let Some(deadline) = view.leader_deadline {
+            return deadline;
+        }
+        if let Some(deadline) = view.advance_deadline {
+            return deadline;
+        }
+
+        // If no deadlines are still set (waiting for null votes),
+        // return next try for null block vote
+        if let Some(deadline) = view.null_vote_retry {
+            return deadline;
+        }
+        let null_vote_retry = self.runtime.current() + Duration::from_secs(30);
+        view.null_vote_retry = Some(null_vote_retry);
+        null_vote_retry
+    }
+
+    pub fn timeout(&mut self) -> wire::Vote {
+        // Set timeout fired
+        let view = self.views.get_mut(&self.view).unwrap();
+        view.timeout_fired = true;
+
+        // Remove deadlines
+        view.leader_deadline = None;
+        view.advance_deadline = None;
+        view.null_vote_retry = None;
+
+        // Construct null vote
+        wire::Vote {
+            view: self.view,
+            block: Bytes::new(),
+            signature: Some(wire::Signature {
+                public_key: self.crypto.public_key(),
+                signature: self.crypto.sign(VOTE_NAMESPACE, &Bytes::new()),
+            }),
         }
     }
 
@@ -228,6 +316,56 @@ impl<C: Scheme, A: Application> Store<C, A> {
 
         // Return the vote for broadcast
         Some(vote)
+    }
+
+    fn construct_notarization(
+        &mut self,
+        view: &mut View,
+        last_vote_null: bool,
+    ) -> Option<wire::Notarization> {
+        // If the last vote we received was not null, attempt to broadcast proposal notarization
+        if !last_vote_null {
+            if (view.proposal_votes.len() as u32) < self.threshold
+                || view.broadcast_proposal_notarization
+            {
+                return None;
+            }
+
+            // Construct notarization
+            let mut signatures = Vec::new();
+            for validator in self.validators.iter() {
+                if let Some(vote) = view.proposal_votes.get(validator) {
+                    signatures.push(vote.signature.clone().unwrap());
+                }
+            }
+            let notarization = wire::Notarization {
+                view: self.view,
+                block: view.proposal.clone().unwrap().0, // TODO: make more efficient
+                signatures,
+            };
+            view.broadcast_proposal_notarization = true;
+            return Some(notarization);
+        }
+
+        // If the last vote we received was null, attempt to broadcast null notarization
+        if (view.null_votes.len() as u32) < self.threshold || view.broadcast_null_notarization {
+            return None;
+        }
+
+        // Construct notarization
+        let mut signatures = Vec::new();
+        for validator in self.validators.iter() {
+            if let Some(vote) = view.null_votes.get(validator) {
+                signatures.push(vote.signature.clone().unwrap());
+            }
+        }
+        let notarization = wire::Notarization {
+            view: self.view,
+            block: Bytes::new(),
+            signatures,
+        };
+        view.broadcast_null_notarization = true;
+        Some(notarization)
     }
 
     pub fn vote(&mut self, vote: wire::Vote) -> Option<wire::Notarization> {
@@ -474,8 +612,6 @@ impl<C: Scheme, A: Application> Store<C, A> {
 
         // Return the notarization
         Some(notarization)
-
-        // TODO: send finalize message
     }
 
     pub fn finalize(&mut self, finalize: wire::Finalize) -> Option<wire::Finalization> {

@@ -16,7 +16,7 @@ use bytes::Bytes;
 // - block sent to one honest party different than block sent to all others, does it drop at notarization and fetch actual?
 
 pub trait Application: Clone {
-    fn propose(&mut self) -> Bytes;
+    fn propose(&mut self) -> (Bytes, Bytes); // (hash, payload)
     fn verify(&self, block: Bytes) -> Option<Bytes>;
     fn notarized(&mut self, block: Bytes);
     fn finalized(&mut self, block: Bytes);
