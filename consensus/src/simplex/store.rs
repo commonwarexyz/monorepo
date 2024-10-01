@@ -5,6 +5,7 @@ use commonware_cryptography::{
     bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme, Signature,
 };
 use commonware_runtime::Clock;
+use futures::executor::block_on;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -54,7 +55,7 @@ pub struct View {
     advance_deadline: Option<SystemTime>,
     null_vote_retry: Option<SystemTime>,
 
-    proposal: Option<(Bytes, wire::Proposal)>,
+    proposal: Option<(Bytes, Bytes, wire::Proposal)>,
 
     proposal_votes: HashMap<PublicKey, wire::Vote>,
     broadcast_proposal_notarization: bool,
@@ -109,6 +110,7 @@ pub struct Store<E: Clock, C: Scheme, A: Application> {
     view: u64,
     views: HashMap<u64, View>,
     notarized_blocks: HashMap<Bytes, (u64, u64)>, // block hash -> (view, height)
+    last_notarized: Option<Bytes>,
 }
 
 impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
@@ -135,6 +137,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
             view: 0,
             views: HashMap::new(),
             notarized_blocks: HashMap::new(),
+            last_notarized: None,
         }
     }
 
@@ -150,12 +153,29 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
             return None;
         }
 
+        // Select parent block
+        let (height, parent_hash, payload_hash) = match self.last_notarized {
+            Some(hash) => {
+                let (parent_view, height) = self.notarized_blocks.get(&hash).unwrap();
+                let payload_hash = self
+                    .views
+                    .get(parent_view)
+                    .unwrap()
+                    .proposal
+                    .as_ref()
+                    .unwrap()
+                    .1;
+                (*parent_height + 1, hash, payload_hash)
+            }
+            None => (0, Bytes::new(), Bytes::new()),
+        };
+
         // Construct proposal
-        let (payload_hash, payload) = self.application.propose();
+        let (payload_hash, payload) = self.application.propose(payload_hash);
         let proposal = wire::Proposal {
             view: self.view,
-            height: 0,
-            parent: Bytes::new(),
+            height,
+            parent: parent_hash,
             payload,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
@@ -281,6 +301,21 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Check to see if compatible with notarized tip
+        let (_, last_height) = match self.last_notarized {
+            Some(hash) => self.notarized_blocks.get(&hash).unwrap(),
+            None => (Bytes::new(), 0),
+        };
+        if proposal.height < last_height {
+            debug!(
+                proposal_height = proposal.height,
+                last_height = last_height,
+                reason = "conflicting prefix",
+                "dropping proposal"
+            );
+            return None;
+        }
+
+        // Confirm parent block is notarized and height is correct
         let (_, parent_height) = match self.notarized_blocks.get(&proposal.parent) {
             Some(view) => view,
             None => {
@@ -301,7 +336,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         // Store the proposal
         let proposal_hash = hash(proposal_digest);
         let proposal_view = proposal.view;
-        view.proposal = Some((proposal_hash.clone(), proposal));
+        view.proposal = Some((proposal_hash.clone(), payload_hash, proposal));
         view.leader_deadline = None;
 
         // Check to see if we are past the leader deadline
@@ -582,6 +617,7 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         // Notify application
         if notarization.is_some() && !proposal_hash.is_empty() {
             let payload = view.proposal.as_ref().unwrap().1.payload.clone();
+            self.last_notarized = Some(proposal_hash.clone());
             self.application.notarized(payload);
         }
 
