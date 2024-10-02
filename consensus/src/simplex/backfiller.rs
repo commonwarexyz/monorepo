@@ -94,7 +94,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
             };
 
             // Select random validator to fetch from
-            let validator = self.validators.choose(&mut self.runtime).unwrap();
+            let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
 
             // Make the request
             let request = wire::Request {
@@ -117,9 +117,9 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
             let start = self.runtime.current();
             let deadline = start + Duration::from_secs(1);
             loop {
-                select! {
+                let (sender, proposal) = select! {
                     _timeout = self.runtime.sleep_until(deadline) => {
-                        warn!(sender = hex(validator), height, "backfill request timed out");
+                        warn!(validator = hex(&validator), height, "backfill request timed out");
                         break;
                     },
                     msg = self.receiver.recv() => {
@@ -145,34 +145,49 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                                 continue;
                             }
                         };
-
-                        // Handle response
-                        let expected = match self.missing.get(&height) {
-                            Some(expected) => expected,
-                            None => {
-                                // This could happen if an earlier sender already fulfilled
-                                debug!(sender = hex(&sender), height, "unexpected backfill response");
-                                continue;
-                            }
-                        };
-                        let payload_hash = self.application.verify(proposal.payload.clone()).expect("unable to verify notarized/finalized payload");
-                        let proposal_digest = proposal_digest(proposal.view, proposal.height, proposal.parent.clone(), payload_hash);
-                        let incoming_hash = hash(proposal_digest);
-                        if incoming_hash != *expected {
-                            warn!(sender = hex(&sender), height, "block hash mismatch on resolution");
-                            // TODO: add validator to blacklist
-                            continue;
-                        }
-
-                        // Record the proposal
-                        self.resolve(incoming_hash.clone(), proposal);
-
-                        // If incoming hash was the hash we were expecting, exit the loop
-                        if incoming_hash == focus {
-                            debug!(sender = hex(validator), height, "backfill resolution");
-                            break;
-                        }
+                        (sender, proposal)
                     },
+                };
+
+                // Handle response
+                let expected = match self.missing.get(&height) {
+                    Some(expected) => expected,
+                    None => {
+                        // This could happen if an earlier sender already fulfilled
+                        debug!(
+                            sender = hex(&sender),
+                            height, "unexpected backfill response"
+                        );
+                        continue;
+                    }
+                };
+                let payload_hash = self
+                    .application
+                    .verify(proposal.payload.clone())
+                    .expect("unable to verify notarized/finalized payload");
+                let proposal_digest = proposal_digest(
+                    proposal.view,
+                    proposal.height,
+                    proposal.parent.clone(),
+                    payload_hash,
+                );
+                let incoming_hash = hash(proposal_digest);
+                if incoming_hash != *expected {
+                    warn!(
+                        sender = hex(&sender),
+                        height, "block hash mismatch on resolution"
+                    );
+                    // TODO: add validator to blacklist
+                    continue;
+                }
+
+                // Record the proposal
+                self.resolve(incoming_hash.clone(), proposal);
+
+                // If incoming hash was the hash we were expecting, exit the loop
+                if incoming_hash == focus {
+                    debug!(sender = hex(&sender), height, "backfill resolution");
+                    break;
                 }
             }
         }
