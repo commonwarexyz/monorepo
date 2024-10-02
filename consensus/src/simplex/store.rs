@@ -502,6 +502,9 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         &mut self,
         notarization: wire::Notarization,
     ) -> (Option<wire::Notarization>, Option<wire::Finalize>) {
+        // TODO: check that notarization has threshold signatures and then move forward to that view,
+        // if already tracking view can add missing signatures but we should not check that view already exists
+
         // Store any signatures we have yet to see on current or previous view
         let view = match self.views.get_mut(&notarization.view) {
             Some(view) => view,
