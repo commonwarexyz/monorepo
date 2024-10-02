@@ -82,6 +82,9 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         }
     }
 
+    // This is a pretty basic backfiller (in that it only attempts to resolve one missing
+    // proposal at a time). In `tbd`, this will operate very differently because we can
+    // verify the integrity of any proposal we receive at an index by the threshold signature.
     pub async fn run(&mut self) {
         loop {
             // Get the next missing proposal
