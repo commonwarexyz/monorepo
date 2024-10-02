@@ -695,6 +695,8 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
     pub fn finalize(&mut self, finalize: wire::Finalize) -> Option<wire::Finalization> {
         // TODO: should jump ahead if finalize is valid, not just handle for views we've already seen
 
+        // TODO: when finalizing a view, can prune previous views from memory
+
         // Ensure we are in the right view to process this message
         // TODO: consider storing the finalize if one ahead of our current view
         if finalize.view < self.view {
