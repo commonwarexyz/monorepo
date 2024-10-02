@@ -34,11 +34,42 @@ pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
     index: HashMap<u64, Bytes>,
 
     missing: BTreeMap<u64, Bytes>,
+
+    last_notified: u64,
 }
 
 impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R, A> {
     pub fn get(&self, hash: Bytes) -> Option<wire::Proposal> {
         self.blocks.get(&hash).cloned()
+    }
+
+    fn resolve(&mut self, hash: Bytes, proposal: wire::Proposal) {
+        // If resolves missing, remove from missing
+        self.missing.remove(&proposal.height);
+
+        // Record what we know
+        let height = proposal.height;
+        let parent = proposal.parent.clone();
+        self.index.insert(proposal.height, hash.clone());
+        self.blocks.insert(hash, proposal);
+
+        // Check if we are missing the parent
+        if height > 0 && !self.index.contains_key(&(height - 1)) {
+            self.missing.insert(height - 1, parent);
+        }
+
+        // Notify application of all resolved proposals
+        loop {
+            let next = self.last_notified + 1;
+            if let Some(hash) = self.index.get(&next) {
+                let proposal = self.blocks.get(hash).unwrap();
+                // TODO: track what has been notarized vs finalized
+                self.application.notarized(proposal.payload.clone());
+                self.last_notified = next;
+            } else {
+                break;
+            }
+        }
     }
 
     fn seen(&mut self, proposal: Proposal) {
@@ -47,21 +78,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                 // Record that we are missing the height
                 self.missing.insert(height, hash.clone());
             }
-            Proposal::Downloaded(hash, proposal) => {
-                // If resolves missing, remove from missing
-                self.missing.remove(&proposal.height);
-
-                // Record what we know
-                let height = proposal.height;
-                let parent = proposal.parent.clone();
-                self.index.insert(proposal.height, hash.clone());
-                self.blocks.insert(hash, proposal);
-
-                // Check if we are missing the parent
-                if height > 0 && !self.index.contains_key(&(height - 1)) {
-                    self.missing.insert(height - 1, parent);
-                }
-            }
+            Proposal::Downloaded(hash, proposal) => self.resolve(hash, proposal),
         }
     }
 
@@ -147,16 +164,8 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                             continue;
                         }
 
-                        // Store the proposal
-                        let parent = proposal.parent.clone();
-                        self.missing.remove(&height);
-                        self.index.insert(height, incoming_hash.clone());
-                        self.blocks.insert(incoming_hash.clone(), proposal);
-
-                        // Check to see if parent is stored and add to missing if not
-                        if height > 0 && !self.index.contains_key(&(height - 1)) {
-                            self.missing.insert(height - 1, parent);
-                        }
+                        // Record the proposal
+                        self.resolve(incoming_hash.clone(), proposal);
 
                         // If incoming hash was the hash we were expecting, exit the loop
                         if incoming_hash == focus {
