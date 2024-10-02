@@ -96,6 +96,7 @@ impl View {
     }
 }
 
+// TODO: handle messages from current view and next view
 pub struct Store<E: Clock, C: Scheme, A: Application> {
     runtime: E,
     crypto: C,
@@ -105,6 +106,7 @@ pub struct Store<E: Clock, C: Scheme, A: Application> {
     validators: Vec<PublicKey>,
     validators_ordered: HashMap<PublicKey, u32>,
 
+    // TODO: prune old views
     view: u64,
     views: HashMap<u64, View>,
     notarized_blocks: HashMap<Bytes, (u64, u64)>, // block hash -> (view, height)
