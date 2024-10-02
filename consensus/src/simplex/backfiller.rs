@@ -38,6 +38,7 @@ pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
     last_notified: u64,
 }
 
+// Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
 impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R, A> {
     pub fn get(&self, hash: Bytes) -> Option<wire::Proposal> {
         self.blocks.get(&hash).cloned()
