@@ -59,3 +59,12 @@ message Signature {
     bytes public_key = 1;
     bytes signature = 2;
 }
+
+// Backfiller (TODO: separate proto?)
+message Request {
+    bytes block = 1; // hash
+}
+
+message Resolution {
+    Proposal proposal = 1;
+}

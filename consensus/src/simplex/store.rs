@@ -15,16 +15,17 @@ const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
 const VOTE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_VOTE_";
 const FINALIZE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_FINALIZE_";
 
-fn proposal_digest(view: u64, height: u64, parent: Bytes, payload: Bytes) -> Bytes {
+// TODO: move to shared location
+pub fn proposal_digest(view: u64, height: u64, parent: Bytes, payload_hash: Bytes) -> Bytes {
     let mut hash = Vec::new();
     hash.extend_from_slice(&view.to_be_bytes());
     hash.extend_from_slice(&height.to_be_bytes());
     hash.extend_from_slice(&parent);
-    hash.extend_from_slice(&payload);
+    hash.extend_from_slice(&payload_hash);
     hash.into()
 }
 
-fn hash(bytes: Bytes) -> Bytes {
+pub fn hash(bytes: Bytes) -> Bytes {
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     hasher.finalize().to_vec().into()

@@ -11,6 +11,7 @@ fn main() -> Result<()> {
         "Notarization.block",
         "Finalize.block",
         "Finalization.block",
+        "Request.block",
     ]);
     config.compile_protos(&["src/simplex/wire.proto"], &["src/simplex/"])?;
     Ok(())
