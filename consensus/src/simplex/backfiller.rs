@@ -11,6 +11,8 @@ use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
 use core::panic;
+use futures::channel::mpsc;
+use futures::{SinkExt, StreamExt};
 use prost::Message;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -18,15 +20,19 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, warn};
 
+type View = u64;
+type Height = u64;
+type Hash = Bytes; // use fixed size bytes
+
 #[derive(Clone)]
 pub enum Proposal {
-    Hash(u64, Bytes),
-    Downloaded(Bytes, wire::Proposal),
+    Reference(View, Height, Hash),
+    Populated(Hash, wire::Proposal),
 }
 
 enum Lock {
-    Notarized(HashSet<Bytes>),
-    Finalized(Bytes),
+    Notarized(HashSet<Hash>),
+    Finalized(Hash),
 }
 
 pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
@@ -37,37 +43,32 @@ pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
 
     validators: Vec<PublicKey>,
 
-    locked: HashMap<u64, Lock>,
-
+    locked: HashMap<Height, Lock>,
     blocks: HashMap<Bytes, wire::Proposal>,
-    index: HashMap<u64, Bytes>,
 
-    missing: BTreeMap<u64, Bytes>,
-
-    last_notified: u64,
+    // Fetch missing proposals
+    missing_sender: mpsc::Sender<Hash>,
+    missing_receiver: mpsc::Receiver<Hash>,
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
 impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R, A> {
-    pub fn get(&self, hash: Bytes) -> Option<wire::Proposal> {
-        self.blocks.get(&hash).cloned()
-    }
-
     // TODO: base this off of notarized/finalized (don't want to build index until finalized data, could
     // have a separate index for notarized blocks by view and another for finalized blocks by height)
-    fn resolve(&mut self, hash: Bytes, proposal: wire::Proposal) {
-        // If resolves missing, remove from missing
-        self.missing.remove(&proposal.height);
+    async fn resolve(&mut self, hash: Hash, proposal: wire::Proposal) {
+        // If already resolved, do nothing.
+        if self.blocks.contains_key(&hash) {
+            return;
+        }
 
         // Record what we know
         let height = proposal.height;
         let parent = proposal.parent.clone();
-        self.index.insert(proposal.height, hash.clone());
         self.blocks.insert(hash, proposal);
 
         // Check if we are missing the parent
-        if height > 0 && !self.index.contains_key(&(height - 1)) {
-            self.missing.insert(height - 1, parent);
+        if parent.len() > 0 && !self.blocks.contains_key(&parent) {
+            self.missing_sender.send(parent).await.unwrap();
         }
 
         // Notify application of all resolved proposals
@@ -86,11 +87,16 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
 
     fn seen(&mut self, proposal: Proposal) {
         match proposal {
-            Proposal::Hash(height, hash) => {
-                // Record that we are missing the height
-                self.missing.insert(height, hash.clone());
+            Proposal::Reference(view, height, hash) => {
+                // Check to see if we have the proposal
+                if self.blocks.contains_key(&hash) {
+                    return;
+                }
+
+                // Record that we are missing the view
+                self.missing.insert(view, hash.clone());
             }
-            Proposal::Downloaded(hash, proposal) => self.resolve(hash, proposal),
+            Proposal::Populated(hash, proposal) => self.resolve(hash, proposal),
         }
     }
 
@@ -98,33 +104,37 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
     // proposal at a time). In `tbd`, this will operate very differently because we can
     // verify the integrity of any proposal we receive at an index by the threshold signature.
     pub async fn run(&mut self) {
+        // TODO: need a separate loop for responding to requests
         loop {
             // Get the next missing proposal
-            let (height, focus) = match self.missing.iter().next() {
-                Some((height, hash)) => (*height, hash.clone()),
+            let request = match self.missing_receiver.next().await {
+                Some(request) => request,
                 None => {
-                    self.runtime.sleep(Duration::from_secs(1)).await;
-                    continue;
+                    // No more missing proposals (shutdown)
+                    return;
                 }
             };
 
             // Select random validator to fetch from
             let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
 
-            // Make the request
-            let request = wire::Request {
-                block: focus.clone(),
+            // Send the request
+            let msg = wire::Request {
+                block: request.clone(),
             }
             .encode_to_vec()
             .into();
-
-            // Send the request
             if let Err(err) = self
                 .sender
-                .send(Recipients::One(validator.clone()), request, true)
+                .send(Recipients::One(validator.clone()), msg, true)
                 .await
             {
-                warn!(?err, height, "failed to send backfill request");
+                warn!(
+                    ?err,
+                    request = hex(&request),
+                    validator = hex(&validator),
+                    "failed to send backfill request"
+                );
                 continue;
             }
 
@@ -134,7 +144,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
             loop {
                 let (sender, proposal) = select! {
                     _timeout = self.runtime.sleep_until(deadline) => {
-                        warn!(validator = hex(&validator), height, "backfill request timed out");
+                        warn!(request = hex(&request), validator = hex(&validator), "backfill request timed out");
                         break;
                     },
                     msg = self.receiver.recv() => {
@@ -142,21 +152,21 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                         let (sender, msg) = match msg {
                             Ok(msg) => msg,
                             Err(err) => {
-                                warn!(?err, height, "failed to receive backfill response");
-                                continue;
+                                warn!(?err, "failed to receive backfill response");
+                                return;
                             }
                         };
                         let resolution = match wire::Resolution::decode(msg) {
                             Ok(msg) => msg,
                             Err(err) => {
-                                warn!(?err, sender = hex(&sender), height, "failed to decode message");
+                                warn!(?err, sender = hex(&sender), "failed to decode resolution message");
                                 continue;
                             }
                         };
                         let proposal = match resolution.proposal {
                             Some(proposal) => proposal,
                             None => {
-                                warn!(sender = hex(&sender), height, "resolution missing proposal");
+                                warn!(sender = hex(&sender), "resolution missing proposal");
                                 continue;
                             }
                         };
@@ -164,18 +174,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                     },
                 };
 
-                // Handle response
-                let expected = match self.missing.get(&height) {
-                    Some(expected) => expected,
-                    None => {
-                        // This could happen if an earlier sender already fulfilled
-                        debug!(
-                            sender = hex(&sender),
-                            height, "unexpected backfill response"
-                        );
-                        continue;
-                    }
-                };
+                // Generate payload hash
                 let payload_hash = self
                     .application
                     .verify(proposal.payload.clone())
@@ -187,12 +186,49 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                     payload_hash,
                 );
                 let incoming_hash = hash(proposal_digest);
-                if incoming_hash != *expected {
-                    warn!(
+
+                // Check if we were expecting this hash
+                //
+                // It is ok if we get something we don't need, we may have gotten
+                // what we need from a variety of other places.
+                match self.locked.get(&proposal.height) {
+                    Some(Lock::Notarized(seen)) => {
+                        if !seen.contains(&incoming_hash) {
+                            warn!(
+                                sender = hex(&sender),
+                                height = proposal.height,
+                                "unexpected block hash on resolution"
+                            );
+                            continue;
+                        }
+                    }
+                    Some(Lock::Finalized(expected)) => {
+                        if incoming_hash != *expected {
+                            warn!(
+                                sender = hex(&sender),
+                                height = proposal.height,
+                                "unexpected block hash on resolution"
+                            );
+                            continue;
+                        }
+                    }
+                    None => {
+                        warn!(
+                            sender = hex(&sender),
+                            height = proposal.height,
+                            "unexpected block hash"
+                        );
+                        continue;
+                    }
+                }
+
+                // Check to see if we already have this proposal
+                if self.blocks.contains_key(&incoming_hash) {
+                    debug!(
                         sender = hex(&sender),
-                        height, "block hash mismatch on resolution"
+                        height = proposal.height,
+                        "block already resolved"
                     );
-                    // TODO: add validator to blacklist
                     continue;
                 }
 
@@ -200,8 +236,12 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                 self.resolve(incoming_hash.clone(), proposal);
 
                 // If incoming hash was the hash we were expecting, exit the loop
-                if incoming_hash == focus {
-                    debug!(sender = hex(&sender), height, "backfill resolution");
+                if incoming_hash == request {
+                    debug!(
+                        request = hex(&request),
+                        sender = hex(&sender),
+                        "backfill resolution"
+                    );
                     break;
                 }
             }
@@ -221,9 +261,9 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
 
     pub fn notarized(&mut self, proposal: Proposal) {
         // Extract height and hash
-        let (height, hash) = match &proposal {
-            Proposal::Hash(height, hash) => (*height, hash.clone()),
-            Proposal::Downloaded(hash, proposal) => (proposal.height, hash.clone()),
+        let (view, height, hash) = match &proposal {
+            Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
+            Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
         };
 
         // Insert lock if doesn't already exist
@@ -254,15 +294,27 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
 
     pub fn finalized(&mut self, proposal: Proposal) {
         // Extract height and hash
-        let (height, hash) = match &proposal {
-            Proposal::Hash(height, hash) => (*height, hash.clone()),
-            Proposal::Downloaded(hash, proposal) => (proposal.height, hash.clone()),
+        let (view, height, hash) = match &proposal {
+            Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
+            Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
         };
 
         // Insert lock if doesn't already exist
         let previous = self.locked.get_mut(&height);
         match previous {
-            Some(Lock::Notarized(_)) => {
+            Some(Lock::Notarized(hashes)) => {
+                // Remove unnecessary proposals from memory
+                for old_hash in hashes.iter() {
+                    if old_hash != &hash {
+                        self.blocks.remove(old_hash);
+                        debug!(
+                            height,
+                            hash = hex(old_hash),
+                            "removing unnecessary proposal"
+                        );
+                    }
+                }
+
                 // TODO: need to send notarization for block even if hanven't seen it yet
                 self.locked.insert(height, Lock::Finalized(hash.clone()));
             }
