@@ -31,7 +31,7 @@ pub enum Proposal {
 }
 
 enum Lock {
-    Notarized(BTreeMap<View, Hash>), // priotize building off of highest view (rather than selecting randomly)
+    Notarized(BTreeMap<View, Hash>), // priotize building off of earliest view (avoid wasting work)
     Finalized(Hash),
 }
 
@@ -383,37 +383,49 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
             self.last_finalized = height;
         }
 
-        // Insert lock if doesn't already exist
-        let previous = self.locked.get_mut(&height);
-        match previous {
-            Some(Lock::Notarized(hashes)) => {
-                // Remove unnecessary proposals from memory
-                for (_, old_hash) in hashes.iter() {
-                    if old_hash != &hash {
-                        self.blocks.remove(old_hash);
-                        debug!(
-                            height,
-                            hash = hex(old_hash),
-                            "removing unnecessary proposal"
-                        );
+        // Finalize all locks we have that are ancestors of this block
+        let mut next = height;
+        loop {
+            let previous = self.locked.get_mut(&next);
+            match previous {
+                Some(Lock::Notarized(hashes)) => {
+                    // Remove unnecessary proposals from memory
+                    for (_, old_hash) in hashes.iter() {
+                        if old_hash != &hash {
+                            self.blocks.remove(old_hash);
+                            debug!(
+                                height,
+                                hash = hex(old_hash),
+                                "removing unnecessary proposal"
+                            );
+                        }
+                    }
+
+                    // Store finalized block record
+                    self.locked.insert(height, Lock::Finalized(hash.clone()));
+                }
+                Some(Lock::Finalized(seen)) => {
+                    if *seen != hash {
+                        panic!("finalized block hash mismatch");
                     }
                 }
+                None => {
+                    // TODO: check to see if we have the proposal at this height and populate
+                    // finalize with correct parent
 
-                // TODO: need to send notarization for block even if hanven't seen it yet
-                self.locked.insert(height, Lock::Finalized(hash.clone()));
-            }
-            Some(Lock::Finalized(seen)) => {
-                if *seen != hash {
-                    panic!("finalized block hash mismatch");
+                    // Once we reach an empty lock > 0, exit (and we will continue
+                    // to backfill locks during resolution)
+                    self.locked.insert(next, Lock::Finalized(TODO));
+                    break;
                 }
-                return;
             }
-            None => {
-                self.locked.insert(height, Lock::Finalized(hash.clone()));
-            }
-        }
 
-        // TODO: need to mark anything less than a finalize as finalized?
+            // Update next
+            if next == 0 {
+                break;
+            }
+            next = next - 1;
+        }
 
         // Mark as seen
         // TODO: call application recursively
