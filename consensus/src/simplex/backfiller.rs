@@ -46,6 +46,10 @@ pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
     locked: HashMap<Height, Lock>,
     blocks: HashMap<Bytes, wire::Proposal>,
 
+    // Track notarization/finalization
+    last_notarized: Height,
+    last_finalized: Height,
+
     // Fetch missing proposals
     missing_sender: mpsc::Sender<Hash>,
     missing_receiver: mpsc::Receiver<Hash>,
@@ -69,6 +73,18 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         }
 
         // Record what we know
+        if self.locked.get(&proposal.height).is_none() {
+            if proposal.height < self.last_finalized {
+                let mut seen = HashSet::new();
+                seen.insert(hash.clone());
+                self.locked.insert(proposal.height, Lock::Notarized(seen));
+            } else {
+                self.locked
+                    .insert(proposal.height, Lock::Finalized(hash.clone()));
+            }
+        }
+
+        // Store proposal
         let parent = proposal.parent.clone();
         self.blocks.insert(hash, proposal);
 
