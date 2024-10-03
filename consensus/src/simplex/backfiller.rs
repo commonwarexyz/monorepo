@@ -31,7 +31,7 @@ pub enum Proposal {
 }
 
 enum Lock {
-    Notarized(HashSet<Hash>),
+    Notarized(BTreeMap<View, Hash>), // priotize building off of highest view (rather than selecting randomly)
     Finalized(Hash),
 }
 
@@ -75,8 +75,8 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         // Record what we know
         if self.locked.get(&proposal.height).is_none() {
             if proposal.height < self.last_finalized {
-                let mut seen = HashSet::new();
-                seen.insert(hash.clone());
+                let mut seen = BTreeMap::new();
+                seen.insert(proposal.view, hash.clone());
                 self.locked.insert(proposal.height, Lock::Notarized(seen));
             } else {
                 self.locked
@@ -111,7 +111,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
             match lock {
                 Lock::Notarized(hashes) => {
                     // Send fulfilled unsent notarizations
-                    for hash in hashes.iter() {
+                    for (_, hash) in hashes.iter() {
                         if self.notarizations_sent.contains(hash) {
                             continue;
                         }
@@ -248,7 +248,16 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                 // what we need from a variety of other places.
                 match self.locked.get(&proposal.height) {
                     Some(Lock::Notarized(seen)) => {
-                        if !seen.contains(&incoming_hash) {
+                        let entry = seen.get(&proposal.view);
+                        if entry.is_none() {
+                            warn!(
+                                sender = hex(&sender),
+                                height = proposal.height,
+                                "unexpected block hash on resolution"
+                            );
+                            continue;
+                        }
+                        if entry.unwrap() != &incoming_hash {
                             warn!(
                                 sender = hex(&sender),
                                 height = proposal.height,
@@ -326,23 +335,30 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
             Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
         };
 
+        // Set last notarized
+        if height > self.last_notarized {
+            self.last_notarized = height;
+        }
+
         // Insert lock if doesn't already exist
         let previous = self.locked.get_mut(&height);
         match previous {
             Some(Lock::Notarized(seen)) => {
-                if seen.contains(&hash) {
-                    // Already seen this notarization
+                if let Some(old_hash) = seen.get(&view) {
+                    if *old_hash != hash {
+                        panic!("notarized block hash mismatch");
+                    }
                     return;
                 }
-                seen.insert(hash.clone());
+                seen.insert(view, hash.clone());
             }
             Some(Lock::Finalized(_)) => {
                 // Already finalized, do nothing
                 return;
             }
             None => {
-                let mut seen = HashSet::new();
-                seen.insert(hash.clone());
+                let mut seen = BTreeMap::new();
+                seen.insert(view, hash.clone());
                 self.locked.insert(height, Lock::Notarized(seen));
             }
         }
@@ -362,12 +378,17 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
             Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
         };
 
+        // Set last finalized
+        if height > self.last_finalized {
+            self.last_finalized = height;
+        }
+
         // Insert lock if doesn't already exist
         let previous = self.locked.get_mut(&height);
         match previous {
             Some(Lock::Notarized(hashes)) => {
                 // Remove unnecessary proposals from memory
-                for old_hash in hashes.iter() {
+                for (_, old_hash) in hashes.iter() {
                     if old_hash != &hash {
                         self.blocks.remove(old_hash);
                         debug!(
