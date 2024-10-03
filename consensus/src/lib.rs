@@ -17,6 +17,7 @@ use bytes::Bytes;
 pub trait Application: Clone {
     fn propose(&mut self, parent: Bytes /* payload hash */) -> (Bytes, Bytes); // (hash, payload)
     fn verify(&self, block: Bytes) -> Option<Bytes>;
+    /// No guarantee will send notarized event for all heights.
     fn notarized(&mut self, block: Bytes);
     fn finalized(&mut self, block: Bytes);
 }

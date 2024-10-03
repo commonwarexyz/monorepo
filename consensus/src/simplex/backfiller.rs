@@ -49,6 +49,13 @@ pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
     // Fetch missing proposals
     missing_sender: mpsc::Sender<Hash>,
     missing_receiver: mpsc::Receiver<Hash>,
+
+    // Track last notifications
+    //
+    // We only increase this once we notify of finalization at some height.
+    // It is not guaranteed that we will notify every notarization (may just be finalizes).
+    last_notified: Height,
+    notarizations_sent: HashSet<Hash>,
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
@@ -62,41 +69,73 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         }
 
         // Record what we know
-        let height = proposal.height;
         let parent = proposal.parent.clone();
         self.blocks.insert(hash, proposal);
 
         // Check if we are missing the parent
         if parent.len() > 0 && !self.blocks.contains_key(&parent) {
             self.missing_sender.send(parent).await.unwrap();
+            return;
         }
+    }
 
+    fn notify(&mut self) {
         // Notify application of all resolved proposals
         loop {
-            let next = self.last_notified + 1;
-            if let Some(hash) = self.index.get(&next) {
-                let proposal = self.blocks.get(hash).unwrap();
-                // TODO: track what has been notarized vs finalized
-                self.application.notarized(proposal.payload.clone());
-                self.last_notified = next;
-            } else {
-                break;
+            // Get lock info
+            let lock = match self.locked.get(&self.last_notified) {
+                Some(lock) => lock,
+                None => {
+                    // No more blocks to notify
+                    return;
+                }
+            };
+
+            // Send event
+            match lock {
+                Lock::Notarized(hashes) => {
+                    // Send fulfilled unsent notarizations
+                    for hash in hashes.iter() {
+                        if self.notarizations_sent.contains(hash) {
+                            continue;
+                        }
+                        let proposal = match self.blocks.get(hash) {
+                            Some(proposal) => proposal,
+                            None => continue,
+                        };
+                        self.notarizations_sent.insert(hash.clone());
+                        self.application.notarized(proposal.payload.clone());
+                    }
+                    return;
+                }
+                Lock::Finalized(hash) => {
+                    // Send finalized blocks as soon as we have them
+                    let proposal = match self.blocks.get(hash) {
+                        Some(proposal) => proposal,
+                        None => {
+                            return;
+                        }
+                    };
+                    self.application.finalized(proposal.payload.clone());
+                    self.notarizations_sent.clear();
+                    self.last_notified += 1;
+                }
             }
         }
     }
 
-    fn seen(&mut self, proposal: Proposal) {
+    async fn seen(&mut self, proposal: Proposal) {
         match proposal {
-            Proposal::Reference(view, height, hash) => {
+            Proposal::Reference(_, _, hash) => {
                 // Check to see if we have the proposal
                 if self.blocks.contains_key(&hash) {
                     return;
                 }
 
                 // Record that we are missing the view
-                self.missing.insert(view, hash.clone());
+                self.missing_sender.send(hash.clone()).await.unwrap();
             }
-            Proposal::Populated(hash, proposal) => self.resolve(hash, proposal),
+            Proposal::Populated(hash, proposal) => self.resolve(hash, proposal).await,
         }
     }
 
@@ -235,6 +274,9 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                 // Record the proposal
                 self.resolve(incoming_hash.clone(), proposal);
 
+                // Notify application if we can
+                self.notify();
+
                 // If incoming hash was the hash we were expecting, exit the loop
                 if incoming_hash == request {
                     debug!(
@@ -290,6 +332,9 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         // Mark as seen
         // TODO: call application based on changes to lock (ensure all blocks eventually have both notarized and finalized called in order)
         self.seen(proposal);
+
+        // Notify application
+        self.notify();
     }
 
     pub fn finalized(&mut self, proposal: Proposal) {
@@ -332,5 +377,8 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         // Mark as seen
         // TODO: call application recursively
         self.seen(proposal);
+
+        // Notify application
+        self.notify();
     }
 }
