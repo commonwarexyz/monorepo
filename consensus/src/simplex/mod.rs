@@ -6,6 +6,11 @@
 //!
 //! Wait for block finalization at tip (2f+1), fetch heights backwards (don't
 //! need to backfill views).
+//!
+//! # Differences from Simplex Paper
+//!
+//! * Block timeout in addition to notarization timeout
+//! * Backfill blocks from notarizing peers rather than passing along with notarization
 
 mod backfiller;
 mod config;
