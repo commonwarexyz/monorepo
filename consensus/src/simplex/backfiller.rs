@@ -10,16 +10,23 @@ use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
+use core::panic;
 use prost::Message;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, warn};
 
+#[derive(Clone)]
 pub enum Proposal {
     Hash(u64, Bytes),
     Downloaded(Bytes, wire::Proposal),
+}
+
+enum Lock {
+    Notarized(HashSet<Bytes>),
+    Finalized(Bytes),
 }
 
 pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
@@ -29,6 +36,8 @@ pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
     application: A,
 
     validators: Vec<PublicKey>,
+
+    locked: HashMap<u64, Lock>,
 
     blocks: HashMap<Bytes, wire::Proposal>,
     index: HashMap<u64, Bytes>,
@@ -195,5 +204,79 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                 }
             }
         }
+    }
+
+    // Simplified application functions
+    pub fn propose(&mut self) -> Option<(Bytes, Bytes)> {
+        // If don't have ancestry to last notarized block fulfilled, do nothing.
+
+        // Get latest notarized block
+    }
+
+    pub fn verify(&self, payload: Bytes) -> Option<Bytes> {
+        // Verify block
+    }
+
+    pub fn notarized(&mut self, proposal: Proposal) {
+        // Extract height and hash
+        let (height, hash) = match &proposal {
+            Proposal::Hash(height, hash) => (*height, hash.clone()),
+            Proposal::Downloaded(hash, proposal) => (proposal.height, hash.clone()),
+        };
+
+        // Insert lock if doesn't already exist
+        let previous = self.locked.get_mut(&height);
+        match previous {
+            Some(Lock::Notarized(seen)) => {
+                if seen.contains(&hash) {
+                    // Already seen this notarization
+                    return;
+                }
+                seen.insert(hash.clone());
+            }
+            Some(Lock::Finalized(_)) => {
+                // Already finalized, do nothing
+                return;
+            }
+            None => {
+                let mut seen = HashSet::new();
+                seen.insert(hash.clone());
+                self.locked.insert(height, Lock::Notarized(seen));
+            }
+        }
+
+        // Mark as seen
+        // TODO: call application based on changes to lock (ensure all blocks eventually have both notarized and finalized called in order)
+        self.seen(proposal);
+    }
+
+    pub fn finalized(&mut self, proposal: Proposal) {
+        // Extract height and hash
+        let (height, hash) = match &proposal {
+            Proposal::Hash(height, hash) => (*height, hash.clone()),
+            Proposal::Downloaded(hash, proposal) => (proposal.height, hash.clone()),
+        };
+
+        // Insert lock if doesn't already exist
+        let previous = self.locked.get_mut(&height);
+        match previous {
+            Some(Lock::Notarized(_)) => {
+                // TODO: need to send notarization for block even if hanven't seen it yet
+                self.locked.insert(height, Lock::Finalized(hash.clone()));
+            }
+            Some(Lock::Finalized(seen)) => {
+                if *seen != hash {
+                    panic!("finalized block hash mismatch");
+                }
+                return;
+            }
+            None => {
+                self.locked.insert(height, Lock::Finalized(hash.clone()));
+            }
+        }
+
+        // Mark as seen
+        // TODO: call application recursively
+        self.seen(proposal);
     }
 }
