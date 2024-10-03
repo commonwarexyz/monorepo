@@ -53,6 +53,8 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         self.blocks.get(&hash).cloned()
     }
 
+    // TODO: base this off of notarized/finalized (don't want to build index until finalized data, could
+    // have a separate index for notarized blocks by view and another for finalized blocks by height)
     fn resolve(&mut self, hash: Bytes, proposal: wire::Proposal) {
         // If resolves missing, remove from missing
         self.missing.remove(&proposal.height);
