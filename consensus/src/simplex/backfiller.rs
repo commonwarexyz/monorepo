@@ -341,6 +341,8 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         }
 
         // Insert lock if doesn't already exist
+        //
+        // TODO: treat notarizations in consecutive views as a finalization and recuse backwards
         let previous = self.locked.get_mut(&height);
         match previous {
             Some(Lock::Notarized(seen)) => {
