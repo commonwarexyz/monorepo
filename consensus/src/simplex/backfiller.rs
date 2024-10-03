@@ -298,6 +298,8 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
     }
 
     pub fn verify(&self, payload: Bytes) -> Option<Bytes> {
+        // If don't have ancestry yet, do nothing.
+
         // Verify block
     }
 
@@ -373,6 +375,8 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                 self.locked.insert(height, Lock::Finalized(hash.clone()));
             }
         }
+
+        // TODO: need to mark anything less than a finalize as finalized?
 
         // Mark as seen
         // TODO: call application recursively
