@@ -21,12 +21,18 @@ type Payload = Bytes;
 
 pub trait Application: Clone {
     /// Generate a new payload for the given parent hash.
-    fn propose(&mut self, parent: Hash) -> (Hash, Payload); // (hash, payload)
+    ///
+    /// If state is not yet ready, this will return None.
+    fn propose(&mut self, parent: Hash) -> Option<Payload>;
 
     /// Parse the payload and return the hash of the payload.
+    ///
+    /// Parse is a stateless operation and may be called out-of-order.
     fn parse(&self, payload: Payload) -> Option<Hash>;
 
     /// Verify the payload is valid.
+    ///
+    /// Verify is a stateful operation and must be called in-order.
     fn verify(&self, payload: Payload) -> bool;
 
     /// Event that the payload has been notarized.

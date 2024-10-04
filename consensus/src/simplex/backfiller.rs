@@ -4,7 +4,7 @@ use super::{
     store::{hash, proposal_digest},
     wire,
 };
-use crate::{Application, Hash, Height, View};
+use crate::{Application, Hash, Height, Payload, View};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -311,16 +311,24 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
     }
 
     // Simplified application functions
-    pub fn propose(&mut self) -> Option<(Bytes, Bytes)> {
+    pub fn propose(&mut self) -> Option<Payload> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
 
         // Get latest notarized block
+        None
     }
 
-    pub fn verify(&self, payload: Bytes) -> Option<Bytes> {
+    pub fn parse(&self, payload: Payload) -> Option<Hash> {
+        self.application.parse(payload)
+    }
+
+    pub fn verify(&self, payload: Payload) -> bool {
         // If don't have ancestry yet, do nothing.
 
+        // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
+
         // Verify block
+        false
     }
 
     pub fn notarized(&mut self, proposal: Proposal) {

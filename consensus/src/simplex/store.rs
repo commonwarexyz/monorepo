@@ -1,3 +1,5 @@
+//! TODO: change name to voter
+
 use super::wire;
 use crate::Application;
 use bytes::Bytes;
