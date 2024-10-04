@@ -19,6 +19,9 @@ type Height = u64;
 type Hash = Bytes; // use fixed size bytes
 type Payload = Bytes;
 
+/// TODO: call verify after voting (before finalization votes) or before voting? Can include
+/// outputs of block in next block?
+/// TODO: perform verification async so can keep responding to messages?
 pub trait Application: Clone {
     /// Generate a new payload for the given parent hash.
     ///
@@ -43,3 +46,16 @@ pub trait Application: Clone {
     /// Event that the payload has been finalized.
     fn finalized(&mut self, payload: Payload);
 }
+
+// Example Payload (Transfers):
+// - Vec<Tx> => hashed as balanced binary trie by hash
+//
+// Context:
+// -> Builder, View (gauge of time elapsed), Height, Timestamp, Parent_Payload
+// -> Signers in previous round (reward uptime)
+// -> Faults (at any round)
+//
+// Expectations:
+// * Application tracks a trie of pending blocks (with pending state diffs to that trie)
+//   * If we only execute committed blocks, this isn't required? Still need to build proposals on a tree of blocks. Also means data proveable from a block
+// .   may not be correct (would need to rely on child block to indicate what was successful).
