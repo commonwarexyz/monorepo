@@ -1,11 +1,10 @@
 //! Backfill missing proposals seen in consensus.
 
-use crate::Application;
-
 use super::{
     store::{hash, proposal_digest},
     wire,
 };
+use crate::{Application, Hash, Height, View};
 use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -19,10 +18,6 @@ use rand::Rng;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, warn};
-
-type View = u64;
-type Height = u64;
-type Hash = Bytes; // use fixed size bytes
 
 #[derive(Clone)]
 pub enum Proposal {
@@ -44,7 +39,7 @@ pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
     validators: Vec<PublicKey>,
 
     locked: HashMap<Height, Lock>,
-    blocks: HashMap<Bytes, wire::Proposal>,
+    blocks: HashMap<Hash, wire::Proposal>,
 
     // Track notarization/finalization
     last_notarized: Height,

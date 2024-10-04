@@ -14,10 +14,26 @@ use bytes::Bytes;
 // - 33% double-voting
 // - block sent to one honest party different than block sent to all others, does it drop at notarization and fetch actual?
 
+type View = u64;
+type Height = u64;
+type Hash = Bytes; // use fixed size bytes
+type Payload = Bytes;
+
 pub trait Application: Clone {
-    fn propose(&mut self, parent: Bytes /* payload hash */) -> (Bytes, Bytes); // (hash, payload)
-    fn verify(&self, block: Bytes) -> Option<Bytes>;
+    /// Generate a new payload for the given parent hash.
+    fn propose(&mut self, parent: Hash) -> (Hash, Payload); // (hash, payload)
+
+    /// Parse the payload and return the hash of the payload.
+    fn parse(&self, payload: Payload) -> Option<Hash>;
+
+    /// Verify the payload is valid.
+    fn verify(&self, payload: Payload) -> bool;
+
+    /// Event that the payload has been notarized.
+    ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, block: Bytes);
-    fn finalized(&mut self, block: Bytes);
+    fn notarized(&mut self, payload: Payload);
+
+    /// Event that the payload has been finalized.
+    fn finalized(&mut self, payload: Payload);
 }
