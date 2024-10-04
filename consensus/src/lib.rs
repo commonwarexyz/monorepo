@@ -51,11 +51,12 @@ pub trait Application: Clone {
 // - Vec<Tx> => hashed as balanced binary trie by hash
 //
 // Context:
-// -> Builder, View (gauge of time elapsed), Height, Timestamp, Parent_Payload
-// -> Signers in previous round (reward uptime)
-// -> Faults (at any round)
+// -> Builder, View (gauge of time elapsed), Height, Timestamp, Parent_Payload (used to track inner trie)
+// .   -> If previously proposed block at a height that is not yet canonicalized, should re-propose?
+// -> (Optional) Signers in previous round (reward uptime)
+// -> (Optional) Faults (at any round)
 //
 // Expectations:
 // * Application tracks a trie of pending blocks (with pending state diffs to that trie)
-//   * If we only execute committed blocks, this isn't required? Still need to build proposals on a tree of blocks. Also means data proveable from a block
-// .   may not be correct (would need to rely on child block to indicate what was successful).
+//   * If we only execute committed blocks, this isn't required? Still need to build proposals on a tree of blocks (can't wait for finality
+// .   to build). Also would mean data proveable from a block may not be correct (would need to rely on child block to indicate what was successful).
