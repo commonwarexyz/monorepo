@@ -4,7 +4,7 @@ pub mod simplex;
 
 use bytes::Bytes;
 
-// TODO: add simulated dialect for applications to test their execution environments under
+// TODO: add simulated dialect for applications to test their execution environments under (with arbitary orphans, etc.)
 
 // TODO: tests
 // - sync from scratch
