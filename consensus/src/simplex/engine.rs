@@ -1,4 +1,4 @@
-use super::{store::Store, wire, Error};
+use super::{voter::Voter, wire, Error};
 use crate::Application;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -15,7 +15,7 @@ pub struct Engine<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> {
     receiver: R,
 
     validators: Vec<PublicKey>,
-    store: Store<E, C, A>,
+    voter: Store<E, C, A>,
 }
 
 impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A, S, R> {

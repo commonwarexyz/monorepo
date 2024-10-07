@@ -13,10 +13,10 @@
 //! * Block timeout in addition to notarization timeout
 //! * Backfill blocks from notarizing peers rather than passing along with notarization
 
-mod backfiller;
 mod config;
 mod engine;
-mod store;
+mod orchestrator;
+mod voter;
 
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));

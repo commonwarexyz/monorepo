@@ -1,6 +1,9 @@
 //! TODO: change name to voter
 
-use super::{backfiller::Backfiller, wire};
+use super::{
+    orchestrator::{self, Orchestrator},
+    wire,
+};
 use crate::Application;
 use bytes::Bytes;
 use commonware_cryptography::{bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme};
@@ -73,15 +76,15 @@ impl View {
     pub fn new(
         idx: u64,
         leader: PublicKey,
-        leader_deadline: SystemTime,
-        advance_deadline: SystemTime,
+        leader_deadline: Option<SystemTime>,
+        advance_deadline: Option<SystemTime>,
     ) -> Self {
         Self {
             idx,
 
             leader,
-            leader_deadline: Some(leader_deadline),
-            advance_deadline: Some(advance_deadline),
+            leader_deadline,
+            advance_deadline,
             null_vote_retry: None,
 
             proposal: None,
@@ -100,28 +103,25 @@ impl View {
 }
 
 // TODO: handle messages from current view and next view
-pub struct Store<E: Clock + Rng, C: Scheme, A: Application> {
+pub struct Voter<E: Clock + Rng, C: Scheme, A: Application> {
     runtime: E,
     crypto: C,
 
-    backfiller: Backfiller<E, A>,
+    orchestrator: Orchestrator<E, A>,
 
     threshold: u32,
     validators: Vec<PublicKey>,
     validators_ordered: HashMap<PublicKey, u32>,
 
-    // TODO: prune old views
     view: u64,
     views: HashMap<u64, View>,
-    notarized_blocks: HashMap<Bytes, (u64, u64)>, // block hash -> (view, height)
-    last_notarized: Option<Bytes>,
 }
 
-impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
+impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
     pub fn new(
         runtime: E,
         crypto: C,
-        backfiller: Backfiller<E, A>,
+        orchestrator: Orchestrator<E, A>,
         mut validators: Vec<PublicKey>,
     ) -> Self {
         // Initialize ordered validators
@@ -136,7 +136,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
             runtime,
             crypto,
 
-            backfiller,
+            orchestrator,
 
             // TODO: move this helper
             threshold: threshold(validators.len() as u32)
@@ -146,8 +146,6 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
 
             view: 0,
             views: HashMap::new(),
-            notarized_blocks: HashMap::new(),
-            last_notarized: None,
         }
     }
 
@@ -164,7 +162,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Select parent block
-        let (parent, payload) = match self.backfiller.propose() {
+        let (parent, payload) = match self.orchestrator.propose() {
             Some((parent, payload)) => (parent, payload),
             None => {
                 debug!(reason = "no available parent", "dropping proposal");
@@ -174,7 +172,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
         let height = parent.1.height + 1;
 
         // Get payload hash
-        let payload_hash = match self.backfiller.parse(payload.clone()) {
+        let payload_hash = match self.orchestrator.parse(payload.clone()) {
             Some(hash) => hash,
             None => {
                 warn!(
@@ -215,6 +213,8 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
         if let Some(deadline) = view.null_vote_retry {
             return deadline;
         }
+
+        // Set null vote retry, if none already set
         let null_vote_retry = self.runtime.current() + Duration::from_secs(30);
         view.null_vote_retry = Some(null_vote_retry);
         null_vote_retry
@@ -231,29 +231,18 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
         view.null_vote_retry = None;
 
         // Construct null vote
+        let blk = Bytes::new();
         wire::Vote {
             view: self.view,
-            block: Bytes::new(),
+            block: blk.clone(),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
-                signature: self.crypto.sign(VOTE_NAMESPACE, &Bytes::new()),
+                signature: self.crypto.sign(VOTE_NAMESPACE, &blk),
             }),
         }
     }
 
     pub fn proposal(&mut self, proposal: wire::Proposal) -> Option<wire::Vote> {
-        // Ensure we are in the right view to process this message
-        // TODO: consider storing the proposal if one ahead of our current view
-        if proposal.view != self.view {
-            debug!(
-                proposal_view = proposal.view,
-                our_view = self.view,
-                reason = "incorrect view",
-                "dropping proposal"
-            );
-            return None;
-        }
-
         // Parse signature
         let signature = match &proposal.signature {
             Some(signature) => signature,
@@ -263,39 +252,51 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
             }
         };
 
-        // Check to see if we have already received a proposal for this view
-        let view = self.views.get_mut(&proposal.view).unwrap();
-        if view.proposal.is_some() {
-            debug!(view = proposal.view, "proposal already exists");
-            // TODO: check if different signed proposal and post fault
+        // Ensure we are in the right view to process this message
+        if proposal.view != self.view && proposal.view != self.view + 1 {
+            debug!(
+                proposal_view = proposal.view,
+                our_view = self.view,
+                reason = "incorrect view",
+                "dropping proposal"
+            );
             return None;
         }
 
-        // Check to see if leader is correct
+        // Check expected leader
+        let expected_leader =
+            self.validators[proposal.view as usize % self.validators.len()].clone();
         if !C::validate(&signature.public_key) {
             debug!(reason = "invalid signature", "dropping proposal");
             return None;
         }
-        if view.leader != signature.public_key {
+        if expected_leader != signature.public_key {
             debug!(
                 proposal_leader = hex(&signature.public_key),
-                view_leader = hex(&view.leader),
+                view_leader = hex(&expected_leader),
                 reason = "leader mismatch",
                 "dropping proposal"
             );
             return None;
         }
 
-        // Verify the payload and get its hash
-        let payload_hash = match self.application.verify(proposal.payload.clone()) {
+        // Check to see if we have already received a proposal for this view (if exists)
+        if let Some(view) = self.views.get(&proposal.view) {
+            if view.proposal.is_some() {
+                debug!(view = proposal.view, "proposal already exists");
+                // TODO: check if different signed proposal and post fault
+                return None;
+            }
+        }
+
+        // Verify the signature
+        let payload_hash = match self.orchestrator.parse(proposal.payload.clone()) {
             Some(hash) => hash,
             None => {
                 debug!(reason = "invalid payload", "dropping proposal");
                 return None;
             }
         };
-
-        // Verify the signature
         let proposal_digest = proposal_digest(
             proposal.view,
             proposal.height,
@@ -312,51 +313,17 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
             return None;
         }
 
-        // Check to see if compatible with notarized tip
-        let last_height = match &self.last_notarized {
-            Some(hash) => self.notarized_blocks.get(hash).unwrap().1,
-            None => 0,
-        };
-        if proposal.height < last_height {
-            debug!(
-                proposal_height = proposal.height,
-                last_height = last_height,
-                reason = "conflicting prefix",
-                "dropping proposal"
-            );
+        // Verify the proposal
+        if !self.orchestrator.verify(proposal.clone()) {
+            debug!(reason = "invalid payload", "dropping proposal");
             return None;
-        }
-
-        // Confirm parent block is notarized and height is correct
-        if last_height > 0 {
-            let (_, parent_height) = match self.notarized_blocks.get(&proposal.parent) {
-                Some(view) => view,
-                None => {
-                    debug!(reason = "unknown parent", "dropping proposal");
-                    return None;
-                }
-            };
-            if parent_height + 1 != proposal.height {
-                debug!(
-                    parent_height = parent_height,
-                    proposal_height = proposal.height,
-                    reason = "invalid height",
-                    "dropping proposal"
-                );
-                return None;
-            }
-        } else {
-            if proposal.parent.len() != 0 {
-                debug!(reason = "invalid parent", "dropping proposal");
-                return None;
-            }
-            if proposal.height != 0 {
-                debug!(reason = "invalid height", "dropping proposal");
-                return None;
-            }
-        }
+        };
 
         // Store the proposal
+        let view = self
+            .views
+            .entry(proposal.view)
+            .or_insert_with(|| View::new(proposal.view, expected_leader, None, None));
         let proposal_hash = hash(proposal_digest);
         let proposal_view = proposal.view;
         view.proposal = Some((proposal_hash.clone(), payload_hash, proposal));
@@ -369,17 +336,18 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Construct vote
-        let vote = wire::Vote {
+        if proposal_view != self.view {
+            // TODO: when moving into next view, we should broadcast vote
+            return None;
+        }
+        Some(wire::Vote {
             view: self.view,
             block: proposal_hash.clone(),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(VOTE_NAMESPACE, &proposal_hash),
             }),
-        };
-
-        // Return the vote for broadcast
-        Some(vote)
+        })
     }
 
     fn construct_notarization(
@@ -428,8 +396,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
 
     pub fn vote(&mut self, vote: wire::Vote) -> Option<wire::Notarization> {
         // Ensure we are in the right view to process this message
-        // TODO: consider storing the vote if one ahead of our current view
-        if vote.view != self.view {
+        if vote.view != self.view && vote.view != self.view + 1 {
             debug!(
                 vote_view = vote.view,
                 our_view = self.view,
@@ -475,7 +442,14 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Check to see if vote is for proposal in view
-        let view = self.views.get_mut(&vote.view).unwrap();
+        let view = self.views.entry(vote.view).or_insert_with(|| {
+            View::new(
+                vote.view,
+                self.validators[vote.view as usize % self.validators.len()].clone(),
+                None,
+                None,
+            )
+        });
 
         // Handle vote
         let last_vote_null = vote.block.len() == 0;
@@ -506,6 +480,9 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Construct notarization
+        if self.view != vote.view {
+            return None;
+        }
         Self::construct_notarization(&self.validators, self.threshold, view, last_vote_null)
     }
 
@@ -513,6 +490,60 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
         &mut self,
         notarization: wire::Notarization,
     ) -> (Option<wire::Notarization>, Option<wire::Finalize>) {
+        // Verify threshold notarization
+        //
+        // TODO: conditionally verify signatures based on our view
+        let mut added = 0;
+        let mut seen = HashSet::new();
+        for signature in notarization.signatures {
+            // Verify signature
+            if !C::validate(&signature.public_key) {
+                debug!(
+                    signer = hex(&signature.public_key),
+                    reason = "invalid validator",
+                    "dropping notarization"
+                );
+                return (None, None);
+            }
+
+            // Ensure we haven't seen this signature before
+            if seen.contains(&signature.public_key) {
+                debug!(
+                    signer = hex(&signature.public_key),
+                    reason = "duplicate signature",
+                    "dropping notarization"
+                );
+                return (None, None);
+            }
+            seen.insert(signature.public_key.clone());
+
+            // Verify signature
+            if !C::verify(
+                VOTE_NAMESPACE,
+                &vote_digest(notarization.view, notarization.block.clone()),
+                &signature.public_key,
+                &signature.signature,
+            ) {
+                debug!(reason = "invalid signature", "dropping notarization");
+                return (None, None);
+            }
+            added += 1;
+        }
+        if added <= self.threshold {
+            debug!(
+                threshold = self.threshold,
+                signatures = added,
+                reason = "insufficient signatures",
+                "dropping notarization"
+            );
+            return (None, None);
+        }
+        debug!(view = notarization.view, added, "notarization verified");
+
+        // TODO: If new view, immediately jump ahead
+
+        // TODO: if old view, add any missing signatures
+
         // TODO: check that notarization has threshold signatures and then move forward to that view,
         // if already tracking view can add missing signatures but we should not check that view already exists
 
@@ -710,7 +741,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
 
         // Ensure we are in the right view to process this message
         // TODO: consider storing the finalize if one ahead of our current view
-        if finalize.view < self.view {
+        if finalize.view != self.view && finalize.view != self.view + 1 {
             debug!(
                 finalize_view = finalize.view,
                 our_view = self.view,
@@ -795,11 +826,56 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
 
     pub fn finalization(&mut self, finalization: wire::Finalization) -> Option<wire::Finalization> {
         // Ensure not for null
-        // TODO: record faults
         if finalization.block.len() == 0 {
             debug!(reason = "finalize for null block", "dropping finalization");
+            // TODO: record faults
             return None;
         }
+
+        // Verify threshold finalization
+        //
+        // TODO: conditionally verify signatures based on our view
+        let mut added = 0;
+        let mut seen = HashSet::new();
+        for signature in finalization.signatures {
+            // Verify signature
+            if !C::validate(&signature.public_key) {
+                debug!(
+                    signer = hex(&signature.public_key),
+                    reason = "invalid validator",
+                    "dropping finalization"
+                );
+                return None;
+            }
+
+            // Ensure we haven't seen this signature before
+            if seen.contains(&signature.public_key) {
+                debug!(
+                    signer = hex(&signature.public_key),
+                    reason = "duplicate signature",
+                    "dropping finalization"
+                );
+                return None;
+            }
+            seen.insert(signature.public_key.clone());
+
+            // Verify signature
+            if !C::verify(
+                FINALIZE_NAMESPACE,
+                &finalize_digest(finalization.view, finalization.block.clone()),
+                &signature.public_key,
+                &signature.signature,
+            ) {
+                debug!(reason = "invalid signature", "dropping finalization");
+                return None;
+            }
+            added += 1;
+        }
+        debug!(view = finalization.view, added, "finalization verified");
+
+        // TODO: jump ahead if greater than our view
+
+        // TODO: if old view, store finalizations
 
         // Store any signatures we have yet to see on current or previous view
         let view = match self.views.get_mut(&finalization.view) {

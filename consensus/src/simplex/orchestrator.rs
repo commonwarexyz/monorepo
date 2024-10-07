@@ -1,7 +1,7 @@
 //! Backfill missing proposals seen in consensus.
 
 use super::{
-    store::{hash, proposal_digest},
+    voter::{hash, proposal_digest},
     wire,
 };
 use crate::{Application, Hash, Height, Payload, View};
@@ -29,7 +29,7 @@ enum Lock {
     Finalized(Hash),
 }
 
-pub struct Backfiller<E: Clock + Rng, A: Application> {
+pub struct Orchestrator<E: Clock + Rng, A: Application> {
     runtime: E,
     application: A,
 
@@ -55,7 +55,7 @@ pub struct Backfiller<E: Clock + Rng, A: Application> {
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng, A: Application> Backfiller<E, A> {
+impl<E: Clock + Rng, A: Application> Orchestrator<E, A> {
     // TODO: base this off of notarized/finalized (don't want to build index until finalized data, could
     // have a separate index for notarized blocks by view and another for finalized blocks by height)
     async fn resolve(&mut self, hash: Hash, proposal: wire::Proposal) {
