@@ -15,7 +15,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     time::Duration,
 };
-use tracing::{debug, error};
+use tracing::{debug, error, trace};
 
 type Channel = u32;
 
@@ -82,7 +82,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         // Ensure doesn't already exist
         let entry = self.agents.entry(public_key.clone()).or_default();
         if entry.get(&channel).is_some() {
-            return Err(Error::ChannelAlreadyRegistered);
+            return Err(Error::ChannelAlreadyRegistered(channel));
         }
 
         // Initialize agent channel
@@ -303,12 +303,26 @@ impl Sender {
             loop {
                 select! {
                     high_task = high_receiver.next() => {
-                        if let Err(err) = sender.send(high_task.unwrap()).await{
+                        let high_task = match high_task {
+                            Some(high_task) => high_task,
+                            None => {
+                                trace!(channel, "high priority channel closed");
+                                break
+                            },
+                        };
+                        if let Err(err) = sender.send(high_task).await{
                             error!(?err, "failed to send high priority task");
                         }
                     },
                     low_task = low_receiver.next() => {
-                        if let Err(err) = sender.send(low_task.unwrap()).await{
+                        let low_task = match low_task {
+                            Some(low_task) => low_task,
+                            None => {
+                                trace!(channel, "low priority channel closed");
+                                break
+                            },
+                        };
+                        if let Err(err) = sender.send(low_task).await{
                             error!(?err, "failed to send low priority task");
                         }
                     }

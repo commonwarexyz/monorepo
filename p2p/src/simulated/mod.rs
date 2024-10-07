@@ -16,8 +16,8 @@ pub enum Error {
     LinkingSelf,
     #[error("invalid success rate (must be in [0, 1]): {0}")]
     InvalidSuccessRate(f64),
-    #[error("channel already registered")]
-    ChannelAlreadyRegistered,
+    #[error("channel already registered: {0}")]
+    ChannelAlreadyRegistered(u32),
 }
 
 #[cfg(test)]
@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_message() {
+    fn test_message_too_big() {
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
@@ -201,6 +201,23 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_channel() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let mut network = network::Network::new(runtime.clone(), network::Config {});
+
+            // Register agents
+            let pk = Ed25519::from_seed(0).public_key();
+            network.register(0, 1024 * 1024, pk.clone()).unwrap();
+            let result = network.register(0, 1024 * 1024, pk);
+
+            // Confirm error is correct
+            assert!(matches!(result, Err(Error::ChannelAlreadyRegistered(0))));
+        });
+    }
+
+    #[test]
     fn test_invalid_success_rate() {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
@@ -243,6 +260,75 @@ mod tests {
                 network.register(0, 1024 * 1024, pk1.clone()).unwrap();
             let (mut sender2, mut receiver2) =
                 network.register(0, 1024 * 1024, pk2.clone()).unwrap();
+
+            // Register unused channels
+            let _ = network.register(1, 1024 * 1024, pk1.clone()).unwrap();
+            let _ = network.register(2, 1024 * 1024, pk2.clone()).unwrap();
+
+            // Link agents
+            network
+                .link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    network::Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .unwrap();
+            network
+                .link(
+                    pk2.clone(),
+                    pk1.clone(),
+                    network::Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .unwrap();
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Send messages
+            let msg1 = Bytes::from("hello from pk1");
+            let msg2 = Bytes::from("hello from pk2");
+            sender1
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
+                .await
+                .unwrap();
+            sender2
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
+                .await
+                .unwrap();
+
+            // Confirm message delivery
+            let (sender, message) = receiver1.recv().await.unwrap();
+            assert_eq!(sender, pk2);
+            assert_eq!(message, msg2);
+            let (sender, message) = receiver2.recv().await.unwrap();
+            assert_eq!(sender, pk1);
+            assert_eq!(message, msg1);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "runtime stalled")]
+    fn test_channel_difference() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let mut network = network::Network::new(runtime.clone(), network::Config {});
+
+            // Register agents
+            let pk1 = Ed25519::from_seed(0).public_key();
+            let pk2 = Ed25519::from_seed(1).public_key();
+            let (mut sender1, mut receiver1) =
+                network.register(0, 1024 * 1024, pk1.clone()).unwrap();
+            let (mut sender2, mut receiver2) =
+                network.register(1, 1024 * 1024, pk2.clone()).unwrap();
 
             // Link agents
             network
