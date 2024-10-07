@@ -52,8 +52,8 @@ pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
     //
     // We only increase this once we notify of finalization at some height.
     // It is not guaranteed that we will notify every notarization (may just be finalizes).
+    notarizations_sent: HashMap<Height, HashSet<Hash>>,
     last_notified: Height,
-    notarizations_sent: HashSet<Hash>,
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
@@ -90,10 +90,11 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
     }
 
     fn notify(&mut self) {
-        // Notify application of all resolved proposals
+        // Notify application of all finalized proposals
+        let mut next = self.last_notified;
         loop {
             // Get lock info
-            let lock = match self.locked.get(&self.last_notified) {
+            let lock = match self.locked.get(&next) {
                 Some(lock) => lock,
                 None => {
                     // No more blocks to notify
@@ -105,18 +106,18 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
             match lock {
                 Lock::Notarized(hashes) => {
                     // Send fulfilled unsent notarizations
+                    let notifications = self.notarizations_sent.entry(next).or_default();
                     for (_, hash) in hashes.iter() {
-                        if self.notarizations_sent.contains(hash) {
+                        if notifications.contains(hash) {
                             continue;
                         }
                         let proposal = match self.blocks.get(hash) {
                             Some(proposal) => proposal,
                             None => continue,
                         };
-                        self.notarizations_sent.insert(hash.clone());
+                        notifications.insert(hash.clone());
                         self.application.notarized(proposal.payload.clone());
                     }
-                    return;
                 }
                 Lock::Finalized(hash) => {
                     // Send finalized blocks as soon as we have them
@@ -127,10 +128,13 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                         }
                     };
                     self.application.finalized(proposal.payload.clone());
-                    self.notarizations_sent.clear();
+                    self.notarizations_sent.remove(&self.last_notified);
                     self.last_notified += 1;
                 }
             }
+
+            // Update next
+            next += 1;
         }
     }
 
@@ -309,22 +313,88 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         }
     }
 
+    fn best_parent(&self) -> Option<wire::Proposal> {
+        // Find highest block that we have notified the application of
+        let mut next = self.last_notarized;
+        loop {
+            match self.locked.get(&next) {
+                Some(Lock::Notarized(hashes)) => {
+                    // Find earliest view that we also sent notification for
+                    for (_, hash) in hashes.iter() {
+                        if let Some(notifications) = self.notarizations_sent.get(&next) {
+                            if notifications.contains(hash) {
+                                return self.blocks.get(hash).cloned();
+                            }
+                        }
+                    }
+                }
+                Some(Lock::Finalized(hash)) => {
+                    if self.last_notified >= next {
+                        return self.blocks.get(hash).cloned();
+                    }
+                }
+                None => return None,
+            }
+
+            // Update next
+            if next == 0 {
+                return None;
+            }
+            next -= 1;
+        }
+    }
+
     // Simplified application functions
     pub fn propose(&mut self) -> Option<Payload> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
+        let parent = match self.best_parent() {
+            Some(parent) => parent,
+            None => {
+                return None;
+            }
+        };
 
-        // Get latest notarized block
-        None
+        // Propose block
+        //
+        // TODO: provide more info to application
+        self.application.propose(parent.payload.clone())
     }
 
     pub fn parse(&self, payload: Payload) -> Option<Hash> {
         self.application.parse(payload)
     }
 
+    fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
+        // Check if we have the parent
+        if !self.blocks.contains_key(&proposal.parent) {
+            return false;
+        }
+
+        // If proposal height is already finalized, fail
+        if proposal.height <= self.last_finalized {
+            return false;
+        }
+
+        // Get parent
+        let parent = match self.blocks.get(&proposal.parent) {
+            Some(parent) => parent,
+            None => return false,
+        };
+
+        // Check if parent is notarized or finalized
+        match self.locked.get(&parent.height) {
+            Some(Lock::Finalized(hash)) => parent.parent == *hash,
+            Some(Lock::Notarized(hashes)) => hashes.contains_key(&parent.view),
+            None => false,
+        }
+    }
+
     pub fn verify(&self, proposal: wire::Proposal) -> bool {
         // If don't have ancestry yet, do nothing.
-
-        // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
+        if !self.valid_ancestry(&proposal) {
+            // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
+            return false;
+        }
 
         // Verify payload
         self.application.verify(proposal.payload.clone())
@@ -368,7 +438,6 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         }
 
         // Mark as seen
-        // TODO: call application based on changes to lock (ensure all blocks eventually have both notarized and finalized called in order)
         self.seen(proposal);
 
         // Notify application
