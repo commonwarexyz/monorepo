@@ -227,7 +227,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                 // Generate payload hash
                 let payload_hash = self
                     .application
-                    .verify(proposal.payload.clone())
+                    .parse(proposal.payload.clone())
                     .expect("unable to verify notarized/finalized payload");
                 let proposal_digest = proposal_digest(
                     proposal.view,
@@ -322,13 +322,13 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         self.application.parse(payload)
     }
 
-    pub fn verify(&self, payload: Payload) -> bool {
+    pub fn verify(&self, proposal: wire::Proposal) -> bool {
         // If don't have ancestry yet, do nothing.
 
         // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
 
-        // Verify block
-        false
+        // Verify payload
+        self.application.verify(proposal.payload.clone())
     }
 
     pub fn notarized(&mut self, proposal: Proposal) {

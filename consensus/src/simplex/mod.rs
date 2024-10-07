@@ -1,6 +1,7 @@
 //! Simplex
 //!
-//! PoA Consensus useful for running a DKG
+//! PoA Consensus useful for running a DKG (no reconfiguration support, round-robin
+//! leader selection).
 //!
 //! # Sync
 //!
