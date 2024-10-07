@@ -22,7 +22,7 @@ type Payload = Bytes;
 /// TODO: call verify after voting (before finalization votes) or before voting? Can include
 /// outputs of block in next block?
 /// TODO: perform verification async so can keep responding to messages?
-pub trait Application: Clone + Send + Sync {
+pub trait Application: Send + 'static {
     /// Generate a new payload for the given parent hash.
     ///
     /// If state is not yet ready, this will return None.

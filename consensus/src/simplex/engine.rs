@@ -94,11 +94,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
         };
     }
 
-    pub async fn run(
-        mut self,
-        mut sender: impl Sender,
-        mut receiver: impl Receiver,
-    ) -> Result<(), Error> {
+    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
         // Process messages
         loop {
             // Attempt to propose a block
