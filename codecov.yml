@@ -1,5 +1,10 @@
 ignore:
   - "examples"
+  - "debug!\\("
+  - "info!\\("
+  - "trace!\\("
+  - "warn!\\("
+  - "error!\\("
 
 comment:
   layout: "header, diff, files, footer"
