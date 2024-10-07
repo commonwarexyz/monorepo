@@ -394,6 +394,36 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         Some(notarization)
     }
 
+    fn enter_view(&mut self, view: u64) {
+        // Ensure view is valid
+        if view <= self.view {
+            panic!("cannot enter previous or current view");
+        }
+
+        // Prune old views
+        while self.view < view {
+            if let Some(record) = self.views.remove(&self.view) {
+                // TODO: send proposals to orchestrator to reduce backfill needs?
+                debug!(view = record.idx, "pruned view");
+            }
+            self.view += 1;
+        }
+
+        // Setup new view
+        let entry = self.views.entry(view).or_insert_with(|| {
+            View::new(
+                view,
+                self.validators[view as usize % self.validators.len()].clone(),
+                None,
+                None,
+            )
+        });
+        entry.leader_deadline = Some(self.runtime.current() + Duration::from_secs(1));
+        entry.advance_deadline = Some(self.runtime.current() + Duration::from_secs(2));
+
+        // TODO: Return vote, notarization, finalize, finalization if we have it?
+    }
+
     pub fn vote(&mut self, vote: wire::Vote) -> Option<wire::Notarization> {
         // Ensure we are in the right view to process this message
         if vote.view != self.view && vote.view != self.view + 1 {
@@ -873,7 +903,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         }
         debug!(view = finalization.view, added, "finalization verified");
 
-        // TODO: jump ahead if greater than our view
+        // TODO: jump ahead if greater than our view (and prune in-memory after notifying orchestrator of what we have)
 
         // TODO: if old view, store finalizations
 
