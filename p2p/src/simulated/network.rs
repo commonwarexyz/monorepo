@@ -24,18 +24,17 @@ type Task = (
     PublicKey,
     Recipients,
     Bytes,
-    oneshot::Sender<Result<Vec<PublicKey>, Error>>,
+    oneshot::Sender<Vec<PublicKey>>,
 );
 
 /// Implementation of a `simulated` network.
 pub struct Network<E: Spawner + Rng + Clock> {
     runtime: E,
-    cfg: Config,
-
+    // cfg: Config,
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
     links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
-    agents: BTreeMap<PublicKey, HashMap<Channel, mpsc::UnboundedSender<Message>>>,
+    agents: BTreeMap<PublicKey, HashMap<Channel, (usize, mpsc::UnboundedSender<Message>)>>,
 }
 
 /// Describes a connection between two peers.
@@ -55,17 +54,15 @@ pub struct Link {
 
 /// Configuration for a `simulated` network.
 pub struct Config {
-    /// Maximum size of a message in bytes.
-    pub max_message_size: usize,
+    // TODO: add metrics
 }
 
 impl<E: Spawner + Rng + Clock> Network<E> {
     /// Create a new simulated network with a given runtime and configuration.
-    pub fn new(runtime: E, cfg: Config) -> Self {
+    pub fn new(runtime: E, _: Config) -> Self {
         let (sender, receiver) = mpsc::unbounded();
         Self {
             runtime,
-            cfg,
             sender,
             receiver,
             links: HashMap::new(),
@@ -79,6 +76,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     pub fn register(
         &mut self,
         channel: Channel,
+        max_size: usize,
         public_key: PublicKey,
     ) -> Result<(Sender, Receiver), Error> {
         // Ensure doesn't already exist
@@ -89,11 +87,12 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 
         // Initialize agent channel
         let (sender, receiver) = mpsc::unbounded();
-        entry.insert(channel, sender);
+        entry.insert(channel, (max_size, sender));
         Ok((
             Sender::new(
                 self.runtime.clone(),
                 channel,
+                max_size,
                 public_key,
                 self.sender.clone(),
             ),
@@ -128,15 +127,6 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     pub async fn run(mut self) {
         // Process messages
         while let Some((channel, origin, recipients, message, reply)) = self.receiver.next().await {
-            // Ensure message is valid
-            if message.len() > self.cfg.max_message_size {
-                if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
-                    // This can only happen if the sender exited.
-                    error!(?err, "failed to send error");
-                }
-                continue;
-            }
-
             // Collect recipients
             let recipients = match recipients {
                 Recipients::All => self.agents.keys().cloned().collect(),
@@ -229,7 +219,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                         }
 
                         // Drop message if not listening on channel
-                        let sender = match sender.get_mut(&channel) {
+                        let (max_size, sender) = match sender.get_mut(&channel) {
                             Some(sender) => sender,
                             None => {
                                 debug!(
@@ -241,6 +231,19 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                                 return;
                             }
                         };
+
+                        // Drop message if too large
+                        if message.len() > *max_size {
+                            debug!(
+                                recipient = hex(&recipient),
+                                channel,
+                                size = message.len(),
+                                max_size = *max_size,
+                                reason = "message too large",
+                                "dropping message",
+                            );
+                            return;
+                        }
 
                         // Send message
                         if let Err(err) = sender.send((origin.clone(), message)).await {
@@ -265,7 +268,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 }
 
                 // Notify sender of successful sends
-                if let Err(err) = reply.send(Ok(sent)) {
+                if let Err(err) = reply.send(sent) {
                     // This can only happen if the sender exited.
                     error!(?err, "failed to send ack");
                 }
@@ -278,6 +281,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 #[derive(Clone)]
 pub struct Sender {
     channel: Channel,
+    max_size: usize,
+
     me: PublicKey,
     high: mpsc::UnboundedSender<Task>,
     low: mpsc::UnboundedSender<Task>,
@@ -287,6 +292,7 @@ impl Sender {
     fn new(
         runtime: impl Spawner,
         channel: u32,
+        max_size: usize,
         me: PublicKey,
         mut sender: mpsc::UnboundedSender<Task>,
     ) -> Self {
@@ -313,6 +319,8 @@ impl Sender {
         // Return sender
         Self {
             channel,
+            max_size,
+
             me,
             high,
             low,
@@ -329,13 +337,19 @@ impl crate::Sender for Sender {
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<PublicKey>, Error> {
+        // Check message size
+        if message.len() > self.max_size {
+            return Err(Error::MessageTooLarge(message.len()));
+        }
+
+        // Send message
         let (sender, receiver) = oneshot::channel();
         let mut channel = if priority { &self.high } else { &self.low };
         channel
             .send((self.channel, self.me.clone(), recipients, message, sender))
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
+        receiver.await.map_err(|_| Error::NetworkClosed)
     }
 }
 

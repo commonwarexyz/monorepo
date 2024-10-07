@@ -35,19 +35,14 @@ mod tests {
         // Create simulated network
         let (executor, runtime, auditor) = Executor::seeded(seed);
         executor.start(async move {
-            let mut network = network::Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                },
-            );
+            let mut network = network::Network::new(runtime.clone(), network::Config {});
 
             // Register agents
             let mut agents = BTreeMap::new();
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, mut receiver) = network.register(pk.clone());
+                let (sender, mut receiver) = network.register(0, 1024 * 1024, pk.clone()).unwrap();
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
                 runtime.spawn("agent_receiver", async move {
@@ -148,18 +143,13 @@ mod tests {
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                },
-            );
+            let mut network = network::Network::new(runtime.clone(), network::Config {});
 
             // Register agents
             let mut agents = HashMap::new();
             for i in 0..10 {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, _) = network.register(pk.clone());
+                let (sender, _) = network.register(0, 1024 * 1024, pk.clone()).unwrap();
                 agents.insert(pk, sender);
             }
 
@@ -188,16 +178,11 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                },
-            );
+            let mut network = network::Network::new(runtime.clone(), network::Config {});
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
-            network.register(pk.clone());
+            network.register(0, 1024 * 1024, pk.clone()).unwrap();
 
             // Attempt to link self
             let result = network.link(
@@ -220,18 +205,13 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                },
-            );
+            let mut network = network::Network::new(runtime.clone(), network::Config {});
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            network.register(pk1.clone());
-            network.register(pk2.clone());
+            network.register(0, 1024 * 1024, pk1.clone()).unwrap();
+            network.register(0, 1024 * 1024, pk2.clone()).unwrap();
 
             // Attempt to link with invalid success rate
             let result = network.link(
@@ -254,18 +234,15 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                },
-            );
+            let mut network = network::Network::new(runtime.clone(), network::Config {});
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) = network.register(pk1.clone());
-            let (mut sender2, mut receiver2) = network.register(pk2.clone());
+            let (mut sender1, mut receiver1) =
+                network.register(0, 1024 * 1024, pk1.clone()).unwrap();
+            let (mut sender2, mut receiver2) =
+                network.register(0, 1024 * 1024, pk2.clone()).unwrap();
 
             // Link agents
             network
