@@ -65,14 +65,17 @@ pub struct View {
     // TODO: track votes for next view across n hashes if proposal not yet set (as soon
     // as proposal is set, drop all votes for unrelated?)
     // TODO: we can track all votes, just make sure to only track one vote per validator
-    proposal_votes: HashMap<PublicKey, wire::Vote>,
+    proposal_voters: HashSet<PublicKey>,
+    proposal_votes: HashMap<Hash, HashMap<PublicKey, wire::Vote>>,
     broadcast_proposal_notarization: bool,
 
     timeout_fired: bool,
     null_votes: HashMap<PublicKey, wire::Vote>,
     broadcast_null_notarization: bool,
 
-    finalizes: HashMap<PublicKey, wire::Finalize>,
+    // TODO: ensure no one voting for null block has voted for finalize
+    finalizers: HashSet<PublicKey>,
+    finalizes: HashMap<Hash, HashMap<PublicKey, wire::Finalize>>,
     broadcast_finalization: bool,
 }
 
