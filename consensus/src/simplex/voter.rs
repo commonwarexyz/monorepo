@@ -62,6 +62,9 @@ pub struct View {
         wire::Proposal,
     )>,
 
+    // TODO: track votes for next view across n hashes if proposal not yet set (as soon
+    // as proposal is set, drop all votes for unrelated?)
+    // TODO: we can track all votes, just make sure to only track one vote per validator
     proposal_votes: HashMap<PublicKey, wire::Vote>,
     broadcast_proposal_notarization: bool,
 
@@ -817,17 +820,14 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         }
 
         // Get view for finalize
-        let view = match self.views.get_mut(&finalize.view) {
-            Some(view) => view,
-            None => {
-                debug!(
-                    view = finalize.view,
-                    reason = "missing view",
-                    "dropping finalize"
-                );
-                return None;
-            }
-        };
+        let view = self.views.entry(finalize.view).or_insert_with(|| {
+            View::new(
+                finalize.view,
+                self.validators[finalize.view as usize % self.validators.len()].clone(),
+                None,
+                None,
+            )
+        });
 
         // Check if finalize vote is for a block (Fault)
         if finalize.block.len() == 0 {
