@@ -26,10 +26,13 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{utils::hex, Ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use commonware_runtime::{deterministic::Executor, select, Clock, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use rand::Rng;
-    use std::collections::{BTreeMap, HashMap};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        time::Duration,
+    };
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         // Create simulated network
@@ -315,8 +318,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "runtime stalled")]
-    fn test_channel_difference() {
+    fn test_send_wrong_channel() {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
@@ -325,10 +327,8 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) =
-                network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
-            let (mut sender2, mut receiver2) =
-                network.register(pk2.clone(), 1, 1024 * 1024).unwrap();
+            let (mut sender1, _) = network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
+            let (_, mut receiver2) = network.register(pk2.clone(), 1, 1024 * 1024).unwrap();
 
             // Link agents
             network
@@ -342,40 +342,24 @@ mod tests {
                     },
                 )
                 .unwrap();
-            network
-                .link(
-                    pk2.clone(),
-                    pk1.clone(),
-                    network::Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 2.5,
-                        success_rate: 1.0,
-                    },
-                )
-                .unwrap();
 
             // Start network
             runtime.spawn("network", network.run());
 
-            // Send messages
-            let msg1 = Bytes::from("hello from pk1");
-            let msg2 = Bytes::from("hello from pk2");
+            // Send message
+            let msg = Bytes::from("hello from pk1");
             sender1
-                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
-                .await
-                .unwrap();
-            sender2
-                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
+                .send(Recipients::One(pk2.clone()), msg, false)
                 .await
                 .unwrap();
 
-            // Confirm message delivery
-            let (sender, message) = receiver1.recv().await.unwrap();
-            assert_eq!(sender, pk2);
-            assert_eq!(message, msg2);
-            let (sender, message) = receiver2.recv().await.unwrap();
-            assert_eq!(sender, pk1);
-            assert_eq!(message, msg1);
+            // Confirm no message delivery
+            select! {
+                _msg = receiver2.recv() => {
+                    panic!("unexpected message");
+                },
+                _timeout = runtime.sleep(Duration::from_secs(100000)) => {},
+            }
         });
     }
 }
