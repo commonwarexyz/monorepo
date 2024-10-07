@@ -90,14 +90,18 @@
 //!
 //! ## Discovery
 //!
-//! Peer discovery relies heavily on the assumption that all peers are known at each index (a user-provided tuple of
+//! Peer discovery relies heavily on the assumption that all peers are known and synchronized at each index (a user-provided tuple of
 //! `(u64, Vec<PublicKey>)`). Using this assumption, we can construct a sorted bit vector that represents our knowledge
 //! of peer IPs (where 1 == we know, 0 == we don't know). This means we can represent our knowledge of 1000 peers in only 125 bytes!
 //!
+//! _If peers at a given index are not synchronized, peers may signal their knowledge of peer IPs that another peer may
+//! incorrectly respond to (associating a given index with a different peer) or fail to respond to (if the bit vector representation
+//! of the set is smaller/larger than expected). It is up to the application to ensure sets are synchronized._
+//!
 //! Because this representation is so efficient/small, peers send bit vectors to each other periodically as a "ping" to keep
-//! the connection alive. Because it may be useful to be connected to multiple indexes of peers at a given time (i.e. to perform a DKG
-//! with a new set of peers), it is possible to configure this crate to maintain connections to multiple indexes (and pings are a
-//! random index we are trying to connect to).
+//! the connection alive. Because it may be useful to be connected to multiple indexes of peers at a given time (i.e. to
+//! perform a DKG with a new set of peers), it is possible to configure this crate to maintain connections to multiple
+//! indexes (and pings are a random index we are trying to connect to).
 //!
 //! ```protobuf
 //! message BitVec {
@@ -115,6 +119,7 @@
 //!     repeated Peer peers = 1;
 //! }
 //! ```
+//!
 //! If a peer learns about an updated address for a peer, it will update the record it has stored (for itself and for future gossip).
 //! This record is created during instantiation and is sent immediately after a connection is established (right after the handshake).
 //! This means that a peer that learned about an outdated record for a peer will update it immediately upon being dialed.
