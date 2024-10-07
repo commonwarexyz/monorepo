@@ -137,6 +137,10 @@
 //! wait for the other peer to respond with some set of unknown peers. Different peers do not need to agree on who this list of
 //! bootstrapping peers is (this list is configurable).
 //!
+//! _If a peer is not in any registered peer set (to its knowledge) but is dialed by a peer that is, it will accept the connection.
+//! This allows peers that have a more up-to-date version of the peer set to connect, exchange application-level information, and for
+//! the said peer to potentially learn of an updated peer set (of which it is part)._
+//!
 //! ## Chunking
 //!
 //! To support arbitarily large messages (while maintaing a small frame size), this crate automatically chunks messages
