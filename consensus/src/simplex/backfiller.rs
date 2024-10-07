@@ -29,10 +29,8 @@ enum Lock {
     Finalized(Hash),
 }
 
-pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
+pub struct Backfiller<E: Clock + Rng, A: Application> {
     runtime: E,
-    sender: S,
-    receiver: R,
     application: A,
 
     validators: Vec<PublicKey>,
@@ -57,7 +55,7 @@ pub struct Backfiller<E: Clock + Rng, S: Sender, R: Receiver, A: Application> {
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R, A> {
+impl<E: Clock + Rng, A: Application> Backfiller<E, A> {
     // TODO: base this off of notarized/finalized (don't want to build index until finalized data, could
     // have a separate index for notarized blocks by view and another for finalized blocks by height)
     async fn resolve(&mut self, hash: Hash, proposal: wire::Proposal) {
@@ -156,7 +154,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
     // This is a pretty basic backfiller (in that it only attempts to resolve one missing
     // proposal at a time). In `tbd`, this will operate very differently because we can
     // verify the integrity of any proposal we receive at an index by the threshold signature.
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
         // TODO: need a separate loop for responding to requests
         loop {
             // Get the next missing proposal
@@ -177,8 +175,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
             }
             .encode_to_vec()
             .into();
-            if let Err(err) = self
-                .sender
+            if let Err(err) = sender
                 .send(Recipients::One(validator.clone()), msg, true)
                 .await
             {
@@ -200,7 +197,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                         warn!(request = hex(&request), validator = hex(&validator), "backfill request timed out");
                         break;
                     },
-                    msg = self.receiver.recv() => {
+                    msg = receiver.recv() => {
                         // Parse message
                         let (sender, msg) = match msg {
                             Ok(msg) => msg,
@@ -313,7 +310,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         }
     }
 
-    fn best_parent(&self) -> Option<wire::Proposal> {
+    fn best_parent(&self) -> Option<(Hash, wire::Proposal)> {
         // Find highest block that we have notified the application of
         let mut next = self.last_notarized;
         loop {
@@ -323,14 +320,17 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
                     for (_, hash) in hashes.iter() {
                         if let Some(notifications) = self.notarizations_sent.get(&next) {
                             if notifications.contains(hash) {
-                                return self.blocks.get(hash).cloned();
+                                return Some((
+                                    hash.clone(),
+                                    self.blocks.get(hash).unwrap().clone(),
+                                ));
                             }
                         }
                     }
                 }
                 Some(Lock::Finalized(hash)) => {
                     if self.last_notified >= next {
-                        return self.blocks.get(hash).cloned();
+                        return Some((hash.clone(), self.blocks.get(hash).unwrap().clone()));
                     }
                 }
                 None => return None,
@@ -345,7 +345,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
     }
 
     // Simplified application functions
-    pub fn propose(&mut self) -> Option<Payload> {
+    pub fn propose(&mut self) -> Option<((Hash, wire::Proposal), Payload)> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
@@ -357,7 +357,15 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
         // Propose block
         //
         // TODO: provide more info to application
-        self.application.propose(parent.payload.clone())
+        let payload = match self.application.propose(parent.1.payload.clone()) {
+            Some(payload) => payload,
+            None => {
+                return None;
+            }
+        };
+
+        // Generate proposal
+        Some((parent, payload))
     }
 
     pub fn parse(&self, payload: Payload) -> Option<Hash> {

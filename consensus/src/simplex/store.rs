@@ -1,16 +1,17 @@
 //! TODO: change name to voter
 
-use super::wire;
+use super::{backfiller::Backfiller, wire};
 use crate::Application;
 use bytes::Bytes;
 use commonware_cryptography::{bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme};
 use commonware_runtime::Clock;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, SystemTime},
 };
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 // TODO: move to config
 const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
@@ -99,10 +100,11 @@ impl View {
 }
 
 // TODO: handle messages from current view and next view
-pub struct Store<E: Clock, C: Scheme, A: Application> {
+pub struct Store<E: Clock + Rng, C: Scheme, A: Application> {
     runtime: E,
     crypto: C,
-    application: A,
+
+    backfiller: Backfiller<E, A>,
 
     threshold: u32,
     validators: Vec<PublicKey>,
@@ -115,8 +117,13 @@ pub struct Store<E: Clock, C: Scheme, A: Application> {
     last_notarized: Option<Bytes>,
 }
 
-impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
-    pub fn new(runtime: E, crypto: C, application: A, mut validators: Vec<PublicKey>) -> Self {
+impl<E: Clock + Rng, C: Scheme, A: Application> Store<E, C, A> {
+    pub fn new(
+        runtime: E,
+        crypto: C,
+        backfiller: Backfiller<E, A>,
+        mut validators: Vec<PublicKey>,
+    ) -> Self {
         // Initialize ordered validators
         validators.sort();
         let mut validators_ordered = HashMap::new();
@@ -128,7 +135,8 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         Self {
             runtime,
             crypto,
-            application,
+
+            backfiller,
 
             // TODO: move this helper
             threshold: threshold(validators.len() as u32)
@@ -156,36 +164,37 @@ impl<E: Clock, C: Scheme, A: Application> Store<E, C, A> {
         }
 
         // Select parent block
-        let (height, parent_hash, payload_hash) = match &self.last_notarized {
-            Some(hash) => {
-                let (parent_view, height) = self.notarized_blocks.get(hash).unwrap();
-                let payload_hash = self
-                    .views
-                    .get(parent_view)
-                    .unwrap()
-                    .proposal
-                    .as_ref()
-                    .unwrap()
-                    .1
-                    .clone();
-                (*height + 1, hash.clone(), payload_hash)
+        let (parent, payload) = match self.backfiller.propose() {
+            Some((parent, payload)) => (parent, payload),
+            None => {
+                debug!(reason = "no available parent", "dropping proposal");
+                return None;
             }
-            None => (0, Bytes::new(), Bytes::new()),
+        };
+        let height = parent.1.height + 1;
+
+        // Get payload hash
+        let payload_hash = match self.backfiller.parse(payload.clone()) {
+            Some(hash) => hash,
+            None => {
+                warn!(
+                    reason = "invalid payload produced by self",
+                    "dropping proposal"
+                );
+                return None;
+            }
         };
 
         // Construct proposal
-        let (payload_hash, payload) = self.application.propose(payload_hash);
+        let digest = proposal_digest(self.view, height, parent.0.clone(), payload_hash.clone());
         let proposal = wire::Proposal {
             view: self.view,
             height,
-            parent: parent_hash,
+            parent: parent.0,
             payload,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
-                signature: self.crypto.sign(
-                    PROPOSAL_NAMESPACE,
-                    &proposal_digest(self.view, 0, Bytes::new(), payload_hash),
-                ),
+                signature: self.crypto.sign(PROPOSAL_NAMESPACE, &digest),
             }),
         };
         Some(proposal)
