@@ -24,6 +24,7 @@ pub enum Proposal {
     Populated(Hash, wire::Proposal),
 }
 
+// TODO: change name from `Lock` to something else (only finalization is really a lock)
 enum Lock {
     Notarized(BTreeMap<View, Hash>), // priotize building off of earliest view (avoid wasting work)
     Finalized(Hash),
