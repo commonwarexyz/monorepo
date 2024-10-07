@@ -15,7 +15,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     time::Duration,
 };
-use tracing::{debug, error, trace};
+use tracing::{debug, error};
 
 type Channel = u32;
 
@@ -301,31 +301,26 @@ impl Sender {
         let (low, mut low_receiver) = mpsc::unbounded();
         runtime.spawn("sender", async move {
             loop {
+                // Wait for task
+                let task;
                 select! {
                     high_task = high_receiver.next() => {
-                        let high_task = match high_task {
-                            Some(high_task) => high_task,
-                            None => {
-                                trace!(channel, "high priority channel closed");
-                                break
-                            },
+                        task = match high_task {
+                            Some(task) => task,
+                            None => break,
                         };
-                        if let Err(err) = sender.send(high_task).await{
-                            error!(?err, channel, "failed to send high priority task");
-                        }
                     },
                     low_task = low_receiver.next() => {
-                        let low_task = match low_task {
-                            Some(low_task) => low_task,
-                            None => {
-                                trace!(channel, "low priority channel closed");
-                                break
-                            },
+                        task = match low_task {
+                            Some(task) => task,
+                            None => break,
                         };
-                        if let Err(err) = sender.send(low_task).await{
-                            error!(?err, channel, "failed to send low priority task");
-                        }
                     }
+                }
+
+                // Send task
+                if let Err(err) = sender.send(task).await {
+                    error!(?err, channel, "failed to send task");
                 }
             }
         });
