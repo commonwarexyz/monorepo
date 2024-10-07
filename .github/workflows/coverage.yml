@@ -37,6 +37,23 @@ jobs:
     - name: Install cargo-tarpaulin
       if: steps.cargo-tarpaulin-cache.outputs.cache-hit != 'true'
       run: cargo install cargo-tarpaulin --version ${{ env.TARPAULIN_VERSION }}
+    - name: Generate custom rustfmt.toml
+      run: |
+        cat << EOF > rustfmt.toml
+        max_width = 200
+        use_small_heuristics = "Off"
+        chain_split_single_line = false
+        fn_call_width = 200
+        struct_lit_width = 200
+        struct_variant_width = 200
+        array_width = 200
+        struct_field_width = 200
+        imports_indent = "Block"
+        imports_layout = "HorizontalVertical"
+        merge_imports = true
+        EOF
+    - name: Format code with rustfmt
+      run: cargo fmt --all -- --config-path rustfmt.toml
     - name: Generate coverage report
       run: cargo tarpaulin --timeout 600 --out Xml
     - name: Upload coverage to Codecov
