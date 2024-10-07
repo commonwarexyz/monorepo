@@ -111,11 +111,9 @@ enum Lock {
     Finalized(Hash),
 }
 
-pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application, S: Sender, R: Receiver> {
+pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
     runtime: E,
     application: A,
-    sender: S,
-    receiver: Option<R>,
 
     mailbox: Mailbox,
     mailbox_receiver: mpsc::Receiver<Message>,
@@ -142,29 +140,16 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application, S: Sender, R: 
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<
-        E: Clock + Rng + Spawner,
-        A: Application + Send + 'static,
-        S: Sender + Send + 'static,
-        R: Receiver + Send + 'static,
-    > Orchestrator<E, A, S, R>
-{
-    pub fn new(
-        runtime: E,
-        application: A,
-        sender: S,
-        receiver: R,
-        validators: Vec<PublicKey>,
-    ) -> (Self, Mailbox) {
+impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
+    pub fn new(runtime: E, application: A, mut validators: Vec<PublicKey>) -> (Self, Mailbox) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         let mailbox = Mailbox::new(mailbox_sender);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
+        validators.sort();
         (
             Self {
                 runtime,
                 application,
-                sender,
-                receiver: Some(receiver),
 
                 mailbox: mailbox.clone(),
                 mailbox_receiver,
@@ -285,8 +270,7 @@ impl<
     // This is a pretty basic backfiller (in that it only attempts to resolve one missing
     // proposal at a time). In `tbd`, this will operate very differently because we can
     // verify the integrity of any proposal we receive at an index by the threshold signature.
-    pub async fn run(mut self) {
-        let mut receiver = self.receiver.take().unwrap();
+    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
         let mut outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::MAX);
         loop {
             // Check to see if we should add a task
@@ -306,7 +290,7 @@ impl<
                     .into();
 
                     // Send message
-                    self.sender
+                    sender
                         .send(Recipients::One(validator.clone()), msg, true)
                         .await
                         .unwrap();
@@ -334,7 +318,7 @@ impl<
                     .into();
 
                     // Send message
-                    self.sender
+                    sender
                         .send(Recipients::One(validator.clone()), msg, true)
                         .await
                         .unwrap();
@@ -368,18 +352,18 @@ impl<
                     };
                 },
                 network = receiver.recv() => {
-                    let (sender, msg) = network.unwrap();
+                    let (s, msg) = network.unwrap();
                     let msg = match wire::Backfill::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
-                            warn!(?err, sender = hex(&sender), "failed to decode message");
+                            warn!(?err, sender = hex(&s), "failed to decode message");
                             continue;
                         }
                     };
                     let payload = match msg.payload {
                         Some(payload) => payload,
                         None => {
-                            warn!(sender = hex(&sender), "message missing payload");
+                            warn!(sender = hex(&s), "message missing payload");
                             continue;
                         }
                     };
@@ -389,21 +373,21 @@ impl<
                             let msg = wire::Resolution {
                                 proposal,
                             }.encode_to_vec().into();
-                            self.sender.send(Recipients::One(sender), msg, false).await.unwrap();
+                            sender.send(Recipients::One(s), msg, false).await.unwrap();
                         }
                         wire::backfill::Payload::Resolution(resolution) => {
                             // Parse proposal
                             let proposal = match resolution.proposal {
                                 Some(proposal) => proposal,
                                 None => {
-                                    warn!(sender = hex(&sender), "resolution missing proposal");
+                                    warn!(sender = hex(&s), "resolution missing proposal");
                                     continue;
                                 }
                             };
                             let payload_hash = match self.application.parse(proposal.payload.clone()) {
                                 Some(payload_hash) => payload_hash,
                                 None => {
-                                    warn!(sender = hex(&sender), "unable to parse notarized/finalized payload");
+                                    warn!(sender = hex(&s), "unable to parse notarized/finalized payload");
                                     continue;
                                 }
                             };
@@ -423,7 +407,7 @@ impl<
                                     let entry = seen.get(&proposal.view);
                                     if entry.is_none() {
                                         warn!(
-                                            sender = hex(&sender),
+                                            sender = hex(&s),
                                             height = proposal.height,
                                             "unexpected block hash on resolution"
                                         );
@@ -431,7 +415,7 @@ impl<
                                     }
                                     if entry.unwrap() != &incoming_hash {
                                         warn!(
-                                            sender = hex(&sender),
+                                            sender = hex(&s),
                                             height = proposal.height,
                                             "unexpected block hash on resolution"
                                         );
@@ -441,7 +425,7 @@ impl<
                                 Some(Lock::Finalized(expected)) => {
                                     if incoming_hash != *expected {
                                         warn!(
-                                            sender = hex(&sender),
+                                            sender = hex(&s),
                                             height = proposal.height,
                                             "unexpected block hash on resolution"
                                         );
@@ -450,7 +434,7 @@ impl<
                                 }
                                 None => {
                                     warn!(
-                                        sender = hex(&sender),
+                                        sender = hex(&s),
                                         height = proposal.height,
                                         "unexpected block hash"
                                     );
@@ -461,7 +445,7 @@ impl<
                             // Check to see if we already have this proposal
                             if self.blocks.contains_key(&incoming_hash) {
                                 debug!(
-                                    sender = hex(&sender),
+                                    sender = hex(&s),
                                     height = proposal.height,
                                     "block already resolved"
                                 );
@@ -478,7 +462,7 @@ impl<
                             if let Some(request) = outstanding_task.0 {
                                 debug!(
                                     request = hex(&request),
-                                    sender = hex(&sender),
+                                    sender = hex(&s),
                                     "backfill resolution"
                                 );
                                 outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::MAX);
