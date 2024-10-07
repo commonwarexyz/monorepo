@@ -56,6 +56,27 @@ pub struct Orchestrator<E: Clock + Rng, A: Application> {
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
 impl<E: Clock + Rng, A: Application> Orchestrator<E, A> {
+    pub fn new(runtime: E, application: A, validators: Vec<PublicKey>) -> Self {
+        let (missing_sender, missing_receiver) = mpsc::channel(1024);
+        Self {
+            runtime,
+            application,
+            validators,
+
+            locked: HashMap::new(),
+            blocks: HashMap::new(),
+
+            last_notarized: 0,
+            last_finalized: 0,
+
+            missing_sender,
+            missing_receiver,
+
+            notarizations_sent: HashMap::new(),
+            last_notified: 0,
+        }
+    }
+
     // TODO: base this off of notarized/finalized (don't want to build index until finalized data, could
     // have a separate index for notarized blocks by view and another for finalized blocks by height)
     async fn resolve(&mut self, hash: Hash, proposal: wire::Proposal) {

@@ -955,7 +955,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         })
     }
 
-    fn construct_finalization(&mut self, view: u64) -> Option<wire::Finalization> {
+    pub fn construct_finalization(&mut self, view: u64) -> Option<wire::Finalization> {
         let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {

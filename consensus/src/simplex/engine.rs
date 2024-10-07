@@ -1,49 +1,61 @@
-use super::{voter::Voter, wire, Error};
+use super::{orchestrator::Orchestrator, voter::Voter, wire, Error};
 use crate::Application;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
 use prost::Message as _;
+use rand::Rng;
 use tracing::debug;
 
-pub struct Engine<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> {
+pub struct Engine<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> {
     runtime: E,
     crypto: C,
     application: A,
 
-    sender: S,
-    receiver: R,
+    voter: Voter<E, C, A>,
+    voter_network: (S, R),
+
+    orchestrator: Orchestrator<E, A>,
+    orchestrator_network: (S, R),
 
     validators: Vec<PublicKey>,
-    voter: Store<E, C, A>,
 }
 
-impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A, S, R> {
+impl<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A, S, R> {
     pub fn new(
         runtime: E,
         crypto: C,
         application: A,
-        sender: S,
-        receiver: R,
+        voter_network: (S, R),
+        orchestrator_network: (S, R),
         mut validators: Vec<PublicKey>,
     ) -> Self {
         validators.sort();
+        let orchestrator =
+            Orchestrator::new(runtime.clone(), application.clone(), validators.clone());
         Self {
             runtime: runtime.clone(),
             crypto: crypto.clone(),
             application: application.clone(),
 
-            sender,
-            receiver,
+            // TODO: need to communicate with orchestrator in some way? Likely need to move to actor model...
+            voter: Voter::new(runtime, crypto, orchestrator, validators.clone()),
+            voter_network,
+
+            orchestrator,
+            orchestrator_network,
 
             validators: validators.clone(),
-            store: Store::new(runtime, crypto, application, validators),
         }
     }
 
     async fn handle_proposal(&mut self, proposal: wire::Proposal) {
         // Store the proposal
-        let vote = match self.store.proposal(proposal) {
+        let proposal_view = proposal.view;
+        self.voter.proposal(proposal);
+
+        // Attempt to vote
+        let vote = match self.voter.construct_vote(proposal_view) {
             Some(vote) => vote,
             None => {
                 return;
@@ -55,7 +67,8 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
             payload: Some(wire::message::Payload::Vote(vote.clone())),
         };
         let msg = msg.encode_to_vec();
-        self.sender
+        self.voter_network
+            .0
             .send(Recipients::All, msg.into(), true)
             .await
             .unwrap();
@@ -66,7 +79,11 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
 
     async fn handle_vote(&mut self, vote: wire::Vote) {
         // Store the vote
-        let notarization = match self.store.vote(vote) {
+        let vote_view = vote.view;
+        self.voter.vote(vote);
+
+        // Attempt to notarize
+        let notarization = match self.voter.construct_notarization(vote_view) {
             Some(notarization) => notarization,
             None => {
                 return;
@@ -78,7 +95,8 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
             payload: Some(wire::message::Payload::Notarization(notarization.clone())),
         };
         let msg = msg.encode_to_vec();
-        self.sender
+        self.voter_network
+            .0
             .send(Recipients::All, msg.into(), true)
             .await
             .unwrap();
@@ -89,51 +107,61 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
 
     async fn handle_notarization(&mut self, notarization: wire::Notarization) {
         // Store the notarization
-        let (notarization, finalize) = self.store.notarization(notarization);
+        let notarization_view = notarization.view;
+        self.voter.notarization(notarization);
 
-        // Broadcast notarization (ours may be better than what we received)
-        if let Some(notarization) = notarization {
+        // Attempt to notarize
+        if let Some(notarization) = self.voter.construct_notarization(notarization_view) {
             let msg = wire::Message {
                 payload: Some(wire::message::Payload::Notarization(notarization.clone())),
             };
             let msg = msg.encode_to_vec();
-            self.sender
+            self.voter_network
+                .0
                 .send(Recipients::All, msg.into(), true)
                 .await
                 .unwrap();
-        }
+        };
 
-        // Broadcast the finalize
-        if let Some(finalize) = finalize {
-            let msg = wire::Message {
-                payload: Some(wire::message::Payload::Finalize(finalize.clone())),
-            };
-            let msg = msg.encode_to_vec();
-            self.sender
-                .send(Recipients::All, msg.into(), true)
-                .await
-                .unwrap();
+        // Attempt to finalize
+        let finalize = match self.voter.construct_finalize(notarization_view) {
+            Some(finalize) => finalize,
+            None => {
+                return;
+            }
+        };
+        let msg = wire::Message {
+            payload: Some(wire::message::Payload::Finalize(finalize.clone())),
+        };
+        let msg = msg.encode_to_vec();
+        self.voter_network
+            .0
+            .send(Recipients::All, msg.into(), true)
+            .await
+            .unwrap();
 
-            // Handle the finalize
-            self.handle_finalize(finalize).await;
-        }
+        // Handle the finalize
+        self.handle_finalize(finalize).await;
     }
 
     async fn handle_finalize(&mut self, finalize: wire::Finalize) {
         // Store the finalize
-        let finalization = match self.store.finalize(finalize) {
+        let finalize_view = finalize.view;
+        self.voter.finalize(finalize);
+
+        // Broadcast the finalization (ours may be better than what we received)
+        let finalization = match self.voter.construct_finalization(finalize_view) {
             Some(finalization) => finalization,
             None => {
                 return;
             }
         };
-
-        // Broadcast the finalization (ours may be better than what we received)
         let msg = wire::Message {
             payload: Some(wire::message::Payload::Finalization(finalization.clone())),
         };
         let msg = msg.encode_to_vec();
-        self.sender
+        self.voter_network
+            .0
             .send(Recipients::All, msg.into(), true)
             .await
             .unwrap();
@@ -144,19 +172,20 @@ impl<E: Clock, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A
 
     async fn handle_finalization(&mut self, finalization: wire::Finalization) {
         // Store the finalization
-        self.store.finalization(finalization);
+        self.voter.finalization(finalization);
     }
 
     async fn handle_timeout(&mut self) {
         // Trigger the timeout
-        let vote = self.store.timeout();
+        let vote = self.voter.timeout();
 
         // Broadcast the vote
         let msg = wire::Message {
             payload: Some(wire::message::Payload::Vote(vote.clone())),
         };
         let msg = msg.encode_to_vec();
-        self.sender
+        self.voter_network
+            .0
             .send(Recipients::All, msg.into(), true)
             .await
             .unwrap();
