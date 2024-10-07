@@ -470,33 +470,6 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         view.leader_deadline = None;
     }
 
-    fn construct_notarization(
-        validators: &Vec<PublicKey>,
-        threshold: u32,
-        view: &mut View,
-        last_vote_null: bool,
-    ) -> Option<wire::Notarization> {
-        // Determine which votes to use
-        let (proposal_hash, votes) = match last_vote_null {
-            true => view.notarizable_null(threshold)?,
-            false => view.notarizable_proposal(threshold)?,
-        };
-
-        // Construct notarization
-        let mut signatures = Vec::new();
-        for validator in validators.iter() {
-            if let Some(vote) = votes.get(validator) {
-                signatures.push(vote.signature.clone().unwrap());
-            }
-        }
-        let notarization = wire::Notarization {
-            view: view.idx,
-            block: proposal_hash,
-            signatures,
-        };
-        Some(notarization)
-    }
-
     fn enter_view(&mut self, view: u64) {
         // Ensure view is valid
         if view <= self.view {
@@ -664,29 +637,6 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         self.enter_view(notarization.view + 1);
     }
 
-    fn construct_finalization(
-        validators: &Vec<PublicKey>,
-        threshold: u32,
-        view: &mut View,
-    ) -> Option<wire::Finalization> {
-        // Check if we have enough finalizes
-        let (proposal_hash, finalizes) = view.finalizable_proposal(threshold)?;
-
-        // Construct finalization
-        let mut signatures = Vec::new();
-        for validator in validators.iter() {
-            if let Some(finalize) = finalizes.get(validator) {
-                signatures.push(finalize.signature.clone().unwrap());
-            }
-        }
-        let finalization = wire::Finalization {
-            view: view.idx,
-            block: proposal_hash,
-            signatures,
-        };
-        Some(finalization)
-    }
-
     pub fn finalize(&mut self, finalize: wire::Finalize) {
         // Ensure we are in the right view to process this message
         if finalize.view != self.view && finalize.view != self.view + 1 {
@@ -820,5 +770,58 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         if finalization.view >= self.view {
             self.enter_view(finalization.view + 1);
         }
+    }
+
+    pub fn construct_vote() -> Option<wire::Vote> {}
+
+    pub fn construct_notarization(
+        validators: &Vec<PublicKey>,
+        threshold: u32,
+        view: &mut View,
+    ) -> Option<wire::Notarization> {
+        // Determine which votes to use
+        let (proposal_hash, votes) = match last_vote_null {
+            true => view.notarizable_null(threshold)?,
+            false => view.notarizable_proposal(threshold)?,
+        };
+
+        // Construct notarization
+        let mut signatures = Vec::new();
+        for validator in validators.iter() {
+            if let Some(vote) = votes.get(validator) {
+                signatures.push(vote.signature.clone().unwrap());
+            }
+        }
+        let notarization = wire::Notarization {
+            view: view.idx,
+            block: proposal_hash,
+            signatures,
+        };
+        Some(notarization)
+    }
+
+    pub fn construct_finalize() -> Option<wire::Finalize> {}
+
+    fn construct_finalization(
+        validators: &Vec<PublicKey>,
+        threshold: u32,
+        view: &mut View,
+    ) -> Option<wire::Finalization> {
+        // Check if we have enough finalizes
+        let (proposal_hash, finalizes) = view.finalizable_proposal(threshold)?;
+
+        // Construct finalization
+        let mut signatures = Vec::new();
+        for validator in validators.iter() {
+            if let Some(finalize) = finalizes.get(validator) {
+                signatures.push(finalize.signature.clone().unwrap());
+            }
+        }
+        let finalization = wire::Finalization {
+            view: view.idx,
+            block: proposal_hash,
+            signatures,
+        };
+        Some(finalization)
     }
 }
