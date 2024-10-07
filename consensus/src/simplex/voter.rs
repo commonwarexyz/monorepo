@@ -51,8 +51,6 @@ pub fn hash(bytes: Bytes) -> Bytes {
 }
 
 pub struct View {
-    idx: u64,
-
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -80,14 +78,11 @@ pub struct View {
 
 impl View {
     pub fn new(
-        idx: u64,
         leader: PublicKey,
         leader_deadline: Option<SystemTime>,
         advance_deadline: Option<SystemTime>,
     ) -> Self {
         Self {
-            idx,
-
             leader,
             leader_deadline,
             advance_deadline,
@@ -466,7 +461,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         let view = self
             .views
             .entry(proposal.view)
-            .or_insert_with(|| View::new(proposal.view, expected_leader, None, None));
+            .or_insert_with(|| View::new(expected_leader, None, None));
         let proposal_hash = hash(proposal_digest);
         view.proposal = Some((proposal_hash.clone(), proposal));
         view.leader_deadline = None;
@@ -481,7 +476,6 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         // Setup new view
         let entry = self.views.entry(view).or_insert_with(|| {
             View::new(
-                view,
                 self.validators[view as usize % self.validators.len()].clone(),
                 None,
                 None,
@@ -549,7 +543,6 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         // Check to see if vote is for proposal in view
         let view = self.views.entry(vote.view).or_insert_with(|| {
             View::new(
-                vote.view,
                 self.validators[vote.view as usize % self.validators.len()].clone(),
                 None,
                 None,
@@ -735,7 +728,6 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         // Get view for finalize
         let view = self.views.entry(finalize.view).or_insert_with(|| {
             View::new(
-                finalize.view,
                 self.validators[finalize.view as usize % self.validators.len()].clone(),
                 None,
                 None,
@@ -857,34 +849,34 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
     }
 
     pub fn construct_vote(&mut self, view: u64) -> Option<wire::Vote> {
-        let view = match self.views.get_mut(&view) {
+        let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
                 return None;
             }
         };
-        if view.broadcast_vote {
+        if view_obj.broadcast_vote {
             return None;
         }
-        if view.timeout_fired {
+        if view_obj.timeout_fired {
             return None;
         }
-        let (hash, proposal) = match &view.proposal {
+        let (hash, proposal) = match &view_obj.proposal {
             Some((hash, proposal)) => (hash, proposal),
             None => {
                 return None;
             }
         };
-        view.broadcast_vote = true;
+        view_obj.broadcast_vote = true;
         Some(wire::Vote {
-            view: self.view,
+            view,
             height: proposal.height,
             hash: hash.clone(),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
                     VOTE_NAMESPACE,
-                    &vote_digest(self.view, proposal.height, hash.clone()),
+                    &vote_digest(view, proposal.height, hash.clone()),
                 ),
             }),
         })
@@ -892,7 +884,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
 
     pub fn construct_notarization(&mut self, view: u64) -> Option<wire::Notarization> {
         // Get requested view
-        let view = match self.views.get_mut(&view) {
+        let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
                 return None;
@@ -900,9 +892,9 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         };
 
         // Attempt to construct notarization
-        let mut result = view.notarizable_proposal(self.threshold);
+        let mut result = view_obj.notarizable_proposal(self.threshold);
         if result.is_none() {
-            result = view.notarizable_null(self.threshold);
+            result = view_obj.notarizable_null(self.threshold);
         }
         if result.is_none() {
             return None;
@@ -917,7 +909,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             }
         }
         let notarization = wire::Notarization {
-            view: view.idx,
+            view,
             height,
             hash,
             signatures,
@@ -926,45 +918,45 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
     }
 
     pub fn construct_finalize(&mut self, view: u64) -> Option<wire::Finalize> {
-        let view = match self.views.get_mut(&view) {
+        let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
                 return None;
             }
         };
-        if view.timeout_fired {
+        if view_obj.timeout_fired {
             return None;
         }
-        if !view.broadcast_vote {
+        if !view_obj.broadcast_vote {
             // Ensure we vote before we finalize
             return None;
         }
-        if view.broadcast_finalize {
+        if view_obj.broadcast_finalize {
             return None;
         }
-        let (hash, proposal) = match &view.proposal {
+        let (hash, proposal) = match &view_obj.proposal {
             Some((hash, proposal)) => (hash, proposal),
             None => {
                 return None;
             }
         };
-        view.broadcast_finalize = true;
+        view_obj.broadcast_finalize = true;
         Some(wire::Finalize {
-            view: self.view,
+            view,
             height: proposal.height,
             hash: hash.clone(),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
                     FINALIZE_NAMESPACE,
-                    &finalize_digest(self.view, proposal.height, hash.clone()),
+                    &finalize_digest(view, proposal.height, hash.clone()),
                 ),
             }),
         })
     }
 
     fn construct_finalization(&mut self, view: u64) -> Option<wire::Finalization> {
-        let view = match self.views.get_mut(&view) {
+        let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
                 return None;
@@ -972,7 +964,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         };
 
         // Check if we have enough finalizes
-        let (hash, height, finalizes) = view.finalizable_proposal(self.threshold)?;
+        let (hash, height, finalizes) = view_obj.finalizable_proposal(self.threshold)?;
 
         // Construct finalization
         let mut signatures = Vec::new();
@@ -982,7 +974,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             }
         }
         let finalization = wire::Finalization {
-            view: view.idx,
+            view,
             height,
             hash,
             signatures,
