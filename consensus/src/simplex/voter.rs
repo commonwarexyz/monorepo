@@ -109,6 +109,8 @@ impl View {
     }
 }
 
+// TODO: create fault tracker that can be configured by developer to do something
+
 // TODO: handle messages from current view and next view
 pub struct Voter<E: Clock + Rng, C: Scheme, A: Application> {
     runtime: E,
