@@ -529,7 +529,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                         self.runtime.current() + Duration::from_secs(1),
                     );
                 }
-            }
+            };
 
             // Wait for an event
             select! {

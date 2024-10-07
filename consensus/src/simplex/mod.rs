@@ -45,7 +45,7 @@ mod tests {
     use commonware_p2p::simulated::network::{self, Link, Network};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use std::time::Duration;
-    use tracing::debug;
+    use tracing::{debug, Level};
 
     struct MockApplication {}
 
@@ -74,11 +74,13 @@ mod tests {
     #[test]
     fn test_simple() {
         // Configure logging
-        tracing_subscriber::fmt().with_test_writer().init();
+        tracing_subscriber::fmt()
+            .with_max_level(Level::TRACE)
+            .init();
 
         // Create runtime
         let n = 5;
-        let (executor, runtime, _) = Executor::seeded(0);
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
             let mut network = Network::new(runtime.clone(), network::Config {});

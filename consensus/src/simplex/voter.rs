@@ -324,6 +324,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
     pub fn timeout_deadline(&mut self) -> SystemTime {
         // Return the earliest deadline
+        // TODO: if no view exists, this will panic
         let view = self.views.get_mut(&self.view).unwrap();
         if let Some(deadline) = view.leader_deadline {
             return deadline;
