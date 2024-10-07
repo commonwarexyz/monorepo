@@ -171,7 +171,7 @@ impl<E: Clock + Rng, A: Application> Orchestrator<E, A> {
 
             // Send the request
             let msg = wire::Request {
-                block: request.clone(),
+                hash: request.clone(),
             }
             .encode_to_vec()
             .into();
