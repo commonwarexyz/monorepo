@@ -40,9 +40,30 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Application, Hash, Payload};
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_p2p::simulated::network::{self, Network};
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+
+    struct MockApplication {}
+
+    impl Application for MockApplication {
+        fn propose(&mut self, _parent: Hash) -> Option<Payload> {
+            None
+        }
+
+        fn parse(&self, _payload: Payload) -> Option<Hash> {
+            None
+        }
+
+        fn verify(&self, _payload: Payload) -> bool {
+            true
+        }
+
+        fn notarized(&mut self, _payload: Payload) {}
+
+        fn finalized(&mut self, _payload: Payload) {}
+    }
 
     #[test]
     fn test_simple() {
@@ -51,17 +72,37 @@ mod tests {
         let (executor, runtime, _) = Executor::seeded(0);
         executor.start(async move {
             // Create simulated network
-            let mut network = Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                },
-            );
+            let mut network = Network::new(runtime.clone(), network::Config {});
 
             // Register participants
+            let mut schemes = Vec::new();
             let mut validators = Vec::new();
             for i in 0..n {
-                let pk = Ed25519::from_seed(i as u64).public_key();
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+
+            // Create runners
+            for scheme in schemes.into_iter() {
+                let validator = scheme.public_key();
+                let (block_sender, block_receiver) =
+                    network.register(validator.clone(), 0, 1024 * 1024).unwrap();
+                let (vote_sender, vote_receiver) =
+                    network.register(validator.clone(), 1, 1024 * 1024).unwrap();
+                let mut runner = runner::Runner::new(runtime.clone(), validators.clone());
+                runtime.spawn("runner", async move {
+                    runner
+                        .run(
+                            scheme,
+                            MockApplication {},
+                            (block_sender, block_receiver),
+                            (vote_sender, vote_receiver),
+                        )
+                        .await;
+                });
             }
         });
     }
