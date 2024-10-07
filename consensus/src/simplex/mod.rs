@@ -43,9 +43,8 @@ mod tests {
     use crate::{Application, Hash, Payload};
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_p2p::simulated::network::{self, Link, Network};
-    use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
-    use std::time::Duration;
-    use tracing::{debug, Level};
+    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use tracing::Level;
 
     struct MockApplication {}
 
