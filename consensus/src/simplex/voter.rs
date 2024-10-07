@@ -56,15 +56,14 @@ pub struct View {
     advance_deadline: Option<SystemTime>,
     null_vote_retry: Option<SystemTime>,
 
+    // Track one proposal per view
     proposal: Option<(
         Hash, /* proposal */
         Hash, /* payload */
         wire::Proposal,
     )>,
 
-    // TODO: track votes for next view across n hashes if proposal not yet set (as soon
-    // as proposal is set, drop all votes for unrelated?)
-    // TODO: we can track all votes, just make sure to only track one vote per validator
+    // Track votes for all proposals (ensuring any participant only has one recorded vote)
     proposal_voters: HashSet<PublicKey>,
     proposal_votes: HashMap<Hash, HashMap<PublicKey, wire::Vote>>,
     broadcast_proposal_notarization: bool,
@@ -73,7 +72,7 @@ pub struct View {
     null_votes: HashMap<PublicKey, wire::Vote>,
     broadcast_null_notarization: bool,
 
-    // TODO: ensure no one voting for null block has voted for finalize
+    // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
     finalizers: HashSet<PublicKey>,
     finalizes: HashMap<Hash, HashMap<PublicKey, wire::Finalize>>,
     broadcast_finalization: bool,
@@ -96,6 +95,7 @@ impl View {
 
             proposal: None,
 
+            proposal_voters: HashSet::new(),
             proposal_votes: HashMap::new(),
             broadcast_proposal_notarization: false,
 
@@ -103,9 +103,100 @@ impl View {
             null_votes: HashMap::new(),
             broadcast_null_notarization: false,
 
+            finalizers: HashSet::new(),
             finalizes: HashMap::new(),
             broadcast_finalization: false,
         }
+    }
+
+    fn notarizable_proposal(
+        &mut self,
+        threshold: u32,
+    ) -> Option<(Hash, &HashMap<PublicKey, wire::Vote>)> {
+        if self.broadcast_proposal_notarization {
+            return None;
+        }
+        for (proposal, votes) in self.proposal_votes.iter() {
+            if (votes.len() as u32) < threshold {
+                continue;
+            }
+
+            // Ensure we have the proposal we are going to broadcast a notarization for
+            match &self.proposal {
+                Some((hash, _, _)) => {
+                    if hash != proposal {
+                        debug!(
+                            proposal = hex(&proposal),
+                            hash = hex(&hash),
+                            reason = "proposal mismatch",
+                            "skipping notarization broadcast"
+                        );
+                        continue;
+                    }
+                }
+                None => {
+                    continue;
+                }
+            }
+
+            // There should never exist enough votes for multiple proposals, so it doesn't
+            // matter which one we choose.
+            self.broadcast_proposal_notarization = true;
+            return Some((proposal.clone(), votes));
+        }
+        None
+    }
+
+    fn notarizable_null(
+        &mut self,
+        threshold: u32,
+    ) -> Option<(Hash, &HashMap<PublicKey, wire::Vote>)> {
+        if self.broadcast_null_notarization {
+            return None;
+        }
+        if (self.null_votes.len() as u32) < threshold {
+            return None;
+        }
+        self.broadcast_null_notarization = true;
+        Some((Bytes::new(), &self.null_votes))
+    }
+
+    fn finalizable_proposal(
+        &mut self,
+        threshold: u32,
+    ) -> Option<(Hash, &HashMap<PublicKey, wire::Finalize>)> {
+        if self.broadcast_finalization {
+            return None;
+        }
+        for (proposal, finalizes) in self.finalizes.iter() {
+            if (finalizes.len() as u32) < threshold {
+                continue;
+            }
+
+            // Ensure we have the proposal we are going to broadcast a finalization for
+            match &self.proposal {
+                Some((hash, _, _)) => {
+                    if hash != proposal {
+                        debug!(
+                            proposal = hex(&proposal),
+                            hash = hex(&hash),
+                            reason = "proposal mismatch",
+                            "skipping finalization broadcast"
+                        );
+                        continue;
+                    }
+                }
+                None => {
+                    continue;
+                }
+            }
+
+            // There should never exist enough finalizes for multiple proposals, so it doesn't
+            // matter which one we choose.
+            self.broadcast_finalization = true;
+            return Some((proposal.clone(), finalizes));
+        }
+        None
     }
 }
 
@@ -367,25 +458,8 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
     ) -> Option<wire::Notarization> {
         // Determine which votes to use
         let (proposal_hash, votes) = match last_vote_null {
-            true => {
-                if (view.null_votes.len() as u32) < threshold || view.broadcast_null_notarization {
-                    return None;
-                }
-                view.broadcast_null_notarization = true;
-                (Bytes::new(), &view.null_votes)
-            }
-            false => {
-                if (view.proposal_votes.len() as u32) < threshold
-                    || view.broadcast_proposal_notarization
-                {
-                    return None;
-                }
-                view.broadcast_proposal_notarization = true;
-                (
-                    view.proposal.as_ref().unwrap().0.clone(),
-                    &view.proposal_votes,
-                )
-            }
+            true => view.notarizable_null(threshold)?,
+            false => view.notarizable_proposal(threshold)?,
         };
 
         // Construct notarization
@@ -757,21 +831,18 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         view: &mut View,
     ) -> Option<wire::Finalization> {
         // Check if we have enough finalizes
-        if (view.finalizes.len() as u32) < threshold || view.broadcast_finalization {
-            return None;
-        }
-        view.broadcast_finalization = true;
+        let (proposal_hash, finalizes) = view.finalizable_proposal(threshold)?;
 
         // Construct finalization
         let mut signatures = Vec::new();
         for validator in validators.iter() {
-            if let Some(finalize) = view.finalizes.get(validator) {
+            if let Some(finalize) = finalizes.get(validator) {
                 signatures.push(finalize.signature.clone().unwrap());
             }
         }
         let finalization = wire::Finalization {
             view: view.idx,
-            block: view.proposal.as_ref().unwrap().0.clone(),
+            block: proposal_hash,
             signatures,
         };
         Some(finalization)
