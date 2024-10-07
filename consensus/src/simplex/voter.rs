@@ -662,6 +662,8 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         }
         debug!(view = notarization.view, added, "notarization verified");
 
+        // TODO: Store signatures for view
+
         // Inform orchestrator of notarization
         let proposal = match view.and_then(|view| view.proposal.as_ref()) {
             Some((hash, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
@@ -830,6 +832,8 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             added += 1;
         }
         debug!(view = finalization.view, added, "finalization verified");
+
+        // TODO: store finalize for view
 
         // Inform orchestrator of finalization
         let proposal = match view.and_then(|view| view.proposal.as_ref()) {
