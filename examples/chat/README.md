@@ -12,7 +12,6 @@ and [commonware-p2p::authenticated](https://docs.rs/commonware-p2p/latest/common
 of `p2p_connections` in the "Metrics Panel" in the right corner of the window. This metric should be equal to
 `count(friends)- 1` (you don't connect to yourself).
 
-
 ## Synchonized Friends
 
 `commonware-p2p::authenticated` requires all friends to have the same set of friends for friend discovery to work
