@@ -462,7 +462,6 @@ mod tests {
     }
 
     fn run_deterministic_test(seed: u64, mode: Mode) {
-        tracing_subscriber::fmt().with_test_writer().init();
         // Configure test
         let max_message_size = 1_024 * 1_024; // 1MB
         let n = 25;
@@ -485,6 +484,7 @@ mod tests {
 
     #[test]
     fn test_determinism_one() {
+        tracing_subscriber::fmt().with_test_writer().init();
         for i in 0..10 {
             run_deterministic_test(i, Mode::One);
         }
@@ -492,6 +492,7 @@ mod tests {
 
     #[test]
     fn test_determinism_some() {
+        tracing_subscriber::fmt().with_test_writer().init();
         for i in 0..10 {
             run_deterministic_test(i, Mode::Some);
         }
@@ -499,6 +500,7 @@ mod tests {
 
     #[test]
     fn test_determinism_all() {
+        tracing_subscriber::fmt().with_test_writer().init();
         for i in 0..10 {
             run_deterministic_test(i, Mode::All);
         }
@@ -506,6 +508,7 @@ mod tests {
 
     #[test]
     fn test_tokio_connectivity() {
+        tracing_subscriber::fmt().with_test_writer().init();
         let cfg = tokio::Config::default();
         let (executor, runtime) = tokio::Executor::init(cfg.clone());
         executor.start(async move {
