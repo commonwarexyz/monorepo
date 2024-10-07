@@ -395,7 +395,15 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         Some(notarization)
     }
 
-    fn enter_view(&mut self, view: u64) {
+    fn enter_view(
+        &mut self,
+        view: u64,
+    ) -> (
+        Option<wire::Vote>,
+        Option<wire::Notarization>,
+        Option<wire::Finalize>,
+        Option<wire::Finalization>,
+    ) {
         // Ensure view is valid
         if view <= self.view {
             panic!("cannot enter previous or current view");
@@ -422,7 +430,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         entry.leader_deadline = Some(self.runtime.current() + Duration::from_secs(1));
         entry.advance_deadline = Some(self.runtime.current() + Duration::from_secs(2));
 
-        // TODO: Return vote, notarization, finalize, finalization if we have it?
+        // TODO: If we have already seen a proposal, construct useful network messages
     }
 
     pub fn vote(&mut self, vote: wire::Vote) -> Option<wire::Notarization> {
@@ -558,6 +566,8 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                 debug!(reason = "invalid signature", "dropping notarization");
                 return (None, None);
             }
+
+            // TODO: If we are tracking this view, add any new signatures
             added += 1;
         }
         if added <= self.threshold {
@@ -898,6 +908,8 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                 debug!(reason = "invalid signature", "dropping finalization");
                 return None;
             }
+
+            // TODO: If we are tracking this view, add any new signatures
             added += 1;
         }
         debug!(view = finalization.view, added, "finalization verified");
