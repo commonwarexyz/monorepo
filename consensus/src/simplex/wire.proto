@@ -60,6 +60,12 @@ message Signature {
 }
 
 // Backfiller (TODO: separate proto?)
+message Backfill {
+    oneof payload {
+        Request request = 1;
+        Resolution resolution = 2;
+    }
+}
 message Request {
     bytes hash = 1;
 }

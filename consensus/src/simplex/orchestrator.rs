@@ -7,7 +7,7 @@ use super::{
 use crate::{Application, Hash, Height, Payload, View};
 use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{select, Clock};
+use commonware_runtime::{select, Clock, Spawner};
 use core::panic;
 use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt};
@@ -35,6 +35,14 @@ pub enum Message {
     },
     Finalized {
         proposal: Proposal,
+    },
+
+    Get {
+        hash: Hash,
+        response: oneshot::Sender<Option<wire::Proposal>>,
+    },
+    Got {
+        proposal: wire::Proposal,
     },
 }
 
@@ -94,6 +102,22 @@ impl Mailbox {
             .await
             .unwrap();
     }
+
+    async fn get(&mut self, hash: Hash) -> Option<wire::Proposal> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Get {
+                hash,
+                response: sender,
+            })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    async fn got(&mut self, proposal: wire::Proposal) {
+        self.sender.send(Message::Got { proposal }).await.unwrap();
+    }
 }
 
 #[derive(Clone)]
@@ -108,12 +132,13 @@ enum Lock {
     Finalized(Hash),
 }
 
-pub struct Orchestrator<E: Clock + Rng, A: Application, S: Sender, R: Receiver> {
+pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application, S: Sender, R: Receiver> {
     runtime: E,
     application: A,
     sender: S,
     receiver: R,
 
+    mailbox: Mailbox,
     mailbox_receiver: mpsc::Receiver<Message>,
 
     validators: Vec<PublicKey>,
@@ -138,7 +163,9 @@ pub struct Orchestrator<E: Clock + Rng, A: Application, S: Sender, R: Receiver> 
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng, A: Application, S: Sender, R: Receiver> Orchestrator<E, A, S, R> {
+impl<E: Clock + Rng + Spawner, A: Application, S: Sender, R: Receiver + Send + 'static>
+    Orchestrator<E, A, S, R>
+{
     pub fn new(
         runtime: E,
         application: A,
@@ -147,6 +174,7 @@ impl<E: Clock + Rng, A: Application, S: Sender, R: Receiver> Orchestrator<E, A, 
         validators: Vec<PublicKey>,
     ) -> (Self, Mailbox) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
+        let mailbox = Mailbox::new(mailbox_sender);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
         (
             Self {
@@ -155,6 +183,7 @@ impl<E: Clock + Rng, A: Application, S: Sender, R: Receiver> Orchestrator<E, A, 
                 sender,
                 receiver,
 
+                mailbox: mailbox.clone(),
                 mailbox_receiver,
 
                 validators,
@@ -171,7 +200,7 @@ impl<E: Clock + Rng, A: Application, S: Sender, R: Receiver> Orchestrator<E, A, 
                 notarizations_sent: HashMap::new(),
                 last_notified: 0,
             },
-            Mailbox::new(mailbox_sender),
+            mailbox,
         )
     }
 
@@ -274,65 +303,34 @@ impl<E: Clock + Rng, A: Application, S: Sender, R: Receiver> Orchestrator<E, A, 
     // proposal at a time). In `tbd`, this will operate very differently because we can
     // verify the integrity of any proposal we receive at an index by the threshold signature.
     pub async fn run(mut self) {
-        // TODO: need a separate loop for responding to requests
-        loop {
-            // Get the next missing proposal
-            let request = match self.missing_receiver.next().await {
-                Some(request) => request,
-                None => {
-                    // No more missing proposals (shutdown)
-                    return;
-                }
-            };
-
-            // Select random validator to fetch from
-            let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
-
-            // Send the request
-            let msg = wire::Request {
-                hash: request.clone(),
-            }
-            .encode_to_vec()
-            .into();
-            if let Err(err) = self
-                .sender
-                .send(Recipients::One(validator.clone()), msg, true)
-                .await
-            {
-                warn!(
-                    ?err,
-                    request = hex(&request),
-                    validator = hex(&validator),
-                    "failed to send backfill request"
-                );
-                continue;
-            }
-
-            // Process responses until deadline or we receive the proposal
-            let start = self.runtime.current();
-            let deadline = start + Duration::from_secs(1);
+        // Relay messages from the wire to the mailbox
+        self.runtime.spawn("network", async move {
             loop {
-                let (sender, proposal) = select! {
-                    _timeout = self.runtime.sleep_until(deadline) => {
-                        warn!(request = hex(&request), validator = hex(&validator), "backfill request timed out");
-                        break;
-                    },
-                    msg = self.receiver.recv() => {
-                        // Parse message
-                        let (sender, msg) = match msg {
-                            Ok(msg) => msg,
-                            Err(err) => {
-                                warn!(?err, "failed to receive backfill response");
-                                return;
-                            }
-                        };
-                        let resolution = match wire::Resolution::decode(msg) {
-                            Ok(msg) => msg,
-                            Err(err) => {
-                                warn!(?err, sender = hex(&sender), "failed to decode resolution message");
-                                continue;
-                            }
-                        };
+                let (sender, msg) = self.receiver.recv().await.unwrap();
+                let msg = match wire::Backfill::decode(msg) {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        warn!(?err, sender = hex(&sender), "failed to decode message");
+                        continue;
+                    }
+                };
+                let payload = match msg.payload {
+                    Some(payload) => payload,
+                    None => {
+                        warn!(sender = hex(&sender), "message missing payload");
+                        continue;
+                    }
+                };
+                match payload {
+                    wire::backfill::Payload::Request(request) => {
+                        let result = self.mailbox.get(request.hash).await;
+                        let msg = wire::Resolution { proposal: result }.encode_to_vec().into();
+                        self.sender
+                            .send(Recipients::One(sender), msg, false)
+                            .await
+                            .unwrap();
+                    }
+                    wire::backfill::Payload::Resolution(resolution) => {
                         let proposal = match resolution.proposal {
                             Some(proposal) => proposal,
                             None => {
@@ -340,94 +338,218 @@ impl<E: Clock + Rng, A: Application, S: Sender, R: Receiver> Orchestrator<E, A, 
                                 continue;
                             }
                         };
-                        (sender, proposal)
-                    },
-                };
-
-                // Generate payload hash
-                let payload_hash = self
-                    .application
-                    .parse(proposal.payload.clone())
-                    .expect("unable to verify notarized/finalized payload");
-                let proposal_digest = proposal_digest(
-                    proposal.view,
-                    proposal.height,
-                    proposal.parent.clone(),
-                    payload_hash,
-                );
-                let incoming_hash = hash(proposal_digest);
-
-                // Check if we were expecting this hash
-                //
-                // It is ok if we get something we don't need, we may have gotten
-                // what we need from a variety of other places.
-                match self.locked.get(&proposal.height) {
-                    Some(Lock::Notarized(seen)) => {
-                        let entry = seen.get(&proposal.view);
-                        if entry.is_none() {
-                            warn!(
-                                sender = hex(&sender),
-                                height = proposal.height,
-                                "unexpected block hash on resolution"
-                            );
-                            continue;
-                        }
-                        if entry.unwrap() != &incoming_hash {
-                            warn!(
-                                sender = hex(&sender),
-                                height = proposal.height,
-                                "unexpected block hash on resolution"
-                            );
-                            continue;
-                        }
-                    }
-                    Some(Lock::Finalized(expected)) => {
-                        if incoming_hash != *expected {
-                            warn!(
-                                sender = hex(&sender),
-                                height = proposal.height,
-                                "unexpected block hash on resolution"
-                            );
-                            continue;
-                        }
-                    }
-                    None => {
-                        warn!(
-                            sender = hex(&sender),
-                            height = proposal.height,
-                            "unexpected block hash"
-                        );
-                        continue;
+                        self.mailbox.got(proposal).await;
                     }
                 }
+            }
+        });
 
-                // Check to see if we already have this proposal
-                if self.blocks.contains_key(&incoming_hash) {
-                    debug!(
-                        sender = hex(&sender),
-                        height = proposal.height,
-                        "block already resolved"
+        // Orchestrate backfilling
+        self.runtime.spawn("backfiller", async move {
+            loop {
+                // Get the next missing proposal
+                let request = match self.missing_receiver.next().await {
+                    Some(request) => request,
+                    None => {
+                        // No more missing proposals (shutdown)
+                        return;
+                    }
+                };
+
+                // Select random validator to fetch from
+                let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
+
+                // Send the request
+                let msg = wire::Request {
+                    hash: request.clone(),
+                }
+                .encode_to_vec()
+                .into();
+                if let Err(err) = self
+                    .sender
+                    .send(Recipients::One(validator.clone()), msg, true)
+                    .await
+                {
+                    warn!(
+                        ?err,
+                        request = hex(&request),
+                        validator = hex(&validator),
+                        "failed to send backfill request"
                     );
                     continue;
                 }
 
-                // Record the proposal
-                self.resolve(incoming_hash.clone(), proposal);
+                // Process responses until deadline or we receive the proposal
+                let start = self.runtime.current();
+                let deadline = start + Duration::from_secs(1);
+                loop {
+                    let (sender, proposal) = select! {
+                        _timeout = self.runtime.sleep_until(deadline) => {
+                            warn!(request = hex(&request), validator = hex(&validator), "backfill request timed out");
+                            break;
+                        },
+                        msg = self.receiver.recv() => {
+                            // Parse message
+                            let (sender, msg) = match msg {
+                                Ok(msg) => msg,
+                                Err(err) => {
+                                    warn!(?err, "failed to receive backfill response");
+                                    return;
+                                }
+                            };
+                            let resolution = match wire::Resolution::decode(msg) {
+                                Ok(msg) => msg,
+                                Err(err) => {
+                                    warn!(?err, sender = hex(&sender), "failed to decode resolution message");
+                                    continue;
+                                }
+                            };
+                            let proposal = match resolution.proposal {
+                                Some(proposal) => proposal,
+                                None => {
+                                    warn!(sender = hex(&sender), "resolution missing proposal");
+                                    continue;
+                                }
+                            };
+                            (sender, proposal)
+                        },
+                    };
 
-                // Notify application if we can
-                self.notify();
-
-                // If incoming hash was the hash we were expecting, exit the loop
-                if incoming_hash == request {
-                    debug!(
-                        request = hex(&request),
-                        sender = hex(&sender),
-                        "backfill resolution"
+                    // Generate payload hash
+                    let payload_hash = self
+                        .application
+                        .parse(proposal.payload.clone())
+                        .expect("unable to verify notarized/finalized payload");
+                    let proposal_digest = proposal_digest(
+                        proposal.view,
+                        proposal.height,
+                        proposal.parent.clone(),
+                        payload_hash,
                     );
-                    break;
+                    let incoming_hash = hash(proposal_digest);
+
+                    // Check if we were expecting this hash
+                    //
+                    // It is ok if we get something we don't need, we may have gotten
+                    // what we need from a variety of other places.
+                    match self.locked.get(&proposal.height) {
+                        Some(Lock::Notarized(seen)) => {
+                            let entry = seen.get(&proposal.view);
+                            if entry.is_none() {
+                                warn!(
+                                    sender = hex(&sender),
+                                    height = proposal.height,
+                                    "unexpected block hash on resolution"
+                                );
+                                continue;
+                            }
+                            if entry.unwrap() != &incoming_hash {
+                                warn!(
+                                    sender = hex(&sender),
+                                    height = proposal.height,
+                                    "unexpected block hash on resolution"
+                                );
+                                continue;
+                            }
+                        }
+                        Some(Lock::Finalized(expected)) => {
+                            if incoming_hash != *expected {
+                                warn!(
+                                    sender = hex(&sender),
+                                    height = proposal.height,
+                                    "unexpected block hash on resolution"
+                                );
+                                continue;
+                            }
+                        }
+                        None => {
+                            warn!(
+                                sender = hex(&sender),
+                                height = proposal.height,
+                                "unexpected block hash"
+                            );
+                            continue;
+                        }
+                    }
+
+                    // Check to see if we already have this proposal
+                    if self.blocks.contains_key(&incoming_hash) {
+                        debug!(
+                            sender = hex(&sender),
+                            height = proposal.height,
+                            "block already resolved"
+                        );
+                        continue;
+                    }
+
+                    // Record the proposal
+                    self.resolve(incoming_hash.clone(), proposal);
+
+                    // Notify application if we can
+                    self.notify();
+
+                    // If incoming hash was the hash we were expecting, exit the loop
+                    if incoming_hash == request {
+                        debug!(
+                            request = hex(&request),
+                            sender = hex(&sender),
+                            "backfill resolution"
+                        );
+                        break;
+                    }
                 }
             }
-        }
+    });
+
+        // Handle mailbox
+        self.runtime.spawn("mailbox", async move {
+            loop {
+                let msg = match self.mailbox_receiver.next().await {
+                    Some(msg) => msg,
+                    None => {
+                        // No more messages (shutdown)
+                        return;
+                    }
+                };
+
+                match msg {
+                    Message::Propose { response } => {
+                        let proposal = match self.propose() {
+                            Some(proposal) => proposal,
+                            None => {
+                                response.send(None).unwrap();
+                                continue;
+                            }
+                        };
+                        response.send(Some(proposal)).unwrap();
+                    }
+                    Message::Parse { payload, response } => {
+                        let hash = self.application.parse(payload);
+                        response.send(hash).unwrap();
+                    }
+                    Message::Verify { proposal, response } => {
+                        let valid = self.verify(proposal);
+                        response.send(valid).unwrap();
+                    }
+                    Message::Notarized { proposal } => self.notarized(proposal),
+                    Message::Finalized { proposal } => self.finalized(proposal),
+                    Message::Get { hash, response } => {
+                        let proposal = self.blocks.get(&hash).cloned();
+                        response.send(proposal).unwrap();
+                    }
+                    Message::Got { proposal } => {
+                        let hash = hash(proposal_digest(
+                            proposal.view,
+                            proposal.height,
+                            proposal.parent.clone(),
+                            self.application.parse(proposal.payload).unwrap(),
+                        ));
+                        self.resolve(hash, proposal).await;
+                        self.notify();
+                    }
+                }
+            }
+        });
     }
 
     fn best_parent(&self) -> Option<(Hash, wire::Proposal)> {
@@ -465,7 +587,7 @@ impl<E: Clock + Rng, A: Application, S: Sender, R: Receiver> Orchestrator<E, A, 
     }
 
     // Simplified application functions
-    pub fn propose(&mut self) -> Option<((Hash, wire::Proposal), Payload)> {
+    pub fn propose(&mut self) -> Option<((Hash, wire::Proposal), (Hash, Payload))> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
@@ -484,8 +606,10 @@ impl<E: Clock + Rng, A: Application, S: Sender, R: Receiver> Orchestrator<E, A, 
             }
         };
 
+        let payload_hash = self.application.parse(payload.clone()).unwrap();
+
         // Generate proposal
-        Some((parent, payload))
+        Some((parent, (payload_hash, payload)))
     }
 
     pub fn parse(&self, payload: Payload) -> Option<Hash> {
