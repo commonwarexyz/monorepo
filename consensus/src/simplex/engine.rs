@@ -75,6 +75,8 @@ impl<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E
 
         // Handle the vote
         self.handle_vote(vote).await;
+
+        // TODO: attempt to build notarization, finalize, and finalization (may be blocked on this)
     }
 
     async fn handle_vote(&mut self, vote: wire::Vote) {
