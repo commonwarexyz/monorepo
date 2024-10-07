@@ -7,11 +7,11 @@ fn main() -> Result<()> {
         "Signature.signature",
         "Proposal.payload",
         "Proposal.parent",
-        "Vote.block",
-        "Notarization.block",
-        "Finalize.block",
-        "Finalization.block",
-        "Request.block",
+        "Vote.hash",
+        "Notarization.hash",
+        "Finalize.hash",
+        "Finalization.hash",
+        "Request.hash",
     ]);
     config.compile_protos(&["src/simplex/wire.proto"], &["src/simplex/"])?;
     Ok(())
