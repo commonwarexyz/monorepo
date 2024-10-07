@@ -49,6 +49,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E
         }
     }
 
+    // TODO: add shared logic for attempting all view messages after each is received
     async fn handle_proposal(&mut self, proposal: wire::Proposal) {
         // Store the proposal
         let proposal_view = proposal.view;
