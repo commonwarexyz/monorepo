@@ -134,7 +134,9 @@ impl<
 
     pub async fn run(mut self) -> Result<(), Error> {
         let orchestrator = self.orchestrator.take().unwrap();
-        self.runtime.spawn("orchestrator", orchestrator.run());
+        self.runtime.spawn("orchestrator", async move {
+            orchestrator.run().await;
+        });
 
         // Process messages
         loop {

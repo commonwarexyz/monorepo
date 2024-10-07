@@ -115,7 +115,7 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application, S: Sender, R: 
     runtime: E,
     application: A,
     sender: S,
-    receiver: R,
+    receiver: Option<R>,
 
     mailbox: Mailbox,
     mailbox_receiver: mpsc::Receiver<Message>,
@@ -164,7 +164,7 @@ impl<
                 runtime,
                 application,
                 sender,
-                receiver,
+                receiver: Some(receiver),
 
                 mailbox: mailbox.clone(),
                 mailbox_receiver,
@@ -286,6 +286,7 @@ impl<
     // proposal at a time). In `tbd`, this will operate very differently because we can
     // verify the integrity of any proposal we receive at an index by the threshold signature.
     pub async fn run(mut self) {
+        let mut receiver = self.receiver.take().unwrap();
         let mut outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::MAX);
         loop {
             // Check to see if we should add a task
@@ -366,7 +367,7 @@ impl<
                         Message::Finalized { proposal } => self.finalized(proposal),
                     };
                 },
-                network = self.receiver.recv() => {
+                network = receiver.recv() => {
                     let (sender, msg) = network.unwrap();
                     let msg = match wire::Backfill::decode(msg) {
                         Ok(msg) => msg,
@@ -474,8 +475,7 @@ impl<
                             self.notify();
 
                             // If incoming hash was our task, exit the loop
-                            let request = outstanding_task.0.unwrap();
-                            if incoming_hash == request {
+                            if let Some(request) = outstanding_task.0 {
                                 debug!(
                                     request = hex(&request),
                                     sender = hex(&sender),
