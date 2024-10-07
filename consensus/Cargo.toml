@@ -28,3 +28,6 @@ num-traits = "0.2"
 
 [build-dependencies]
 prost-build = { workspace = true } 
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

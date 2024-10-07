@@ -39,11 +39,13 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::{Application, Hash, Payload};
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_p2p::simulated::network::{self, Network};
-    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
 
     struct MockApplication {}
 
@@ -67,6 +69,9 @@ mod tests {
 
     #[test]
     fn test_simple() {
+        // Configure logging
+        tracing_subscriber::fmt().with_test_writer().init();
+
         // Create runtime
         let n = 5;
         let (executor, runtime, _) = Executor::seeded(0);
@@ -103,6 +108,13 @@ mod tests {
                         )
                         .await;
                 });
+            }
+
+            // Loop forever
+            //
+            // TODO: replace with conditions based on application
+            loop {
+                runtime.sleep(Duration::from_secs(1)).await;
             }
         });
     }
