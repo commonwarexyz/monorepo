@@ -499,7 +499,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
     // proposal at a time). In `tbd`, this will operate very differently because we can
     // verify the integrity of any proposal we receive at an index by the threshold signature.
     pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
-        let mut outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::MAX);
+        // TODO: using UNIX_EPOCH + Duration::MAX causing a panic
+        let mut outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::from_secs(100));
         loop {
             // Check to see if we should add a task
             if outstanding_task.0.is_none() {
