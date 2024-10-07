@@ -135,6 +135,7 @@ mod tests {
 
     #[test]
     fn test_determinism() {
+        tracing_subscriber::fmt().with_test_writer().init();
         compare_outputs(25, 25);
     }
 
