@@ -17,7 +17,10 @@ use std::{
 };
 use tracing::{debug, error};
 
+type Channel = u32;
+
 type Task = (
+    Channel,
     PublicKey,
     Recipients,
     Bytes,
@@ -32,7 +35,7 @@ pub struct Network<E: Spawner + Rng + Clock> {
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
     links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
-    agents: BTreeMap<PublicKey, mpsc::UnboundedSender<Message>>,
+    agents: BTreeMap<PublicKey, HashMap<Channel, mpsc::UnboundedSender<Message>>>,
 }
 
 /// Describes a connection between two peers.
@@ -70,16 +73,32 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         }
     }
 
-    /// Register a new peer with the network.
+    /// Register a new peer with the network that can interact over a given channel.
     ///
     /// By default, the peer will not be linked to any other peers.
-    pub fn register(&mut self, public_key: PublicKey) -> (Sender, Receiver) {
+    pub fn register(
+        &mut self,
+        channel: Channel,
+        public_key: PublicKey,
+    ) -> Result<(Sender, Receiver), Error> {
+        // Ensure doesn't already exist
+        let entry = self.agents.entry(public_key.clone()).or_default();
+        if entry.get(&channel).is_some() {
+            return Err(Error::ChannelAlreadyRegistered);
+        }
+
+        // Initialize agent channel
         let (sender, receiver) = mpsc::unbounded();
-        self.agents.insert(public_key.clone(), sender);
-        (
-            Sender::new(self.runtime.clone(), public_key, self.sender.clone()),
+        entry.insert(channel, sender);
+        Ok((
+            Sender::new(
+                self.runtime.clone(),
+                channel,
+                public_key,
+                self.sender.clone(),
+            ),
             Receiver { receiver },
-        )
+        ))
     }
 
     /// Create a unidirectional link between two peers.
@@ -108,7 +127,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     /// Run the simulated network.
     pub async fn run(mut self) {
         // Process messages
-        while let Some((origin, recipients, message, reply)) = self.receiver.next().await {
+        while let Some((channel, origin, recipients, message, reply)) = self.receiver.next().await {
             // Ensure message is valid
             if message.len() > self.cfg.max_message_size {
                 if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
@@ -209,6 +228,20 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                             return;
                         }
 
+                        // Drop message if not listening on channel
+                        let sender = match sender.get_mut(&channel) {
+                            Some(sender) => sender,
+                            None => {
+                                debug!(
+                                    recipient = hex(&recipient),
+                                    channel,
+                                    reason = "missing channel",
+                                    "dropping message",
+                                );
+                                return;
+                            }
+                        };
+
                         // Send message
                         if let Err(err) = sender.send((origin.clone(), message)).await {
                             // This can only happen if the receiver exited.
@@ -244,13 +277,19 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 /// Implementation of a [`crate::Sender`] for the simulated network.
 #[derive(Clone)]
 pub struct Sender {
+    channel: Channel,
     me: PublicKey,
     high: mpsc::UnboundedSender<Task>,
     low: mpsc::UnboundedSender<Task>,
 }
 
 impl Sender {
-    fn new(runtime: impl Spawner, me: PublicKey, mut sender: mpsc::UnboundedSender<Task>) -> Self {
+    fn new(
+        runtime: impl Spawner,
+        channel: u32,
+        me: PublicKey,
+        mut sender: mpsc::UnboundedSender<Task>,
+    ) -> Self {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
@@ -272,7 +311,12 @@ impl Sender {
         });
 
         // Return sender
-        Self { me, high, low }
+        Self {
+            channel,
+            me,
+            high,
+            low,
+        }
     }
 }
 
@@ -288,7 +332,7 @@ impl crate::Sender for Sender {
         let (sender, receiver) = oneshot::channel();
         let mut channel = if priority { &self.high } else { &self.low };
         channel
-            .send((self.me.clone(), recipients, message, sender))
+            .send((self.channel, self.me.clone(), recipients, message, sender))
             .await
             .map_err(|_| Error::NetworkClosed)?;
         receiver.await.map_err(|_| Error::NetworkClosed)?

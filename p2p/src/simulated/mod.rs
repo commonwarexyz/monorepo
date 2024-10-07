@@ -16,6 +16,8 @@ pub enum Error {
     LinkingSelf,
     #[error("invalid success rate (must be in [0, 1]): {0}")]
     InvalidSuccessRate(f64),
+    #[error("channel already registered")]
+    ChannelAlreadyRegistered,
 }
 
 #[cfg(test)]
