@@ -362,4 +362,50 @@ mod tests {
             }
         });
     }
+
+    #[test]
+    fn test_message_too_big_receiver() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let mut network = network::Network::new(runtime.clone(), network::Config {});
+
+            // Register agents
+            let pk1 = Ed25519::from_seed(0).public_key();
+            let pk2 = Ed25519::from_seed(1).public_key();
+            let (mut sender1, _) = network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
+            let (_, mut receiver2) = network.register(pk2.clone(), 0, 1).unwrap();
+
+            // Link agents
+            network
+                .link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    network::Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .unwrap();
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Send message
+            let msg = Bytes::from("hello from pk1");
+            sender1
+                .send(Recipients::One(pk2.clone()), msg, false)
+                .await
+                .unwrap();
+
+            // Confirm no message delivery
+            select! {
+                _msg = receiver2.recv() => {
+                    panic!("unexpected message");
+                },
+                _timeout = runtime.sleep(Duration::from_secs(100000)) => {},
+            }
+        });
+    }
 }
