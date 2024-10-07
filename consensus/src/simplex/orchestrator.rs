@@ -344,8 +344,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             let valid = self.verify(proposal);
                             response.send(valid).unwrap();
                         }
-                        Message::Notarized { proposal } => self.notarized(proposal),
-                        Message::Finalized { proposal } => self.finalized(proposal),
+                        Message::Notarized { proposal } => self.notarized(proposal).await,
+                        Message::Finalized { proposal } => self.finalized(proposal).await,
                     };
                 },
                 network = receiver.recv() => {
@@ -450,7 +450,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             }
 
                             // Record the proposal
-                            self.resolve(incoming_hash.clone(), proposal);
+                            self.resolve(incoming_hash.clone(), proposal).await;
 
                             // Notify application if we can
                             self.notify();
@@ -586,7 +586,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         self.application.verify(proposal.payload.clone())
     }
 
-    pub fn notarized(&mut self, proposal: Proposal) {
+    pub async fn notarized(&mut self, proposal: Proposal) {
         // Extract height and hash
         let (view, height, hash) = match &proposal {
             Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
@@ -624,13 +624,13 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Mark as seen
-        self.seen(proposal);
+        self.seen(proposal).await;
 
         // Notify application
         self.notify();
     }
 
-    pub fn finalized(&mut self, proposal: Proposal) {
+    pub async fn finalized(&mut self, proposal: Proposal) {
         // Extract height and hash
         let (height, mut hash) = match &proposal {
             Proposal::Reference(_, height, hash) => (*height, hash.clone()),
@@ -693,12 +693,12 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             if next == 0 {
                 break;
             }
-            next = next - 1;
+            next -= 1;
         }
 
         // Mark as seen
         // TODO: call application recursively
-        self.seen(proposal);
+        self.seen(proposal).await;
 
         // Notify application
         self.notify();
