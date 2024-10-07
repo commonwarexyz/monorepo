@@ -325,6 +325,7 @@ impl<
                     let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
 
                     // Send the request
+                    let request = outstanding_task.0.unwrap();
                     let msg = wire::Request {
                         hash: request.clone(),
                     }
@@ -405,7 +406,7 @@ impl<
                                     continue;
                                 }
                             };
-                            let hash = hash(proposal_digest(
+                            let incoming_hash = hash(proposal_digest(
                                 proposal.view,
                                 proposal.height,
                                 proposal.parent.clone(),
@@ -473,7 +474,8 @@ impl<
                             self.notify();
 
                             // If incoming hash was our task, exit the loop
-                            if incoming_hash == outstanding_task.0.unwrap() {
+                            let request = outstanding_task.0.unwrap();
+                            if incoming_hash == request {
                                 debug!(
                                     request = hex(&request),
                                     sender = hex(&sender),
