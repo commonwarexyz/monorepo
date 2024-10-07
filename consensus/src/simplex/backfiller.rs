@@ -377,9 +377,9 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
 
     pub fn finalized(&mut self, proposal: Proposal) {
         // Extract height and hash
-        let (view, height, mut hash) = match &proposal {
-            Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
-            Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
+        let (height, mut hash) = match &proposal {
+            Proposal::Reference(_, height, hash) => (*height, hash.clone()),
+            Proposal::Populated(hash, proposal) => (proposal.height, hash.clone()),
         };
 
         // Set last finalized
