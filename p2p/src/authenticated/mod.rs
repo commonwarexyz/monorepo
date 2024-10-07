@@ -135,7 +135,8 @@
 //! To get all of this started, a peer must first be bootstrapped with a list of known peers/addresses. The peer will dial these
 //! other peers, send its own record, send a bit vector (with all 0's except its own position in the sorted list), and then
 //! wait for the other peer to respond with some set of unknown peers. Different peers do not need to agree on who this list of
-//! bootstrapping peers is (this list is configurable).
+//! bootstrapping peers is (this list is configurable). Knowledge of bootstrappers and connections to them are never dropped,
+//! even if the bootstrapper is not in any known peer set.
 //!
 //! _If a peer is not in any registered peer set (to its knowledge) but is dialed by a peer that is, it will accept the connection.
 //! This allows peers that have a more up-to-date version of the peer set to connect, exchange application-level information, and for
