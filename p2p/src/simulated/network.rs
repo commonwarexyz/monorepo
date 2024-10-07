@@ -75,9 +75,9 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     /// By default, the peer will not be linked to any other peers.
     pub fn register(
         &mut self,
+        public_key: PublicKey,
         channel: Channel,
         max_size: usize,
-        public_key: PublicKey,
     ) -> Result<(Sender, Receiver), Error> {
         // Ensure doesn't already exist
         let entry = self.agents.entry(public_key.clone()).or_default();
@@ -91,9 +91,9 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         Ok((
             Sender::new(
                 self.runtime.clone(),
+                public_key,
                 channel,
                 max_size,
-                public_key,
                 self.sender.clone(),
             ),
             Receiver { receiver },
@@ -291,9 +291,9 @@ pub struct Sender {
 impl Sender {
     fn new(
         runtime: impl Spawner,
+        me: PublicKey,
         channel: u32,
         max_size: usize,
-        me: PublicKey,
         mut sender: mpsc::UnboundedSender<Task>,
     ) -> Self {
         // Listen for messages

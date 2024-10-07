@@ -42,7 +42,7 @@ mod tests {
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, mut receiver) = network.register(0, 1024 * 1024, pk.clone()).unwrap();
+                let (sender, mut receiver) = network.register(pk.clone(), 0, 1024 * 1024).unwrap();
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
                 runtime.spawn("agent_receiver", async move {
@@ -149,7 +149,7 @@ mod tests {
             let mut agents = HashMap::new();
             for i in 0..10 {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, _) = network.register(0, 1024 * 1024, pk.clone()).unwrap();
+                let (sender, _) = network.register(pk.clone(), 0, 1024 * 1024).unwrap();
                 agents.insert(pk, sender);
             }
 
@@ -182,7 +182,7 @@ mod tests {
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
-            network.register(0, 1024 * 1024, pk.clone()).unwrap();
+            network.register(pk.clone(), 0, 1024 * 1024).unwrap();
 
             // Attempt to link self
             let result = network.link(
@@ -209,8 +209,8 @@ mod tests {
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
-            network.register(0, 1024 * 1024, pk.clone()).unwrap();
-            let result = network.register(0, 1024 * 1024, pk);
+            network.register(pk.clone(), 0, 1024 * 1024).unwrap();
+            let result = network.register(pk, 0, 1024 * 1024);
 
             // Confirm error is correct
             assert!(matches!(result, Err(Error::ChannelAlreadyRegistered(0))));
@@ -227,8 +227,8 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            network.register(0, 1024 * 1024, pk1.clone()).unwrap();
-            network.register(0, 1024 * 1024, pk2.clone()).unwrap();
+            network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
+            network.register(pk2.clone(), 0, 1024 * 1024).unwrap();
 
             // Attempt to link with invalid success rate
             let result = network.link(
@@ -257,13 +257,13 @@ mod tests {
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
             let (mut sender1, mut receiver1) =
-                network.register(0, 1024 * 1024, pk1.clone()).unwrap();
+                network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
             let (mut sender2, mut receiver2) =
-                network.register(0, 1024 * 1024, pk2.clone()).unwrap();
+                network.register(pk2.clone(), 0, 1024 * 1024).unwrap();
 
             // Register unused channels
-            let _ = network.register(1, 1024 * 1024, pk1.clone()).unwrap();
-            let _ = network.register(2, 1024 * 1024, pk2.clone()).unwrap();
+            let _ = network.register(pk1.clone(), 1, 1024 * 1024).unwrap();
+            let _ = network.register(pk2.clone(), 2, 1024 * 1024).unwrap();
 
             // Link agents
             network
@@ -326,9 +326,9 @@ mod tests {
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
             let (mut sender1, mut receiver1) =
-                network.register(0, 1024 * 1024, pk1.clone()).unwrap();
+                network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
             let (mut sender2, mut receiver2) =
-                network.register(1, 1024 * 1024, pk2.clone()).unwrap();
+                network.register(pk2.clone(), 1, 1024 * 1024).unwrap();
 
             // Link agents
             network
