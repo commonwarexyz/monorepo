@@ -54,7 +54,7 @@ pub struct Link {
 
 /// Configuration for a `simulated` network.
 pub struct Config {
-    // TODO: add metrics
+    // TODO: add metrics (#90)
 }
 
 impl<E: Spawner + Rng + Clock> Network<E> {
@@ -311,7 +311,7 @@ impl Sender {
                             },
                         };
                         if let Err(err) = sender.send(high_task).await{
-                            error!(?err, "failed to send high priority task");
+                            error!(?err, channel, "failed to send high priority task");
                         }
                     },
                     low_task = low_receiver.next() => {
@@ -323,7 +323,7 @@ impl Sender {
                             },
                         };
                         if let Err(err) = sender.send(low_task).await{
-                            error!(?err, "failed to send low priority task");
+                            error!(?err, channel, "failed to send low priority task");
                         }
                     }
                 }
