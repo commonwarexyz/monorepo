@@ -28,6 +28,7 @@ impl<E: Spawner + Clock + Rng> Runner<E> {
         orchestrator_network: (impl Sender, impl Receiver),
         voter_network: (impl Sender, impl Receiver),
     ) {
+        // Start the orchestrator
         let (orchestrator_sender, orchestrator_receiver) = orchestrator_network;
         let (orchestrator, mailbox) =
             Orchestrator::new(self.runtime.clone(), application, self.validators.clone());
@@ -37,6 +38,7 @@ impl<E: Spawner + Clock + Rng> Runner<E> {
                 .await;
         });
 
+        // Start the engine
         let (voter_sender, voter_receiver) = voter_network;
         let engine = Engine::new(
             self.runtime.clone(),
