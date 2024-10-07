@@ -115,7 +115,6 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
     runtime: E,
     application: A,
 
-    mailbox: Mailbox,
     mailbox_receiver: mpsc::Receiver<Message>,
 
     validators: Vec<PublicKey>,
@@ -143,7 +142,6 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
 impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
     pub fn new(runtime: E, application: A, mut validators: Vec<PublicKey>) -> (Self, Mailbox) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
-        let mailbox = Mailbox::new(mailbox_sender);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
         validators.sort();
         (
@@ -151,7 +149,6 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 runtime,
                 application,
 
-                mailbox: mailbox.clone(),
                 mailbox_receiver,
 
                 validators,
@@ -168,7 +165,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 notarizations_sent: HashMap::new(),
                 last_notified: 0,
             },
-            mailbox,
+            Mailbox::new(mailbox_sender),
         )
     }
 
@@ -323,7 +320,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                         .await
                         .unwrap();
 
-                    // Set timeout
+                    // Reset timeout
                     outstanding_task = (Some(request), self.runtime.current() + Duration::from_secs(1));
                 },
                 mailbox = self.mailbox_receiver.next() => {
