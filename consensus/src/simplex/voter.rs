@@ -1,10 +1,7 @@
 //! TODO: change name to voter
 
-use super::{
-    orchestrator::{self, Orchestrator},
-    wire,
-};
-use crate::Application;
+use super::{orchestrator::Orchestrator, wire};
+use crate::{Application, Hash};
 use bytes::Bytes;
 use commonware_cryptography::{bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme};
 use commonware_runtime::Clock;
@@ -59,7 +56,11 @@ pub struct View {
     advance_deadline: Option<SystemTime>,
     null_vote_retry: Option<SystemTime>,
 
-    proposal: Option<(Bytes, Bytes, wire::Proposal)>,
+    proposal: Option<(
+        Hash, /* proposal */
+        Hash, /* payload */
+        wire::Proposal,
+    )>,
 
     proposal_votes: HashMap<PublicKey, wire::Vote>,
     broadcast_proposal_notarization: bool,
@@ -687,12 +688,6 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         }
         debug!(added, "notarization verified");
 
-        // Mark block as notarized if not already
-        self.notarized_blocks.insert(
-            proposal_hash.clone(),
-            (notarization.view, view.proposal.as_ref().unwrap().2.height),
-        );
-
         // Construct notarization
         let notarization = Self::construct_notarization(
             &self.validators,
@@ -765,12 +760,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
     }
 
     pub fn finalize(&mut self, finalize: wire::Finalize) -> Option<wire::Finalization> {
-        // TODO: should jump ahead if finalize is valid, not just handle for views we've already seen
-
-        // TODO: when finalizing a view, can prune previous views from memory
-
         // Ensure we are in the right view to process this message
-        // TODO: consider storing the finalize if one ahead of our current view
         if finalize.view != self.view && finalize.view != self.view + 1 {
             debug!(
                 finalize_view = finalize.view,
@@ -831,12 +821,18 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
 
         // Check if finalize vote is for a block (Fault)
         if finalize.block.len() == 0 {
+            // TODO: record fault
             debug!(reason = "finalize for null block", "dropping finalize");
             return None;
         }
-        if finalize.block != view.proposal.as_ref().unwrap().0 {
-            // TODO: don't unwrap here
-            // TODO: this could happen if we haven't seen proposal yet
+        let proposal_hash = match &view.proposal {
+            Some((hash, _, _)) => hash,
+            None => {
+                debug!(reason = "missing proposal", "dropping finalize");
+                return None;
+            }
+        };
+        if finalize.block != proposal_hash {
             debug!(
                 finalize_block = hex(&finalize.block),
                 proposal_block = hex(&view.proposal.as_ref().unwrap().0),
@@ -851,6 +847,9 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             .insert(signature.public_key.clone(), finalize.clone());
 
         // Construct finalization
+        if finalize.view != self.view {
+            return None;
+        }
         Self::construct_finalization(&self.validators, self.threshold, view)
     }
 
