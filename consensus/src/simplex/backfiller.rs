@@ -5,7 +5,6 @@ use super::{
     wire,
 };
 use crate::{Application, Hash, Height, Payload, View};
-use bytes::Bytes;
 use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
@@ -378,7 +377,7 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
 
     pub fn finalized(&mut self, proposal: Proposal) {
         // Extract height and hash
-        let (view, height, hash) = match &proposal {
+        let (view, height, mut hash) = match &proposal {
             Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
             Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
         };
@@ -408,20 +407,30 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
 
                     // Store finalized block record
                     self.locked.insert(height, Lock::Finalized(hash.clone()));
+
+                    // Update value of hash to be parent of this block
+                    if let Some(parent) = self.blocks.get(&hash) {
+                        hash = parent.parent.clone();
+                    } else {
+                        // If we don't know the parent, we can't finalize any ancestors
+                        break;
+                    }
                 }
                 Some(Lock::Finalized(seen)) => {
                     if *seen != hash {
                         panic!("finalized block hash mismatch");
                     }
+                    break;
                 }
                 None => {
-                    // TODO: check to see if we have the proposal at this height and populate
-                    // finalize with correct parent
+                    self.locked.insert(next, Lock::Finalized(hash.clone()));
 
-                    // Once we reach an empty lock > 0, exit (and we will continue
-                    // to backfill locks during resolution)
-                    self.locked.insert(next, Lock::Finalized(TODO));
-                    break;
+                    // Attempt to keep recursing backwards until hit a finalized block or 0
+                    if let Some(parent) = self.blocks.get(&hash) {
+                        hash = parent.parent.clone();
+                    } else {
+                        break;
+                    }
                 }
             }
 
