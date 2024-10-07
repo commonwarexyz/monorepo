@@ -16,6 +16,7 @@
 mod config;
 mod engine;
 mod orchestrator;
+mod runner;
 mod voter;
 
 mod wire {
