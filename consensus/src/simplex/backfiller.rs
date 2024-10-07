@@ -381,10 +381,25 @@ impl<E: Clock + Rng, S: Sender, R: Receiver, A: Application> Backfiller<E, S, R,
             None => return false,
         };
 
-        // Check if parent is notarized or finalized
+        // Check if parent is notarized or finalized and that the application
+        // has been notified of the parent (ancestry is processed)
         match self.locked.get(&parent.height) {
-            Some(Lock::Finalized(hash)) => parent.parent == *hash,
-            Some(Lock::Notarized(hashes)) => hashes.contains_key(&parent.view),
+            Some(Lock::Notarized(hashes)) => {
+                if !hashes.contains_key(&parent.view) {
+                    return false;
+                }
+                let notifications = match self.notarizations_sent.get(&parent.height) {
+                    Some(notifications) => notifications,
+                    None => return false,
+                };
+                notifications.contains(&parent.parent)
+            }
+            Some(Lock::Finalized(hash)) => {
+                if parent.parent != *hash {
+                    return false;
+                }
+                self.last_notified >= parent.height
+            }
             None => false,
         }
     }
