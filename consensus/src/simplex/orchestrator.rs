@@ -171,15 +171,30 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
     // TODO: base this off of notarized/finalized (don't want to build index until finalized data, could
     // have a separate index for notarized blocks by view and another for finalized blocks by height)
-    async fn resolve(&mut self, hash: Hash, proposal: wire::Proposal) {
+    async fn resolve(&mut self, proposal: Proposal) {
+        // Parse proposal
+        let (hash, proposal) = match proposal {
+            Proposal::Reference(_, _, hash) => {
+                // Check to see if we have the proposal
+                if self.blocks.contains_key(&hash) {
+                    return;
+                }
+
+                // Record that we are missing the view
+                self.missing_sender.send(hash.clone()).await.unwrap();
+                return;
+            }
+            Proposal::Populated(hash, proposal) => (hash, proposal),
+        };
+
         // If already resolved, do nothing.
         if self.blocks.contains_key(&hash) {
             return;
         }
 
         // Record what we know
-        if self.locked.get(&proposal.height).is_none() {
-            if proposal.height < self.last_finalized {
+        if !self.locked.contains_key(&proposal.height) {
+            if proposal.height > self.last_finalized {
                 let mut seen = BTreeMap::new();
                 seen.insert(proposal.view, hash.clone());
                 self.locked.insert(proposal.height, Lock::Notarized(seen));
@@ -194,9 +209,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         self.blocks.insert(hash, proposal);
 
         // Check if we are missing the parent
-        if parent.len() > 0 && !self.blocks.contains_key(&parent) {
+        if !parent.is_empty() && !self.blocks.contains_key(&parent) {
             self.missing_sender.send(parent).await.unwrap();
-            return;
         }
     }
 
@@ -246,21 +260,6 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
             // Update next
             next += 1;
-        }
-    }
-
-    async fn seen(&mut self, proposal: Proposal) {
-        match proposal {
-            Proposal::Reference(_, _, hash) => {
-                // Check to see if we have the proposal
-                if self.blocks.contains_key(&hash) {
-                    return;
-                }
-
-                // Record that we are missing the view
-                self.missing_sender.send(hash.clone()).await.unwrap();
-            }
-            Proposal::Populated(hash, proposal) => self.resolve(hash, proposal).await,
         }
     }
 
@@ -439,30 +438,23 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                 }
                             }
 
-                            // Check to see if we already have this proposal
-                            if self.blocks.contains_key(&incoming_hash) {
-                                debug!(
-                                    sender = hex(&s),
-                                    height = proposal.height,
-                                    "block already resolved"
-                                );
-                                continue;
-                            }
-
                             // Record the proposal
-                            self.resolve(incoming_hash.clone(), proposal).await;
+                            let proposal = Proposal::Populated(incoming_hash.clone(), proposal.clone());
+                            self.resolve(proposal).await;
 
                             // Notify application if we can
                             self.notify();
 
                             // If incoming hash was our task, exit the loop
-                            if let Some(request) = outstanding_task.0 {
-                                debug!(
-                                    request = hex(&request),
-                                    sender = hex(&s),
-                                    "backfill resolution"
-                                );
-                                outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::MAX);
+                            if let Some(request) = outstanding_task.0.as_ref() {
+                                if *request == incoming_hash {
+                                    debug!(
+                                        request = hex(&request),
+                                        sender = hex(&s),
+                                        "backfill resolution"
+                                    );
+                                    outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::MAX);
+                                }
                             }
                         }
                     }
@@ -624,7 +616,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Mark as seen
-        self.seen(proposal).await;
+        self.resolve(proposal).await;
 
         // Notify application
         self.notify();
@@ -697,8 +689,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Mark as seen
-        // TODO: call application recursively
-        self.seen(proposal).await;
+        self.resolve(proposal).await;
 
         // Notify application
         self.notify();
