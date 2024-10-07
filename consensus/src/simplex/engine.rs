@@ -2,26 +2,37 @@ use super::{orchestrator::Orchestrator, voter::Voter, wire, Error};
 use crate::Application;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{select, Clock};
+use commonware_runtime::{select, Clock, Spawner};
 use prost::Message as _;
 use rand::Rng;
 use tracing::debug;
 
-pub struct Engine<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> {
+pub struct Engine<
+    E: Clock + Rng + Spawner,
+    C: Scheme,
+    A: Application,
+    S: Sender + Send,
+    R: Receiver + Send,
+> {
     runtime: E,
     crypto: C,
-    application: A,
 
-    voter: Voter<E, C, A>,
+    voter: Voter<E, C>,
     voter_network: (S, R),
 
-    orchestrator: Orchestrator<E, A>,
-    orchestrator_network: (S, R),
+    orchestrator: Option<Orchestrator<E, A, S, R>>,
 
     validators: Vec<PublicKey>,
 }
 
-impl<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E, C, A, S, R> {
+impl<
+        E: Clock + Rng + Spawner,
+        C: Scheme,
+        A: Application + 'static,
+        S: Sender + Send + 'static,
+        R: Receiver + Send + 'static,
+    > Engine<E, C, A, S, R>
+{
     pub fn new(
         runtime: E,
         crypto: C,
@@ -31,19 +42,21 @@ impl<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E
         mut validators: Vec<PublicKey>,
     ) -> Self {
         validators.sort();
-        let orchestrator =
-            Orchestrator::new(runtime.clone(), application.clone(), validators.clone());
+        let (orchestrator, mailbox) = Orchestrator::new(
+            runtime.clone(),
+            application.clone(),
+            orchestrator_network.0,
+            orchestrator_network.1,
+            validators.clone(),
+        );
         Self {
             runtime: runtime.clone(),
             crypto: crypto.clone(),
-            application: application.clone(),
 
-            // TODO: need to communicate with orchestrator in some way? Likely need to move to actor model...
-            voter: Voter::new(runtime, crypto, orchestrator, validators.clone()),
+            voter: Voter::new(runtime, crypto, mailbox, validators.clone()),
             voter_network,
 
-            orchestrator,
-            orchestrator_network,
+            orchestrator: Some(orchestrator),
 
             validators: validators.clone(),
         }
@@ -120,10 +133,13 @@ impl<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E
     }
 
     pub async fn run(mut self) -> Result<(), Error> {
+        let orchestrator = self.orchestrator.take().unwrap();
+        self.runtime.spawn("orchestrator", orchestrator.run());
+
         // Process messages
         loop {
             // Attempt to propose a block
-            if let Some(proposal) = self.voter.propose() {
+            if let Some(proposal) = self.voter.propose().await {
                 // Broadcast the proposal
                 let msg = wire::Message {
                     payload: Some(wire::message::Payload::Proposal(proposal.clone())),
@@ -137,7 +153,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E
 
                 // Handle the proposal
                 let proposal_view = proposal.view;
-                self.voter.proposal(proposal);
+                self.voter.proposal(proposal).await;
                 self.send_view_messages(proposal_view).await;
             }
 
@@ -198,7 +214,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E
             match payload {
                 wire::message::Payload::Proposal(proposal) => {
                     view = proposal.view;
-                    self.voter.proposal(proposal);
+                    self.voter.proposal(proposal).await;
                 }
                 wire::message::Payload::Vote(vote) => {
                     view = vote.view;
@@ -215,10 +231,6 @@ impl<E: Clock + Rng, C: Scheme, A: Application, S: Sender, R: Receiver> Engine<E
                 wire::message::Payload::Finalization(finalization) => {
                     view = finalization.view;
                     self.voter.finalization(finalization);
-                }
-                _ => {
-                    debug!(sender = hex(&sender), "unexpected message");
-                    continue;
                 }
             };
 

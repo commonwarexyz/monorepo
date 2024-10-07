@@ -9,14 +9,92 @@ use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
 use core::panic;
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures::{SinkExt, StreamExt};
-use prost::Message;
+use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, warn};
+
+pub enum Message {
+    Propose {
+        response: oneshot::Sender<Option<((Hash, wire::Proposal), (Hash, Payload))>>,
+    },
+    Parse {
+        payload: Payload,
+        response: oneshot::Sender<Option<Hash>>,
+    },
+    Verify {
+        proposal: wire::Proposal,
+        response: oneshot::Sender<bool>,
+    },
+    Notarized {
+        proposal: Proposal,
+    },
+    Finalized {
+        proposal: Proposal,
+    },
+}
+
+#[derive(Clone)]
+pub struct Mailbox {
+    sender: mpsc::Sender<Message>,
+}
+
+impl Mailbox {
+    pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
+        Self { sender }
+    }
+
+    pub async fn propose(&mut self) -> Option<((Hash, wire::Proposal), (Hash, Payload))> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Propose { response: sender })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    pub async fn parse(&mut self, payload: Payload) -> Option<Hash> {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Parse {
+                payload,
+                response: sender,
+            })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    pub async fn verify(&mut self, proposal: wire::Proposal) -> bool {
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Verify {
+                proposal,
+                response: sender,
+            })
+            .await
+            .unwrap();
+        receiver.await.unwrap()
+    }
+
+    pub async fn notarized(&mut self, proposal: Proposal) {
+        self.sender
+            .send(Message::Notarized { proposal })
+            .await
+            .unwrap();
+    }
+
+    pub async fn finalized(&mut self, proposal: Proposal) {
+        self.sender
+            .send(Message::Finalized { proposal })
+            .await
+            .unwrap();
+    }
+}
 
 #[derive(Clone)]
 pub enum Proposal {
@@ -30,9 +108,13 @@ enum Lock {
     Finalized(Hash),
 }
 
-pub struct Orchestrator<E: Clock + Rng, A: Application> {
+pub struct Orchestrator<E: Clock + Rng, A: Application, S: Sender, R: Receiver> {
     runtime: E,
     application: A,
+    sender: S,
+    receiver: R,
+
+    mailbox_receiver: mpsc::Receiver<Message>,
 
     validators: Vec<PublicKey>,
 
@@ -56,26 +138,41 @@ pub struct Orchestrator<E: Clock + Rng, A: Application> {
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng, A: Application> Orchestrator<E, A> {
-    pub fn new(runtime: E, application: A, validators: Vec<PublicKey>) -> Self {
+impl<E: Clock + Rng, A: Application, S: Sender, R: Receiver> Orchestrator<E, A, S, R> {
+    pub fn new(
+        runtime: E,
+        application: A,
+        sender: S,
+        receiver: R,
+        validators: Vec<PublicKey>,
+    ) -> (Self, Mailbox) {
+        let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
-        Self {
-            runtime,
-            application,
-            validators,
+        (
+            Self {
+                runtime,
+                application,
+                sender,
+                receiver,
 
-            locked: HashMap::new(),
-            blocks: HashMap::new(),
+                mailbox_receiver,
 
-            last_notarized: 0,
-            last_finalized: 0,
+                validators,
 
-            missing_sender,
-            missing_receiver,
+                locked: HashMap::new(),
+                blocks: HashMap::new(),
 
-            notarizations_sent: HashMap::new(),
-            last_notified: 0,
-        }
+                last_notarized: 0,
+                last_finalized: 0,
+
+                missing_sender,
+                missing_receiver,
+
+                notarizations_sent: HashMap::new(),
+                last_notified: 0,
+            },
+            Mailbox::new(mailbox_sender),
+        )
     }
 
     // TODO: base this off of notarized/finalized (don't want to build index until finalized data, could
@@ -176,7 +273,7 @@ impl<E: Clock + Rng, A: Application> Orchestrator<E, A> {
     // This is a pretty basic backfiller (in that it only attempts to resolve one missing
     // proposal at a time). In `tbd`, this will operate very differently because we can
     // verify the integrity of any proposal we receive at an index by the threshold signature.
-    pub async fn run(&mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(mut self) {
         // TODO: need a separate loop for responding to requests
         loop {
             // Get the next missing proposal
@@ -197,7 +294,8 @@ impl<E: Clock + Rng, A: Application> Orchestrator<E, A> {
             }
             .encode_to_vec()
             .into();
-            if let Err(err) = sender
+            if let Err(err) = self
+                .sender
                 .send(Recipients::One(validator.clone()), msg, true)
                 .await
             {
@@ -219,7 +317,7 @@ impl<E: Clock + Rng, A: Application> Orchestrator<E, A> {
                         warn!(request = hex(&request), validator = hex(&validator), "backfill request timed out");
                         break;
                     },
-                    msg = receiver.recv() => {
+                    msg = self.receiver.recv() => {
                         // Parse message
                         let (sender, msg) = match msg {
                             Ok(msg) => msg,

@@ -1,7 +1,7 @@
 //! TODO: change name to voter
 
-use super::{orchestrator::Orchestrator, wire};
-use crate::{simplex::orchestrator::Proposal, Application, Hash, Height};
+use super::{orchestrator::Mailbox, wire};
+use crate::{simplex::orchestrator::Proposal, Hash, Height};
 use bytes::Bytes;
 use commonware_cryptography::{bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme};
 use commonware_runtime::Clock;
@@ -11,7 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     time::{Duration, SystemTime},
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 // TODO: move to config
 const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
@@ -239,11 +239,11 @@ impl View {
 
 // TODO: create fault tracker that can be configured by developer to do something
 
-pub struct Voter<E: Clock + Rng, C: Scheme, A: Application> {
+pub struct Voter<E: Clock + Rng, C: Scheme> {
     runtime: E,
     crypto: C,
 
-    orchestrator: Orchestrator<E, A>,
+    orchestrator: Mailbox,
 
     threshold: u32,
     validators: Vec<PublicKey>,
@@ -253,11 +253,11 @@ pub struct Voter<E: Clock + Rng, C: Scheme, A: Application> {
     views: HashMap<u64, View>,
 }
 
-impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
+impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     pub fn new(
         runtime: E,
         crypto: C,
-        orchestrator: Orchestrator<E, A>,
+        orchestrator: Mailbox,
         mut validators: Vec<PublicKey>,
     ) -> Self {
         // Initialize ordered validators
@@ -285,7 +285,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         }
     }
 
-    pub fn propose(&mut self) -> Option<wire::Proposal> {
+    pub async fn propose(&mut self) -> Option<wire::Proposal> {
         // Check if we are leader
         let view = self.views.get(&self.view).unwrap();
         if view.leader != self.crypto.public_key() {
@@ -298,7 +298,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         }
 
         // Select parent block
-        let (parent, payload) = match self.orchestrator.propose() {
+        let (parent, payload) = match self.orchestrator.propose().await {
             Some((parent, payload)) => (parent, payload),
             None => {
                 debug!(reason = "no available parent", "dropping proposal");
@@ -307,25 +307,13 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         };
         let height = parent.1.height + 1;
 
-        // Get payload hash
-        let payload_hash = match self.orchestrator.parse(payload.clone()) {
-            Some(hash) => hash,
-            None => {
-                warn!(
-                    reason = "invalid payload produced by self",
-                    "dropping proposal"
-                );
-                return None;
-            }
-        };
-
         // Construct proposal
-        let digest = proposal_digest(self.view, height, parent.0.clone(), payload_hash.clone());
+        let digest = proposal_digest(self.view, height, parent.0.clone(), payload.0.clone());
         let proposal = wire::Proposal {
             view: self.view,
             height,
             parent: parent.0,
-            payload,
+            payload: payload.1,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(PROPOSAL_NAMESPACE, &digest),
@@ -380,7 +368,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         }
     }
 
-    pub fn proposal(&mut self, proposal: wire::Proposal) {
+    pub async fn proposal(&mut self, proposal: wire::Proposal) {
         // Parse signature
         let signature = match &proposal.signature {
             Some(signature) => signature,
@@ -428,7 +416,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         }
 
         // Verify the signature
-        let payload_hash = match self.orchestrator.parse(proposal.payload.clone()) {
+        let payload_hash = match self.orchestrator.parse(proposal.payload.clone()).await {
             Some(hash) => hash,
             None => {
                 debug!(reason = "invalid payload", "dropping proposal");
@@ -452,7 +440,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         }
 
         // Verify the proposal
-        if !self.orchestrator.verify(proposal.clone()) {
+        if !self.orchestrator.verify(proposal.clone()).await {
             debug!(reason = "invalid payload", "dropping proposal");
             return;
         };
