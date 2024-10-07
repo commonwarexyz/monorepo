@@ -39,14 +39,10 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_p2p::simulated::{
-        self,
-        network::{self, Network},
-    };
-    use commonware_runtime::{deterministic::Executor, Runner};
-
     use super::*;
+    use commonware_cryptography::{Ed25519, Scheme};
+    use commonware_p2p::simulated::network::{self, Network};
+    use commonware_runtime::{deterministic::Executor, Runner};
 
     #[test]
     fn test_simple() {
