@@ -62,6 +62,8 @@ pub struct View {
         Hash, /* payload */
         wire::Proposal,
     )>,
+    broadcast_vote: bool,
+    broadcast_finalize: bool,
 
     // Track votes for all proposals (ensuring any participant only has one recorded vote)
     proposal_voters: HashSet<PublicKey>,
@@ -94,6 +96,8 @@ impl View {
             null_vote_retry: None,
 
             proposal: None,
+            broadcast_vote: false,
+            broadcast_finalize: false,
 
             proposal_voters: HashSet::new(),
             proposal_votes: HashMap::new(),
@@ -107,6 +111,28 @@ impl View {
             finalizes: HashMap::new(),
             broadcast_finalization: false,
         }
+    }
+
+    fn add_verified_vote(&mut self, vote: wire::Vote) {
+        if vote.block.len() == 0 {
+            self.null_votes
+                .insert(vote.signature.as_ref().unwrap().public_key.clone(), vote);
+            return;
+        }
+
+        // Check if already voted
+        let public_key = &vote.signature.as_ref().unwrap().public_key;
+        if self.proposal_voters.contains(public_key) {
+            return;
+        }
+
+        // Store the vote
+        self.proposal_voters.insert(public_key.clone());
+        let entry = self
+            .proposal_votes
+            .entry(vote.block.clone())
+            .or_insert_with(HashMap::new);
+        entry.insert(public_key.clone(), vote);
     }
 
     fn notarizable_proposal(
@@ -161,6 +187,22 @@ impl View {
         Some((Bytes::new(), &self.null_votes))
     }
 
+    fn add_verified_finalize(&mut self, finalize: wire::Finalize) {
+        // Check if already finalized
+        let public_key = &finalize.signature.as_ref().unwrap().public_key;
+        if self.finalizers.contains(public_key) {
+            return;
+        }
+
+        // Store the finalize
+        self.finalizers.insert(public_key.clone());
+        let entry = self
+            .finalizes
+            .entry(finalize.block.clone())
+            .or_insert_with(HashMap::new);
+        entry.insert(public_key.clone(), finalize);
+    }
+
     fn finalizable_proposal(
         &mut self,
         threshold: u32,
@@ -202,7 +244,6 @@ impl View {
 
 // TODO: create fault tracker that can be configured by developer to do something
 
-// TODO: handle messages from current view and next view
 pub struct Voter<E: Clock + Rng, C: Scheme, A: Application> {
     runtime: E,
     crypto: C,
@@ -342,13 +383,13 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         }
     }
 
-    pub fn proposal(&mut self, proposal: wire::Proposal) -> Option<wire::Vote> {
+    pub fn proposal(&mut self, proposal: wire::Proposal) {
         // Parse signature
         let signature = match &proposal.signature {
             Some(signature) => signature,
             _ => {
                 debug!(reason = "missing signature", "dropping proposal");
-                return None;
+                return;
             }
         };
 
@@ -360,7 +401,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                 reason = "incorrect view",
                 "dropping proposal"
             );
-            return None;
+            return;
         }
 
         // Check expected leader
@@ -368,7 +409,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             self.validators[proposal.view as usize % self.validators.len()].clone();
         if !C::validate(&signature.public_key) {
             debug!(reason = "invalid signature", "dropping proposal");
-            return None;
+            return;
         }
         if expected_leader != signature.public_key {
             debug!(
@@ -377,7 +418,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                 reason = "leader mismatch",
                 "dropping proposal"
             );
-            return None;
+            return;
         }
 
         // Check to see if we have already received a proposal for this view (if exists)
@@ -385,7 +426,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             if view.proposal.is_some() {
                 debug!(view = proposal.view, "proposal already exists");
                 // TODO: check if different signed proposal and post fault
-                return None;
+                return;
             }
         }
 
@@ -394,7 +435,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             Some(hash) => hash,
             None => {
                 debug!(reason = "invalid payload", "dropping proposal");
-                return None;
+                return;
             }
         };
         let proposal_digest = proposal_digest(
@@ -410,13 +451,13 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             &signature.signature,
         ) {
             debug!(reason = "invalid signature", "dropping proposal");
-            return None;
+            return;
         }
 
         // Verify the proposal
         if !self.orchestrator.verify(proposal.clone()) {
             debug!(reason = "invalid payload", "dropping proposal");
-            return None;
+            return;
         };
 
         // Store the proposal
@@ -425,29 +466,8 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             .entry(proposal.view)
             .or_insert_with(|| View::new(proposal.view, expected_leader, None, None));
         let proposal_hash = hash(proposal_digest);
-        let proposal_view = proposal.view;
         view.proposal = Some((proposal_hash.clone(), payload_hash, proposal));
         view.leader_deadline = None;
-
-        // Check to see if we are past the leader deadline
-        if view.timeout_fired {
-            debug!(view = proposal_view, "leader deadline passed");
-            return None;
-        }
-
-        // Construct vote
-        if proposal_view != self.view {
-            // TODO: when moving into next view, we should broadcast vote
-            return None;
-        }
-        Some(wire::Vote {
-            view: self.view,
-            block: proposal_hash.clone(),
-            signature: Some(wire::Signature {
-                public_key: self.crypto.public_key(),
-                signature: self.crypto.sign(VOTE_NAMESPACE, &proposal_hash),
-            }),
-        })
     }
 
     fn construct_notarization(
@@ -503,8 +523,6 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         });
         entry.leader_deadline = Some(self.runtime.current() + Duration::from_secs(1));
         entry.advance_deadline = Some(self.runtime.current() + Duration::from_secs(2));
-
-        // TODO: If we have already seen a proposal, construct useful network messages
     }
 
     pub fn vote(&mut self, vote: wire::Vote) {
@@ -565,35 +583,25 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         });
 
         // Handle vote
-        if vote.block.len() == 0 {
-            view.null_votes
-                .insert(signature.public_key.clone(), vote.clone());
-            return;
-        }
+        view.add_verified_vote(vote);
+    }
 
-        // Check if already voted
-        if view.proposal_voters.contains(&signature.public_key) {
+    pub fn notarization(&mut self, notarization: wire::Notarization) {
+        // Check if we are still in a view that this would help with
+        if notarization.view < self.view {
             debug!(
-                signer = hex(&signature.public_key),
-                reason = "already voted",
-                "skipping vote"
+                notarization_view = notarization.view,
+                our_view = self.view,
+                reason = "outdated notarization",
+                "dropping notarization"
             );
             return;
         }
 
-        // Store the vote
-        view.proposal_voters.insert(signature.public_key.clone());
-        let entry = view
-            .proposal_votes
-            .entry(vote.block.clone())
-            .or_insert_with(HashMap::new);
-        entry.insert(signature.public_key.clone(), vote);
-    }
+        // Lookup view in case we can add any missing signatures
+        let mut view = self.views.get_mut(&notarization.view);
 
-    pub fn notarization(&mut self, notarization: wire::Notarization) {
         // Verify threshold notarization
-        //
-        // TODO: conditionally verify signatures based on our view
         let mut added = 0;
         let mut seen = HashSet::new();
         for signature in notarization.signatures {
@@ -629,7 +637,16 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                 return;
             }
 
-            // TODO: If we are tracking this view, add any new signatures
+            // Add any useful signatures
+            if let Some(ref mut view) = view {
+                view.add_verified_vote(wire::Vote {
+                    view: notarization.view,
+                    block: notarization.block.clone(),
+                    signature: Some(signature),
+                });
+            }
+
+            // Track that we added one for threshold
             added += 1;
         }
         if added <= self.threshold {
@@ -639,170 +656,12 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                 reason = "insufficient signatures",
                 "dropping notarization"
             );
-            return (None, None);
+            return;
         }
         debug!(view = notarization.view, added, "notarization verified");
 
-        // TODO: If new view, immediately jump ahead
-
-        // TODO: if old view, add any missing signatures
-
-        // TODO: check that notarization has threshold signatures and then move forward to that view,
-        // if already tracking view can add missing signatures but we should not check that view already exists
-
-        // Store any signatures we have yet to see on current or previous view
-        let view = match self.views.get_mut(&notarization.view) {
-            Some(view) => view,
-            None => {
-                debug!(
-                    view = notarization.view,
-                    reason = "unknown view",
-                    "dropping notarization"
-                );
-                return (None, None);
-            }
-        };
-
-        // Get votes
-        let (proposal_hash, votes) = match notarization.block.len() {
-            0 => (Bytes::new(), &mut view.null_votes),
-            _ => {
-                // Get proposal
-                let proposal_hash = match &view.proposal {
-                    Some((hash, _, _)) => hash,
-                    None => {
-                        // TODO: this will require us to fetch the proposal, but should never drop notarization
-                        debug!(reason = "missing proposal", "dropping notarization");
-                        return (None, None);
-                    }
-                };
-
-                // If notarization is not for proposal, drop
-                if proposal_hash != &notarization.block {
-                    // TODO: this will require us to fetch the proposal and drop ours (Fault)
-                    debug!(
-                        notarization_block = hex(&notarization.block),
-                        proposal_block = hex(&proposal_hash),
-                        reason = "block mismatch",
-                        "dropping notarization"
-                    );
-                    return (None, None);
-                }
-                (proposal_hash.clone(), &mut view.proposal_votes)
-            }
-        };
-
-        // Verify signature info
-        if notarization.signatures.len() < self.threshold as usize {
-            debug!(
-                threshold = self.threshold,
-                signatures = notarization.signatures.len(),
-                reason = "insufficient signatures",
-                "dropping notarization"
-            );
-            return (None, None);
-        }
-
-        // Verify and store missing signatures
-        let mut added = 0;
-        let mut seen = HashSet::new();
-        for signature in notarization.signatures {
-            // Verify signature
-            if !C::validate(&signature.public_key) {
-                debug!(
-                    signer = hex(&signature.public_key),
-                    reason = "invalid validator",
-                    "dropping notarization"
-                );
-                return (None, None);
-            }
-
-            // Ensure we haven't seen this signature before
-            if seen.contains(&signature.public_key) {
-                debug!(
-                    signer = hex(&signature.public_key),
-                    reason = "duplicate signature",
-                    "dropping notarization"
-                );
-                return (None, None);
-            }
-            seen.insert(signature.public_key.clone());
-
-            // If we already have this, skip verification
-            if votes.contains_key(&signature.public_key) {
-                trace!(
-                    signer = hex(&signature.public_key),
-                    reason = "already voted",
-                    "skipping notarization vote"
-                );
-                continue;
-            }
-            if !C::verify(
-                VOTE_NAMESPACE,
-                &vote_digest(notarization.view, proposal_hash.clone()),
-                &signature.public_key,
-                &signature.signature,
-            ) {
-                debug!(reason = "invalid signature", "dropping notarization");
-                return (None, None);
-            }
-
-            // Store the vote
-            votes.insert(
-                signature.public_key.clone(),
-                wire::Vote {
-                    view: notarization.view,
-                    block: proposal_hash.clone(),
-                    signature: Some(signature),
-                },
-            );
-            added += 1;
-        }
-        debug!(added, "notarization verified");
-
-        // Construct notarization
-        let notarization = Self::construct_notarization(
-            &self.validators,
-            self.threshold,
-            view,
-            proposal_hash.is_empty(),
-        );
-
-        // Notify application
-        if notarization.is_some() && !proposal_hash.is_empty() {
-            let payload = view.proposal.as_ref().unwrap().2.payload.clone();
-            self.last_notarized = Some(proposal_hash.clone());
-            self.application.notarized(payload);
-        }
-
-        // Increment view
-        let timeout_fired = view.timeout_fired;
-        self.view += 1;
-        self.views.insert(
-            self.view,
-            View::new(
-                self.view,
-                self.validators[self.view as usize % self.validators.len()].clone(),
-                self.runtime.current() + Duration::from_secs(2),
-                self.runtime.current() + Duration::from_secs(3),
-            ),
-        );
-
-        // If this is a dummy block notarization or we've timed out, don't broadcast a finalize message.
-        if proposal_hash.is_empty() || timeout_fired {
-            return (notarization, None);
-        }
-
-        // Construct finalize
-        let finalize = wire::Finalize {
-            view: self.view,
-            block: proposal_hash.clone(),
-            signature: Some(wire::Signature {
-                public_key: self.crypto.public_key(),
-                signature: self.crypto.sign(FINALIZE_NAMESPACE, &proposal_hash),
-            }),
-        };
-        (notarization, Some(finalize))
+        // Enter next view
+        self.enter_view(notarization.view + 1);
     }
 
     fn construct_finalization(
@@ -837,7 +696,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                 reason = "incorrect view",
                 "dropping finalize"
             );
-            return None;
+            return;
         }
 
         // Parse signature
@@ -845,12 +704,12 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             Some(signature) => signature,
             _ => {
                 debug!(reason = "missing signature", "dropping finalize");
-                return None;
+                return;
             }
         };
         if !C::validate(&signature.public_key) {
             debug!(reason = "invalid signature", "dropping finalize");
-            return None;
+            return;
         }
 
         // Verify that signer is a validator
@@ -860,7 +719,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                 reason = "invalid validator",
                 "dropping finalize"
             );
-            return None;
+            return;
         }
 
         // Verify the signature
@@ -872,7 +731,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
             &signature.signature,
         ) {
             debug!(reason = "invalid signature", "dropping vote");
-            return None;
+            return;
         }
 
         // Get view for finalize
@@ -889,55 +748,25 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
         if finalize.block.len() == 0 {
             // TODO: record fault
             debug!(reason = "finalize for null block", "dropping finalize");
-            return None;
-        }
-        let proposal_hash = match &view.proposal {
-            Some((hash, _, _)) => hash,
-            None => {
-                debug!(reason = "missing proposal", "dropping finalize");
-                return None;
-            }
-        };
-        if finalize.block != proposal_hash {
-            debug!(
-                finalize_block = hex(&finalize.block),
-                proposal_block = hex(&view.proposal.as_ref().unwrap().0),
-                reason = "block mismatch",
-                "dropping finalize"
-            );
-            return None;
-        }
-
-        // Check if already finalized
-        if view.finalizers.contains(&signature.public_key) {
-            debug!(
-                signer = hex(&signature.public_key),
-                reason = "already finalized",
-                "skipping finalize"
-            );
             return;
         }
 
-        // Record the finalize
-        view.finalizers.insert(signature.public_key.clone());
-        let entry = view
-            .finalizes
-            .entry(finalize.block.clone())
-            .or_insert_with(HashMap::new);
-        entry.insert(signature.public_key.clone(), finalize);
+        // Handle finalize
+        view.add_verified_finalize(finalize);
     }
 
-    pub fn finalization(&mut self, finalization: wire::Finalization) -> Option<wire::Finalization> {
-        // Ensure not for null
+    pub fn finalization(&mut self, finalization: wire::Finalization) {
+        // Ensure not for null (should never happen)
         if finalization.block.len() == 0 {
             debug!(reason = "finalize for null block", "dropping finalization");
             // TODO: record faults
-            return None;
+            return;
         }
 
+        // Lookup view in case we can add any missing signatures
+        let mut view = self.views.get_mut(&finalization.view);
+
         // Verify threshold finalization
-        //
-        // TODO: conditionally verify signatures based on our view
         let mut added = 0;
         let mut seen = HashSet::new();
         for signature in finalization.signatures {
@@ -948,7 +777,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                     reason = "invalid validator",
                     "dropping finalization"
                 );
-                return None;
+                return;
             }
 
             // Ensure we haven't seen this signature before
@@ -958,7 +787,7 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                     reason = "duplicate signature",
                     "dropping finalization"
                 );
-                return None;
+                return;
             }
             seen.insert(signature.public_key.clone());
 
@@ -970,109 +799,26 @@ impl<E: Clock + Rng, C: Scheme, A: Application> Voter<E, C, A> {
                 &signature.signature,
             ) {
                 debug!(reason = "invalid signature", "dropping finalization");
-                return None;
+                return;
             }
 
-            // TODO: If we are tracking this view, add any new signatures
+            // Add any useful signatures
+            if let Some(ref mut view) = view {
+                view.add_verified_finalize(wire::Finalize {
+                    view: finalization.view,
+                    block: finalization.block.clone(),
+                    signature: Some(signature),
+                });
+            }
+
+            // Track that we added one for threshold
             added += 1;
         }
         debug!(view = finalization.view, added, "finalization verified");
 
-        // TODO: jump ahead if greater than our view (and prune in-memory after notifying orchestrator of what we have)
-
-        // TODO: if old view, store finalizations
-
-        // Store any signatures we have yet to see on current or previous view
-        let view = match self.views.get_mut(&finalization.view) {
-            Some(view) => view,
-            None => {
-                // TODO: shouldn't drop this
-                debug!(
-                    view = finalization.view,
-                    reason = "unknown view",
-                    "dropping finalization"
-                );
-                return None;
-            }
-        };
-
-        // Verify signature info
-        if finalization.signatures.len() < self.threshold as usize {
-            debug!(
-                threshold = self.threshold,
-                signatures = finalization.signatures.len(),
-                reason = "insufficient signatures",
-                "dropping finalization"
-            );
-            return None;
+        // Enter next view (if applicable)
+        if finalization.view >= self.view {
+            self.enter_view(finalization.view + 1);
         }
-
-        // Verify and store missing signatures
-        let mut added = 0;
-        let mut seen = HashSet::new();
-        for signature in finalization.signatures {
-            // Verify signature
-            if !C::validate(&signature.public_key) {
-                debug!(
-                    signer = hex(&signature.public_key),
-                    reason = "invalid validator",
-                    "dropping finalization"
-                );
-                return None;
-            }
-
-            // Ensure we haven't seen this signature before
-            if seen.contains(&signature.public_key) {
-                debug!(
-                    signer = hex(&signature.public_key),
-                    reason = "duplicate signature",
-                    "dropping finalization"
-                );
-                return None;
-            }
-            seen.insert(signature.public_key.clone());
-
-            // If we already have this, skip verification
-            if view.finalizes.contains_key(&signature.public_key) {
-                trace!(
-                    signer = hex(&signature.public_key),
-                    reason = "already recorded finalize",
-                    "skipping finalization"
-                );
-                continue;
-            }
-            if !C::verify(
-                FINALIZE_NAMESPACE,
-                &finalize_digest(finalization.view, finalization.block.clone()),
-                &signature.public_key,
-                &signature.signature,
-            ) {
-                debug!(reason = "invalid signature", "dropping finalization");
-                return None;
-            }
-
-            // Store the finalize
-            view.finalizes.insert(
-                signature.public_key.clone(),
-                wire::Finalize {
-                    view: finalization.view,
-                    block: finalization.block.clone(),
-                    signature: Some(signature),
-                },
-            );
-            added += 1;
-        }
-        debug!(added, "finalization verified");
-
-        // Construct finalization
-        let finalization = Self::construct_finalization(&self.validators, self.threshold, view);
-        if finalization.is_none() {
-            return None;
-        }
-
-        // Notify application
-        let payload = view.proposal.as_ref().unwrap().2.payload.clone();
-        self.application.finalized(payload);
-        finalization
     }
 }
