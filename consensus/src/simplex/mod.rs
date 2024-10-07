@@ -39,32 +39,36 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
     use crate::{Application, Hash, Payload};
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_p2p::simulated::network::{self, Network};
+    use commonware_p2p::simulated::network::{self, Link, Network};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
+    use std::time::Duration;
+    use tracing::debug;
 
     struct MockApplication {}
 
     impl Application for MockApplication {
         fn propose(&mut self, _parent: Hash) -> Option<Payload> {
-            None
+            unimplemented!()
         }
 
         fn parse(&self, _payload: Payload) -> Option<Hash> {
-            None
+            unimplemented!()
         }
 
         fn verify(&self, _payload: Payload) -> bool {
-            true
+            unimplemented!()
         }
 
-        fn notarized(&mut self, _payload: Payload) {}
+        fn notarized(&mut self, _payload: Payload) {
+            unimplemented!()
+        }
 
-        fn finalized(&mut self, _payload: Payload) {}
+        fn finalized(&mut self, _payload: Payload) {
+            unimplemented!()
+        }
     }
 
     #[test]
@@ -92,11 +96,32 @@ mod tests {
 
             // Create runners
             for scheme in schemes.into_iter() {
+                // Register on network
                 let validator = scheme.public_key();
                 let (block_sender, block_receiver) =
                     network.register(validator.clone(), 0, 1024 * 1024).unwrap();
                 let (vote_sender, vote_receiver) =
                     network.register(validator.clone(), 1, 1024 * 1024).unwrap();
+
+                // Link to other validators
+                for other in validators.iter() {
+                    if other == &validator {
+                        continue;
+                    }
+                    network
+                        .link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency_mean: 10.0,
+                                latency_stddev: 1.0,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .unwrap();
+                }
+
+                // Start runner
                 let mut runner = runner::Runner::new(runtime.clone(), validators.clone());
                 runtime.spawn("runner", async move {
                     runner
@@ -110,12 +135,8 @@ mod tests {
                 });
             }
 
-            // Loop forever
-            //
-            // TODO: replace with conditions based on application
-            loop {
-                runtime.sleep(Duration::from_secs(1)).await;
-            }
+            // Run network
+            network.run().await;
         });
     }
 }
