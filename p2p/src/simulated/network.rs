@@ -10,13 +10,15 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use prometheus_client::metrics::{counter::Counter, family::Family};
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    metrics::{counter::Counter, family::Family},
+    registry::Registry,
+};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
-use std::sync::{Arc, Mutex};
 use std::{
     collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tracing::{debug, error};
@@ -40,8 +42,8 @@ pub struct Network<E: Spawner + Rng + Clock> {
     links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
     agents: BTreeMap<PublicKey, HashMap<Channel, (usize, mpsc::UnboundedSender<Message>)>>,
 
-    received_messages: Family<metrics::ReceivedMessage, Counter>,
-    sent_messages: Family<metrics::SentMessage, Counter>,
+    received_messages: Family<metrics::Message, Counter>,
+    sent_messages: Family<metrics::Message, Counter>,
 }
 
 /// Describes a connection between two peers.
@@ -62,15 +64,14 @@ pub struct Link {
 /// Configuration for a `simulated` network.
 pub struct Config {
     pub registry: Arc<Mutex<Registry>>,
-    // TODO: add metrics (#90)
 }
 
 impl<E: Spawner + Rng + Clock> Network<E> {
     /// Create a new simulated network with a given runtime and configuration.
     pub fn new(runtime: E, cfg: Config) -> Self {
         let (sender, receiver) = mpsc::unbounded();
-        let sent_messages = Family::<metrics::SentMessage, Counter>::default();
-        let received_messages = Family::<metrics::ReceivedMessage, Counter>::default();
+        let sent_messages = Family::<metrics::Message, Counter>::default();
+        let received_messages = Family::<metrics::Message, Counter>::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
             registry.register("messages_sent", "messages sent", sent_messages.clone());
@@ -148,12 +149,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     /// Run the simulated network.
     pub async fn run(mut self) {
         // Process messages
-
         while let Some((channel, origin, recipients, message, reply)) = self.receiver.next().await {
-            let received_messages = self.received_messages.clone();
-            received_messages
-                .get_or_create(&metrics::ReceivedMessage::new(&origin, channel))
-                .inc();
             // Collect recipients
             let recipients = match recipients {
                 Recipients::All => self.agents.keys().cloned().collect(),
@@ -165,7 +161,6 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             let mut sent = Vec::new();
             let (acquired_sender, mut acquired_receiver) = mpsc::channel(recipients.len());
             for recipient in recipients {
-                let sent_messages = self.sent_messages.clone();
                 // Skip self
                 if recipient == origin {
                     debug!(
@@ -206,6 +201,12 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     }
                 };
 
+                // Record sent message as soon as we determine there is a link with recipient (approximates
+                // having an open connection)
+                self.sent_messages
+                    .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
+                    .inc();
+
                 // Apply link settings
                 let should_deliver = self.runtime.gen_bool(link.success_rate);
                 let delay = Normal::new(link.latency_mean, link.latency_stddev)
@@ -226,6 +227,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     let message = message.clone();
                     let mut acquired_sender = acquired_sender.clone();
                     let origin = origin.clone();
+                    let received_messages = self.received_messages.clone();
                     async move {
                         // Mark as sent as soon as soon as execution starts
                         acquired_sender.send(()).await.unwrap();
@@ -282,11 +284,13 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                                 ?err,
                                 "failed to send",
                             );
-                        } else {
-                            sent_messages
-                                .get_or_create(&metrics::SentMessage::new(&recipient))
-                                .inc();
+                            return;
                         }
+
+                        // Only record received messages that were successfully sent
+                        received_messages
+                            .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
+                            .inc();
                     }
                 });
                 sent.push(recipient);

@@ -2,27 +2,18 @@ use commonware_cryptography::{utils::hex, PublicKey};
 use prometheus_client::encoding::EncodeLabelSet;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct ReceivedMessage {
-    pub peer: String,
-    pub message: i32,
+pub struct Message {
+    pub origin: String,
+    pub recipient: String,
+    pub channel: i32,
 }
 
-impl ReceivedMessage {
-    pub fn new(peer: &PublicKey, channel: u32) -> Self {
+impl Message {
+    pub fn new(origin: &PublicKey, recipient: &PublicKey, channel: u32) -> Self {
         Self {
-            peer: hex(peer),
-            message: channel as i32,
+            origin: hex(origin),
+            recipient: hex(recipient),
+            channel: channel as i32,
         }
-    }
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct SentMessage {
-    pub peer: String,
-}
-
-impl SentMessage {
-    pub fn new(peer: &PublicKey) -> Self {
-        Self { peer: hex(peer) }
     }
 }
