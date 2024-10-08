@@ -6,6 +6,9 @@ use bytes::Bytes;
 
 // TODO: add simulated dialect for applications to test their execution environments under (with arbitary orphans, etc.)
 
+// TODO: add a view limit (where no further blocks can be produced) but still respond to sync requests (would need to periodically gossip
+// last finalization to all peers to allow new syncers to catch up)
+
 // TODO: tests
 // - sync from scratch
 // - halt (50% shutdown) and recover
