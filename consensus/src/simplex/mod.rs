@@ -39,15 +39,15 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
-    use core::hash;
-
     use super::*;
     use crate::{Application, Hash, Payload};
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_p2p::simulated::network::{self, Link, Network};
+    use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
-    use tracing::{info, Level};
+    use prometheus_client::registry::Registry;
+    use std::sync::{Arc, Mutex};
+    use tracing::Level;
     use voter::hash;
 
     struct MockApplication {}
@@ -89,7 +89,12 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = Network::new(runtime.clone(), network::Config {});
+            let mut network = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                },
+            );
 
             // Register participants
             let mut schemes = Vec::new();
