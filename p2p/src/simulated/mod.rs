@@ -1,8 +1,65 @@
 //! Simulate messaging between arbitrary peers with configurable performance (i.e. drops, latency, corruption, etc.).
 //!
 //! To make the simulation deterministic, employ `commonware-runtime`'s `deterministic::Executor` (with a given seed).
+//!
+//! # Example
+//!
+//! ```rust
+//! use commonware_p2p::simulated::{Config, Link, Network};
+//! use commonware_cryptography::{Ed25519, Scheme};
+//! use commonware_runtime::{deterministic::Executor, Spawner, Runner};
+//! use prometheus_client::registry::Registry;
+//! use std::sync::{Arc, Mutex};
+//!
+//! // Generate peers
+//! let peers = vec![
+//!     Ed25519::from_seed(0).public_key(),
+//!     Ed25519::from_seed(1).public_key(),
+//!     Ed25519::from_seed(2).public_key(),
+//!     Ed25519::from_seed(3).public_key(),
+//! ];
+//!
+//! // Configure network
+//! let p2p_cfg = Config {
+//!     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+//! };
+//!
+//! // Start runtime
+//! let (executor, runtime, _) = Executor::seeded(0);
+//! executor.start(async move {
+//!     // Initialize network
+//!     let mut network = Network::new(runtime.clone(), p2p_cfg);
+//!
+//!     // Link 2 peers
+//!     network.link(
+//!         peers[0].clone(),
+//!         peers[1].clone(),
+//!         Link {
+//!             latency_mean: 5.0,
+//!             latency_stddev: 2.5,
+//!             success_rate: 0.75,
+//!         },
+//!     ).unwrap();
+//!
+//!     // Register some channel
+//!     let (sender, receiver) = network.register(
+//!         peers[0].clone(),
+//!         0,
+//!         1024 * 1024, // 1KB
+//!     ).unwrap();
+//!
+//!     // Run network
+//!     let network_handler = runtime.spawn("network", network.run());
+//!
+//!     // ... Use sender and receiver ...
+//!
+//!     // Shutdown network
+//!     network_handler.abort();
+//! });
+//! ```
 
-pub mod network;
+mod metrics;
+mod network;
 
 use thiserror::Error;
 
@@ -20,6 +77,8 @@ pub enum Error {
     ChannelAlreadyRegistered(u32),
 }
 
+pub use network::{Config, Link, Network};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -28,17 +87,24 @@ mod tests {
     use commonware_cryptography::{utils::hex, Ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, select, Clock, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
+    use prometheus_client::registry::Registry;
     use rand::Rng;
+    use std::sync::{Arc, Mutex};
     use std::{
         collections::{BTreeMap, HashMap},
         time::Duration,
     };
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
-        // Create simulated network
         let (executor, runtime, auditor) = Executor::seeded(seed);
         executor.start(async move {
-            let mut network = network::Network::new(runtime.clone(), network::Config {});
+            // Create simulated network
+            let mut network = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                },
+            );
 
             // Register agents
             let mut agents = BTreeMap::new();
@@ -69,7 +135,7 @@ mod tests {
                     let result = network.link(
                         agent.clone(),
                         other.clone(),
-                        network::Link {
+                        Link {
                             latency_mean: 5.0,
                             latency_stddev: 2.5,
                             success_rate: 0.75,
@@ -146,7 +212,12 @@ mod tests {
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(runtime.clone(), network::Config {});
+            let mut network = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                },
+            );
 
             // Register agents
             let mut agents = HashMap::new();
@@ -181,7 +252,12 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(runtime.clone(), network::Config {});
+            let mut network = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                },
+            );
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
@@ -191,7 +267,7 @@ mod tests {
             let result = network.link(
                 pk.clone(),
                 pk.clone(),
-                network::Link {
+                Link {
                     latency_mean: 5.0,
                     latency_stddev: 2.5,
                     success_rate: 0.75,
@@ -208,7 +284,12 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(runtime.clone(), network::Config {});
+            let mut network = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                },
+            );
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
@@ -225,7 +306,12 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(runtime.clone(), network::Config {});
+            let mut network = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                },
+            );
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
@@ -237,7 +323,7 @@ mod tests {
             let result = network.link(
                 pk1.clone(),
                 pk2.clone(),
-                network::Link {
+                Link {
                     latency_mean: 5.0,
                     latency_stddev: 2.5,
                     success_rate: 1.5,
@@ -254,7 +340,12 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(runtime.clone(), network::Config {});
+            let mut network = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                },
+            );
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
@@ -273,7 +364,7 @@ mod tests {
                 .link(
                     pk1.clone(),
                     pk2.clone(),
-                    network::Link {
+                    Link {
                         latency_mean: 5.0,
                         latency_stddev: 2.5,
                         success_rate: 1.0,
@@ -284,7 +375,7 @@ mod tests {
                 .link(
                     pk2.clone(),
                     pk1.clone(),
-                    network::Link {
+                    Link {
                         latency_mean: 5.0,
                         latency_stddev: 2.5,
                         success_rate: 1.0,
@@ -322,7 +413,12 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(runtime.clone(), network::Config {});
+            let mut network = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                },
+            );
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
@@ -335,7 +431,7 @@ mod tests {
                 .link(
                     pk1.clone(),
                     pk2.clone(),
-                    network::Link {
+                    Link {
                         latency_mean: 5.0,
                         latency_stddev: 2.5,
                         success_rate: 1.0,
@@ -368,7 +464,12 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(runtime.clone(), network::Config {});
+            let mut network = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                },
+            );
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
@@ -381,7 +482,7 @@ mod tests {
                 .link(
                     pk1.clone(),
                     pk2.clone(),
-                    network::Link {
+                    Link {
                         latency_mean: 5.0,
                         latency_stddev: 2.5,
                         success_rate: 1.0,

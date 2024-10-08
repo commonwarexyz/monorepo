@@ -1,5 +1,6 @@
 //! Implementation of a `simulated` network.
 
+use super::metrics;
 use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
@@ -9,10 +10,15 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
+use prometheus_client::{
+    metrics::{counter::Counter, family::Family},
+    registry::Registry,
+};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tracing::{debug, error};
@@ -35,6 +41,9 @@ pub struct Network<E: Spawner + Rng + Clock> {
     receiver: mpsc::UnboundedReceiver<Task>,
     links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
     agents: BTreeMap<PublicKey, HashMap<Channel, (usize, mpsc::UnboundedSender<Message>)>>,
+
+    received_messages: Family<metrics::Message, Counter>,
+    sent_messages: Family<metrics::Message, Counter>,
 }
 
 /// Describes a connection between two peers.
@@ -54,19 +63,33 @@ pub struct Link {
 
 /// Configuration for a `simulated` network.
 pub struct Config {
-    // TODO: add metrics (#90)
+    pub registry: Arc<Mutex<Registry>>,
 }
 
 impl<E: Spawner + Rng + Clock> Network<E> {
     /// Create a new simulated network with a given runtime and configuration.
-    pub fn new(runtime: E, _: Config) -> Self {
+    pub fn new(runtime: E, cfg: Config) -> Self {
         let (sender, receiver) = mpsc::unbounded();
+        let sent_messages = Family::<metrics::Message, Counter>::default();
+        let received_messages = Family::<metrics::Message, Counter>::default();
+        {
+            let mut registry = cfg.registry.lock().unwrap();
+            registry.register("messages_sent", "messages sent", sent_messages.clone());
+            registry.register(
+                "messages_received",
+                "messages received",
+                received_messages.clone(),
+            );
+        }
+
         Self {
             runtime,
             sender,
             receiver,
             links: HashMap::new(),
             agents: BTreeMap::new(),
+            received_messages,
+            sent_messages,
         }
     }
 
@@ -178,6 +201,12 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     }
                 };
 
+                // Record sent message as soon as we determine there is a link with recipient (approximates
+                // having an open connection)
+                self.sent_messages
+                    .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
+                    .inc();
+
                 // Apply link settings
                 let should_deliver = self.runtime.gen_bool(link.success_rate);
                 let delay = Normal::new(link.latency_mean, link.latency_stddev)
@@ -198,6 +227,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     let message = message.clone();
                     let mut acquired_sender = acquired_sender.clone();
                     let origin = origin.clone();
+                    let received_messages = self.received_messages.clone();
                     async move {
                         // Mark as sent as soon as soon as execution starts
                         acquired_sender.send(()).await.unwrap();
@@ -254,7 +284,13 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                                 ?err,
                                 "failed to send",
                             );
+                            return;
                         }
+
+                        // Only record received messages that were successfully sent
+                        received_messages
+                            .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
+                            .inc();
                     }
                 });
                 sent.push(recipient);
