@@ -1,4 +1,4 @@
-//! Simplex
+//! Fixed
 //!
 //! PoA Consensus useful for running a DKG (no reconfiguration support, round-robin
 //! leader selection).

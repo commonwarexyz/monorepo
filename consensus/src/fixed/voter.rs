@@ -1,7 +1,7 @@
 //! TODO: change name to voter
 
 use super::{orchestrator::Mailbox, wire};
-use crate::{simplex::orchestrator::Proposal, Hash, Height};
+use crate::{r#static::orchestrator::Proposal, Hash, Height};
 use bytes::Bytes;
 use commonware_cryptography::{bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme};
 use commonware_runtime::Clock;
