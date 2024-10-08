@@ -116,7 +116,7 @@ mod tests {
                 let (vote_sender, vote_receiver) =
                     network.register(validator.clone(), 1, 1024 * 1024).unwrap();
 
-                // Link to other validators
+                // Link to all other validators
                 for other in validators.iter() {
                     if other == &validator {
                         continue;

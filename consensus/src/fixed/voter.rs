@@ -580,6 +580,9 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
     pub async fn notarization(&mut self, notarization: wire::Notarization) {
         // Check if we are still in a view that this would help with
+        //
+        // TODO: remove so that we can collect missing signatures or just don't allow to save compute resources
+        // around signature verification?
         if notarization.view < self.view {
             trace!(
                 notarization_view = notarization.view,
@@ -603,6 +606,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         let mut view = self.views.get_mut(&notarization.view);
 
         // Verify threshold notarization
+        // TODO: exit if length != signers (to save space could just send threshold)
         let mut added = 0;
         let mut seen = HashSet::new();
         for signature in notarization.signatures {
