@@ -347,41 +347,75 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
     fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
         // Check if we have the parent
-        if !self.blocks.contains_key(&proposal.parent) {
+        let parent = self.blocks.get(&proposal.parent);
+        if parent.is_none() {
+            debug!(
+                height = proposal.height,
+                hash = hex(&proposal.parent),
+                "missing parent"
+            );
             return false;
         }
+        let parent = parent.unwrap();
 
         // If proposal height is already finalized, fail
         if proposal.height <= self.last_finalized {
+            debug!(height = proposal.height, "already finalized");
             return false;
         }
-
-        // Get parent
-        let parent = match self.blocks.get(&proposal.parent) {
-            Some(parent) => parent,
-            None => return false,
-        };
 
         // Check if parent is notarized or finalized and that the application
         // has been notified of the parent (ancestry is processed)
         match self.locked.get(&parent.height) {
             Some(Lock::Notarized(hashes)) => {
                 if !hashes.contains_key(&parent.view) {
+                    debug!(
+                        height = proposal.height,
+                        hash = hex(&proposal.parent),
+                        "parent not notarized"
+                    );
                     return false;
                 }
                 let notifications = match self.notarizations_sent.get(&parent.height) {
                     Some(notifications) => notifications,
-                    None => return false,
+                    None => {
+                        debug!(
+                            height = proposal.height,
+                            hash = hex(&proposal.parent),
+                            "parent not notified of notarization"
+                        );
+                        return false;
+                    }
                 };
-                notifications.contains(&parent.parent)
+                let contains = notifications.contains(&parent.parent);
+                if !contains {
+                    debug!(
+                        height = proposal.height,
+                        hash = hex(&proposal.parent),
+                        "parent not notified of notarization"
+                    );
+                }
+                contains
             }
             Some(Lock::Finalized(hash)) => {
                 if proposal.parent != *hash {
+                    debug!(
+                        height = proposal.height,
+                        hash = hex(&proposal.parent),
+                        "parent mismatch"
+                    );
                     return false;
                 }
                 self.last_notified >= parent.height
             }
-            None => false,
+            None => {
+                debug!(
+                    height = proposal.height,
+                    hash = hex(&proposal.parent),
+                    "parent not notarized nor finalized"
+                );
+                false
+            }
         }
     }
 

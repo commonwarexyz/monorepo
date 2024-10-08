@@ -11,7 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     time::{Duration, SystemTime},
 };
-use tracing::debug;
+use tracing::{debug, info};
 
 // TODO: move to config
 const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
@@ -487,6 +487,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         entry.advance_deadline = Some(self.runtime.current() + Duration::from_secs(2));
 
         // TODO: prune old views once finalized is above
+        info!(view, "entered view");
+        self.view = view;
     }
 
     pub fn vote(&mut self, vote: wire::Vote) {
@@ -702,7 +704,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             }
         };
         if !C::validate(&signature.public_key) {
-            debug!(reason = "invalid signature", "dropping finalize");
+            debug!(reason = "invalid public key", "dropping finalize");
             return;
         }
 
@@ -720,12 +722,17 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         let finalize_digest =
             finalize_digest(finalize.view, finalize.height, finalize.hash.clone());
         if !C::verify(
-            VOTE_NAMESPACE,
+            FINALIZE_NAMESPACE,
             &finalize_digest,
             &signature.public_key,
             &signature.signature,
         ) {
-            debug!(reason = "invalid signature", "dropping vote");
+            debug!(
+                signer = hex(&signature.public_key),
+                digest = hex(&finalize_digest),
+                reason = "invalid signature",
+                "dropping finalize"
+            );
             return;
         }
 
