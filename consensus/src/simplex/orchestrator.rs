@@ -8,8 +8,11 @@ use crate::{Application, Hash, Height, Payload, View};
 use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock, Spawner};
-use core::panic;
-use futures::channel::{mpsc, oneshot};
+use core::{panic, task};
+use futures::{
+    channel::{mpsc, oneshot},
+    future::Either,
+};
 use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::seq::SliceRandom;
@@ -499,14 +502,15 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
     // proposal at a time). In `tbd`, this will operate very differently because we can
     // verify the integrity of any proposal we receive at an index by the threshold signature.
     pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
-        // TODO: using UNIX_EPOCH + Duration::MAX causing a panic
-        let mut outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::from_secs(100));
+        let mut outstanding_task = None;
         loop {
             // Check to see if we should add a task
-            if outstanding_task.0.is_none() {
+            if outstanding_task.is_none() {
                 let missing = self.missing_receiver.try_next();
                 if let Ok(res) = missing {
                     let request = res.unwrap();
+
+                    // TODO: Check if we already have the proposal (and recurse if not)
 
                     // Select random validator to fetch from
                     let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
@@ -525,16 +529,21 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                         .unwrap();
 
                     // Set timeout
-                    outstanding_task = (
-                        Some(request),
-                        self.runtime.current() + Duration::from_secs(1),
-                    );
+                    outstanding_task =
+                        Some((request, self.runtime.current() + Duration::from_secs(1)));
                 }
+            };
+
+            // Avoid arbitrarily long sleep
+            let task_future = if let Some(outstanding_task) = outstanding_task {
+                Either::Left(self.runtime.sleep_until(outstanding_task.1))
+            } else {
+                Either::Right(futures::future::pending())
             };
 
             // Wait for an event
             select! {
-                _task_timeout = self.runtime.sleep_until(outstanding_task.1) => {
+                _task_timeout = task_future => {
                     // Request from another random validator
                     let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
 
@@ -675,20 +684,15 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             let proposal = Proposal::Populated(incoming_hash.clone(), proposal.clone());
                             self.resolve(proposal).await;
 
-                            // Notify application if we can
-                            self.notify();
-
-                            // If incoming hash was our task, exit the loop
-                            if let Some(request) = outstanding_task.0.as_ref() {
-                                if *request == incoming_hash {
-                                    debug!(
-                                        request = hex(&request),
-                                        sender = hex(&s),
-                                        "backfill resolution"
-                                    );
-                                    outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::MAX);
+                            // Remove outstanding task if we were waiting on this
+                            if let Some(outstanding) = outstanding_task {
+                                if outstanding.0 == incoming_hash {
+                                    outstanding_task = None;
                                 }
                             }
+
+                            // Notify application if we can
+                            self.notify();
                         }
                     }
                 },
