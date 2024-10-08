@@ -171,7 +171,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
                         }
                         wire::message::Payload::Notarization(notarization) => {
                             view = notarization.view;
-                            self.voter.notarization(notarization);
+                            self.voter.notarization(notarization).await;
                         }
                         wire::message::Payload::Finalize(finalize) => {
                             view = finalize.view;
@@ -179,7 +179,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
                         }
                         wire::message::Payload::Finalization(finalization) => {
                             view = finalization.view;
-                            self.voter.finalization(finalization);
+                            self.voter.finalization(finalization).await;
                         }
                     };
 

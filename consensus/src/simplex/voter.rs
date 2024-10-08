@@ -565,7 +565,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         view.add_verified_vote(vote);
     }
 
-    pub fn notarization(&mut self, notarization: wire::Notarization) {
+    pub async fn notarization(&mut self, notarization: wire::Notarization) {
         // Check if we are still in a view that this would help with
         if notarization.view < self.view {
             debug!(
@@ -653,7 +653,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             // Track that we added one for threshold
             added += 1;
         }
-        if added <= self.threshold {
+        if added < self.threshold {
             debug!(
                 threshold = self.threshold,
                 signatures = added,
@@ -675,7 +675,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 notarization.hash.clone(),
             ),
         };
-        self.orchestrator.notarized(proposal);
+        self.orchestrator.notarized(proposal).await;
 
         // Enter next view
         self.enter_view(notarization.view + 1);
@@ -759,7 +759,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         view.add_verified_finalize(finalize);
     }
 
-    pub fn finalization(&mut self, finalization: wire::Finalization) {
+    pub async fn finalization(&mut self, finalization: wire::Finalization) {
         // Ensure not for null (should never happen)
         if finalization.hash.len() == 0 {
             debug!(reason = "finalize for null block", "dropping finalization");
@@ -833,6 +833,15 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             // Track that we added one for threshold
             added += 1;
         }
+        if added < self.threshold {
+            debug!(
+                threshold = self.threshold,
+                signatures = added,
+                reason = "insufficient signatures",
+                "dropping finalization"
+            );
+            return;
+        }
         debug!(view = finalization.view, added, "finalization verified");
 
         // TODO: store finalize for view
@@ -846,7 +855,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 finalization.hash.clone(),
             ),
         };
-        self.orchestrator.finalized(proposal);
+        self.orchestrator.finalized(proposal).await;
 
         // Enter next view (if applicable)
         if finalization.view >= self.view {

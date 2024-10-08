@@ -376,7 +376,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 notifications.contains(&parent.parent)
             }
             Some(Lock::Finalized(hash)) => {
-                if parent.parent != *hash {
+                if proposal.parent != *hash {
                     return false;
                 }
                 self.last_notified >= parent.height
@@ -389,6 +389,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         // If don't have ancestry yet, do nothing.
         if !self.valid_ancestry(&proposal) {
             // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
+            debug!(
+                height = proposal.height,
+                hash = hex(&proposal.parent),
+                "invalid ancestry"
+            );
             return false;
         }
 

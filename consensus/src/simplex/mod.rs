@@ -39,13 +39,15 @@ pub enum Error {
 
 #[cfg(test)]
 mod tests {
+    use core::hash;
+
     use super::*;
     use crate::{Application, Hash, Payload};
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_p2p::simulated::network::{self, Link, Network};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
-    use tracing::Level;
+    use tracing::{info, Level};
     use voter::hash;
 
     struct MockApplication {}
@@ -57,24 +59,24 @@ mod tests {
             (hash, payload)
         }
 
-        fn propose(&mut self, _parent: Hash) -> Option<Payload> {
-            unimplemented!()
+        fn propose(&mut self, parent: Hash) -> Option<Payload> {
+            Some(hash(parent))
         }
 
-        fn parse(&self, _payload: Payload) -> Option<Hash> {
-            unimplemented!()
+        fn parse(&self, payload: Payload) -> Option<Hash> {
+            Some(hash(payload))
         }
 
         fn verify(&self, _payload: Payload) -> bool {
-            unimplemented!()
+            true
         }
 
         fn notarized(&mut self, _payload: Payload) {
-            unimplemented!()
+            info!("notarized")
         }
 
         fn finalized(&mut self, _payload: Payload) {
-            unimplemented!()
+            info!("finalized")
         }
     }
 
