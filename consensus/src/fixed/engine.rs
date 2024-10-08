@@ -161,6 +161,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
                     // tip (immediately vote dummy when entering round).
                     let view;
                     match payload {
+                        // TODO: check correctness prior to passing on to voter (like hash size)
                         wire::message::Payload::Proposal(proposal) => {
                             view = proposal.view;
                             self.voter.proposal(proposal).await;

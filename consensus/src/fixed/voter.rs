@@ -383,6 +383,14 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     }
 
     pub async fn proposal(&mut self, proposal: wire::Proposal) {
+        // TODO: check timestamp is within some synchrony bound back/forward, because we don't run
+        // backfill through consensus can assert anything we vote on is within a [low, high] bound
+        // at time received
+        //
+        // It is possible that if re-processed, the block would be considered invalid (but that will
+        // never happen). This also means on historical sync that we won't check the value of this timestamp (
+        // may want to ensure greater than parent).
+
         // Parse signature
         let signature = match &proposal.signature {
             Some(signature) => signature,
@@ -593,6 +601,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             return;
         }
 
+        // TODO: process notarizations as long as > last finalized (could allow for better block building/verification)
+
         // Assert null notarization is well-formed
         if notarization.hash.len() == 0 && notarization.height != 0 {
             debug!(
@@ -683,16 +693,18 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
         // TODO: Store signatures for view
 
-        // Inform orchestrator of notarization
-        let proposal = match view.and_then(|view| view.proposal.as_ref()) {
-            Some((hash, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
-            None => Proposal::Reference(
-                notarization.view,
-                notarization.height,
-                notarization.hash.clone(),
-            ),
-        };
-        self.orchestrator.notarized(proposal).await;
+        // Inform orchestrator of notarization if not null vote
+        if notarization.hash.is_some() {
+            let proposal = match view.and_then(|view| view.proposal.as_ref()) {
+                Some((hash, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
+                None => Proposal::Reference(
+                    notarization.view,
+                    notarization.height,
+                    notarization.hash.clone(),
+                ),
+            };
+            self.orchestrator.notarized(proposal).await;
+        }
 
         // Enter next view
         self.enter_view(notarization.view + 1);
