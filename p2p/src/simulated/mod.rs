@@ -11,10 +11,6 @@
 //! use prometheus_client::registry::Registry;
 //! use std::sync::{Arc, Mutex};
 //!
-//! // Configure runtime
-//! let (executor, runtime, auditor) = Executor::seeded(0);
-//!
-//!
 //! // Generate peers
 //! let peers = vec![
 //!     Ed25519::from_seed(0).public_key(),
@@ -29,6 +25,7 @@
 //! };
 //!
 //! // Start runtime
+//! let (executor, runtime, auditor) = Executor::seeded(0);
 //! executor.start(async move {
 //!     // Initialize network
 //!     let mut network = Network::new(runtime.clone(), p2p_cfg);
