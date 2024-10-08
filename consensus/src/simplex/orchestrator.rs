@@ -535,8 +535,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             };
 
             // Avoid arbitrarily long sleep
-            let task_future = if let Some(outstanding_task) = outstanding_task {
-                Either::Left(self.runtime.sleep_until(outstanding_task.1))
+            let task_future = if let Some((_, ref deadline)) = outstanding_task {
+                Either::Left(self.runtime.sleep_until(*deadline))
             } else {
                 Either::Right(futures::future::pending())
             };
@@ -548,7 +548,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
 
                     // Send the request
-                    let request = outstanding_task.0.unwrap();
+                    let request = outstanding_task.unwrap().0;
                     let msg = wire::Request {
                         hash: request.clone(),
                     }
@@ -562,7 +562,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                         .unwrap();
 
                     // Reset timeout
-                    outstanding_task = (Some(request), self.runtime.current() + Duration::from_secs(1));
+                    outstanding_task = Some((request, self.runtime.current() + Duration::from_secs(1)));
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
@@ -685,7 +685,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             self.resolve(proposal).await;
 
                             // Remove outstanding task if we were waiting on this
-                            if let Some(outstanding) = outstanding_task {
+                            if let Some(ref outstanding) = outstanding_task {
                                 if outstanding.0 == incoming_hash {
                                     outstanding_task = None;
                                 }
