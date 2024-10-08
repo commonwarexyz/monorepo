@@ -498,6 +498,42 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         self.notify();
     }
 
+    fn get_next_missing(&mut self) -> Option<Hash> {
+        loop {
+            // See if we have any missing proposals
+            let next = match self.missing_receiver.try_next() {
+                Ok(res) => res.unwrap(),
+                Err(_) => return None,
+            };
+
+            // Check if still unfulfilled
+            if self.blocks.contains_key(&next) {
+                continue;
+            }
+
+            // Return missing proposal
+            return Some(next);
+        }
+    }
+
+    async fn send_request(&mut self, hash: Hash, sender: &mut impl Sender) {
+        // Select random validator to fetch from
+        let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
+
+        // Send the request
+        let msg = wire::Backfill {
+            payload: Some(wire::backfill::Payload::Request(wire::Request { hash })),
+        }
+        .encode_to_vec()
+        .into();
+
+        // Send message
+        sender
+            .send(Recipients::One(validator.clone()), msg, true)
+            .await
+            .unwrap();
+    }
+
     // This is a pretty basic backfiller (in that it only attempts to resolve one missing
     // proposal at a time). In `tbd`, this will operate very differently because we can
     // verify the integrity of any proposal we receive at an index by the threshold signature.
@@ -506,36 +542,19 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         loop {
             // Check to see if we should add a task
             if outstanding_task.is_none() {
-                let missing = self.missing_receiver.try_next();
-                if let Ok(res) = missing {
-                    let request = res.unwrap();
-
-                    // TODO: Check if we already have the proposal (and recurse if not)
-
-                    // Select random validator to fetch from
-                    let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
-
-                    // Send the request
-                    let msg = wire::Request {
-                        hash: request.clone(),
-                    }
-                    .encode_to_vec()
-                    .into();
-
-                    // Send message
-                    sender
-                        .send(Recipients::One(validator.clone()), msg, true)
-                        .await
-                        .unwrap();
+                let missing = self.get_next_missing();
+                if let Some(next) = missing {
+                    // Send request
+                    self.send_request(next.clone(), &mut sender).await;
 
                     // Set timeout
                     outstanding_task =
-                        Some((request, self.runtime.current() + Duration::from_secs(1)));
+                        Some((next, self.runtime.current() + Duration::from_secs(1)));
                 }
             };
 
             // Avoid arbitrarily long sleep
-            let task_future = if let Some((_, ref deadline)) = outstanding_task {
+            let missing_timeout = if let Some((_, ref deadline)) = outstanding_task {
                 Either::Left(self.runtime.sleep_until(*deadline))
             } else {
                 Either::Right(futures::future::pending())
@@ -543,23 +562,10 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
             // Wait for an event
             select! {
-                _task_timeout = task_future => {
-                    // Request from another random validator
-                    let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
-
-                    // Send the request
-                    let request = outstanding_task.unwrap().0;
-                    let msg = wire::Request {
-                        hash: request.clone(),
-                    }
-                    .encode_to_vec()
-                    .into();
-
-                    // Send message
-                    sender
-                        .send(Recipients::One(validator.clone()), msg, true)
-                        .await
-                        .unwrap();
+                _task_timeout = missing_timeout => {
+                    // Send request again
+                    let request = outstanding_task.unwrap().0.clone();
+                    self.send_request(request.clone(), &mut sender).await;
 
                     // Reset timeout
                     outstanding_task = Some((request, self.runtime.current() + Duration::from_secs(1)));
