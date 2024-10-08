@@ -17,6 +17,7 @@ use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
+use sha2::digest::crypto_common::rand_core::block;
 use std::time::Duration;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -26,7 +27,7 @@ use tracing::{debug, warn};
 
 pub enum Message {
     Propose {
-        response: oneshot::Sender<Option<((Hash, wire::Proposal), (Hash, Payload))>>,
+        response: oneshot::Sender<Option<((Hash, Height), (Hash, Payload))>>,
     },
     Parse {
         payload: Payload,
@@ -54,7 +55,7 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn propose(&mut self) -> Option<((Hash, wire::Proposal), (Hash, Payload))> {
+    pub async fn propose(&mut self) -> Option<((Hash, Height), (Hash, Payload))> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Propose { response: sender })
@@ -143,7 +144,24 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
 impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
-    pub fn new(runtime: E, application: A, mut validators: Vec<PublicKey>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, mut application: A, mut validators: Vec<PublicKey>) -> (Self, Mailbox) {
+        // Create genesis block and store it
+        let mut locked = HashMap::new();
+        let mut blocks = HashMap::new();
+        let genesis = application.genesis();
+        locked.insert(0, Lock::Finalized(genesis.0.clone()));
+        blocks.insert(
+            genesis.0.clone(),
+            wire::Proposal {
+                view: 0,
+                height: 0,
+                parent: Hash::new(),
+                payload: genesis.1,
+                signature: None,
+            },
+        );
+
+        // Initialize mailbox
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
         validators.sort();
@@ -156,8 +174,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
                 validators,
 
-                locked: HashMap::new(),
-                blocks: HashMap::new(),
+                locked,
+                blocks,
 
                 last_notarized: 0,
                 last_finalized: 0,
@@ -266,7 +284,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
     }
 
-    fn best_parent(&self) -> Option<(Hash, wire::Proposal)> {
+    fn best_parent(&self) -> Option<(Hash, Height)> {
         // Find highest block that we have notified the application of
         let mut next = self.last_notarized;
         loop {
@@ -276,17 +294,14 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     for (_, hash) in hashes.iter() {
                         if let Some(notifications) = self.notarizations_sent.get(&next) {
                             if notifications.contains(hash) {
-                                return Some((
-                                    hash.clone(),
-                                    self.blocks.get(hash).unwrap().clone(),
-                                ));
+                                return Some((hash.clone(), self.blocks.get(hash).unwrap().height));
                             }
                         }
                     }
                 }
                 Some(Lock::Finalized(hash)) => {
                     if self.last_notified >= next {
-                        return Some((hash.clone(), self.blocks.get(hash).unwrap().clone()));
+                        return Some((hash.clone(), self.blocks.get(hash).unwrap().height));
                     }
                 }
                 None => return None,
@@ -301,7 +316,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
     }
 
     // Simplified application functions
-    pub fn propose(&mut self) -> Option<((Hash, wire::Proposal), (Hash, Payload))> {
+    pub fn propose(&mut self) -> Option<((Hash, Height), (Hash, Payload))> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
@@ -313,7 +328,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         // Propose block
         //
         // TODO: provide more info to application
-        let payload = match self.application.propose(parent.1.payload.clone()) {
+        let payload = match self.application.propose(parent.0.clone()) {
             Some(payload) => payload,
             None => {
                 return None;

@@ -268,11 +268,13 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
 
         // Add first view
+        //
+        // We start on view 1 because the genesis block occupies view 0/height 0.
         let mut views = HashMap::new();
         views.insert(
-            0,
+            1,
             View::new(
-                validators[0].clone(),
+                validators[1].clone(),
                 Some(runtime.current() + Duration::from_secs(1)),
                 Some(runtime.current() + Duration::from_secs(2)),
             ),
@@ -291,7 +293,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             validators,
             validators_ordered,
 
-            view: 0,
+            view: 1,
             views,
         }
     }
@@ -316,7 +318,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 return None;
             }
         };
-        let height = parent.1.height + 1;
+        let height = parent.1 + 1;
 
         // Construct proposal
         let digest = proposal_digest(self.view, height, parent.0.clone(), payload.0.clone());

@@ -41,14 +41,22 @@ pub enum Error {
 mod tests {
     use super::*;
     use crate::{Application, Hash, Payload};
+    use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_p2p::simulated::network::{self, Link, Network};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use tracing::Level;
+    use voter::hash;
 
     struct MockApplication {}
 
     impl Application for MockApplication {
+        fn genesis(&mut self) -> (Hash, Payload) {
+            let payload = Bytes::from("genesis");
+            let hash = hash(payload.clone());
+            (hash, payload)
+        }
+
         fn propose(&mut self, _parent: Hash) -> Option<Payload> {
             unimplemented!()
         }
@@ -74,7 +82,8 @@ mod tests {
     fn test_simple() {
         // Configure logging
         tracing_subscriber::fmt()
-            .with_max_level(Level::TRACE)
+            .with_max_level(Level::DEBUG)
+            .with_line_number(true)
             .init();
 
         // Create runtime
