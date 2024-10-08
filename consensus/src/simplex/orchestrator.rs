@@ -8,12 +8,16 @@ use crate::{Application, Hash, Height, Payload, View};
 use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock, Spawner};
-use core::panic;
-use futures::channel::{mpsc, oneshot};
+use core::{panic, task};
+use futures::{
+    channel::{mpsc, oneshot},
+    future::Either,
+};
 use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
+use sha2::digest::crypto_common::rand_core::block;
 use std::time::Duration;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -23,7 +27,7 @@ use tracing::{debug, warn};
 
 pub enum Message {
     Propose {
-        response: oneshot::Sender<Option<((Hash, wire::Proposal), (Hash, Payload))>>,
+        response: oneshot::Sender<Option<((Hash, Height), (Hash, Payload))>>,
     },
     Parse {
         payload: Payload,
@@ -51,7 +55,7 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn propose(&mut self) -> Option<((Hash, wire::Proposal), (Hash, Payload))> {
+    pub async fn propose(&mut self) -> Option<((Hash, Height), (Hash, Payload))> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Propose { response: sender })
@@ -140,7 +144,24 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
 impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
-    pub fn new(runtime: E, application: A, mut validators: Vec<PublicKey>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, mut application: A, mut validators: Vec<PublicKey>) -> (Self, Mailbox) {
+        // Create genesis block and store it
+        let mut locked = HashMap::new();
+        let mut blocks = HashMap::new();
+        let genesis = application.genesis();
+        locked.insert(0, Lock::Finalized(genesis.0.clone()));
+        blocks.insert(
+            genesis.0.clone(),
+            wire::Proposal {
+                view: 0,
+                height: 0,
+                parent: Hash::new(),
+                payload: genesis.1,
+                signature: None,
+            },
+        );
+
+        // Initialize mailbox
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
         validators.sort();
@@ -153,8 +174,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
                 validators,
 
-                locked: HashMap::new(),
-                blocks: HashMap::new(),
+                locked,
+                blocks,
 
                 last_notarized: 0,
                 last_finalized: 0,
@@ -263,7 +284,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
     }
 
-    fn best_parent(&self) -> Option<(Hash, wire::Proposal)> {
+    fn best_parent(&self) -> Option<(Hash, Height)> {
         // Find highest block that we have notified the application of
         let mut next = self.last_notarized;
         loop {
@@ -273,17 +294,14 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     for (_, hash) in hashes.iter() {
                         if let Some(notifications) = self.notarizations_sent.get(&next) {
                             if notifications.contains(hash) {
-                                return Some((
-                                    hash.clone(),
-                                    self.blocks.get(hash).unwrap().clone(),
-                                ));
+                                return Some((hash.clone(), self.blocks.get(hash).unwrap().height));
                             }
                         }
                     }
                 }
                 Some(Lock::Finalized(hash)) => {
                     if self.last_notified >= next {
-                        return Some((hash.clone(), self.blocks.get(hash).unwrap().clone()));
+                        return Some((hash.clone(), self.blocks.get(hash).unwrap().height));
                     }
                 }
                 None => return None,
@@ -298,7 +316,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
     }
 
     // Simplified application functions
-    pub fn propose(&mut self) -> Option<((Hash, wire::Proposal), (Hash, Payload))> {
+    pub fn propose(&mut self) -> Option<((Hash, Height), (Hash, Payload))> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
@@ -310,7 +328,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         // Propose block
         //
         // TODO: provide more info to application
-        let payload = match self.application.propose(parent.1.payload.clone()) {
+        let payload = match self.application.propose(parent.0.clone()) {
             Some(payload) => payload,
             None => {
                 return None;
@@ -329,41 +347,77 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
     fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
         // Check if we have the parent
-        if !self.blocks.contains_key(&proposal.parent) {
+        let parent = self.blocks.get(&proposal.parent);
+        if parent.is_none() {
+            debug!(
+                height = proposal.height,
+                parent_hash = hex(&proposal.parent),
+                "missing parent"
+            );
             return false;
         }
+        let parent = parent.unwrap();
 
         // If proposal height is already finalized, fail
         if proposal.height <= self.last_finalized {
+            debug!(height = proposal.height, "already finalized");
             return false;
         }
-
-        // Get parent
-        let parent = match self.blocks.get(&proposal.parent) {
-            Some(parent) => parent,
-            None => return false,
-        };
 
         // Check if parent is notarized or finalized and that the application
         // has been notified of the parent (ancestry is processed)
         match self.locked.get(&parent.height) {
             Some(Lock::Notarized(hashes)) => {
                 if !hashes.contains_key(&parent.view) {
+                    debug!(
+                        height = proposal.height,
+                        parent_hash = hex(&proposal.parent),
+                        "parent not notarized"
+                    );
                     return false;
                 }
                 let notifications = match self.notarizations_sent.get(&parent.height) {
                     Some(notifications) => notifications,
-                    None => return false,
+                    None => {
+                        debug!(
+                            height = proposal.height,
+                            parent_hash = hex(&proposal.parent),
+                            "parent not notified of notarization"
+                        );
+                        return false;
+                    }
                 };
-                notifications.contains(&parent.parent)
+                let contains = notifications.contains(&proposal.parent);
+                if !contains {
+                    let notifications = notifications.iter().map(hex).collect::<Vec<_>>();
+                    debug!(
+                        height = proposal.height,
+                        parent_hash = hex(&proposal.parent),
+                        ?notifications,
+                        "parent not notified of notarization"
+                    );
+                }
+                contains
             }
             Some(Lock::Finalized(hash)) => {
-                if parent.parent != *hash {
+                if proposal.parent != *hash {
+                    debug!(
+                        height = proposal.height,
+                        parent_hash = hex(&proposal.parent),
+                        "parent mismatch"
+                    );
                     return false;
                 }
                 self.last_notified >= parent.height
             }
-            None => false,
+            None => {
+                debug!(
+                    height = proposal.height,
+                    parent_hash = hex(&proposal.parent),
+                    "parent not notarized nor finalized"
+                );
+                false
+            }
         }
     }
 
@@ -371,6 +425,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         // If don't have ancestry yet, do nothing.
         if !self.valid_ancestry(&proposal) {
             // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
+            debug!(
+                height = proposal.height,
+                parent_hash = hex(&proposal.parent),
+                "invalid ancestry"
+            );
             return false;
         }
 
@@ -495,65 +554,77 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         self.notify();
     }
 
+    fn get_next_missing(&mut self) -> Option<Hash> {
+        loop {
+            // See if we have any missing proposals
+            let next = match self.missing_receiver.try_next() {
+                Ok(res) => res.unwrap(),
+                Err(_) => return None,
+            };
+
+            // Check if still unfulfilled
+            if self.blocks.contains_key(&next) {
+                continue;
+            }
+
+            // Return missing proposal
+            return Some(next);
+        }
+    }
+
+    async fn send_request(&mut self, hash: Hash, sender: &mut impl Sender) {
+        // Select random validator to fetch from
+        let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
+
+        // Send the request
+        let msg = wire::Backfill {
+            payload: Some(wire::backfill::Payload::Request(wire::Request { hash })),
+        }
+        .encode_to_vec()
+        .into();
+
+        // Send message
+        sender
+            .send(Recipients::One(validator.clone()), msg, true)
+            .await
+            .unwrap();
+    }
+
     // This is a pretty basic backfiller (in that it only attempts to resolve one missing
     // proposal at a time). In `tbd`, this will operate very differently because we can
     // verify the integrity of any proposal we receive at an index by the threshold signature.
     pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
-        // TODO: using UNIX_EPOCH + Duration::MAX causing a panic
-        let mut outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::from_secs(100));
+        let mut outstanding_task = None;
         loop {
             // Check to see if we should add a task
-            if outstanding_task.0.is_none() {
-                let missing = self.missing_receiver.try_next();
-                if let Ok(res) = missing {
-                    let request = res.unwrap();
-
-                    // Select random validator to fetch from
-                    let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
-
-                    // Send the request
-                    let msg = wire::Request {
-                        hash: request.clone(),
-                    }
-                    .encode_to_vec()
-                    .into();
-
-                    // Send message
-                    sender
-                        .send(Recipients::One(validator.clone()), msg, true)
-                        .await
-                        .unwrap();
+            if outstanding_task.is_none() {
+                let missing = self.get_next_missing();
+                if let Some(next) = missing {
+                    // Send request
+                    self.send_request(next.clone(), &mut sender).await;
 
                     // Set timeout
-                    outstanding_task = (
-                        Some(request),
-                        self.runtime.current() + Duration::from_secs(1),
-                    );
+                    outstanding_task =
+                        Some((next, self.runtime.current() + Duration::from_secs(1)));
                 }
+            };
+
+            // Avoid arbitrarily long sleep
+            let missing_timeout = if let Some((_, ref deadline)) = outstanding_task {
+                Either::Left(self.runtime.sleep_until(*deadline))
+            } else {
+                Either::Right(futures::future::pending())
             };
 
             // Wait for an event
             select! {
-                _task_timeout = self.runtime.sleep_until(outstanding_task.1) => {
-                    // Request from another random validator
-                    let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
-
-                    // Send the request
-                    let request = outstanding_task.0.unwrap();
-                    let msg = wire::Request {
-                        hash: request.clone(),
-                    }
-                    .encode_to_vec()
-                    .into();
-
-                    // Send message
-                    sender
-                        .send(Recipients::One(validator.clone()), msg, true)
-                        .await
-                        .unwrap();
+                _task_timeout = missing_timeout => {
+                    // Send request again
+                    let request = outstanding_task.unwrap().0.clone();
+                    self.send_request(request.clone(), &mut sender).await;
 
                     // Reset timeout
-                    outstanding_task = (Some(request), self.runtime.current() + Duration::from_secs(1));
+                    outstanding_task = Some((request, self.runtime.current() + Duration::from_secs(1)));
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
@@ -675,20 +746,16 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             let proposal = Proposal::Populated(incoming_hash.clone(), proposal.clone());
                             self.resolve(proposal).await;
 
-                            // Notify application if we can
-                            self.notify();
-
-                            // If incoming hash was our task, exit the loop
-                            if let Some(request) = outstanding_task.0.as_ref() {
-                                if *request == incoming_hash {
-                                    debug!(
-                                        request = hex(&request),
-                                        sender = hex(&s),
-                                        "backfill resolution"
-                                    );
-                                    outstanding_task = (None, SystemTime::UNIX_EPOCH + Duration::MAX);
+                            // Remove outstanding task if we were waiting on this
+                            if let Some(ref outstanding) = outstanding_task {
+                                if outstanding.0 == incoming_hash {
+                                    debug!(hash = hex(&incoming_hash), "resolved missing proposal");
+                                    outstanding_task = None;
                                 }
                             }
+
+                            // Notify application if we can
+                            self.notify();
                         }
                     }
                 },

@@ -23,6 +23,9 @@ type Payload = Bytes;
 /// outputs of block in next block?
 /// TODO: perform verification async so can keep responding to messages?
 pub trait Application: Send + 'static {
+    /// Initialize the application with the genesis block at view=0, height=0.
+    fn genesis(&mut self) -> (Hash, Payload);
+
     /// Generate a new payload for the given parent hash.
     ///
     /// If state is not yet ready, this will return None.
