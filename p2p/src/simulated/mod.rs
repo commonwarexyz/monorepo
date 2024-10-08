@@ -8,10 +8,7 @@
 //! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{Ed25519, Scheme};
 //! use commonware_runtime::{deterministic::Executor, Spawner, Runner};
-//! use governor::Quota;
 //! use prometheus_client::registry::Registry;
-//! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-//! use std::num::NonZeroU32;
 //! use std::sync::{Arc, Mutex};
 //!
 //! // Configure runtime
