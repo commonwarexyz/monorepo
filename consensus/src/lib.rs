@@ -32,6 +32,8 @@ pub trait Application: Send + 'static {
     /// Generate a new payload for the given parent hash.
     ///
     /// If state is not yet ready, this will return None.
+    ///
+    /// TODO: provide uptime/fault info here?
     fn propose(&mut self, parent: Hash, height: Height, timestamp: u64) -> Option<Payload>;
 
     /// Parse the payload and return the hash of the payload.

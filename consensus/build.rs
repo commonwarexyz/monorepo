@@ -1,6 +1,6 @@
 use std::io::Result;
 fn main() -> Result<()> {
-    // Proto compilation rules for `simplex` dialect
+    // Proto compilation rules for `fixed` dialect
     let mut config = prost_build::Config::new();
     config.bytes([
         "Signature.public_key",
@@ -12,7 +12,8 @@ fn main() -> Result<()> {
         "Finalize.hash",
         "Finalization.hash",
         "Request.hash",
+        "Missing.hash",
     ]);
-    config.compile_protos(&["src/simplex/wire.proto"], &["src/simplex/"])?;
+    config.compile_protos(&["src/fixed/wire.proto"], &["src/fixed/"])?;
     Ok(())
 }

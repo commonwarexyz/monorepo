@@ -25,7 +25,7 @@ message Proposal {
 message Vote {
     uint64 view = 1;
     uint64 height = 2;
-    bytes hash = 3; 
+    optional bytes hash = 3; 
 
     Signature signature = 4;
 }
@@ -33,7 +33,7 @@ message Vote {
 message Notarization {
     uint64 view = 1;
     uint64 height = 2;
-    bytes hash = 3;
+    optional bytes hash = 3;
     
     repeated Signature signatures = 4;
 }
@@ -64,6 +64,7 @@ message Backfill {
     oneof payload {
         Request request = 1;
         Resolution resolution = 2;
+        Missing missing = 3;
     }
 }
 message Request {
@@ -72,4 +73,9 @@ message Request {
 
 message Resolution {
     Proposal proposal = 1;
+}
+
+message Missing {
+    // TODO: use this to quickly request from someone else
+    bytes hash = 1;
 }
