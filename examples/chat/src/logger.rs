@@ -59,7 +59,7 @@ impl std::io::Write for Writer {
 
         // Append log message
         let mut logs = self.logs.lock().unwrap();
-        logs.insert(0, log_message.trim_end().to_string());
+        logs.push(log_message.trim_end().to_string());
         Ok(buf.len())
     }
 

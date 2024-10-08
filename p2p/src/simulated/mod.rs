@@ -17,6 +17,8 @@ pub enum Error {
     LinkingSelf,
     #[error("invalid success rate (must be in [0, 1]): {0}")]
     InvalidSuccessRate(f64),
+    #[error("channel already registered: {0}")]
+    ChannelAlreadyRegistered(u32),
 }
 
 #[cfg(test)]
@@ -25,7 +27,7 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{utils::hex, Ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use commonware_runtime::{deterministic::Executor, select, Clock, Runner, Spawner};
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use prometheus_client::registry::Registry;
     use rand::Rng;
@@ -37,25 +39,20 @@ mod tests {
 
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         // Create simulated network
-        let (executor, runtime, auditor) = Executor::init(seed, Duration::from_millis(1));
+        let (executor, runtime, auditor) = Executor::seeded(seed);
         executor.start(async move {
-            let mut network = network::Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
-                },
-            );
-
+            let mut network = network::Network::new(runtime.clone(), network::Config {
+                registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+            });
             // Register agents
             let mut agents = BTreeMap::new();
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, mut receiver) = network.register(pk.clone());
+                let (sender, mut receiver) = network.register(pk.clone(), 0, 1024 * 1024).unwrap();
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
-                runtime.spawn(async move {
+                runtime.spawn("agent_receiver", async move {
                     for _ in 0..size {
                         receiver.recv().await.unwrap();
                     }
@@ -91,7 +88,7 @@ mod tests {
             }
 
             // Send messages
-            runtime.spawn({
+            runtime.spawn("agent_sender", {
                 let mut runtime = runtime.clone();
                 async move {
                     // Sort agents for deterministic output
@@ -118,7 +115,7 @@ mod tests {
             });
 
             // Start network
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Wait for all recipients
             let mut results = Vec::new();
@@ -149,28 +146,24 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_message() {
-        let (executor, mut runtime, _) = Executor::init(0, Duration::from_millis(1));
+    fn test_message_too_big() {
+        let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
-                },
-            );
+            let mut network = network::Network::new(runtime.clone(), network::Config {
+                registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+            });
 
             // Register agents
             let mut agents = HashMap::new();
             for i in 0..10 {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, _) = network.register(pk.clone());
+                let (sender, _) = network.register(pk.clone(), 0, 1024 * 1024).unwrap();
                 agents.insert(pk, sender);
             }
 
             // Start network
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Send invalid message
             let keys = agents.keys().collect::<Vec<_>>();
@@ -191,20 +184,16 @@ mod tests {
 
     #[test]
     fn test_linking_self() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
-                },
-            );
+            let mut network = network::Network::new(runtime.clone(), network::Config {
+                registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+            });
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
-            network.register(pk.clone());
+            network.register(pk.clone(), 0, 1024 * 1024).unwrap();
 
             // Attempt to link self
             let result = network.link(
@@ -223,23 +212,39 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_success_rate() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+    fn test_duplicate_channel() {
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
-                },
-            );
+
+            let mut network = network::Network::new(runtime.clone(), network::Config {
+                registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+            });
+
+            // Register agents
+            let pk = Ed25519::from_seed(0).public_key();
+            network.register(pk.clone(), 0, 1024 * 1024).unwrap();
+            let result = network.register(pk, 0, 1024 * 1024);
+
+            // Confirm error is correct
+            assert!(matches!(result, Err(Error::ChannelAlreadyRegistered(0))));
+        });
+    }
+
+    #[test]
+    fn test_invalid_success_rate() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let mut network = network::Network::new(runtime.clone(), network::Config {
+                registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+            });
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            network.register(pk1.clone());
-            network.register(pk2.clone());
+            network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
+            network.register(pk2.clone(), 0, 1024 * 1024).unwrap();
 
             // Attempt to link with invalid success rate
             let result = network.link(
@@ -259,22 +264,25 @@ mod tests {
 
     #[test]
     fn test_simple_message_delivery() {
-        let (executor, runtime, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = network::Network::new(
-                runtime.clone(),
-                network::Config {
-                    max_message_size: 1024 * 1024,
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
-                },
-            );
+
+            let mut network = network::Network::new(runtime.clone(), network::Config {
+                registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+            });
 
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) = network.register(pk1.clone());
-            let (mut sender2, mut receiver2) = network.register(pk2.clone());
+            let (mut sender1, mut receiver1) =
+                network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
+            let (mut sender2, mut receiver2) =
+                network.register(pk2.clone(), 0, 1024 * 1024).unwrap();
+
+            // Register unused channels
+            let _ = network.register(pk1.clone(), 1, 1024 * 1024).unwrap();
+            let _ = network.register(pk2.clone(), 2, 1024 * 1024).unwrap();
 
             // Link agents
             network
@@ -301,7 +309,7 @@ mod tests {
                 .unwrap();
 
             // Start network
-            runtime.spawn(network.run());
+            runtime.spawn("network", network.run());
 
             // Send messages
             let msg1 = Bytes::from("hello from pk1");
@@ -322,6 +330,102 @@ mod tests {
             let (sender, message) = receiver2.recv().await.unwrap();
             assert_eq!(sender, pk1);
             assert_eq!(message, msg1);
+        });
+    }
+
+    #[test]
+    fn test_send_wrong_channel() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let mut network = network::Network::new(runtime.clone(), network::Config {
+                registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+            });
+
+            // Register agents
+            let pk1 = Ed25519::from_seed(0).public_key();
+            let pk2 = Ed25519::from_seed(1).public_key();
+            let (mut sender1, _) = network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
+            let (_, mut receiver2) = network.register(pk2.clone(), 1, 1024 * 1024).unwrap();
+
+            // Link agents
+            network
+                .link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    network::Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .unwrap();
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Send message
+            let msg = Bytes::from("hello from pk1");
+            sender1
+                .send(Recipients::One(pk2.clone()), msg, false)
+                .await
+                .unwrap();
+
+            // Confirm no message delivery
+            select! {
+                _msg = receiver2.recv() => {
+                    panic!("unexpected message");
+                },
+                _timeout = runtime.sleep(Duration::from_secs(100000)) => {},
+            }
+        });
+    }
+
+    #[test]
+    fn test_message_too_big_receiver() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let mut network = network::Network::new(runtime.clone(), network::Config {
+                registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+            });
+
+            // Register agents
+            let pk1 = Ed25519::from_seed(0).public_key();
+            let pk2 = Ed25519::from_seed(1).public_key();
+            let (mut sender1, _) = network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
+            let (_, mut receiver2) = network.register(pk2.clone(), 0, 1).unwrap();
+
+            // Link agents
+            network
+                .link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    network::Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .unwrap();
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Send message
+            let msg = Bytes::from("hello from pk1");
+            sender1
+                .send(Recipients::One(pk2.clone()), msg, false)
+                .await
+                .unwrap();
+
+            // Confirm no message delivery
+            select! {
+                _msg = receiver2.recv() => {
+                    panic!("unexpected message");
+                },
+                _timeout = runtime.sleep(Duration::from_secs(100000)) => {},
+            }
         });
     }
 }

@@ -149,7 +149,7 @@ impl<E: Spawner> Reservation<E> {
 impl<E: Spawner> Drop for Reservation<E> {
     fn drop(&mut self) {
         let (peer, mut mailbox) = self.closer.take().unwrap();
-        self.runtime.spawn(async move {
+        self.runtime.spawn("reservation", async move {
             mailbox.release(peer).await;
         });
     }

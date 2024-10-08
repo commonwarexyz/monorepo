@@ -1,12 +1,20 @@
-//! Send encrypted messages to a group of friends using [commonware-cryptography](https://crates.io/crates/commonware-cryptography)
-//! and [commonware-p2p](https://crates.io/crates/commonware-p2p).
+//! Send encrypted messages to a group of friends using [commonware-cryptography::ed25519](https://docs.rs/commonware-cryptography/latest/commonware_cryptography/ed25519/index.html)
+//! and [commonware-p2p::authenticated](https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html).
 //!
 //! # Offline Friends
 //!
 //! `commonware-chat` only sends messages to connected friends. If a friend is offline at the time a message is sent,
-//! `commonware-p2p` will drop the message. You can confirm you are connected to all your friends by checking the value
-//! of `p2p_connections` in the "Metrics Panel" in the right corner of the window. This metric should be equal to
-//! `count(friends)- 1` (you don't connect to yourself).
+//! `commonware-p2p::authenticated` will drop the message. You can confirm you are connected to all your friends by
+//! checking the value of `p2p_connections` in the "Metrics Panel" in the right corner of the window. This metric should
+//! be equal to `count(friends)- 1` (you don't connect to yourself).
+//!
+//! # Synchonized Friends
+//!
+//! `commonware-p2p::authenticated` requires all friends to have the same set of friends for friend discovery to work
+//! correctly. If you do not synchronize friends, you may be able to form connections between specific friends but may
+//! not be able to form connections with all friends. You can learn more about why
+//! this is [here](https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html#discovery). Other
+//! dialects of `commonware-p2p` may not have this requirement.
 //!
 //! # Usage (4 Friends)
 //!
@@ -63,8 +71,12 @@ use tracing::info;
 #[doc(hidden)]
 fn main() {
     // Initialize runtime
-    let runtime_cfg = tokio::Config::default();
-    let (executor, runtime) = Executor::init(runtime_cfg);
+    let runtime_registry = Arc::new(Mutex::new(Registry::with_prefix("runtime")));
+    let runtime_cfg = tokio::Config {
+        registry: runtime_registry.clone(),
+        ..Default::default()
+    };
+    let (executor, runtime) = Executor::init(runtime_cfg.clone());
 
     // Parse arguments
     let matches = Command::new("commonware-chat")
@@ -140,10 +152,10 @@ fn main() {
     }
 
     // Configure network
-    let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+    let p2p_registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        registry.clone(),
+        p2p_registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         runtime_cfg.max_message_size,
@@ -170,13 +182,14 @@ fn main() {
         );
 
         // Start network
-        let network_handler = runtime.spawn(network.run());
+        let network_handler = runtime.spawn("network", network.run());
 
         // Start chat
         handler::run(
-            runtime,
+            runtime.clone(),
             hex(&signer.public_key()),
-            registry,
+            runtime_registry,
+            p2p_registry,
             logs,
             chat_sender,
             chat_receiver,

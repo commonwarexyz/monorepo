@@ -11,11 +11,10 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, tokio::{Config, Executor}};
 //!
-//! let cfg = Config::default();
-//! let (executor, runtime) = Executor::init(cfg);
+//! let (executor, runtime) = Executor::default();
 //! executor.start(async move {
 //!     println!("Parent started");
-//!     let result = runtime.spawn(async move {
+//!     let result = runtime.spawn("child", async move {
 //!         println!("Child started");
 //!         "hello"
 //!     });
@@ -31,23 +30,98 @@ use futures::{
     SinkExt, StreamExt,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
+use prometheus_client::{
+    encoding::EncodeLabelSet,
+    metrics::{counter::Counter, family::Family, gauge::Gauge},
+    registry::Registry,
+};
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     future::Future,
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
     runtime::{Builder, Runtime},
+    task_local,
     time::timeout,
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::warn;
 
-#[derive(Copy, Clone)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct Work {
+    label: String,
+}
+
+#[derive(Debug)]
+struct Metrics {
+    tasks_spawned: Family<Work, Counter>,
+    tasks_running: Family<Work, Gauge>,
+
+    // As nice as it would be to track each of these by socket address,
+    // it quickly becomes an OOM attack vector.
+    inbound_connections: Counter,
+    outbound_connections: Counter,
+    inbound_bandwidth: Counter,
+    outbound_bandwidth: Counter,
+}
+
+impl Metrics {
+    pub fn init(registry: Arc<Mutex<Registry>>) -> Self {
+        let metrics = Self {
+            tasks_spawned: Family::default(),
+            tasks_running: Family::default(),
+            inbound_connections: Counter::default(),
+            outbound_connections: Counter::default(),
+            inbound_bandwidth: Counter::default(),
+            outbound_bandwidth: Counter::default(),
+        };
+        {
+            let mut registry = registry.lock().unwrap();
+            registry.register(
+                "tasks_spawned",
+                "Total number of tasks spawned",
+                metrics.tasks_spawned.clone(),
+            );
+            registry.register(
+                "tasks_running",
+                "Number of tasks currently running",
+                metrics.tasks_running.clone(),
+            );
+            registry.register(
+                "inbound_connections",
+                "Number of connections created by dialing us",
+                metrics.inbound_connections.clone(),
+            );
+            registry.register(
+                "outbound_connections",
+                "Number of connections created by dialing others",
+                metrics.outbound_connections.clone(),
+            );
+            registry.register(
+                "inbound_bandwidth",
+                "Bandwidth used by receiving data from others",
+                metrics.inbound_bandwidth.clone(),
+            );
+            registry.register(
+                "outbound_bandwidth",
+                "Bandwidth used by sending data to others",
+                metrics.outbound_bandwidth.clone(),
+            );
+        }
+        metrics
+    }
+}
+
+/// Configuration for the `tokio` runtime.
+#[derive(Clone)]
 pub struct Config {
+    /// Registry for metrics.
+    pub registry: Arc<Mutex<Registry>>,
+
     /// Number of threads to use for the runtime.
     pub threads: usize,
 
@@ -88,6 +162,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            registry: Arc::new(Mutex::new(Registry::default())),
             threads: 2,
             catch_panics: true,
             max_message_size: 1024 * 1024, // 1 MB
@@ -101,24 +176,37 @@ impl Default for Config {
 /// Runtime based on [Tokio](https://tokio.rs).
 pub struct Executor {
     cfg: Config,
+    metrics: Arc<Metrics>,
     runtime: Runtime,
 }
 
 impl Executor {
     /// Initialize a new `tokio` runtime with the given number of threads.
     pub fn init(cfg: Config) -> (Runner, Context) {
+        let metrics = Arc::new(Metrics::init(cfg.registry.clone()));
         let runtime = Builder::new_multi_thread()
             .worker_threads(cfg.threads)
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let executor = Arc::new(Self { cfg, runtime });
+        let executor = Arc::new(Self {
+            cfg,
+            metrics,
+            runtime,
+        });
         (
             Runner {
                 executor: executor.clone(),
             },
             Context { executor },
         )
+    }
+
+    /// Initialize a new `tokio` runtime with default configuration.
+    // We'd love to implement the trait but we can't because of the return type.
+    #[allow(clippy::should_implement_trait)]
+    pub fn default() -> (Runner, Context) {
+        Self::init(Config::default())
     }
 }
 
@@ -144,13 +232,33 @@ pub struct Context {
     executor: Arc<Executor>,
 }
 
+task_local! {
+    static PREFIX: String;
+}
+
 impl crate::Spawner for Context {
-    fn spawn<F, T>(&self, f: F) -> Handle<T>
+    fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let (f, handle) = Handle::init(f, self.executor.cfg.catch_panics);
+        let label = PREFIX
+            .try_with(|prefix| format!("{}_{}", prefix, label))
+            .unwrap_or_else(|_| label.to_string());
+        let f = PREFIX.scope(label.clone(), f);
+        let work = Work { label };
+        self.executor
+            .metrics
+            .tasks_spawned
+            .get_or_create(&work)
+            .inc();
+        let gauge = self
+            .executor
+            .metrics
+            .tasks_running
+            .get_or_create(&work)
+            .clone();
+        let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
         self.executor.runtime.spawn(f);
         handle
     }
@@ -209,6 +317,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
         let stream = TcpStream::connect(socket)
             .await
             .map_err(|_| Error::ConnectionFailed)?;
+        self.executor.metrics.outbound_connections.inc();
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.executor.cfg.tcp_nodelay {
@@ -240,6 +349,7 @@ impl crate::Listener<Sink, Stream> for Listener {
     async fn accept(&mut self) -> Result<(SocketAddr, Sink, Stream), Error> {
         // Accept a new TCP stream
         let (stream, addr) = self.listener.accept().await.map_err(|_| Error::Closed)?;
+        self.context.executor.metrics.inbound_connections.inc();
 
         // Set TCP_NODELAY if configured
         if let Some(tcp_nodelay) = self.context.executor.cfg.tcp_nodelay {
@@ -268,10 +378,17 @@ pub struct Sink {
 
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
+        let len = msg.len();
         timeout(self.context.executor.cfg.write_timeout, self.sink.send(msg))
             .await
             .map_err(|_| Error::WriteFailed)?
-            .map_err(|_| Error::WriteFailed)
+            .map_err(|_| Error::WriteFailed)?;
+        self.context
+            .executor
+            .metrics
+            .outbound_bandwidth
+            .inc_by(len as u64);
+        Ok(())
     }
 }
 
@@ -287,6 +404,11 @@ impl crate::Stream for Stream {
             .map_err(|_| Error::ReadFailed)?
             .ok_or(Error::Closed)?
             .map_err(|_| Error::ReadFailed)?;
+        self.context
+            .executor
+            .metrics
+            .inbound_bandwidth
+            .inc_by(result.len() as u64);
         Ok(result.freeze())
     }
 }
@@ -320,16 +442,14 @@ mod tests {
 
     #[test]
     fn test_runs_tasks() {
-        let cfg = Config::default();
-        let (executor, runtime) = Executor::init(cfg);
+        let (executor, runtime) = Executor::default();
         run_tasks(10, executor, runtime);
     }
 
     #[test]
     fn test_codec_invalid_frame_len() {
         // Initalize runtime
-        let cfg = Config::default();
-        let (runner, _) = Executor::init(cfg);
+        let (runner, _) = Executor::default();
         runner.start(async move {
             // Create a stream
             let max_frame_len = 10;
@@ -351,8 +471,7 @@ mod tests {
     #[test]
     fn test_codec_valid_frame_len() {
         // Initialize runtime
-        let cfg = Config::default();
-        let (runner, _) = Executor::init(cfg);
+        let (runner, _) = Executor::default();
         runner.start(async move {
             // Create a stream
             let max_frame_len = 10;

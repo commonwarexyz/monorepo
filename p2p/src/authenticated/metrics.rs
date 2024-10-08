@@ -1,11 +1,6 @@
 use commonware_cryptography::{utils::hex, PublicKey};
 use prometheus_client::encoding::EncodeLabelSet;
 
-const HANDSHAKE_TYPE: i32 = -1;
-const BIT_VEC_TYPE: i32 = -2;
-const PEERS_TYPE: i32 = -3;
-const UNKNOWN_TYPE: i32 = i32::MIN;
-
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Peer {
     pub peer: String,
@@ -24,22 +19,27 @@ pub struct Message {
 }
 
 impl Message {
+    const HANDSHAKE_TYPE: i32 = -1;
+    const BIT_VEC_TYPE: i32 = -2;
+    const PEERS_TYPE: i32 = -3;
+    const UNKNOWN_TYPE: i32 = i32::MIN;
+
     pub fn new_handshake(peer: &PublicKey) -> Self {
         Self {
             peer: hex(peer),
-            message: HANDSHAKE_TYPE,
+            message: Self::HANDSHAKE_TYPE,
         }
     }
     pub fn new_bit_vec(peer: &PublicKey) -> Self {
         Self {
             peer: hex(peer),
-            message: BIT_VEC_TYPE,
+            message: Self::BIT_VEC_TYPE,
         }
     }
     pub fn new_peers(peer: &PublicKey) -> Self {
         Self {
             peer: hex(peer),
-            message: PEERS_TYPE,
+            message: Self::PEERS_TYPE,
         }
     }
     pub fn new_chunk(peer: &PublicKey, channel: u32) -> Self {
@@ -51,7 +51,7 @@ impl Message {
     pub fn new_unknown(peer: &PublicKey) -> Self {
         Self {
             peer: hex(peer),
-            message: UNKNOWN_TYPE,
+            message: Self::UNKNOWN_TYPE,
         }
     }
 }

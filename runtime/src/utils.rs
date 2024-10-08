@@ -10,11 +10,13 @@ use futures::{
     stream::{AbortHandle, Abortable},
     FutureExt,
 };
+use prometheus_client::metrics::gauge::Gauge;
 use std::{
     any::Any,
     future::Future,
     panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
+    sync::{Arc, Once},
     task::{Context, Poll},
 };
 use tracing::error;
@@ -59,44 +61,82 @@ where
 {
     aborter: AbortHandle,
     receiver: oneshot::Receiver<Result<T, Error>>,
+
+    running: Gauge,
+    once: Arc<Once>,
 }
 
 impl<T> Handle<T>
 where
     T: Send + 'static,
 {
-    pub(crate) fn init<F>(f: F, catch_panic: bool) -> (impl Future<Output = ()>, Self)
+    pub(crate) fn init<F>(
+        f: F,
+        running: Gauge,
+        catch_panic: bool,
+    ) -> (impl Future<Output = ()>, Self)
     where
         F: Future<Output = T> + Send + 'static,
     {
+        // Increment running counter
+        running.inc();
+
         // Initialize channels to handle result/abort
+        let once = Arc::new(Once::new());
         let (sender, receiver) = oneshot::channel();
         let (aborter, abort_registration) = AbortHandle::new_pair();
 
         // Wrap the future to handle panics
-        let wrapped = async move {
-            let result = AssertUnwindSafe(f).catch_unwind().await;
-            let result = match result {
-                Ok(result) => Ok(result),
-                Err(err) => {
-                    if !catch_panic {
-                        resume_unwind(err);
+        let wrapped = {
+            let once = once.clone();
+            let running = running.clone();
+            async move {
+                // Run future
+                let result = AssertUnwindSafe(f).catch_unwind().await;
+
+                // Decrement running counter
+                once.call_once(|| {
+                    running.dec();
+                });
+
+                // Handle result
+                let result = match result {
+                    Ok(result) => Ok(result),
+                    Err(err) => {
+                        if !catch_panic {
+                            resume_unwind(err);
+                        }
+                        let err = extract_panic_message(&*err);
+                        error!(?err, "task panicked");
+                        Err(Error::Exited)
                     }
-                    let err = extract_panic_message(&*err);
-                    error!(?err, "task panicked");
-                    Err(Error::Exited)
-                }
-            };
-            let _ = sender.send(result);
+                };
+                let _ = sender.send(result);
+            }
         };
 
         // Make the future abortable
         let abortable = Abortable::new(wrapped, abort_registration);
-        (abortable.map(|_| ()), Self { aborter, receiver })
+        (
+            abortable.map(|_| ()),
+            Self {
+                aborter,
+                receiver,
+
+                running,
+                once,
+            },
+        )
     }
 
     pub fn abort(&self) {
+        // Stop task
         self.aborter.abort();
+
+        // Decrement running counter
+        self.once.call_once(|| {
+            self.running.dec();
+        });
     }
 }
 
@@ -127,9 +167,9 @@ pub fn run_tasks(tasks: usize, runner: impl Runner, context: impl Spawner) -> Ve
         // Randomly schedule tasks
         let mut handles = FuturesUnordered::new();
         for i in 0..tasks - 1 {
-            handles.push(context.spawn(task(i)));
+            handles.push(context.spawn("test", task(i)));
         }
-        handles.push(context.spawn(task(tasks - 1)));
+        handles.push(context.spawn("test", task(tasks - 1)));
 
         // Collect output order
         let mut outputs = Vec::new();

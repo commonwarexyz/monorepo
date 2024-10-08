@@ -83,11 +83,10 @@ impl Relay {
 mod tests {
     use super::*;
     use commonware_runtime::{deterministic::Executor, Runner};
-    use std::time::Duration;
 
     #[test]
     fn test_relay_content_priority() {
-        let (executor, _, _) = Executor::init(0, Duration::from_millis(1));
+        let (executor, _, _) = Executor::default();
         executor.start(async move {
             let (low_sender, mut low_receiver) = mpsc::channel(1);
             let (high_sender, mut high_receiver) = mpsc::channel(1);

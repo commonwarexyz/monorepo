@@ -178,14 +178,17 @@ impl<
             debug!(ip = ?address.ip(), port = ?address.port(), "accepted incoming connection");
 
             // Spawn a new handshaker to upgrade connection
-            self.runtime.spawn(Self::handshake(
-                self.runtime.clone(),
-                self.connection.clone(),
-                sink,
-                stream,
-                tracker.clone(),
-                supervisor.clone(),
-            ));
+            self.runtime.spawn(
+                "handshaker",
+                Self::handshake(
+                    self.runtime.clone(),
+                    self.connection.clone(),
+                    sink,
+                    stream,
+                    tracker.clone(),
+                    supervisor.clone(),
+                ),
+            );
         }
     }
 }

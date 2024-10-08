@@ -21,22 +21,24 @@ use std::{
 };
 use tracing::{debug, error};
 
+type Channel = u32;
+
 type Task = (
+    Channel,
     PublicKey,
     Recipients,
     Bytes,
-    oneshot::Sender<Result<Vec<PublicKey>, Error>>,
+    oneshot::Sender<Vec<PublicKey>>,
 );
 
 /// Implementation of a `simulated` network.
 pub struct Network<E: Spawner + Rng + Clock> {
     runtime: E,
-    cfg: Config,
-
+    // cfg: Config,
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
     links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
-    agents: BTreeMap<PublicKey, mpsc::UnboundedSender<Message>>,
+    agents: BTreeMap<PublicKey, HashMap<Channel, (usize, mpsc::UnboundedSender<Message>)>>,
 
     received_messages: Family<metrics::ReceivedMessage, Counter>,
     sent_messages: Family<metrics::SentMessage, Counter>,
@@ -59,14 +61,14 @@ pub struct Link {
 
 /// Configuration for a `simulated` network.
 pub struct Config {
-    /// Maximum size of a message in bytes.
-    pub max_message_size: usize,
     pub registry: Arc<Mutex<Registry>>,
+    // TODO: add metrics (#90)
 }
 
 impl<E: Spawner + Rng + Clock> Network<E> {
     /// Create a new simulated network with a given runtime and configuration.
     pub fn new(runtime: E, cfg: Config) -> Self {
+        let (sender, receiver) = mpsc::unbounded();
         let sent_messages = Family::<metrics::SentMessage, Counter>::default();
         let received_messages = Family::<metrics::ReceivedMessage, Counter>::default();
         {
@@ -79,11 +81,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             );
         }
 
-        let (sender, receiver) = mpsc::unbounded();
-
         Self {
             runtime,
-            cfg,
             sender,
             receiver,
             links: HashMap::new(),
@@ -93,16 +92,34 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         }
     }
 
-    /// Register a new peer with the network.
+    /// Register a new peer with the network that can interact over a given channel.
     ///
     /// By default, the peer will not be linked to any other peers.
-    pub fn register(&mut self, public_key: PublicKey) -> (Sender, Receiver) {
+    pub fn register(
+        &mut self,
+        public_key: PublicKey,
+        channel: Channel,
+        max_size: usize,
+    ) -> Result<(Sender, Receiver), Error> {
+        // Ensure doesn't already exist
+        let entry = self.agents.entry(public_key.clone()).or_default();
+        if entry.get(&channel).is_some() {
+            return Err(Error::ChannelAlreadyRegistered(channel));
+        }
+
+        // Initialize agent channel
         let (sender, receiver) = mpsc::unbounded();
-        self.agents.insert(public_key.clone(), sender);
-        (
-            Sender::new(self.runtime.clone(), public_key, self.sender.clone()),
+        entry.insert(channel, (max_size, sender));
+        Ok((
+            Sender::new(
+                self.runtime.clone(),
+                public_key,
+                channel,
+                max_size,
+                self.sender.clone(),
+            ),
             Receiver { receiver },
-        )
+        ))
     }
 
     /// Create a unidirectional link between two peers.
@@ -131,23 +148,12 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     /// Run the simulated network.
     pub async fn run(mut self) {
         // Process messages
-        while let Some((origin, recipients, message, reply)) = self.receiver.next().await {
-            let received_messages = self.received_messages.clone();
-            // Ensure message is valid
-            if message.len() > self.cfg.max_message_size {
-                if let Err(err) = reply.send(Err(Error::MessageTooLarge(message.len()))) {
-                    // This can only happen if the sender exited.
-                    error!(?err, "failed to send error");
-                }
-                received_messages
-                    .get_or_create(&metrics::ReceivedMessage::new_too_large(&origin))
-                    .inc();
-                continue;
-            }
-            received_messages
-                .get_or_create(&metrics::ReceivedMessage::new_unknown(&origin))
-                .inc();
 
+        while let Some((channel, origin, recipients, message, reply)) = self.receiver.next().await {
+            let received_messages = self.received_messages.clone();
+            received_messages
+                .get_or_create(&metrics::ReceivedMessage::new(&origin, channel))
+                .inc();
             // Collect recipients
             let recipients = match recipients {
                 Recipients::All => self.agents.keys().cloned().collect(),
@@ -213,7 +219,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 );
 
                 // Send message
-                self.runtime.spawn({
+                self.runtime.spawn("messenger", {
                     let runtime = self.runtime.clone();
                     let mut sender = sender.clone();
                     let recipient = recipient.clone();
@@ -232,12 +238,36 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 
                         // Drop message if success rate is too low
                         if !should_deliver {
-                            sent_messages
-                                .get_or_create(&metrics::SentMessage::new_dropped(&recipient))
-                                .inc();
                             debug!(
                                 recipient = hex(&recipient),
                                 reason = "random link failure",
+                                "dropping message",
+                            );
+                            return;
+                        }
+
+                        // Drop message if not listening on channel
+                        let (max_size, sender) = match sender.get_mut(&channel) {
+                            Some(sender) => sender,
+                            None => {
+                                debug!(
+                                    recipient = hex(&recipient),
+                                    channel,
+                                    reason = "missing channel",
+                                    "dropping message",
+                                );
+                                return;
+                            }
+                        };
+
+                        // Drop message if too large
+                        if message.len() > *max_size {
+                            debug!(
+                                recipient = hex(&recipient),
+                                channel,
+                                size = message.len(),
+                                max_size = *max_size,
+                                reason = "message too large",
                                 "dropping message",
                             );
                             return;
@@ -252,12 +282,9 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                                 ?err,
                                 "failed to send",
                             );
-                            sent_messages
-                                .get_or_create(&metrics::SentMessage::new_failed(&recipient))
-                                .inc();
                         } else {
                             sent_messages
-                                .get_or_create(&metrics::SentMessage::new_success(&recipient))
+                                .get_or_create(&metrics::SentMessage::new(&recipient))
                                 .inc();
                         }
                     }
@@ -266,14 +293,14 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             }
 
             // Notify sender of successful sends
-            self.runtime.spawn(async move {
+            self.runtime.spawn("notifier", async move {
                 // Wait for semaphore to be acquired on all sends
                 for _ in 0..sent.len() {
                     acquired_receiver.next().await.unwrap();
                 }
 
                 // Notify sender of successful sends
-                if let Err(err) = reply.send(Ok(sent)) {
+                if let Err(err) = reply.send(sent) {
                     // This can only happen if the sender exited.
                     error!(?err, "failed to send ack");
                 }
@@ -285,35 +312,60 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 /// Implementation of a [`crate::Sender`] for the simulated network.
 #[derive(Clone)]
 pub struct Sender {
+    channel: Channel,
+    max_size: usize,
+
     me: PublicKey,
     high: mpsc::UnboundedSender<Task>,
     low: mpsc::UnboundedSender<Task>,
 }
 
 impl Sender {
-    fn new(runtime: impl Spawner, me: PublicKey, mut sender: mpsc::UnboundedSender<Task>) -> Self {
+    fn new(
+        runtime: impl Spawner,
+        me: PublicKey,
+        channel: u32,
+        max_size: usize,
+        mut sender: mpsc::UnboundedSender<Task>,
+    ) -> Self {
         // Listen for messages
         let (high, mut high_receiver) = mpsc::unbounded();
         let (low, mut low_receiver) = mpsc::unbounded();
-        runtime.spawn(async move {
+        runtime.spawn("sender", async move {
             loop {
+                // Wait for task
+                let task;
                 select! {
                     high_task = high_receiver.next() => {
-                        if let Err(err) = sender.send(high_task.unwrap()).await{
-                            error!(?err, "failed to send high priority task");
-                        }
+                        task = match high_task {
+                            Some(task) => task,
+                            None => break,
+                        };
                     },
                     low_task = low_receiver.next() => {
-                        if let Err(err) = sender.send(low_task.unwrap()).await{
-                            error!(?err, "failed to send low priority task");
-                        }
+                        task = match low_task {
+                            Some(task) => task,
+                            None => break,
+                        };
                     }
+                }
+
+                // Send task
+                if let Err(err) = sender.send(task).await {
+                    error!(?err, channel, "failed to send task");
                 }
             }
         });
 
         // Return sender
-        Self { me, high, low }
+        Self {
+            channel,
+            max_size,
+
+            me,
+            high,
+            low,
+        }
     }
 }
 
@@ -326,13 +378,19 @@ impl crate::Sender for Sender {
         message: Bytes,
         priority: bool,
     ) -> Result<Vec<PublicKey>, Error> {
+        // Check message size
+        if message.len() > self.max_size {
+            return Err(Error::MessageTooLarge(message.len()));
+        }
+
+        // Send message
         let (sender, receiver) = oneshot::channel();
         let mut channel = if priority { &self.high } else { &self.low };
         channel
-            .send((self.me.clone(), recipients, message, sender))
+            .send((self.channel, self.me.clone(), recipients, message, sender))
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
+        receiver.await.map_err(|_| Error::NetworkClosed)
     }
 }
 

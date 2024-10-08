@@ -55,7 +55,7 @@ impl Mailbox {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Messenger {
     sender: mpsc::Sender<Message>,
 }
