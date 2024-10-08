@@ -71,13 +71,9 @@ mod tests {
             true
         }
 
-        fn notarized(&mut self, _payload: Payload) {
-            info!("notarized")
-        }
+        fn notarized(&mut self, _payload: Payload) {}
 
-        fn finalized(&mut self, _payload: Payload) {
-            info!("finalized")
-        }
+        fn finalized(&mut self, _payload: Payload) {}
     }
 
     #[test]

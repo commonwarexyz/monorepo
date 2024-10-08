@@ -11,7 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     time::{Duration, SystemTime},
 };
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 // TODO: move to config
 const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
@@ -581,7 +581,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     pub async fn notarization(&mut self, notarization: wire::Notarization) {
         // Check if we are still in a view that this would help with
         if notarization.view < self.view {
-            debug!(
+            trace!(
                 notarization_view = notarization.view,
                 our_view = self.view,
                 reason = "outdated notarization",
@@ -862,7 +862,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
         debug!(view = finalization.view, added, "finalization verified");
 
-        // TODO: store finalize for view
+        // TODO: store finalize in view
 
         // Inform orchestrator of finalization
         let proposal = match view.and_then(|view| view.proposal.as_ref()) {
