@@ -267,6 +267,17 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             validators_ordered.insert(validator.clone(), i as u32);
         }
 
+        // Add first view
+        let mut views = HashMap::new();
+        views.insert(
+            0,
+            View::new(
+                validators[0].clone(),
+                Some(runtime.current() + Duration::from_secs(1)),
+                Some(runtime.current() + Duration::from_secs(2)),
+            ),
+        );
+
         // Initialize store
         Self {
             runtime,
@@ -281,7 +292,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             validators_ordered,
 
             view: 0,
-            views: HashMap::new(),
+            views,
         }
     }
 
