@@ -572,7 +572,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
     }
 
-    async fn send_request(&mut self, hash: Hash, sender: &mut impl Sender) {
+    async fn send_request(&mut self, hash: Hash, sender: &mut impl Sender) -> PublicKey {
         // Select random validator to fetch from
         let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
 
@@ -588,6 +588,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             .send(Recipients::One(validator.clone()), msg, true)
             .await
             .unwrap();
+        validator
     }
 
     // This is a pretty basic backfiller (in that it only attempts to resolve one missing
@@ -601,16 +602,19 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 let missing = self.get_next_missing();
                 if let Some(next) = missing {
                     // Send request
-                    self.send_request(next.clone(), &mut sender).await;
+                    let validator = self.send_request(next.clone(), &mut sender).await;
 
                     // Set timeout
-                    outstanding_task =
-                        Some((next, self.runtime.current() + Duration::from_secs(1)));
+                    outstanding_task = Some((
+                        validator,
+                        next,
+                        self.runtime.current() + Duration::from_secs(1),
+                    ));
                 }
             };
 
             // Avoid arbitrarily long sleep
-            let missing_timeout = if let Some((_, ref deadline)) = outstanding_task {
+            let missing_timeout = if let Some((_, _, ref deadline)) = outstanding_task {
                 Either::Left(self.runtime.sleep_until(*deadline))
             } else {
                 Either::Right(futures::future::pending())
@@ -621,10 +625,10 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 _task_timeout = missing_timeout => {
                     // Send request again
                     let request = outstanding_task.unwrap().0.clone();
-                    self.send_request(request.clone(), &mut sender).await;
+                    let validator = self.send_request(request.clone(), &mut sender).await;
 
                     // Reset timeout
-                    outstanding_task = Some((request, self.runtime.current() + Duration::from_secs(1)));
+                    outstanding_task = Some((validator, request, self.runtime.current() + Duration::from_secs(1)));
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
@@ -674,6 +678,20 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                 proposal,
                             }.encode_to_vec().into();
                             sender.send(Recipients::One(s), msg, false).await.unwrap();
+                        }
+                        wire::backfill::Payload::Missing(missing) => {
+                            if let Some(ref outstanding) = outstanding_task {
+                                let request = outstanding.1;
+                                if outstanding.0 == s && request == missing.hash {
+                                    debug!(hash = hex(&missing.hash), peer = hex(&s), "peer missing proposal");
+
+                                    // Send request again
+                                    let validator = self.send_request(request.clone(), &mut sender).await;
+
+                                    // Reset timeout
+                                    outstanding_task = Some((validator, request, self.runtime.current() + Duration::from_secs(1)));
+                                }
+                            }
                         }
                         wire::backfill::Payload::Resolution(resolution) => {
                             // Parse proposal
@@ -747,9 +765,12 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             self.resolve(proposal).await;
 
                             // Remove outstanding task if we were waiting on this
+                            //
+                            // Note, we don't care if we are sent the proposal from someone unexpected (although
+                            // this is unexpected).
                             if let Some(ref outstanding) = outstanding_task {
                                 if outstanding.0 == incoming_hash {
-                                    debug!(hash = hex(&incoming_hash), "resolved missing proposal");
+                                    debug!(hash = hex(&incoming_hash), peer = hex(&s), "resolved missing proposal");
                                     outstanding_task = None;
                                 }
                             }

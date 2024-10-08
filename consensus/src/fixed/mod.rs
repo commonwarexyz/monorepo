@@ -12,6 +12,11 @@
 //!
 //! * Block timeout in addition to notarization timeout
 //! * Backfill blocks from notarizing peers rather than passing along with notarization
+//!
+//! # Missing Features (Purposeful)
+//!
+//! * Uptime tracking
+//! * Fault tracking (and ejection of malicious validators) -> won't impact stability
 
 mod config;
 mod engine;

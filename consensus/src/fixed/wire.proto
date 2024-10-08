@@ -16,10 +16,11 @@ message Message {
 message Proposal {
     uint64 view = 1;
     uint64 height = 2;
-    bytes parent = 3;
-    bytes payload = 4;
+    uint64 timestamp = 3;
+    bytes parent = 4;
+    bytes payload = 5;
 
-    Signature signature = 5;
+    Signature signature = 6;
 }
 
 message Vote {
