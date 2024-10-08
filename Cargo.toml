@@ -9,9 +9,9 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-commonware-cryptography = { version = "0.0.8", path = "cryptography" }
-commonware-runtime = { version = "0.0.5", path = "runtime" }
-commonware-p2p = { version = "0.0.19", path = "p2p" }
+commonware-cryptography = { version = "0.0.9", path = "cryptography" }
+commonware-runtime = { version = "0.0.6", path = "runtime" }
+commonware-p2p = { version = "0.0.20", path = "p2p" }
 thiserror = "1.0.63"
 bytes = "1.7.1"
 sha2 = "0.10.8"
