@@ -32,25 +32,26 @@ pub trait Application: Send + 'static {
     /// Generate a new payload for the given parent hash.
     ///
     /// If state is not yet ready, this will return None.
-    fn propose(&mut self, parent: Hash) -> Option<Payload>;
+    fn propose(&mut self, parent: Hash, height: Height, timestamp: u64) -> Option<Payload>;
 
     /// Parse the payload and return the hash of the payload.
     ///
     /// Parse is a stateless operation and may be called out-of-order.
-    fn parse(&self, payload: Payload) -> Option<Hash>;
+    fn parse(&self, parent: Hash, height: Height, timestamp: u64, payload: Payload)
+        -> Option<Hash>;
 
     /// Verify the payload is valid.
     ///
     /// Verify is a stateful operation and must be called in-order.
-    fn verify(&self, payload: Payload) -> bool;
+    fn verify(&self, parent: Hash, height: Height, timestamp: u64, payload: Payload) -> bool;
 
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, payload: Payload);
+    fn notarized(&mut self, parent: Hash, height: Height, timestamp: u64, payload: Payload);
 
     /// Event that the payload has been finalized.
-    fn finalized(&mut self, payload: Payload);
+    fn finalized(&mut self, parent: Hash, height: Height, timestamp: u64, payload: Payload);
 }
 
 // Example Payload (Transfers):
