@@ -25,7 +25,7 @@
 //! };
 //!
 //! // Start runtime
-//! let (executor, runtime, auditor) = Executor::seeded(0);
+//! let (executor, runtime, _) = Executor::seeded(0);
 //! executor.start(async move {
 //!     // Initialize network
 //!     let mut network = Network::new(runtime.clone(), p2p_cfg);
