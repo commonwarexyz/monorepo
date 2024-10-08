@@ -460,6 +460,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         };
 
         // Store the proposal
+        let proposal_view = proposal.view;
+        let proposal_height = proposal.height;
         let view = self
             .views
             .entry(proposal.view)
@@ -467,6 +469,12 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         let proposal_hash = hash(proposal_digest);
         view.proposal = Some((proposal_hash.clone(), proposal));
         view.leader_deadline = None;
+        debug!(
+            view = proposal_view,
+            height = proposal_height,
+            hash = hex(&proposal_hash),
+            "stored proposal"
+        );
     }
 
     fn enter_view(&mut self, view: u64) {

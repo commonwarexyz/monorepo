@@ -351,7 +351,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         if parent.is_none() {
             debug!(
                 height = proposal.height,
-                hash = hex(&proposal.parent),
+                parent_hash = hex(&proposal.parent),
                 "missing parent"
             );
             return false;
@@ -371,7 +371,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 if !hashes.contains_key(&parent.view) {
                     debug!(
                         height = proposal.height,
-                        hash = hex(&proposal.parent),
+                        parent_hash = hex(&proposal.parent),
                         "parent not notarized"
                     );
                     return false;
@@ -381,17 +381,19 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     None => {
                         debug!(
                             height = proposal.height,
-                            hash = hex(&proposal.parent),
+                            parent_hash = hex(&proposal.parent),
                             "parent not notified of notarization"
                         );
                         return false;
                     }
                 };
-                let contains = notifications.contains(&parent.parent);
+                let contains = notifications.contains(&proposal.parent);
                 if !contains {
+                    let notifications = notifications.iter().map(hex).collect::<Vec<_>>();
                     debug!(
                         height = proposal.height,
-                        hash = hex(&proposal.parent),
+                        parent_hash = hex(&proposal.parent),
+                        ?notifications,
                         "parent not notified of notarization"
                     );
                 }
@@ -401,7 +403,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 if proposal.parent != *hash {
                     debug!(
                         height = proposal.height,
-                        hash = hex(&proposal.parent),
+                        parent_hash = hex(&proposal.parent),
                         "parent mismatch"
                     );
                     return false;
@@ -411,7 +413,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             None => {
                 debug!(
                     height = proposal.height,
-                    hash = hex(&proposal.parent),
+                    parent_hash = hex(&proposal.parent),
                     "parent not notarized nor finalized"
                 );
                 false
@@ -425,7 +427,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
             debug!(
                 height = proposal.height,
-                hash = hex(&proposal.parent),
+                parent_hash = hex(&proposal.parent),
                 "invalid ancestry"
             );
             return false;
@@ -747,6 +749,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             // Remove outstanding task if we were waiting on this
                             if let Some(ref outstanding) = outstanding_task {
                                 if outstanding.0 == incoming_hash {
+                                    debug!(hash = hex(&incoming_hash), "resolved missing proposal");
                                     outstanding_task = None;
                                 }
                             }
