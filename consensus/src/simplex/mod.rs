@@ -81,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn test_simple() {
+    fn test_all_online() {
         // Configure logging
         tracing_subscriber::fmt()
             .with_max_level(Level::DEBUG)

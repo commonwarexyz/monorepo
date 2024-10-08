@@ -454,6 +454,9 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
 
         // Verify the proposal
+        //
+        // TODO: if we haven't notified application of parent notarization,
+        // we fail verification here...maybe we should handle this differently?
         if !self.orchestrator.verify(proposal.clone()).await {
             debug!(reason = "invalid payload", "dropping proposal");
             return;
