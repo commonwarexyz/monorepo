@@ -975,9 +975,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         if finalization.view >= self.view {
             self.enter_view(finalization.view + 1);
         }
-
-        // Prune any old views
-        self.prune_views();
     }
 
     pub fn construct_proposal_vote(&mut self, view: u64) -> Option<wire::Vote> {
@@ -1297,6 +1294,10 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
                     // Attempt to send any new view messages
                     self.send_view_messages(&mut sender, view).await;
+
+                    // After sending all required messages, prune any views
+                    // we no longer need
+                    self.prune_views();
                 },
             };
         }
