@@ -257,6 +257,7 @@ pub struct Voter<E: Clock + Rng, C: Scheme> {
     validators: Vec<PublicKey>,
     validators_ordered: HashMap<PublicKey, u32>,
 
+    last_finalized: u64,
     view: u64,
     views: HashMap<u64, View>,
 }
@@ -301,6 +302,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             validators,
             validators_ordered,
 
+            last_finalized: 0,
             view: 1,
             views,
         }
@@ -472,8 +474,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
         // Verify the proposal
         //
-        // TODO: if we haven't notified application of parent notarization,
-        // we fail verification here...maybe we should handle this differently?
+        // This will fail if we haven't notified the application of this parent.
         if !self.orchestrator.verify(proposal.clone()).await {
             debug!(reason = "invalid payload", "dropping proposal");
             return;
@@ -590,11 +591,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     }
 
     pub async fn notarization(&mut self, notarization: wire::Notarization) {
-        // Check if we are still in a view that this would help with
-        //
-        // TODO: remove so that we can collect missing signatures or just don't allow to save compute resources
-        // around signature verification?
-        if notarization.view < self.view {
+        // Check if we are still in a view where this notarization could help
+        if notarization.view <= self.last_finalized {
             trace!(
                 notarization_view = notarization.view,
                 our_view = self.view,
@@ -604,16 +602,51 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             return;
         }
 
-        // TODO: process notarizations as long as > last finalized (could allow for better block building/verification)
+        // Determine if we already broadcast notarization for this view (in which
+        // case we can ignore this message)
+        let view = self.views.get_mut(&notarization.view);
+        if let Some(ref view) = view {
+            if notarization.hash.is_some() && view.broadcast_proposal_notarization {
+                debug!(
+                    view = notarization.view,
+                    reason = "already broadcast notarization",
+                    "dropping notarization"
+                );
+                return;
+            }
+            if notarization.hash.is_none() && view.broadcast_null_notarization {
+                debug!(
+                    view = notarization.view,
+                    reason = "already broadcast null notarization",
+                    "dropping notarization"
+                );
+                return;
+            }
+        }
 
-        // Lookup view in case we can add any missing signatures
-        let mut view = self.views.get_mut(&notarization.view);
+        // Ensure notarization has valid number of signatures
+        if notarization.signatures.len() < self.threshold as usize {
+            debug!(
+                threshold = self.threshold,
+                signatures = notarization.signatures.len(),
+                reason = "insufficient signatures",
+                "dropping notarization"
+            );
+            return;
+        }
+        if notarization.signatures.len() > self.validators.len() {
+            debug!(
+                threshold = self.threshold,
+                signatures = notarization.signatures.len(),
+                reason = "too many signatures",
+                "dropping notarization"
+            );
+            return;
+        }
 
         // Verify threshold notarization
-        // TODO: exit if length != signers (to save space could just send threshold)
-        let mut added = 0;
         let mut seen = HashSet::new();
-        for signature in notarization.signatures {
+        for signature in notarization.signatures.iter() {
             // Verify signature
             if !C::validate(&signature.public_key) {
                 debug!(
@@ -650,46 +683,32 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 return;
             }
 
-            // Add any useful signatures
-            if let Some(ref mut view) = view {
-                // Check if null and already finalized
-                if notarization.hash.is_none() && view.finalizers.contains(&signature.public_key) {
-                    debug!(
-                        signer = hex(&signature.public_key),
-                        reason = "already voted finalize",
-                        "dropping notarization"
-                    );
-                    // TODO: fault
-                } else {
-                    // Store vote
-                    view.add_verified_vote(wire::Vote {
-                        view: notarization.view,
-                        height: notarization.height,
-                        hash: notarization.hash.clone(),
-                        signature: Some(signature),
-                    });
-                }
-            }
-
-            // Track that we added one for threshold
-            added += 1;
+            // TODO: how to handle note that voted for both null/finalize (peer may not be aware and
+            // won't rebroadcast)
         }
-        if added < self.threshold {
-            debug!(
-                threshold = self.threshold,
-                signatures = added,
-                reason = "insufficient signatures",
-                "dropping notarization"
-            );
-            return;
-        }
-        debug!(view = notarization.view, added, "notarization verified");
+        debug!(view = notarization.view, "notarization verified");
 
-        // TODO: Store signatures for view
+        // Add signatures to view (needed to broadcast notarization if we get proposal)
+        let view = self.views.entry(notarization.view).or_insert_with(|| {
+            View::new(
+                self.validators[notarization.view as usize % self.validators.len()].clone(),
+                None,
+                None,
+            )
+        });
+        for signature in notarization.signatures {
+            let vote = wire::Vote {
+                view: notarization.view,
+                height: notarization.height,
+                hash: notarization.hash.clone(),
+                signature: Some(signature),
+            };
+            view.add_verified_vote(vote);
+        }
 
         // Inform orchestrator of notarization if not null vote
         if let Some(notarization_hash) = notarization.hash {
-            let proposal = match view.and_then(|view| view.proposal.as_ref()) {
+            let proposal = match view.proposal.as_ref() {
                 Some((hash, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
                 None => {
                     Proposal::Reference(notarization.view, notarization.height, notarization_hash)
@@ -763,13 +782,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             )
         });
 
-        // Check if finalize vote is for a block (Fault)
-        if finalize.hash.len() == 0 {
-            // TODO: record fault
-            debug!(reason = "finalize for null block", "dropping finalize");
-            return;
-        }
-
         // Check if already votes for null (Fault)
         if view.null_votes.contains_key(&signature.public_key) {
             debug!(
@@ -785,20 +797,54 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     }
 
     pub async fn finalization(&mut self, finalization: wire::Finalization) {
-        // Ensure not for null (should never happen)
-        if finalization.hash.len() == 0 {
-            debug!(reason = "finalize for null block", "dropping finalization");
-            // TODO: record faults
+        // Check if we are still in a view where this finalization could help
+        if finalization.view <= self.last_finalized {
+            trace!(
+                finalization_view = finalization.view,
+                our_view = self.view,
+                reason = "outdated finalization",
+                "dropping finalization"
+            );
             return;
         }
 
-        // Lookup view in case we can add any missing signatures
+        // Determine if we already broadcast finalization for this view (in which
+        // case we can ignore this message)
         let mut view = self.views.get_mut(&finalization.view);
+        if let Some(ref view) = view {
+            if view.broadcast_finalization {
+                debug!(
+                    view = finalization.view,
+                    reason = "already broadcast finalization",
+                    "dropping finalization"
+                );
+                return;
+            }
+        }
+
+        // Ensure finalization has valid number of signatures
+        if finalization.signatures.len() < self.threshold as usize {
+            debug!(
+                threshold = self.threshold,
+                signatures = finalization.signatures.len(),
+                reason = "insufficient signatures",
+                "dropping finalization"
+            );
+            return;
+        }
+        if finalization.signatures.len() > self.validators.len() {
+            debug!(
+                threshold = self.threshold,
+                signatures = finalization.signatures.len(),
+                reason = "too many signatures",
+                "dropping finalization"
+            );
+            return;
+        }
 
         // Verify threshold finalization
-        let mut added = 0;
         let mut seen = HashSet::new();
-        for signature in finalization.signatures {
+        for signature in finalization.signatures.iter() {
             // Verify signature
             if !C::validate(&signature.public_key) {
                 debug!(
@@ -830,45 +876,34 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 debug!(reason = "invalid signature", "dropping finalization");
                 return;
             }
-
-            // Add any useful signatures
-            if let Some(ref mut view) = view {
-                // Check if already voted for null
-                if view.null_votes.contains_key(&signature.public_key) {
-                    debug!(
-                        signer = hex(&signature.public_key),
-                        reason = "already voted null",
-                        "dropping finalization"
-                    );
-                } else {
-                    // Store finalize
-                    view.add_verified_finalize(wire::Finalize {
-                        view: finalization.view,
-                        height: finalization.height,
-                        hash: finalization.hash.clone(),
-                        signature: Some(signature),
-                    });
-                }
-            }
-
-            // Track that we added one for threshold
-            added += 1;
         }
-        if added < self.threshold {
-            debug!(
-                threshold = self.threshold,
-                signatures = added,
-                reason = "insufficient signatures",
-                "dropping finalization"
-            );
-            return;
-        }
-        debug!(view = finalization.view, added, "finalization verified");
+        debug!(view = finalization.view, "finalization verified");
 
-        // TODO: store finalize in view
+        // Add signatures to view (needed to broadcast finalization if we get proposal)
+        let view = self.views.entry(finalization.view).or_insert_with(|| {
+            View::new(
+                self.validators[finalization.view as usize % self.validators.len()].clone(),
+                None,
+                None,
+            )
+        });
+        for signature in finalization.signatures {
+            let finalize = wire::Finalize {
+                view: finalization.view,
+                height: finalization.height,
+                hash: finalization.hash.clone(),
+                signature: Some(signature),
+            };
+            view.add_verified_finalize(finalize);
+        }
+
+        // Track view finalized
+        if finalization.view > self.last_finalized {
+            self.last_finalized = finalization.view;
+        }
 
         // Inform orchestrator of finalization
-        let proposal = match view.and_then(|view| view.proposal.as_ref()) {
+        let proposal = match view.proposal.as_ref() {
             Some((hash, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
             None => Proposal::Reference(
                 finalization.view,
@@ -932,10 +967,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         if result.is_none() {
             result = view_obj.notarizable_null(self.threshold);
         }
-        if result.is_none() {
-            return None;
-        }
-        let (hash, height, votes) = result.unwrap();
+        let (hash, height, votes) = result?;
 
         // Construct notarization
         let mut signatures = Vec::new();
