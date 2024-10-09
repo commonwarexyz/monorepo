@@ -823,7 +823,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
     fn finalize(&mut self, finalize: wire::Finalize) {
         // Ensure we are in the right view to process this message
-        if finalize.view != self.view && finalize.view != self.view + 1 {
+        if finalize.view <= self.last_finalized || finalize.view > self.view + 1 {
             debug!(
                 finalize_view = finalize.view,
                 our_view = self.view,
