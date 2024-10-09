@@ -51,4 +51,4 @@ jobs:
       if: steps.cargo-udeps-cache.outputs.cache-hit != 'true'
       run: cargo +nightly install cargo-udeps --version ${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
-      run: cargo +nightly udeps
+      run: cargo +nightly udeps --all-targets
