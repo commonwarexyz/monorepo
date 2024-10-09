@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "consensus",
     "cryptography",
     "runtime",
     "p2p",

@@ -12,3 +12,4 @@ documentation = "https://docs.rs/commonware-utils"
 
 [dependencies]
 bytes = { workspace = true }
+sha2 = { workspace = true }
