@@ -119,6 +119,8 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
     runtime: E,
     application: A,
 
+    fetch_timeout: Duration,
+
     mailbox_receiver: mpsc::Receiver<Message>,
 
     validators: BTreeMap<View, Vec<PublicKey>>,
@@ -147,6 +149,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
     pub fn new(
         runtime: E,
         mut application: A,
+        fetch_timeout: Duration,
         validators: BTreeMap<View, Vec<PublicKey>>,
     ) -> (Self, Mailbox) {
         // Create genesis block and store it
@@ -172,6 +175,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             Self {
                 runtime,
                 application,
+
+                fetch_timeout,
 
                 mailbox_receiver,
 
@@ -629,11 +634,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     let validator = self.send_request(next.clone(), &mut sender).await;
 
                     // Set timeout
-                    outstanding_task = Some((
-                        validator,
-                        next,
-                        self.runtime.current() + Duration::from_secs(1),
-                    ));
+                    outstanding_task =
+                        Some((validator, next, self.runtime.current() + self.fetch_timeout));
                 }
             };
 
@@ -648,11 +650,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             select! {
                 _task_timeout = missing_timeout => {
                     // Send request again
-                    let request = outstanding_task.unwrap().0.clone();
+                    let (_, request, _)= outstanding_task.take().unwrap();
                     let validator = self.send_request(request.clone(), &mut sender).await;
 
                     // Reset timeout
-                    outstanding_task = Some((validator, request, self.runtime.current() + Duration::from_secs(1)));
+                    outstanding_task = Some((validator, request, self.runtime.current() + self.fetch_timeout));
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();

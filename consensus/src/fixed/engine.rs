@@ -30,11 +30,21 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
         let (orchestrator, mailbox) = orchestrator::Orchestrator::new(
             runtime.clone(),
             cfg.application,
+            cfg.fetch_timeout,
             cfg.validators.clone(),
         );
 
         // Create voter
-        let voter = Voter::new(runtime.clone(), cfg.crypto, mailbox, cfg.validators);
+        let voter = Voter::new(
+            runtime.clone(),
+            cfg.crypto,
+            cfg.namespace,
+            cfg.leader_timeout,
+            cfg.notarization_timeout,
+            cfg.null_vote_retry,
+            mailbox,
+            cfg.validators,
+        );
 
         // Return the engine
         Self {

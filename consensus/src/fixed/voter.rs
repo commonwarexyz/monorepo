@@ -6,6 +6,7 @@ use super::{
     wire,
 };
 use crate::{Hash, Height, View, HASH_LENGTH};
+use bytes::{BufMut, Bytes, BytesMut};
 use commonware_cryptography::{bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
@@ -17,10 +18,16 @@ use std::{
 };
 use tracing::{debug, info, trace, warn};
 
-// TODO: move to config
-const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
-const VOTE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_VOTE_";
-const FINALIZE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_FINALIZE_";
+const PROPOSAL_SUFFIX: &[u8] = b"_PROPOSAL";
+const VOTE_SUFFIX: &[u8] = b"_VOTE";
+const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
+
+fn create_namespace(namespace: &Bytes, suffix: &[u8]) -> Bytes {
+    let mut new_namespace = BytesMut::with_capacity(namespace.len() + suffix.len());
+    new_namespace.put_slice(namespace);
+    new_namespace.put_slice(suffix);
+    new_namespace.freeze()
+}
 
 pub struct Record {
     leader: PublicKey,
@@ -254,6 +261,13 @@ pub struct Voter<E: Clock + Rng, C: Scheme> {
     runtime: E,
     crypto: C,
 
+    proposal_namespace: Bytes,
+    vote_namespace: Bytes,
+    finalize_namespace: Bytes,
+    leader_timeout: Duration,
+    notarization_timeout: Duration,
+    null_vote_retry: Duration,
+
     orchestrator: Mailbox,
 
     validators: BTreeMap<View, (u32, Vec<PublicKey>, HashMap<PublicKey, u32>)>,
@@ -289,6 +303,10 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     pub fn new(
         runtime: E,
         crypto: C,
+        namespace: Bytes,
+        leader_timeout: Duration,
+        notarization_timeout: Duration,
+        null_vote_retry: Duration,
         orchestrator: Mailbox,
         validators: BTreeMap<crate::View, Vec<PublicKey>>,
     ) -> Self {
@@ -312,8 +330,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             1,
             Record::new(
                 Self::leader(&parsed_validators, 1),
-                Some(runtime.current() + Duration::from_secs(1)),
-                Some(runtime.current() + Duration::from_secs(2)),
+                Some(runtime.current() + leader_timeout),
+                Some(runtime.current() + notarization_timeout),
             ),
         );
 
@@ -321,6 +339,13 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         Self {
             runtime,
             crypto,
+
+            proposal_namespace: create_namespace(&namespace, PROPOSAL_SUFFIX),
+            vote_namespace: create_namespace(&namespace, VOTE_SUFFIX),
+            finalize_namespace: create_namespace(&namespace, FINALIZE_SUFFIX),
+            leader_timeout,
+            notarization_timeout,
+            null_vote_retry,
 
             orchestrator,
 
@@ -361,7 +386,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .1
     }
 
-    pub async fn propose(&mut self) -> Option<wire::Proposal> {
+    async fn propose(&mut self) -> Option<wire::Proposal> {
         // Check if we are leader
         let view = self.views.get(&self.view).unwrap();
         if view.leader != self.crypto.public_key() {
@@ -391,7 +416,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             payload,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
-                signature: self.crypto.sign(PROPOSAL_NAMESPACE, &digest),
+                signature: self.crypto.sign(&self.proposal_namespace, &digest),
             }),
         };
         Some(proposal)
@@ -399,7 +424,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
     pub fn timeout_deadline(&mut self) -> SystemTime {
         // Return the earliest deadline
-        // TODO: if no view exists, this will panic
         let view = self.views.get_mut(&self.view).unwrap();
         if let Some(deadline) = view.leader_deadline {
             return deadline;
@@ -415,7 +439,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
 
         // Set null vote retry, if none already set
-        let null_vote_retry = self.runtime.current() + Duration::from_secs(30);
+        let null_vote_retry = self.runtime.current() + self.null_vote_retry;
         view.null_vote_retry = Some(null_vote_retry);
         null_vote_retry
     }
@@ -438,7 +462,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             hash: None,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
-                signature: self.crypto.sign(VOTE_NAMESPACE, &digest),
+                signature: self.crypto.sign(&self.vote_namespace, &digest),
             }),
         }
     }
@@ -512,7 +536,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             &payload_hash,
         );
         if !C::verify(
-            PROPOSAL_NAMESPACE,
+            &self.proposal_namespace,
             &proposal_digest,
             &signature.public_key,
             &signature.signature,
@@ -558,11 +582,10 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .views
             .entry(view)
             .or_insert_with(|| Record::new(Self::leader(&self.validators, view), None, None));
-        entry.leader_deadline = Some(self.runtime.current() + Duration::from_secs(1));
-        entry.advance_deadline = Some(self.runtime.current() + Duration::from_secs(2));
-
-        info!(view, "entered view");
+        entry.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
+        entry.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         self.view = view;
+        info!(view, "entered view");
     }
 
     fn prune_views(&mut self) {
@@ -621,7 +644,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         // Verify the signature
         let vote_digest = vote_digest(vote.view, vote.height, vote.hash.clone());
         if !C::verify(
-            VOTE_NAMESPACE,
+            &self.vote_namespace,
             &vote_digest,
             &signature.public_key,
             &signature.signature,
@@ -721,7 +744,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
             // Verify signature
             if !C::verify(
-                VOTE_NAMESPACE,
+                &self.vote_namespace,
                 &vote_digest(
                     notarization.view,
                     notarization.height,
@@ -807,7 +830,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         // Verify the signature
         let finalize_digest = finalize_digest(finalize.view, finalize.height, &finalize.hash);
         if !C::verify(
-            FINALIZE_NAMESPACE,
+            &self.finalize_namespace,
             &finalize_digest,
             &signature.public_key,
             &signature.signature,
@@ -903,7 +926,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
             // Verify signature
             if !C::verify(
-                FINALIZE_NAMESPACE,
+                &self.finalize_namespace,
                 &finalize_digest(finalization.view, finalization.height, &finalization.hash),
                 &signature.public_key,
                 &signature.signature,
@@ -957,7 +980,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         self.prune_views();
     }
 
-    pub fn construct_vote(&mut self, view: u64) -> Option<wire::Vote> {
+    pub fn construct_proposal_vote(&mut self, view: u64) -> Option<wire::Vote> {
         let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -984,7 +1007,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
-                    VOTE_NAMESPACE,
+                    &self.vote_namespace,
                     &vote_digest(view, proposal.height, Some(hash.clone())),
                 ),
             }),
@@ -1055,7 +1078,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
-                    FINALIZE_NAMESPACE,
+                    &self.finalize_namespace,
                     &finalize_digest(view, proposal.height, hash),
                 ),
             }),
@@ -1092,7 +1115,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
     async fn send_view_messages(&mut self, sender: &mut impl Sender, view: u64) {
         // Attempt to vote
-        if let Some(vote) = self.construct_vote(view) {
+        if let Some(vote) = self.construct_proposal_vote(view) {
             // Broadcast the vote
             let msg = wire::Consensus {
                 payload: Some(wire::consensus::Payload::Vote(vote.clone())),
