@@ -140,7 +140,7 @@ impl View {
         &mut self,
         threshold: u32,
     ) -> Option<(Option<Hash>, Height, &HashMap<PublicKey, wire::Vote>)> {
-        if self.broadcast_proposal_notarization {
+        if self.broadcast_proposal_notarization || self.broadcast_null_notarization {
             return None;
         }
         for (proposal, votes) in self.proposal_votes.iter() {
@@ -179,7 +179,7 @@ impl View {
         &mut self,
         threshold: u32,
     ) -> Option<(Option<Hash>, Height, &HashMap<PublicKey, wire::Vote>)> {
-        if self.broadcast_null_notarization {
+        if self.broadcast_null_notarization || self.broadcast_proposal_notarization {
             return None;
         }
         if (self.null_votes.len() as u32) < threshold {
