@@ -1264,6 +1264,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
                     // Attempt to send any new view messages
                     self.broadcast(&mut sender, vote_view).await;
+                    debug!(view = vote_view, "broadcast null vote");
                 },
                 result = receiver.recv() => {
                     // Parse message
