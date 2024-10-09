@@ -158,8 +158,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
 
                     // Process message
                     //
-                    // While syncing any missing blocks, continue to listen to messages at
-                    // tip (immediately vote dummy when entering round).
+                    // All messages are semantically verified before being passed to the `voter`.
                     let view;
                     match payload {
                         wire::consensus::Payload::Proposal(proposal) => {
@@ -171,6 +170,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
                             self.voter.proposal(proposal).await;
                         }
                         wire::consensus::Payload::Vote(vote) => {
+                            if vote.hash.is_none() && vote.height != 0 {
+                                debug!(sender = hex(&s), "invalid vote height for null block");
+                                continue;
+                            }
                             if vote.hash.is_some() && vote.hash.as_ref().unwrap().len() != HASH_LENGTH {
                                 debug!(sender = hex(&s), "invalid vote hash size");
                                 continue;
@@ -179,6 +182,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
                             self.voter.vote(vote);
                         }
                         wire::consensus::Payload::Notarization(notarization) => {
+                            if notarization.hash.is_none() && notarization.height != 0 {
+                                debug!(sender = hex(&s), "invalid notarization height for null block");
+                                continue;
+                            }
                             if notarization.hash.is_some() && notarization.hash.as_ref().unwrap().len() != HASH_LENGTH {
                                 debug!(sender = hex(&s), "invalid notarization hash size");
                                 continue;

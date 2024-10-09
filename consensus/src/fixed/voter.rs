@@ -1,7 +1,10 @@
 //! TODO: change name to voter
 
-use super::{orchestrator::Mailbox, wire};
-use crate::{r#static::orchestrator::Proposal, Hash, Height};
+use super::{
+    orchestrator::{Mailbox, Proposal},
+    wire,
+};
+use crate::{Hash, Height};
 use bytes::Bytes;
 use commonware_cryptography::{bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme};
 use commonware_runtime::Clock;
@@ -18,8 +21,12 @@ const PROPOSAL_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_PROPOSAL_";
 const VOTE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_VOTE_";
 const FINALIZE_NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_FINALIZE_";
 
-// TODO: move to shared location
-pub fn proposal_digest(view: u64, height: u64, parent: Bytes, payload_hash: Bytes) -> Bytes {
+pub fn proposal_digest(
+    view: crate::View,
+    height: Height,
+    parent: &Hash,
+    payload_hash: &Hash,
+) -> Bytes {
     let mut msg = Vec::new();
     msg.extend_from_slice(&view.to_be_bytes());
     msg.extend_from_slice(&height.to_be_bytes());
@@ -28,7 +35,17 @@ pub fn proposal_digest(view: u64, height: u64, parent: Bytes, payload_hash: Byte
     msg.into()
 }
 
-fn vote_digest(view: u64, height: u64, proposal_hash: Bytes) -> Bytes {
+fn vote_digest(view: crate::View, height: Height, proposal_hash: Option<Hash>) -> Bytes {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(&view.to_be_bytes());
+    msg.extend_from_slice(&height.to_be_bytes());
+    if let Some(hash) = proposal_hash {
+        msg.extend_from_slice(&hash);
+    }
+    msg.into()
+}
+
+fn finalize_digest(view: crate::View, height: Height, proposal_hash: &Hash) -> Bytes {
     let mut msg = Vec::new();
     msg.extend_from_slice(&view.to_be_bytes());
     msg.extend_from_slice(&height.to_be_bytes());
@@ -36,17 +53,9 @@ fn vote_digest(view: u64, height: u64, proposal_hash: Bytes) -> Bytes {
     msg.into()
 }
 
-fn finalize_digest(view: u64, height: u64, proposal_hash: Bytes) -> Bytes {
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&view.to_be_bytes());
-    msg.extend_from_slice(&height.to_be_bytes());
-    msg.extend_from_slice(&proposal_hash);
-    msg.into()
-}
-
-pub fn hash(bytes: Bytes) -> Bytes {
+pub fn hash(digest: &Bytes) -> Bytes {
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    hasher.update(digest);
     hasher.finalize().to_vec().into()
 }
 
@@ -107,11 +116,13 @@ impl View {
     }
 
     fn add_verified_vote(&mut self, vote: wire::Vote) {
-        if vote.hash.len() == 0 {
+        // Determine whether or not this is a null vote
+        if vote.hash.is_none() {
             self.null_votes
                 .insert(vote.signature.as_ref().unwrap().public_key.clone(), vote);
             return;
         }
+        let hash = vote.hash.clone().unwrap();
 
         // Check if already voted
         let public_key = &vote.signature.as_ref().unwrap().public_key;
@@ -121,17 +132,14 @@ impl View {
 
         // Store the vote
         self.proposal_voters.insert(public_key.clone());
-        let entry = self
-            .proposal_votes
-            .entry(vote.hash.clone())
-            .or_insert_with(HashMap::new);
+        let entry = self.proposal_votes.entry(hash).or_insert_with(HashMap::new);
         entry.insert(public_key.clone(), vote);
     }
 
     fn notarizable_proposal(
         &mut self,
         threshold: u32,
-    ) -> Option<(Hash, Height, &HashMap<PublicKey, wire::Vote>)> {
+    ) -> Option<(Option<Hash>, Height, &HashMap<PublicKey, wire::Vote>)> {
         if self.broadcast_proposal_notarization {
             return None;
         }
@@ -162,7 +170,7 @@ impl View {
             // There should never exist enough votes for multiple proposals, so it doesn't
             // matter which one we choose.
             self.broadcast_proposal_notarization = true;
-            return Some((proposal.clone(), height, votes));
+            return Some((Some(proposal.clone()), height, votes));
         }
         None
     }
@@ -170,7 +178,7 @@ impl View {
     fn notarizable_null(
         &mut self,
         threshold: u32,
-    ) -> Option<(Hash, Height, &HashMap<PublicKey, wire::Vote>)> {
+    ) -> Option<(Option<Hash>, Height, &HashMap<PublicKey, wire::Vote>)> {
         if self.broadcast_null_notarization {
             return None;
         }
@@ -178,7 +186,7 @@ impl View {
             return None;
         }
         self.broadcast_null_notarization = true;
-        Some((Bytes::new(), 0, &self.null_votes))
+        Some((None, 0, &self.null_votes))
     }
 
     fn add_verified_finalize(&mut self, finalize: wire::Finalize) {
@@ -311,22 +319,21 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
 
         // Select parent block
-        let (parent, payload) = match self.orchestrator.propose().await {
-            Some((parent, payload)) => (parent, payload),
+        let (parent, height, payload_hash, payload) = match self.orchestrator.propose().await {
+            Some(proposal) => proposal,
             None => {
                 debug!(reason = "no available parent", "dropping proposal");
                 return None;
             }
         };
-        let height = parent.1 + 1;
 
         // Construct proposal
-        let digest = proposal_digest(self.view, height, parent.0.clone(), payload.0.clone());
+        let digest = proposal_digest(self.view, height, &parent, &payload_hash);
         let proposal = wire::Proposal {
             view: self.view,
             height,
-            parent: parent.0,
-            payload: payload.1,
+            parent,
+            payload,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(PROPOSAL_NAMESPACE, &digest),
@@ -358,6 +365,10 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         null_vote_retry
     }
 
+    fn leader(&self, view: crate::View) -> PublicKey {
+        self.validators[view as usize % self.validators.len()].clone()
+    }
+
     pub fn timeout(&mut self) -> wire::Vote {
         // Set timeout fired
         let view = self.views.get_mut(&self.view).unwrap();
@@ -369,12 +380,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         view.null_vote_retry = None;
 
         // Construct null vote
-        let hash = Bytes::new();
-        let digest = vote_digest(self.view, 0, hash.clone());
+        let digest = vote_digest(self.view, 0, None);
         wire::Vote {
             view: self.view,
             height: 0,
-            hash,
+            hash: None,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(VOTE_NAMESPACE, &digest),
@@ -383,14 +393,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     }
 
     pub async fn proposal(&mut self, proposal: wire::Proposal) {
-        // TODO: check timestamp is within some synchrony bound back/forward, because we don't run
-        // backfill through consensus can assert anything we vote on is within a [low, high] bound
-        // at time received
-        //
-        // It is possible that if re-processed, the block would be considered invalid (but that will
-        // never happen). This also means on historical sync that we won't check the value of this timestamp (
-        // may want to ensure greater than parent).
-
         // Parse signature
         let signature = match &proposal.signature {
             Some(signature) => signature,
@@ -412,8 +414,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
 
         // Check expected leader
-        let expected_leader =
-            self.validators[proposal.view as usize % self.validators.len()].clone();
+        let expected_leader = self.leader(proposal.view);
         if !C::validate(&signature.public_key) {
             debug!(reason = "invalid signature", "dropping proposal");
             return;
@@ -438,7 +439,15 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
 
         // Verify the signature
-        let payload_hash = match self.orchestrator.parse(proposal.payload.clone()).await {
+        let payload_hash = match self
+            .orchestrator
+            .parse(
+                proposal.parent.clone(),
+                proposal.height,
+                proposal.payload.clone(),
+            )
+            .await
+        {
             Some(hash) => hash,
             None => {
                 debug!(reason = "invalid payload", "dropping proposal");
@@ -448,8 +457,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         let proposal_digest = proposal_digest(
             proposal.view,
             proposal.height,
-            proposal.parent.clone(),
-            payload_hash.clone(),
+            &proposal.parent,
+            &payload_hash,
         );
         if !C::verify(
             PROPOSAL_NAMESPACE,
@@ -477,7 +486,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .views
             .entry(proposal.view)
             .or_insert_with(|| View::new(expected_leader, None, None));
-        let proposal_hash = hash(proposal_digest);
+        let proposal_hash = hash(&proposal_digest);
         view.proposal = Some((proposal_hash.clone(), proposal));
         view.leader_deadline = None;
         debug!(
@@ -545,12 +554,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             return;
         }
 
-        // Assert null vote is well-formed
-        if vote.hash.len() == 0 && vote.height != 0 {
-            debug!(reason = "null vote with non-zero height", "dropping vote");
-            return;
-        }
-
         // Verify the signature
         let vote_digest = vote_digest(vote.view, vote.height, vote.hash.clone());
         if !C::verify(
@@ -573,7 +576,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         });
 
         // Check if already voted to finalize if null vote
-        if vote.hash.len() == 0 && view.finalizers.contains(&signature.public_key) {
+        if vote.hash.is_none() && view.finalizers.contains(&signature.public_key) {
             debug!(
                 signer = hex(&signature.public_key),
                 reason = "already voted finalize",
@@ -602,15 +605,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
 
         // TODO: process notarizations as long as > last finalized (could allow for better block building/verification)
-
-        // Assert null notarization is well-formed
-        if notarization.hash.len() == 0 && notarization.height != 0 {
-            debug!(
-                reason = "null notation with non-zero height",
-                "dropping notarization"
-            );
-            return;
-        }
 
         // Lookup view in case we can add any missing signatures
         let mut view = self.views.get_mut(&notarization.view);
@@ -659,7 +653,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             // Add any useful signatures
             if let Some(ref mut view) = view {
                 // Check if null and already finalized
-                if notarization.hash.len() == 0 && view.finalizers.contains(&signature.public_key) {
+                if notarization.hash.is_none() && view.finalizers.contains(&signature.public_key) {
                     debug!(
                         signer = hex(&signature.public_key),
                         reason = "already voted finalize",
@@ -694,14 +688,12 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         // TODO: Store signatures for view
 
         // Inform orchestrator of notarization if not null vote
-        if notarization.hash.is_some() {
+        if let Some(notarization_hash) = notarization.hash {
             let proposal = match view.and_then(|view| view.proposal.as_ref()) {
                 Some((hash, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
-                None => Proposal::Reference(
-                    notarization.view,
-                    notarization.height,
-                    notarization.hash.clone(),
-                ),
+                None => {
+                    Proposal::Reference(notarization.view, notarization.height, notarization_hash)
+                }
             };
             self.orchestrator.notarized(proposal).await;
         }
@@ -746,8 +738,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
 
         // Verify the signature
-        let finalize_digest =
-            finalize_digest(finalize.view, finalize.height, finalize.hash.clone());
+        let finalize_digest = finalize_digest(finalize.view, finalize.height, &finalize.hash);
         if !C::verify(
             FINALIZE_NAMESPACE,
             &finalize_digest,
@@ -832,11 +823,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             // Verify signature
             if !C::verify(
                 FINALIZE_NAMESPACE,
-                &finalize_digest(
-                    finalization.view,
-                    finalization.height,
-                    finalization.hash.clone(),
-                ),
+                &finalize_digest(finalization.view, finalization.height, &finalization.hash),
                 &signature.public_key,
                 &signature.signature,
             ) {
@@ -920,12 +907,12 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         Some(wire::Vote {
             view,
             height: proposal.height,
-            hash: hash.clone(),
+            hash: Some(hash.clone()),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
                     VOTE_NAMESPACE,
-                    &vote_digest(view, proposal.height, hash.clone()),
+                    &vote_digest(view, proposal.height, Some(hash.clone())),
                 ),
             }),
         })
@@ -998,7 +985,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
                     FINALIZE_NAMESPACE,
-                    &finalize_digest(view, proposal.height, hash.clone()),
+                    &finalize_digest(view, proposal.height, hash),
                 ),
             }),
         })

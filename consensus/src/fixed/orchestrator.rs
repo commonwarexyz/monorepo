@@ -723,11 +723,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                     continue;
                                 }
                             };
-                            let incoming_hash = hash(proposal_digest(
+                            let incoming_hash = hash(&proposal_digest(
                                 proposal.view,
                                 proposal.height,
-                                proposal.parent.clone(),
-                                payload_hash,
+                                &proposal.parent,
+                                &payload_hash,
                             ));
 
                             // Check if we were expecting this hash
