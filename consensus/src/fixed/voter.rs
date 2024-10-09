@@ -10,10 +10,14 @@ use bytes::{BufMut, Bytes, BytesMut};
 use commonware_cryptography::{bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
+use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::registry::Registry;
 use prost::Message;
 use rand::Rng;
+use std::sync::atomic::AtomicI64;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
@@ -29,7 +33,7 @@ fn create_namespace(namespace: &Bytes, suffix: &[u8]) -> Bytes {
     new_namespace.freeze()
 }
 
-pub struct Record {
+struct Record {
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -257,6 +261,15 @@ impl Record {
     }
 }
 
+pub struct Config {
+    pub registry: Arc<Mutex<Registry>>,
+    pub namespace: Bytes,
+    pub leader_timeout: Duration,
+    pub notarization_timeout: Duration,
+    pub null_vote_retry: Duration,
+    pub validators: BTreeMap<View, Vec<PublicKey>>,
+}
+
 pub struct Voter<E: Clock + Rng, C: Scheme> {
     runtime: E,
     crypto: C,
@@ -275,6 +288,8 @@ pub struct Voter<E: Clock + Rng, C: Scheme> {
     last_finalized: View,
     view: View,
     views: BTreeMap<View, Record>,
+
+    current_view: Gauge,
 }
 
 impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
@@ -300,19 +315,10 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .1
     }
 
-    pub fn new(
-        runtime: E,
-        crypto: C,
-        namespace: Bytes,
-        leader_timeout: Duration,
-        notarization_timeout: Duration,
-        null_vote_retry: Duration,
-        orchestrator: Mailbox,
-        validators: BTreeMap<crate::View, Vec<PublicKey>>,
-    ) -> Self {
+    pub fn new(runtime: E, crypto: C, orchestrator: Mailbox, cfg: Config) -> Self {
         // Initialize ordered validators
         let mut parsed_validators = BTreeMap::new();
-        for (view, validators) in validators.into_iter() {
+        for (view, validators) in cfg.validators.into_iter() {
             let mut ordered = HashMap::new();
             for (i, validator) in validators.iter().enumerate() {
                 ordered.insert(validator.clone(), i as u32);
@@ -330,22 +336,30 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             1,
             Record::new(
                 Self::leader(&parsed_validators, 1),
-                Some(runtime.current() + leader_timeout),
-                Some(runtime.current() + notarization_timeout),
+                Some(runtime.current() + cfg.leader_timeout),
+                Some(runtime.current() + cfg.notarization_timeout),
             ),
         );
+
+        // Initialize metrics
+        let current_view = Gauge::<i64, AtomicI64>::default();
+        {
+            let mut registry = cfg.registry.lock().unwrap();
+            registry.register("current_view", "current view", current_view.clone());
+        }
+        current_view.set(1);
 
         // Initialize store
         Self {
             runtime,
             crypto,
 
-            proposal_namespace: create_namespace(&namespace, PROPOSAL_SUFFIX),
-            vote_namespace: create_namespace(&namespace, VOTE_SUFFIX),
-            finalize_namespace: create_namespace(&namespace, FINALIZE_SUFFIX),
-            leader_timeout,
-            notarization_timeout,
-            null_vote_retry,
+            proposal_namespace: create_namespace(&cfg.namespace, PROPOSAL_SUFFIX),
+            vote_namespace: create_namespace(&cfg.namespace, VOTE_SUFFIX),
+            finalize_namespace: create_namespace(&cfg.namespace, FINALIZE_SUFFIX),
+            leader_timeout: cfg.leader_timeout,
+            notarization_timeout: cfg.notarization_timeout,
+            null_vote_retry: cfg.null_vote_retry,
 
             orchestrator,
 
@@ -354,6 +368,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             last_finalized: 0,
             view: 1,
             views,
+
+            current_view,
         }
     }
 
@@ -378,8 +394,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     }
 
     fn validators(&self, view: View) -> &(u32, Vec<PublicKey>, HashMap<PublicKey, u32>) {
-        &self
-            .validators
+        self.validators
             .range(..=view)
             .next_back()
             .expect("validators do not cover range of allowed views")
@@ -1298,6 +1313,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                     // After sending all required messages, prune any views
                     // we no longer need
                     self.prune_views();
+
+                    // Update metrics
+                    if let Ok(view) = self.view.try_into() {
+                        self.current_view.set(view);
+                    }
                 },
             };
         }

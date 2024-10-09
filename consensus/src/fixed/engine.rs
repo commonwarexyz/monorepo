@@ -1,6 +1,10 @@
-use super::{config::Config, orchestrator, voter::Voter};
+use super::{
+    config::Config,
+    orchestrator,
+    voter::{self, Voter},
+};
 use crate::Application;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{select, Clock, Spawner};
 use rand::Rng;
@@ -38,17 +42,20 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
         let voter = Voter::new(
             runtime.clone(),
             cfg.crypto,
-            cfg.namespace,
-            cfg.leader_timeout,
-            cfg.notarization_timeout,
-            cfg.null_vote_retry,
             mailbox,
-            cfg.validators,
+            voter::Config {
+                registry: cfg.registry,
+                namespace: cfg.namespace,
+                leader_timeout: cfg.leader_timeout,
+                notarization_timeout: cfg.notarization_timeout,
+                null_vote_retry: cfg.null_vote_retry,
+                validators: cfg.validators,
+            },
         );
 
         // Return the engine
         Self {
-            runtime: runtime.clone(),
+            runtime,
 
             orchestrator,
             voter,
