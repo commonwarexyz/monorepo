@@ -44,11 +44,13 @@ mod tests {
     use commonware_cryptography::{Ed25519, PublicKey, Scheme};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
-    use futures::channel::mpsc;
+    use engine::Engine;
+    use futures::{channel::mpsc, StreamExt};
     use prometheus_client::registry::Registry;
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         sync::{Arc, Mutex},
+        time::Duration,
     };
     use tracing::Level;
 
@@ -158,8 +160,10 @@ mod tests {
                 validators.push(pk);
             }
             validators.sort();
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
-            // Create runners
+            // Create engines
+            let (done_sender, mut done_receiver) = mpsc::channel(schemes.len());
             for scheme in schemes.into_iter() {
                 // Register on network
                 let validator = scheme.public_key();
@@ -186,22 +190,39 @@ mod tests {
                         .unwrap();
                 }
 
-                // Start runner
-                let mut runner = runner::Runner::new(runtime.clone(), validators.clone());
-                runtime.spawn("runner", async move {
-                    runner
-                        .run(
-                            scheme,
-                            MockApplication {},
-                            (block_sender, block_receiver),
-                            (vote_sender, vote_receiver),
-                        )
+                // Start engine
+                let cfg = config::Config {
+                    crypto: scheme,
+                    application: MockApplication {
+                        participant: validator,
+                        verified: HashMap::new(),
+                        finalized: HashMap::new(),
+                        done_height: 100,
+                        done: done_sender.clone(),
+                    },
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    namespace: Bytes::from("consensus"),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(1),
+                    null_vote_retry: Duration::from_secs(1),
+                    fetch_timeout: Duration::from_secs(1),
+                    validators: view_validators.clone(),
+                };
+                let engine = Engine::new(runtime.clone(), cfg);
+                runtime.spawn("engine", async move {
+                    engine
+                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
                         .await;
                 });
             }
 
             // Run network
-            network.run().await;
+            runtime.spawn("network", network.run());
+
+            // Wait for all engines to finish
+            for _ in 0..n {
+                done_receiver.next().await.unwrap();
+            }
         });
     }
 }
