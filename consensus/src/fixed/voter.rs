@@ -1346,9 +1346,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                     self.prune_views();
 
                     // Update metrics
-                    if let Ok(view) = self.view.try_into() {
-                        self.current_view.set(view);
-                    }
+                    self.current_view.set(view as i64);
                     self.tracked_views.set(self.views.len() as i64);
                 },
             };
