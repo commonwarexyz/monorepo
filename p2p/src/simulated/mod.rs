@@ -105,19 +105,23 @@ mod tests {
         let (executor, runtime, auditor) = Executor::seeded(seed);
         executor.start(async move {
             // Create simulated network
-            let mut network = Network::new(
+            let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
+            // Start network
+            runtime.spawn("network", network.run());
+
             // Register agents
             let mut agents = BTreeMap::new();
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, mut receiver) = network.register(pk.clone(), 0, 1024 * 1024).unwrap();
+                let (sender, mut receiver) =
+                    oracle.register(pk.clone(), 0, 1024 * 1024).await.unwrap();
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
                 runtime.spawn("agent_receiver", async move {
@@ -138,15 +142,17 @@ mod tests {
                     continue;
                 }
                 for other in agents.keys() {
-                    let result = network.link(
-                        agent.clone(),
-                        other.clone(),
-                        Link {
-                            latency_mean: 5.0,
-                            latency_stddev: 2.5,
-                            success_rate: 0.75,
-                        },
-                    );
+                    let result = oracle
+                        .add_link(
+                            agent.clone(),
+                            other.clone(),
+                            Link {
+                                latency_mean: 5.0,
+                                latency_stddev: 2.5,
+                                success_rate: 0.75,
+                            },
+                        )
+                        .await;
                     if agent == other {
                         assert!(matches!(result, Err(Error::LinkingSelf)));
                     } else {
@@ -182,9 +188,6 @@ mod tests {
                 }
             });
 
-            // Start network
-            runtime.spawn("network", network.run());
-
             // Wait for all recipients
             let mut results = Vec::new();
             for _ in 0..size {
@@ -218,23 +221,23 @@ mod tests {
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = Network::new(
+            let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
+            // Start network
+            runtime.spawn("network", network.run());
+
             // Register agents
             let mut agents = HashMap::new();
             for i in 0..10 {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, _) = network.register(pk.clone(), 0, 1024 * 1024).unwrap();
+                let (sender, _) = oracle.register(pk.clone(), 0, 1024 * 1024).await.unwrap();
                 agents.insert(pk, sender);
             }
-
-            // Start network
-            runtime.spawn("network", network.run());
 
             // Send invalid message
             let keys = agents.keys().collect::<Vec<_>>();
@@ -258,27 +261,32 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = Network::new(
+            let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
+            // Start network
+            runtime.spawn("network", network.run());
+
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
-            network.register(pk.clone(), 0, 1024 * 1024).unwrap();
+            oracle.register(pk.clone(), 0, 1024 * 1024).await.unwrap();
 
             // Attempt to link self
-            let result = network.link(
-                pk.clone(),
-                pk.clone(),
-                Link {
-                    latency_mean: 5.0,
-                    latency_stddev: 2.5,
-                    success_rate: 0.75,
-                },
-            );
+            let result = oracle
+                .add_link(
+                    pk.clone(),
+                    pk.clone(),
+                    Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 0.75,
+                    },
+                )
+                .await;
 
             // Confirm error is correct
             assert!(matches!(result, Err(Error::LinkingSelf)));
@@ -290,17 +298,20 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = Network::new(
+            let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
+            // Start network
+            runtime.spawn("network", network.run());
+
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
-            network.register(pk.clone(), 0, 1024 * 1024).unwrap();
-            let result = network.register(pk, 0, 1024 * 1024);
+            oracle.register(pk.clone(), 0, 1024 * 1024).await.unwrap();
+            let result = oracle.register(pk, 0, 1024 * 1024).await;
 
             // Confirm error is correct
             assert!(matches!(result, Err(Error::ChannelAlreadyRegistered(0))));
@@ -312,29 +323,34 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = Network::new(
+            let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
+            // Start network
+            runtime.spawn("network", network.run());
+
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
-            network.register(pk2.clone(), 0, 1024 * 1024).unwrap();
+            oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
+            oracle.register(pk2.clone(), 0, 1024 * 1024).await.unwrap();
 
             // Attempt to link with invalid success rate
-            let result = network.link(
-                pk1.clone(),
-                pk2.clone(),
-                Link {
-                    latency_mean: 5.0,
-                    latency_stddev: 2.5,
-                    success_rate: 1.5,
-                },
-            );
+            let result = oracle
+                .add_link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 1.5,
+                    },
+                )
+                .await;
 
             // Confirm error is correct
             assert!(matches!(result, Err(Error::InvalidSuccessRate(_))));
@@ -346,28 +362,31 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = Network::new(
+            let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
+            // Start network
+            runtime.spawn("network", network.run());
+
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
             let (mut sender1, mut receiver1) =
-                network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
+                oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
             let (mut sender2, mut receiver2) =
-                network.register(pk2.clone(), 0, 1024 * 1024).unwrap();
+                oracle.register(pk2.clone(), 0, 1024 * 1024).await.unwrap();
 
             // Register unused channels
-            let _ = network.register(pk1.clone(), 1, 1024 * 1024).unwrap();
-            let _ = network.register(pk2.clone(), 2, 1024 * 1024).unwrap();
+            let _ = oracle.register(pk1.clone(), 1, 1024 * 1024).await.unwrap();
+            let _ = oracle.register(pk2.clone(), 2, 1024 * 1024).await.unwrap();
 
             // Link agents
-            network
-                .link(
+            oracle
+                .add_link(
                     pk1.clone(),
                     pk2.clone(),
                     Link {
@@ -376,9 +395,10 @@ mod tests {
                         success_rate: 1.0,
                     },
                 )
+                .await
                 .unwrap();
-            network
-                .link(
+            oracle
+                .add_link(
                     pk2.clone(),
                     pk1.clone(),
                     Link {
@@ -387,10 +407,8 @@ mod tests {
                         success_rate: 1.0,
                     },
                 )
+                .await
                 .unwrap();
-
-            // Start network
-            runtime.spawn("network", network.run());
 
             // Send messages
             let msg1 = Bytes::from("hello from pk1");
@@ -419,22 +437,25 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = Network::new(
+            let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
+            // Start network
+            runtime.spawn("network", network.run());
+
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, _) = network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
-            let (_, mut receiver2) = network.register(pk2.clone(), 1, 1024 * 1024).unwrap();
+            let (mut sender1, _) = oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
+            let (_, mut receiver2) = oracle.register(pk2.clone(), 1, 1024 * 1024).await.unwrap();
 
             // Link agents
-            network
-                .link(
+            oracle
+                .add_link(
                     pk1.clone(),
                     pk2.clone(),
                     Link {
@@ -443,10 +464,8 @@ mod tests {
                         success_rate: 1.0,
                     },
                 )
+                .await
                 .unwrap();
-
-            // Start network
-            runtime.spawn("network", network.run());
 
             // Send message
             let msg = Bytes::from("hello from pk1");
@@ -470,22 +489,25 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
-            let mut network = Network::new(
+            let (network, mut oracle) = Network::new(
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
                 },
             );
 
+            // Start network
+            runtime.spawn("network", network.run());
+
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, _) = network.register(pk1.clone(), 0, 1024 * 1024).unwrap();
-            let (_, mut receiver2) = network.register(pk2.clone(), 0, 1).unwrap();
+            let (mut sender1, _) = oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
+            let (_, mut receiver2) = oracle.register(pk2.clone(), 0, 1).await.unwrap();
 
             // Link agents
-            network
-                .link(
+            oracle
+                .add_link(
                     pk1.clone(),
                     pk2.clone(),
                     Link {
@@ -494,10 +516,8 @@ mod tests {
                         success_rate: 1.0,
                     },
                 )
+                .await
                 .unwrap();
-
-            // Start network
-            runtime.spawn("network", network.run());
 
             // Send message
             let msg = Bytes::from("hello from pk1");

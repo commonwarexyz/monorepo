@@ -2,7 +2,7 @@ use super::{Channel, Error, Link, Receiver, Sender};
 use commonware_cryptography::PublicKey;
 use futures::{
     channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+    SinkExt,
 };
 
 pub enum Message {
