@@ -1,5 +1,3 @@
-//! TODO: change name to voter
-
 use super::utils::{finalize_digest, hash, proposal_digest, vote_digest};
 use super::{
     orchestrator::{Mailbox, Proposal},
@@ -522,8 +520,12 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         // Check to see if we have already received a proposal for this view (if exists)
         if let Some(view) = self.views.get(&proposal.view) {
             if view.proposal.is_some() {
-                debug!(view = proposal.view, "proposal already exists");
-                // TODO: check if different signed proposal and post fault
+                warn!(
+                    leader = hex(&expected_leader),
+                    view = proposal.view,
+                    reason = "already received proposal",
+                    "dropping proposal"
+                );
                 return;
             }
         }
