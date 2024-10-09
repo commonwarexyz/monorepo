@@ -10,11 +10,11 @@ use commonware_cryptography::{
             poly,
         },
     },
-    utils::hex,
     PublicKey, Scheme,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
+use commonware_utils::hex;
 use prost::Message;
 use std::{
     collections::{HashMap, HashSet},

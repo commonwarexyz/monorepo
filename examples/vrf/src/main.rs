@@ -80,12 +80,13 @@
 mod handlers;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{bls12381::dkg::utils, utils::hex, Ed25519, Scheme};
+use commonware_cryptography::{bls12381::dkg::utils::max_reveals, Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
     Runner, Spawner,
 };
+use commonware_utils::{hex, threshold};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -239,9 +240,9 @@ fn main() {
         }
 
         // Infer threshold
-        let threshold = utils::threshold(contributors.len() as u32)
+        let threshold = threshold(contributors.len() as u32)
             .expect("not enough contributors to form a threshold of 2f+1");
-        let max_reveals = utils::max_reveals(threshold);
+        let max_reveals = max_reveals(threshold);
         info!(threshold, max_reveals, "inferred threshold");
 
         // Check if I am the arbiter
