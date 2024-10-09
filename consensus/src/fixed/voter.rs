@@ -287,6 +287,7 @@ pub struct Voter<E: Clock + Rng, C: Scheme> {
     views: BTreeMap<View, Record>,
 
     current_view: Gauge,
+    tracked_views: Gauge,
 }
 
 impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
@@ -340,11 +341,14 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
         // Initialize metrics
         let current_view = Gauge::<i64, AtomicI64>::default();
+        let tracked_views = Gauge::<i64, AtomicI64>::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
             registry.register("current_view", "current view", current_view.clone());
+            registry.register("tracked_views", "tracked views", tracked_views.clone());
         }
         current_view.set(1);
+        tracked_views.set(1);
 
         // Initialize store
         Self {
@@ -367,6 +371,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             views,
 
             current_view,
+            tracked_views,
         }
     }
 
@@ -1344,6 +1349,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                     if let Ok(view) = self.view.try_into() {
                         self.current_view.set(view);
                     }
+                    self.tracked_views.set(self.views.len() as i64);
                 },
             };
         }
