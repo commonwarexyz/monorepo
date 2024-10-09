@@ -32,6 +32,7 @@ pub enum Message {
         response: oneshot::Sender<Option<Hash>>,
     },
     Verify {
+        hash: Hash,
         proposal: wire::Proposal,
         response: oneshot::Sender<bool>,
     },
@@ -76,10 +77,11 @@ impl Mailbox {
         receiver.await.unwrap()
     }
 
-    pub async fn verify(&mut self, proposal: wire::Proposal) -> bool {
+    pub async fn verify(&mut self, hash: Hash, proposal: wire::Proposal) -> bool {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Verify {
+                hash,
                 proposal,
                 response: sender,
             })
@@ -246,9 +248,9 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         // Notify application of all finalized proposals
         let mut next = self.last_notified;
         loop {
-            // Get lock info
-            let lock = match self.knowledge.get(&next) {
-                Some(lock) => lock,
+            // Get info
+            let knowledge = match self.knowledge.get(&next) {
+                Some(knowledge) => knowledge,
                 None => {
                     // No more blocks to notify
                     return;
@@ -256,7 +258,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             };
 
             // Send event
-            match lock {
+            match knowledge {
                 Knowledge::Notarized(hashes) => {
                     // Send fulfilled unsent notarizations
                     let notifications = self.notarizations_sent.entry(next).or_default();
@@ -264,33 +266,21 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                         if notifications.contains(hash) {
                             continue;
                         }
-                        let proposal = match self.blocks.get(hash) {
-                            Some(proposal) => proposal,
-                            None => continue,
-                        };
+                        if !self.blocks.contains_key(hash) {
+                            continue;
+                        }
                         notifications.insert(hash.clone());
-                        self.application.notarized(
-                            proposal.parent.clone(),
-                            proposal.height,
-                            proposal.payload.clone(),
-                        );
+                        self.application.notarized(hash.clone());
                     }
                 }
                 Knowledge::Finalized(hash) => {
                     // Send finalized blocks as soon as we have them
-                    let proposal = match self.blocks.get(hash) {
-                        Some(proposal) => proposal,
-                        None => {
-                            return;
-                        }
-                    };
-                    self.application.finalized(
-                        proposal.parent.clone(),
-                        proposal.height,
-                        proposal.payload.clone(),
-                    );
+                    if !self.blocks.contains_key(hash) {
+                        return;
+                    }
                     self.notarizations_sent.remove(&self.last_notified);
                     self.last_notified += 1;
+                    self.application.finalized(hash.clone());
                 }
             }
 
@@ -437,7 +427,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
     }
 
-    pub fn verify(&self, proposal: wire::Proposal) -> bool {
+    pub fn verify(&mut self, hash: Hash, proposal: wire::Proposal) -> bool {
         // If don't have ancestry yet, do nothing.
         if !self.valid_ancestry(&proposal) {
             // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
@@ -450,8 +440,12 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Verify payload
-        self.application
-            .verify(proposal.parent, proposal.height, proposal.payload.clone())
+        self.application.verify(
+            proposal.parent,
+            proposal.height,
+            proposal.payload.clone(),
+            hash,
+        )
     }
 
     pub async fn notarized(&mut self, proposal: Proposal) {
@@ -677,8 +671,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             let hash = self.parse(parent, height, payload);
                             response.send(hash).unwrap();
                         }
-                        Message::Verify { proposal, response } => {
-                            let valid = self.verify(proposal);
+                        Message::Verify { hash, proposal, response } => {
+                            let valid = self.verify(hash, proposal);
                             response.send(valid).unwrap();
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,

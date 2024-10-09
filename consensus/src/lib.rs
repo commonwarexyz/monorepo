@@ -45,15 +45,15 @@ pub trait Application: Send + 'static {
     /// Verify the payload is valid.
     ///
     /// Verify is a stateful operation and must be called in-order.
-    fn verify(&self, parent: Hash, height: Height, payload: Payload) -> bool;
+    fn verify(&mut self, parent: Hash, height: Height, payload: Payload, hash: Hash) -> bool;
 
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, parent: Hash, height: Height, payload: Payload);
+    fn notarized(&mut self, hash: Hash);
 
     /// Event that the payload has been finalized.
-    fn finalized(&mut self, parent: Hash, height: Height, payload: Payload);
+    fn finalized(&mut self, hash: Hash);
 }
 
 // Example Payload (Transfers):

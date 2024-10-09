@@ -561,12 +561,23 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             debug!(reason = "invalid signature", "dropping proposal");
             return;
         }
+        let proposal_hash = hash(&proposal_digest);
 
         // Verify the proposal
         //
         // This will fail if we haven't notified the application of this parent.
-        if !self.orchestrator.verify(proposal.clone()).await {
-            debug!(reason = "invalid payload", "dropping proposal");
+        if !self
+            .orchestrator
+            .verify(proposal_hash.clone(), proposal.clone())
+            .await
+        {
+            debug!(
+                view = proposal.view,
+                height = proposal.height,
+                hash = hex(&proposal_hash),
+                reason = "verify failed",
+                "dropping proposal"
+            );
             return;
         };
 
@@ -577,7 +588,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .views
             .entry(proposal.view)
             .or_insert_with(|| Record::new(expected_leader, None, None));
-        let proposal_hash = hash(&proposal_digest);
         view.proposal = Some((proposal_hash.clone(), proposal));
         view.leader_deadline = None;
         debug!(

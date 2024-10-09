@@ -39,40 +39,93 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Application, Hash, Payload};
+    use crate::{Application, Hash, Height, Payload};
     use bytes::Bytes;
-    use commonware_cryptography::{Ed25519, Scheme};
+    use commonware_cryptography::{Ed25519, PublicKey, Scheme};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use futures::channel::mpsc;
     use prometheus_client::registry::Registry;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
     use tracing::Level;
-    use voter::hash;
 
-    struct MockApplication {}
+    // TODO: break into official mock object that any consensus can use
+    struct MockApplication {
+        participant: PublicKey,
+
+        verified: HashMap<Hash, Height>,
+        finalized: HashMap<Hash, Height>,
+
+        done_height: Height,
+        done: mpsc::Sender<()>,
+    }
+
+    impl MockApplication {
+        fn verify_payload(height: Height, payload: &Payload) {
+            if payload.len() != 32 + 8 {
+                panic!("invalid payload length");
+            }
+            let parsed_height = Height::from_be_bytes(payload[32..].try_into().unwrap());
+            if parsed_height != height {
+                panic!("invalid height");
+            }
+        }
+    }
 
     impl Application for MockApplication {
         fn genesis(&mut self) -> (Hash, Payload) {
             let payload = Bytes::from("genesis");
-            let hash = hash(payload.clone());
+            let hash = utils::hash(&payload);
+            self.verified.insert(hash.clone(), 0);
+            self.finalized.insert(hash.clone(), 0);
             (hash, payload)
         }
 
-        fn propose(&mut self, parent: Hash) -> Option<Payload> {
-            Some(hash(parent))
+        fn propose(&mut self, parent: Hash, height: Height) -> Option<Payload> {
+            let parent = self.verified.get(&parent).expect("parent not verified");
+            if parent + 1 != height {
+                panic!("invalid height");
+            }
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&self.participant);
+            payload.extend_from_slice(&height.to_be_bytes());
+            Some(Bytes::from(payload))
         }
 
-        fn parse(&self, payload: Payload) -> Option<Hash> {
-            Some(hash(payload))
+        fn parse(&self, _parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
+            Self::verify_payload(height, &payload);
+            Some(utils::hash(&payload))
         }
 
-        fn verify(&self, _payload: Payload) -> bool {
+        fn verify(&mut self, parent: Hash, height: Height, payload: Payload, hash: Hash) -> bool {
+            Self::verify_payload(height, &payload);
+            let parent = self.verified.get(&parent).expect("parent not verified");
+            if parent + 1 != height {
+                panic!("invalid height");
+            }
+            self.verified.insert(hash.clone(), height);
             true
         }
 
-        fn notarized(&mut self, _payload: Payload) {}
+        fn notarized(&mut self, hash: Hash) {
+            if !self.verified.contains_key(&hash) {
+                panic!("hash not verified");
+            }
+        }
 
-        fn finalized(&mut self, _payload: Payload) {}
+        fn finalized(&mut self, hash: Hash) {
+            if self.finalized.contains_key(&hash) {
+                panic!("hash already finalized");
+            }
+            let height = self.verified.get(&hash).expect("hash not finalized");
+            self.finalized.insert(hash, *height);
+            if *height == self.done_height {
+                self.done.try_send(()).unwrap();
+            }
+        }
     }
 
     #[test]
