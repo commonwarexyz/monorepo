@@ -121,7 +121,7 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
-    validators: Vec<PublicKey>,
+    validators: BTreeMap<View, Vec<PublicKey>>,
 
     locked: HashMap<Height, Lock>,
     blocks: HashMap<Hash, wire::Proposal>,
@@ -144,7 +144,11 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
 impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
-    pub fn new(runtime: E, mut application: A, mut validators: Vec<PublicKey>) -> (Self, Mailbox) {
+    pub fn new(
+        runtime: E,
+        mut application: A,
+        validators: BTreeMap<View, Vec<PublicKey>>,
+    ) -> (Self, Mailbox) {
         // Create genesis block and store it
         let mut locked = HashMap::new();
         let mut blocks = HashMap::new();
@@ -164,7 +168,6 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         // Initialize mailbox
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
-        validators.sort();
         (
             Self {
                 runtime,
@@ -581,8 +584,21 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
     }
 
     async fn send_request(&mut self, hash: Hash, sender: &mut impl Sender) -> PublicKey {
+        // Get validators from highest view we know about
+        let (view, validators) = self
+            .validators
+            .range(..=self.last_notarized)
+            .next_back()
+            .expect("validators do not cover range of allowed views");
+
         // Select random validator to fetch from
-        let validator = self.validators.choose(&mut self.runtime).unwrap().clone();
+        let validator = validators.choose(&mut self.runtime).unwrap().clone();
+        debug!(
+            hash = hex(&hash),
+            peer = hex(&validator),
+            validator_view = view,
+            "requesting missing proposal"
+        );
 
         // Send the request
         let msg = wire::Backfill {
