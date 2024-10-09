@@ -1,7 +1,7 @@
 //! Backfill missing proposals seen in consensus.
 
 use super::{
-    voter::{hash, proposal_digest},
+    utils::{hash, proposal_digest},
     wire,
 };
 use crate::{Application, Hash, Height, Payload, View, HASH_LENGTH};
