@@ -707,7 +707,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         // case we can ignore this message)
         let view = self.views.get_mut(&notarization.view);
         if let Some(ref view) = view {
-            // TODO: if called immediately after broadcast, we have not yet parsed this yet
             if notarization.hash.is_some() && view.broadcast_proposal_notarization {
                 debug!(
                     view = notarization.view,
