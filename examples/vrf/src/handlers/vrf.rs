@@ -8,11 +8,11 @@ use commonware_cryptography::{
             poly::Eval,
         },
     },
-    utils::hex,
     PublicKey,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock};
+use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use prost::Message;
 use std::collections::{HashMap, HashSet};

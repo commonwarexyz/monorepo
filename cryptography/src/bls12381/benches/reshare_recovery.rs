@@ -2,6 +2,7 @@ use commonware_cryptography::{
     bls12381::{dkg, primitives::poly},
     Ed25519, Scheme,
 };
+use commonware_utils::quorum;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -20,7 +21,7 @@ fn benchmark_reshare_recovery(c: &mut Criterion) {
         contributors.sort();
 
         // Create shares
-        let t = dkg::utils::threshold(n).unwrap();
+        let t = quorum(n).unwrap();
         let mut contributor_shares = HashMap::new();
         let mut commitments = Vec::new();
         for i in 0..n {

@@ -5,8 +5,9 @@ use crate::authenticated::{
     connection::{self, Instance},
     metrics,
 };
-use commonware_cryptography::{utils::hex, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
+use commonware_utils::hex;
 use governor::{
     clock::Clock as GClock,
     middleware::NoOpMiddleware,

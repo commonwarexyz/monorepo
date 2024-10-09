@@ -1,6 +1,6 @@
-use commonware_cryptography::utils::hex;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Spawner};
+use commonware_utils::hex;
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,

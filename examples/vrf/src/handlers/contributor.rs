@@ -13,10 +13,10 @@ use commonware_cryptography::{
             poly,
         },
     },
-    utils::hex,
     PublicKey, Scheme,
 };
 use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt};
 use prost::Message;
 use rand::rngs::OsRng;

@@ -387,6 +387,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-utils",
  "crossterm 0.28.1",
  "futures",
  "governor",
@@ -425,6 +426,7 @@ version = "0.0.9"
 dependencies = [
  "blst",
  "bytes",
+ "commonware-utils",
  "criterion",
  "ed25519-consensus",
  "proptest",
@@ -444,6 +446,7 @@ dependencies = [
  "chacha20poly1305",
  "commonware-cryptography",
  "commonware-runtime",
+ "commonware-utils",
  "futures",
  "governor",
  "prometheus-client",
@@ -475,6 +478,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-utils"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+]
+
+[[package]]
 name = "commonware-vrf"
 version = "0.0.9"
 dependencies = [
@@ -483,6 +493,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-utils",
  "futures",
  "governor",
  "prometheus-client",

@@ -1,5 +1,6 @@
 use commonware_cryptography::Ed25519;
 use commonware_cryptography::{bls12381::dkg, Scheme};
+use commonware_utils::quorum;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -7,7 +8,7 @@ use std::hint::black_box;
 fn benchmark_dkg_recovery(c: &mut Criterion) {
     let concurrency = 1; // only used in recovery during reshare
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
-        let t = dkg::utils::threshold(n).unwrap();
+        let t = quorum(n).unwrap();
         c.bench_function(&format!("conc={} n={} t={}", concurrency, n, t), |b| {
             b.iter_batched(
                 || {

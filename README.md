@@ -12,6 +12,7 @@ _Crates in this repository are designed for deployment in adversarial environmen
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections. 
+* [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
 ## Examples
 
@@ -20,11 +21,11 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends. 
 * [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
-## Miscellaneous
+## Documentation 
 
 _GitHub hosting does not allow using an arbitrary path for website hosting yet, so we are stuck with `/docs` for now._
 
-* [docs](./docs): Provide information about Commonware at https://commonware.xyz.
+* [docs](./docs): Host information about Commonware at https://commonware.xyz.
 
 ## Licensing
 

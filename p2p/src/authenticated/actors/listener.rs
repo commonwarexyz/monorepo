@@ -4,8 +4,9 @@ use crate::authenticated::{
     actors::{spawner, tracker},
     connection::{self, IncomingHandshake, Instance},
 };
-use commonware_cryptography::{utils::hex, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
+use commonware_utils::hex;
 use governor::{
     clock::ReasonablyRealtime,
     middleware::NoOpMiddleware,

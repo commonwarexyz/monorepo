@@ -5,8 +5,9 @@ pub use super::{
 };
 use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
-use commonware_cryptography::{utils::hex, PublicKey, Scheme};
+use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::{Clock, Spawner};
+use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,

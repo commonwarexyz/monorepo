@@ -6,8 +6,9 @@ use crate::authenticated::{
     metrics, wire,
 };
 use bytes::BytesMut;
-use commonware_cryptography::{utils::hex, PublicKey, Scheme};
+use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::{select, Clock, Handle, Sink, Spawner, Stream};
+use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};

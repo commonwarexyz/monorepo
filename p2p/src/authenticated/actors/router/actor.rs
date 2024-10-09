@@ -7,7 +7,8 @@ use crate::{
     Recipients,
 };
 use bytes::Bytes;
-use commonware_cryptography::{utils::hex, PublicKey};
+use commonware_cryptography::PublicKey;
+use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use std::collections::BTreeMap;
