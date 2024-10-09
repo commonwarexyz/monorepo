@@ -171,9 +171,9 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         }
     }
 
-    fn handle_message(&mut self, message: Task) {
+    fn handle_task(&mut self, task: Task) {
         // Collect recipients
-        let (channel, origin, recipients, message, reply) = message;
+        let (channel, origin, recipients, message, reply) = task;
         let recipients = match recipients {
             Recipients::All => self.agents.keys().cloned().collect(),
             Recipients::Some(keys) => keys,
@@ -338,22 +338,22 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     pub async fn run(mut self) {
         loop {
             select! {
-                ingress = self.ingress.next() => {
+                message = self.ingress.next() => {
                     // If ingress is closed, exit
-                    let message = match ingress {
+                    let message = match message {
                         Some(message) => message,
                         None => break,
                     };
 
                     self.handle_ingress(message);
                 },
-                message = self.receiver.next() => {
+                task = self.receiver.next() => {
                     // If receiver is closed, exit
-                    let task = match message {
-                        Some(message) => message,
+                    let task = match task {
+                        Some(task) => task,
                         None => break,
                     };
-                    self.handle_message(task);
+                    self.handle_task(task);
                 }
             }
         }
