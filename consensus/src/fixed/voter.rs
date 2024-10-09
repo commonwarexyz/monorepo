@@ -92,15 +92,13 @@ impl Record {
         let public_key = &vote.signature.as_ref().unwrap().public_key;
         if vote.hash.is_none() {
             // Check if already issued finalize
-            if self.finalizers.contains_key(public_key) {
+            if self.finalizers.contains_key(public_key) && !skip_invalid {
                 warn!(
                     view = vote.view,
                     signer = hex(public_key),
                     "already voted finalize",
                 );
-                if skip_invalid {
-                    return;
-                }
+                return;
             }
 
             // Store the null vote
@@ -110,14 +108,14 @@ impl Record {
         let hash = vote.hash.clone().unwrap();
 
         // Check if already voted
-        if let Some(previous_vote) = self.proposal_voters.get(public_key) {
-            warn!(
-                view = vote.view,
-                signer = hex(public_key),
-                previous_vote = hex(previous_vote),
-                "already voted"
-            );
-            if skip_invalid {
+        if !skip_invalid {
+            if let Some(previous_vote) = self.proposal_voters.get(public_key) {
+                warn!(
+                    view = vote.view,
+                    signer = hex(public_key),
+                    previous_vote = hex(previous_vote),
+                    "already voted"
+                );
                 return;
             }
         }
@@ -125,7 +123,7 @@ impl Record {
         // Store the vote
         self.proposal_voters
             .insert(public_key.clone(), hash.clone());
-        let entry = self.proposal_votes.entry(hash).or_insert_with(HashMap::new);
+        let entry = self.proposal_votes.entry(hash).or_default();
         entry.insert(public_key.clone(), vote);
     }
 
@@ -148,7 +146,6 @@ impl Record {
                         debug!(
                             view = pro.view,
                             proposal = hex(proposal),
-                            hash = hex(hash),
                             reason = "proposal mismatch",
                             "skipping notarization broadcast"
                         );
@@ -156,8 +153,8 @@ impl Record {
                     }
                     debug!(
                         view = pro.view,
+                        height = pro.height,
                         proposal = hex(proposal),
-                        hash = hex(hash),
                         "broadcasting notarization"
                     );
                     pro.height
@@ -192,26 +189,24 @@ impl Record {
     fn add_verified_finalize(&mut self, skip_invalid: bool, finalize: wire::Finalize) {
         // Check if also issued null vote
         let public_key = &finalize.signature.as_ref().unwrap().public_key;
-        if self.null_votes.contains_key(public_key) {
+        if self.null_votes.contains_key(public_key) && !skip_invalid {
             warn!(
                 view = finalize.view,
                 signer = hex(public_key),
                 "already voted null",
             );
-            if skip_invalid {
-                return;
-            }
+            return;
         }
 
         // Check if already finalized
-        if let Some(previous_finalize) = self.finalizers.get(public_key) {
-            warn!(
-                view = finalize.view,
-                signer = hex(public_key),
-                previous_finalize = hex(previous_finalize),
-                "already voted finalize"
-            );
-            if skip_invalid {
+        if !skip_invalid {
+            if let Some(previous_finalize) = self.finalizers.get(public_key) {
+                warn!(
+                    view = finalize.view,
+                    signer = hex(public_key),
+                    previous_finalize = hex(previous_finalize),
+                    "already voted finalize"
+                );
                 return;
             }
         }
@@ -219,10 +214,7 @@ impl Record {
         // Store the finalize
         self.finalizers
             .insert(public_key.clone(), finalize.hash.clone());
-        let entry = self
-            .finalizes
-            .entry(finalize.hash.clone())
-            .or_insert_with(HashMap::new);
+        let entry = self.finalizes.entry(finalize.hash.clone()).or_default();
         entry.insert(public_key.clone(), finalize);
     }
 
@@ -691,7 +683,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .or_insert_with(|| Record::new(Self::leader(&self.validators, vote.view), None, None));
 
         // Handle vote
-        view.add_verified_vote(true, vote);
+        view.add_verified_vote(false, vote);
     }
 
     async fn notarization(&mut self, notarization: wire::Notarization) {
@@ -811,7 +803,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 hash: notarization.hash.clone(),
                 signature: Some(signature),
             };
-            view.add_verified_vote(false, vote);
+            view.add_verified_vote(true, vote);
         }
 
         // Inform orchestrator of notarization if not null vote
@@ -892,7 +884,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         });
 
         // Handle finalize
-        view.add_verified_finalize(true, finalize);
+        view.add_verified_finalize(false, finalize);
     }
 
     async fn finalization(&mut self, finalization: wire::Finalization) {
@@ -999,7 +991,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 hash: finalization.hash.clone(),
                 signature: Some(signature.clone()),
             };
-            view.add_verified_finalize(false, finalize);
+            view.add_verified_finalize(true, finalize);
         }
 
         // Track view finalized
