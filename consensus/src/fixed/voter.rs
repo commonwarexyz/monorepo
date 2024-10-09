@@ -4,10 +4,12 @@ use super::{
     orchestrator::{Mailbox, Proposal},
     wire,
 };
-use crate::{Hash, Height};
+use crate::{Hash, Height, HASH_LENGTH};
 use bytes::Bytes;
 use commonware_cryptography::{bls12381::dkg::utils::threshold, utils::hex, PublicKey, Scheme};
-use commonware_runtime::Clock;
+use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_runtime::{select, Clock};
+use prost::Message;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::{
@@ -846,7 +848,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
-        let mut view = self.views.get_mut(&finalization.view);
+        let view = self.views.get_mut(&finalization.view);
         if let Some(ref view) = view {
             if view.broadcast_finalization {
                 debug!(
@@ -1087,5 +1089,194 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             signatures,
         };
         Some(finalization)
+    }
+
+    async fn send_view_messages(&mut self, sender: &mut impl Sender, view: u64) {
+        // Attempt to vote
+        if let Some(vote) = self.construct_vote(view) {
+            // Broadcast the vote
+            let msg = wire::Consensus {
+                payload: Some(wire::consensus::Payload::Vote(vote.clone())),
+            };
+            let msg = msg.encode_to_vec();
+            sender
+                .send(Recipients::All, msg.into(), true)
+                .await
+                .unwrap();
+
+            // Handle the vote
+            self.vote(vote);
+        };
+
+        // Attempt to notarize
+        if let Some(notarization) = self.construct_notarization(view) {
+            // Broadcast the notarization
+            let msg = wire::Consensus {
+                payload: Some(wire::consensus::Payload::Notarization(notarization.clone())),
+            };
+            let msg = msg.encode_to_vec();
+            sender
+                .send(Recipients::All, msg.into(), true)
+                .await
+                .unwrap();
+
+            // Handle the notarization
+            self.notarization(notarization);
+        };
+
+        // Attempt to finalize
+        if let Some(finalize) = self.construct_finalize(view) {
+            // Broadcast the finalize
+            let msg = wire::Consensus {
+                payload: Some(wire::consensus::Payload::Finalize(finalize.clone())),
+            };
+            let msg = msg.encode_to_vec();
+            sender
+                .send(Recipients::All, msg.into(), true)
+                .await
+                .unwrap();
+
+            // Handle the finalize
+            self.finalize(finalize);
+        };
+
+        // Attempt to finalization
+        if let Some(finalization) = self.construct_finalization(view) {
+            // Broadcast the finalization
+            let msg = wire::Consensus {
+                payload: Some(wire::consensus::Payload::Finalization(finalization.clone())),
+            };
+            let msg = msg.encode_to_vec();
+            sender
+                .send(Recipients::All, msg.into(), true)
+                .await
+                .unwrap();
+
+            // Handle the finalization
+            self.finalization(finalization);
+        };
+    }
+
+    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+        // Process messages
+        loop {
+            // Attempt to propose a block
+            if let Some(proposal) = self.propose().await {
+                // Broadcast the proposal
+                let msg = wire::Consensus {
+                    payload: Some(wire::consensus::Payload::Proposal(proposal.clone())),
+                };
+                let msg = msg.encode_to_vec();
+                sender
+                    .send(Recipients::All, msg.into(), true)
+                    .await
+                    .unwrap();
+
+                // Handle the proposal
+                let proposal_view = proposal.view;
+                self.proposal(proposal).await;
+                self.send_view_messages(&mut sender, proposal_view).await;
+            }
+
+            // Wait for a timeout to fire or for a message to arrive
+            let null_timeout = self.timeout_deadline();
+            select! {
+                _timeout = self.runtime.sleep_until(null_timeout) => {
+                    // Trigger the timeout
+                    let vote = self.timeout();
+
+                    // Broadcast the vote
+                    let msg = wire::Consensus{
+                        payload: Some(wire::consensus::Payload::Vote(vote.clone())),
+                    };
+                    let msg = msg.encode_to_vec();
+                    sender
+                        .send(Recipients::All, msg.into(), true)
+                        .await
+                        .unwrap();
+
+                    // Handle the vote
+                    let vote_view = vote.view;
+                    self.vote(vote);
+                    self.send_view_messages(&mut sender, vote_view).await;
+                },
+                result = receiver.recv() => {
+                    // Parse message
+                    let (s, msg) = result.unwrap();
+                    let msg = match wire::Consensus::decode(msg) {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            debug!(?err, sender = hex(&s), "failed to decode message");
+                            continue;
+                        }
+                    };
+                    let payload = match msg.payload {
+                        Some(payload) => payload,
+                        None => {
+                            debug!(sender = hex(&s), "message missing payload");
+                            continue;
+                        }
+                    };
+
+                    // Process message
+                    //
+                    // All messages are semantically verified before being passed to the `voter`.
+                    let view;
+                    match payload {
+                        wire::consensus::Payload::Proposal(proposal) => {
+                            if proposal.parent.len() != HASH_LENGTH {
+                                debug!(sender = hex(&s), "invalid proposal parent hash size");
+                                continue;
+                            }
+                            view = proposal.view;
+                            self.proposal(proposal).await;
+                        }
+                        wire::consensus::Payload::Vote(vote) => {
+                            if vote.hash.is_none() && vote.height != 0 {
+                                debug!(sender = hex(&s), "invalid vote height for null block");
+                                continue;
+                            }
+                            if vote.hash.is_some() && vote.hash.as_ref().unwrap().len() != HASH_LENGTH {
+                                debug!(sender = hex(&s), "invalid vote hash size");
+                                continue;
+                            }
+                            view = vote.view;
+                            self.vote(vote);
+                        }
+                        wire::consensus::Payload::Notarization(notarization) => {
+                            if notarization.hash.is_none() && notarization.height != 0 {
+                                debug!(sender = hex(&s), "invalid notarization height for null block");
+                                continue;
+                            }
+                            if notarization.hash.is_some() && notarization.hash.as_ref().unwrap().len() != HASH_LENGTH {
+                                debug!(sender = hex(&s), "invalid notarization hash size");
+                                continue;
+                            }
+                            view = notarization.view;
+                            self.notarization(notarization).await;
+                        }
+                        wire::consensus::Payload::Finalize(finalize) => {
+                            if finalize.hash.len() != HASH_LENGTH {
+                                debug!(sender = hex(&s), "invalid finalize hash size");
+                                continue;
+                            }
+                            view = finalize.view;
+                            self.finalize(finalize);
+                        }
+                        wire::consensus::Payload::Finalization(finalization) => {
+                            if finalization.hash.len() != HASH_LENGTH {
+                                debug!(sender = hex(&s), "invalid finalization hash size");
+                                continue;
+                            }
+                            view = finalization.view;
+                            self.finalization(finalization).await;
+                        }
+                    };
+
+                    // Attempt to send any new view messages
+                    self.send_view_messages(&mut sender, view).await;
+                },
+            };
+        }
     }
 }
