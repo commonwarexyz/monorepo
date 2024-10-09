@@ -1,8 +1,9 @@
 //! Leverage common functionality across multiple primitives.
 
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
 
-/// Converts a byte slice to a hexadecimal string.
+/// Converts `Bytes` to a hexadecimal string.
 pub fn hex(bytes: &Bytes) -> String {
     let mut hex = String::new();
     for byte in bytes.iter() {
@@ -18,6 +19,13 @@ pub fn quorum(n: u32) -> Option<u32> {
         return None;
     }
     Some((2 * f) + 1)
+}
+
+/// Hashes the given `Bytes` using SHA-256.
+pub fn hash(bytes: &Bytes) -> Bytes {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().to_vec().into()
 }
 
 #[cfg(test)]

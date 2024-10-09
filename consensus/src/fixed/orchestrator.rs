@@ -1,13 +1,11 @@
 //! Backfill missing proposals seen in consensus.
 
-use super::{
-    utils::{hash, proposal_digest},
-    wire,
-};
+use super::{utils::proposal_digest, wire};
 use crate::{Application, Hash, Height, Payload, View, HASH_LENGTH};
-use commonware_cryptography::{utils::hex, PublicKey};
+use commonware_cryptography::PublicKey;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock, Spawner};
+use commonware_utils::{hash, hex};
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},

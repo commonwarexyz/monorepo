@@ -406,15 +406,12 @@ dependencies = [
  "commonware-cryptography",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-utils",
  "futures",
- "governor",
- "num-bigint",
- "num-traits",
  "prometheus-client",
  "prost",
  "prost-build",
  "rand",
- "sha2 0.10.8",
  "thiserror",
  "tracing",
  "tracing-subscriber",
@@ -482,6 +479,7 @@ name = "commonware-utils"
 version = "0.0.1"
 dependencies = [
  "bytes",
+ "sha2 0.10.8",
 ]
 
 [[package]]
@@ -1203,25 +1201,6 @@ checksum = "77a8165726e8236064dbb45459242600304b42a5ea24ee2948e18e023bf7ba84"
 dependencies = [
  "overload",
  "winapi",
-]
-
-[[package]]
-name = "num-bigint"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
-dependencies = [
- "num-integer",
- "num-traits",
-]
-
-[[package]]
-name = "num-integer"
-version = "0.1.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]

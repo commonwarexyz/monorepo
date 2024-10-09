@@ -14,17 +14,14 @@ documentation = "https://docs.rs/commonware-consensus"
 commonware-cryptography = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
 bytes = { workspace = true } 
-sha2 = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true } 
 prost = { workspace = true }
-governor = { workspace = true }
 prometheus-client = { workspace = true } 
-num-bigint = "0.4"
-num-traits = "0.2"
 
 [build-dependencies]
 prost-build = { workspace = true } 

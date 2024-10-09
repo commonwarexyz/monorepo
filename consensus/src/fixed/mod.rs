@@ -41,9 +41,10 @@ mod tests {
     use super::*;
     use crate::{Application, Hash, Height, Payload};
     use bytes::Bytes;
-    use commonware_cryptography::{utils::hex, Ed25519, PublicKey, Scheme};
+    use commonware_cryptography::{Ed25519, PublicKey, Scheme};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use commonware_utils::{hash, hex};
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use prometheus_client::registry::Registry;
@@ -80,7 +81,7 @@ mod tests {
     impl Application for MockApplication {
         fn genesis(&mut self) -> (Hash, Payload) {
             let payload = Bytes::from("genesis");
-            let hash = utils::hash(&payload);
+            let hash = hash(&payload);
             self.verified.insert(hash.clone(), 0);
             self.finalized.insert(hash.clone(), 0);
             (hash, payload)
@@ -99,7 +100,7 @@ mod tests {
 
         fn parse(&self, _parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
             Self::verify_payload(height, &payload);
-            Some(utils::hash(&payload))
+            Some(hash(&payload))
         }
 
         fn verify(&mut self, parent: Hash, height: Height, payload: Payload, hash: Hash) -> bool {
