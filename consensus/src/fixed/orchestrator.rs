@@ -17,7 +17,7 @@ use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -109,8 +109,7 @@ pub enum Proposal {
     Populated(Hash, wire::Proposal),
 }
 
-// TODO: change name from `Lock` to something else (only finalization is really a lock)
-enum Lock {
+enum Knowledge {
     Notarized(BTreeMap<View, Hash>), // priotize building off of earliest view (avoid wasting work)
     Finalized(Hash),
 }
@@ -125,7 +124,7 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
 
     validators: BTreeMap<View, Vec<PublicKey>>,
 
-    locked: HashMap<Height, Lock>,
+    knowledge: HashMap<Height, Knowledge>,
     blocks: HashMap<Hash, wire::Proposal>,
 
     // Track notarization/finalization
@@ -153,10 +152,10 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         validators: BTreeMap<View, Vec<PublicKey>>,
     ) -> (Self, Mailbox) {
         // Create genesis block and store it
-        let mut locked = HashMap::new();
+        let mut knowledge = HashMap::new();
         let mut blocks = HashMap::new();
         let genesis = application.genesis();
-        locked.insert(0, Lock::Finalized(genesis.0.clone()));
+        knowledge.insert(0, Knowledge::Finalized(genesis.0.clone()));
         blocks.insert(
             genesis.0.clone(),
             wire::Proposal {
@@ -182,7 +181,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
                 validators,
 
-                locked,
+                knowledge,
                 blocks,
 
                 last_notarized: 0,
@@ -220,15 +219,17 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Record what we know
-        if !self.locked.contains_key(&proposal.height) {
-            if proposal.height > self.last_finalized {
-                let mut seen = BTreeMap::new();
-                seen.insert(proposal.view, hash.clone());
-                self.locked.insert(proposal.height, Lock::Notarized(seen));
-            } else {
-                self.locked
-                    .insert(proposal.height, Lock::Finalized(hash.clone()));
+        match self.knowledge.entry(proposal.height) {
+            Entry::Vacant(e) => {
+                if proposal.height > self.last_finalized {
+                    let mut seen = BTreeMap::new();
+                    seen.insert(proposal.view, hash.clone());
+                    e.insert(Knowledge::Notarized(seen));
+                } else {
+                    e.insert(Knowledge::Finalized(hash.clone()));
+                }
             }
+            Entry::Occupied(_) => {}
         }
 
         // Store proposal
@@ -246,7 +247,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         let mut next = self.last_notified;
         loop {
             // Get lock info
-            let lock = match self.locked.get(&next) {
+            let lock = match self.knowledge.get(&next) {
                 Some(lock) => lock,
                 None => {
                     // No more blocks to notify
@@ -256,7 +257,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
             // Send event
             match lock {
-                Lock::Notarized(hashes) => {
+                Knowledge::Notarized(hashes) => {
                     // Send fulfilled unsent notarizations
                     let notifications = self.notarizations_sent.entry(next).or_default();
                     for (_, hash) in hashes.iter() {
@@ -275,7 +276,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                         );
                     }
                 }
-                Lock::Finalized(hash) => {
+                Knowledge::Finalized(hash) => {
                     // Send finalized blocks as soon as we have them
                     let proposal = match self.blocks.get(hash) {
                         Some(proposal) => proposal,
@@ -302,8 +303,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         // Find highest block that we have notified the application of
         let mut next = self.last_notarized;
         loop {
-            match self.locked.get(&next) {
-                Some(Lock::Notarized(hashes)) => {
+            match self.knowledge.get(&next) {
+                Some(Knowledge::Notarized(hashes)) => {
                     // Find earliest view that we also sent notification for
                     for (_, hash) in hashes.iter() {
                         if let Some(notifications) = self.notarizations_sent.get(&next) {
@@ -313,7 +314,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                         }
                     }
                 }
-                Some(Lock::Finalized(hash)) => {
+                Some(Knowledge::Finalized(hash)) => {
                     if self.last_notified >= next {
                         return Some((hash.clone(), self.blocks.get(hash).unwrap().height));
                     }
@@ -381,8 +382,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
         // Check if parent is notarized or finalized and that the application
         // has been notified of the parent (ancestry is processed)
-        match self.locked.get(&parent.height) {
-            Some(Lock::Notarized(hashes)) => {
+        match self.knowledge.get(&parent.height) {
+            Some(Knowledge::Notarized(hashes)) => {
                 if !hashes.contains_key(&parent.view) {
                     debug!(
                         height = proposal.height,
@@ -414,7 +415,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 }
                 contains
             }
-            Some(Lock::Finalized(hash)) => {
+            Some(Knowledge::Finalized(hash)) => {
                 if proposal.parent != *hash {
                     debug!(
                         height = proposal.height,
@@ -466,11 +467,9 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Insert lock if doesn't already exist
-        //
-        // TODO: treat notarizations in consecutive views as a finalization and recuse backwards
-        let previous = self.locked.get_mut(&height);
+        let previous = self.knowledge.get_mut(&height);
         match previous {
-            Some(Lock::Notarized(seen)) => {
+            Some(Knowledge::Notarized(seen)) => {
                 if let Some(old_hash) = seen.get(&view) {
                     if *old_hash != hash {
                         panic!("notarized block hash mismatch");
@@ -479,14 +478,14 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 }
                 seen.insert(view, hash.clone());
             }
-            Some(Lock::Finalized(_)) => {
+            Some(Knowledge::Finalized(_)) => {
                 // Already finalized, do nothing
                 return;
             }
             None => {
                 let mut seen = BTreeMap::new();
                 seen.insert(view, hash.clone());
-                self.locked.insert(height, Lock::Notarized(seen));
+                self.knowledge.insert(height, Knowledge::Notarized(seen));
             }
         }
 
@@ -512,9 +511,9 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         // Finalize all locks we have that are ancestors of this block
         let mut next = height;
         loop {
-            let previous = self.locked.get_mut(&next);
+            let previous = self.knowledge.get_mut(&next);
             match previous {
-                Some(Lock::Notarized(hashes)) => {
+                Some(Knowledge::Notarized(hashes)) => {
                     // Remove unnecessary proposals from memory
                     for (_, old_hash) in hashes.iter() {
                         if old_hash != &hash {
@@ -528,7 +527,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     }
 
                     // Store finalized block record
-                    self.locked.insert(height, Lock::Finalized(hash.clone()));
+                    self.knowledge
+                        .insert(height, Knowledge::Finalized(hash.clone()));
 
                     // Update value of hash to be parent of this block
                     if let Some(parent) = self.blocks.get(&hash) {
@@ -538,14 +538,15 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                         break;
                     }
                 }
-                Some(Lock::Finalized(seen)) => {
+                Some(Knowledge::Finalized(seen)) => {
                     if *seen != hash {
                         panic!("finalized block hash mismatch");
                     }
                     break;
                 }
                 None => {
-                    self.locked.insert(next, Lock::Finalized(hash.clone()));
+                    self.knowledge
+                        .insert(next, Knowledge::Finalized(hash.clone()));
 
                     // Attempt to keep recursing backwards until hit a finalized block or 0
                     if let Some(parent) = self.blocks.get(&hash) {
@@ -628,14 +629,23 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         loop {
             // Check to see if we should add a task
             if outstanding_task.is_none() {
-                let missing = self.get_next_missing();
-                if let Some(next) = missing {
-                    // Send request
-                    let validator = self.send_request(next.clone(), &mut sender).await;
+                // Loop until we find a task that is missing
+                loop {
+                    let missing = self.get_next_missing();
+                    if let Some(next) = missing {
+                        // Check if already have
+                        if self.blocks.contains_key(&next) {
+                            continue;
+                        }
 
-                    // Set timeout
-                    outstanding_task =
-                        Some((validator, next, self.runtime.current() + self.fetch_timeout));
+                        // Send request
+                        let validator = self.send_request(next.clone(), &mut sender).await;
+
+                        // Set timeout
+                        outstanding_task =
+                            Some((validator, next, self.runtime.current() + self.fetch_timeout));
+                    }
+                    break;
                 }
             };
 
@@ -752,8 +762,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             //
                             // It is ok if we get something we don't need, we may have gotten
                             // what we need from a variety of other places.
-                            match self.locked.get(&proposal.height) {
-                                Some(Lock::Notarized(seen)) => {
+                            match self.knowledge.get(&proposal.height) {
+                                Some(Knowledge::Notarized(seen)) => {
                                     let entry = seen.get(&proposal.view);
                                     if entry.is_none() {
                                         warn!(
@@ -772,7 +782,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                         continue;
                                     }
                                 }
-                                Some(Lock::Finalized(expected)) => {
+                                Some(Knowledge::Finalized(expected)) => {
                                     if incoming_hash != *expected {
                                         warn!(
                                             sender = hex(&s),
