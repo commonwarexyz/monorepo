@@ -101,6 +101,239 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         )
     }
 
+    fn handle_ingress(&mut self, message: ingress::Message) {
+        // Handle ingress message
+        match message {
+            ingress::Message::Register {
+                public_key,
+                channel,
+                max_size,
+                result,
+            } => {
+                // Ensure doesn't already exist
+                let entry = self.agents.entry(public_key.clone()).or_default();
+                if entry.get(&channel).is_some() {
+                    let _ = result.send(Err(Error::ChannelAlreadyRegistered(channel)));
+                    return;
+                }
+
+                // Initialize agent channel
+                let (sender, receiver) = mpsc::unbounded();
+                entry.insert(channel, (max_size, sender));
+                let _ = result.send(Ok((
+                    Sender::new(
+                        self.runtime.clone(),
+                        public_key,
+                        channel,
+                        max_size,
+                        self.sender.clone(),
+                    ),
+                    Receiver { receiver },
+                )));
+            }
+            ingress::Message::Deregister { public_key, result } => {
+                if self.agents.remove(&public_key).is_none() {
+                    let _ = result.send(Err(Error::PeerMissing));
+                    return;
+                }
+                let _ = result.send(Ok(()));
+            }
+            ingress::Message::AddLink {
+                sender,
+                receiver,
+                config,
+                result,
+            } => {
+                self.links
+                    .entry(sender)
+                    .or_default()
+                    .insert(receiver, config);
+                let _ = result.send(());
+            }
+            ingress::Message::RemoveLink {
+                sender,
+                receiver,
+                result,
+            } => {
+                let recipients = match self.links.get_mut(&sender) {
+                    Some(entry) => entry,
+                    None => {
+                        result.send(Err(Error::LinkMissing)).unwrap();
+                        return;
+                    }
+                };
+                if recipients.remove(&receiver).is_none() {
+                    result.send(Err(Error::LinkMissing)).unwrap();
+                    return;
+                }
+                let _ = result.send(Ok(()));
+            }
+        }
+    }
+
+    fn handle_message(&mut self, message: Task) {
+        // Collect recipients
+        let (channel, origin, recipients, message, reply) = message;
+        let recipients = match recipients {
+            Recipients::All => self.agents.keys().cloned().collect(),
+            Recipients::Some(keys) => keys,
+            Recipients::One(key) => vec![key],
+        };
+
+        // Send to all recipients
+        let mut sent = Vec::new();
+        let (acquired_sender, mut acquired_receiver) = mpsc::channel(recipients.len());
+        for recipient in recipients {
+            // Skip self
+            if recipient == origin {
+                debug!(
+                    recipient = hex(&recipient),
+                    reason = "self",
+                    "dropping message",
+                );
+                continue;
+            }
+
+            // Determine if recipient exists
+            let sender = match self.agents.get(&recipient) {
+                Some(sender) => sender,
+                None => {
+                    debug!(
+                        recipient = hex(&recipient),
+                        reason = "no agent",
+                        "dropping message",
+                    );
+                    continue;
+                }
+            };
+
+            // Determine if there is a link between the sender and recipient
+            let link = match self
+                .links
+                .get(&origin)
+                .and_then(|links| links.get(&recipient))
+            {
+                Some(link) => link,
+                None => {
+                    debug!(
+                        recipient = hex(&recipient),
+                        reason = "no link",
+                        "dropping message",
+                    );
+                    continue;
+                }
+            };
+
+            // Record sent message as soon as we determine there is a link with recipient (approximates
+            // having an open connection)
+            self.sent_messages
+                .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
+                .inc();
+
+            // Apply link settings
+            let should_deliver = self.runtime.gen_bool(link.success_rate);
+            let delay = Normal::new(link.latency_mean, link.latency_stddev)
+                .unwrap()
+                .sample(&mut self.runtime);
+            debug!(
+                origin = hex(&origin),
+                recipient = hex(&recipient),
+                ?delay,
+                "sending message",
+            );
+
+            // Send message
+            self.runtime.spawn("messenger", {
+                let runtime = self.runtime.clone();
+                let mut sender = sender.clone();
+                let recipient = recipient.clone();
+                let message = message.clone();
+                let mut acquired_sender = acquired_sender.clone();
+                let origin = origin.clone();
+                let received_messages = self.received_messages.clone();
+                async move {
+                    // Mark as sent as soon as soon as execution starts
+                    acquired_sender.send(()).await.unwrap();
+
+                    // Apply delay to send (once link is not saturated)
+                    //
+                    // Note: messages can be sent out of order (will not occur when using a
+                    // stable TCP connection)
+                    runtime.sleep(Duration::from_millis(delay as u64)).await;
+
+                    // Drop message if success rate is too low
+                    if !should_deliver {
+                        debug!(
+                            recipient = hex(&recipient),
+                            reason = "random link failure",
+                            "dropping message",
+                        );
+                        return;
+                    }
+
+                    // Drop message if not listening on channel
+                    let (max_size, sender) = match sender.get_mut(&channel) {
+                        Some(sender) => sender,
+                        None => {
+                            debug!(
+                                recipient = hex(&recipient),
+                                channel,
+                                reason = "missing channel",
+                                "dropping message",
+                            );
+                            return;
+                        }
+                    };
+
+                    // Drop message if too large
+                    if message.len() > *max_size {
+                        debug!(
+                            recipient = hex(&recipient),
+                            channel,
+                            size = message.len(),
+                            max_size = *max_size,
+                            reason = "message too large",
+                            "dropping message",
+                        );
+                        return;
+                    }
+
+                    // Send message
+                    if let Err(err) = sender.send((origin.clone(), message)).await {
+                        // This can only happen if the receiver exited.
+                        error!(
+                            origin = hex(&origin),
+                            recipient = hex(&recipient),
+                            ?err,
+                            "failed to send",
+                        );
+                        return;
+                    }
+
+                    // Only record received messages that were successfully sent
+                    received_messages
+                        .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
+                        .inc();
+                }
+            });
+            sent.push(recipient);
+        }
+
+        // Notify sender of successful sends
+        self.runtime.spawn("notifier", async move {
+            // Wait for semaphore to be acquired on all sends
+            for _ in 0..sent.len() {
+                acquired_receiver.next().await.unwrap();
+            }
+
+            // Notify sender of successful sends
+            if let Err(err) = reply.send(sent) {
+                // This can only happen if the sender exited.
+                error!(?err, "failed to send ack");
+            }
+        });
+    }
+
     /// Run the simulated network.
     pub async fn run(mut self) {
         loop {
@@ -112,243 +345,15 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                         None => break,
                     };
 
-                    // Handle ingress message
-                    match message {
-                        ingress::Message::Register {
-                            public_key,
-                            channel,
-                            max_size,
-                            result,
-                        } => {
-                            // Ensure doesn't already exist
-                            let entry = self.agents.entry(public_key.clone()).or_default();
-                            if entry.get(&channel).is_some() {
-                                let _ = result.send(Err(Error::ChannelAlreadyRegistered(channel)));
-                                continue;
-                            }
-
-                            // Initialize agent channel
-                            let (sender, receiver) = mpsc::unbounded();
-                            entry.insert(channel, (max_size, sender));
-                            let _ = result.send(Ok((
-                                Sender::new(
-                                    self.runtime.clone(),
-                                    public_key,
-                                    channel,
-                                    max_size,
-                                    self.sender.clone(),
-                                ),
-                                Receiver { receiver },
-                            )));
-                        }
-                        ingress::Message::Deregister {
-                            public_key,
-                            result,
-                        } => {
-                            if self.agents.remove(&public_key).is_none() {
-                                let _ = result.send(Err(Error::PeerMissing));
-                                continue;
-                            }
-                            let _ = result.send(Ok(()));
-                        }
-                        ingress::Message::AddLink {
-                            sender,
-                            receiver,
-                            config,
-                            result,
-                        } => {
-                            self.links
-                                .entry(sender)
-                                .or_default()
-                                .insert(receiver, config);
-                            let _ = result.send(());
-                        }
-                        ingress::Message::RemoveLink {
-                            sender,
-                            receiver,
-                            result,
-                        } =>{
-                            let recipients = match self.links.get_mut(&sender) {
-                                Some(entry) => entry,
-                                None => {
-                                    result.send(Err(Error::LinkMissing)).unwrap();
-                                    continue;
-                                }
-                            };
-                            if recipients.remove(&receiver).is_none() {
-                                result.send(Err(Error::LinkMissing)).unwrap();
-                                continue;
-                            }
-                            let _ = result.send(Ok(()));
-                        }
-                    }
+                    self.handle_ingress(message);
                 },
                 message = self.receiver.next() => {
                     // If receiver is closed, exit
-                    let (channel, origin, recipients, message, reply) = match message {
+                    let task = match message {
                         Some(message) => message,
                         None => break,
                     };
-
-                    // Collect recipients
-                    let recipients = match recipients {
-                        Recipients::All => self.agents.keys().cloned().collect(),
-                        Recipients::Some(keys) => keys,
-                        Recipients::One(key) => vec![key],
-                    };
-
-                    // Send to all recipients
-                    let mut sent = Vec::new();
-                    let (acquired_sender, mut acquired_receiver) = mpsc::channel(recipients.len());
-                    for recipient in recipients {
-                        // Skip self
-                        if recipient == origin {
-                            debug!(
-                                recipient = hex(&recipient),
-                                reason = "self",
-                                "dropping message",
-                            );
-                            continue;
-                        }
-
-                        // Determine if recipient exists
-                        let sender = match self.agents.get(&recipient) {
-                            Some(sender) => sender,
-                            None => {
-                                debug!(
-                                    recipient = hex(&recipient),
-                                    reason = "no agent",
-                                    "dropping message",
-                                );
-                                continue;
-                            }
-                        };
-
-                        // Determine if there is a link between the sender and recipient
-                        let link = match self
-                            .links
-                            .get(&origin)
-                            .and_then(|links| links.get(&recipient))
-                        {
-                            Some(link) => link,
-                            None => {
-                                debug!(
-                                    recipient = hex(&recipient),
-                                    reason = "no link",
-                                    "dropping message",
-                                );
-                                continue;
-                            }
-                        };
-
-                        // Record sent message as soon as we determine there is a link with recipient (approximates
-                        // having an open connection)
-                        self.sent_messages
-                            .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
-                            .inc();
-
-                        // Apply link settings
-                        let should_deliver = self.runtime.gen_bool(link.success_rate);
-                        let delay = Normal::new(link.latency_mean, link.latency_stddev)
-                            .unwrap()
-                            .sample(&mut self.runtime);
-                        debug!(
-                            origin = hex(&origin),
-                            recipient = hex(&recipient),
-                            ?delay,
-                            "sending message",
-                        );
-
-                        // Send message
-                        self.runtime.spawn("messenger", {
-                            let runtime = self.runtime.clone();
-                            let mut sender = sender.clone();
-                            let recipient = recipient.clone();
-                            let message = message.clone();
-                            let mut acquired_sender = acquired_sender.clone();
-                            let origin = origin.clone();
-                            let received_messages = self.received_messages.clone();
-                            async move {
-                                // Mark as sent as soon as soon as execution starts
-                                acquired_sender.send(()).await.unwrap();
-
-                                // Apply delay to send (once link is not saturated)
-                                //
-                                // Note: messages can be sent out of order (will not occur when using a
-                                // stable TCP connection)
-                                runtime.sleep(Duration::from_millis(delay as u64)).await;
-
-                                // Drop message if success rate is too low
-                                if !should_deliver {
-                                    debug!(
-                                        recipient = hex(&recipient),
-                                        reason = "random link failure",
-                                        "dropping message",
-                                    );
-                                    return;
-                                }
-
-                                // Drop message if not listening on channel
-                                let (max_size, sender) = match sender.get_mut(&channel) {
-                                    Some(sender) => sender,
-                                    None => {
-                                        debug!(
-                                            recipient = hex(&recipient),
-                                            channel,
-                                            reason = "missing channel",
-                                            "dropping message",
-                                        );
-                                        return;
-                                    }
-                                };
-
-                                // Drop message if too large
-                                if message.len() > *max_size {
-                                    debug!(
-                                        recipient = hex(&recipient),
-                                        channel,
-                                        size = message.len(),
-                                        max_size = *max_size,
-                                        reason = "message too large",
-                                        "dropping message",
-                                    );
-                                    return;
-                                }
-
-                                // Send message
-                                if let Err(err) = sender.send((origin.clone(), message)).await {
-                                    // This can only happen if the receiver exited.
-                                    error!(
-                                        origin = hex(&origin),
-                                        recipient = hex(&recipient),
-                                        ?err,
-                                        "failed to send",
-                                    );
-                                    return;
-                                }
-
-                                // Only record received messages that were successfully sent
-                                received_messages
-                                    .get_or_create(&metrics::Message::new(&origin, &recipient, channel))
-                                    .inc();
-                            }
-                        });
-                        sent.push(recipient);
-                    }
-
-                    // Notify sender of successful sends
-                    self.runtime.spawn("notifier", async move {
-                        // Wait for semaphore to be acquired on all sends
-                        for _ in 0..sent.len() {
-                            acquired_receiver.next().await.unwrap();
-                        }
-
-                        // Notify sender of successful sends
-                        if let Err(err) = reply.send(sent) {
-                            // This can only happen if the sender exited.
-                            error!(?err, "failed to send ack");
-                        }
-                    });
+                    self.handle_message(task);
                 }
             }
         }
