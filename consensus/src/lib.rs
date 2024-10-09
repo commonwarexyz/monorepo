@@ -20,6 +20,7 @@ use bytes::Bytes;
 type View = u64;
 type Height = u64;
 type Hash = Bytes; // use fixed size bytes
+const HASH_LENGTH: usize = 32;
 type Payload = Bytes;
 
 /// TODO: call verify after voting (before finalization votes) or before voting? Can include
@@ -32,25 +33,27 @@ pub trait Application: Send + 'static {
     /// Generate a new payload for the given parent hash.
     ///
     /// If state is not yet ready, this will return None.
-    fn propose(&mut self, parent: Hash) -> Option<Payload>;
+    ///
+    /// TODO: provide uptime/fault info here?
+    fn propose(&mut self, parent: Hash, height: Height) -> Option<Payload>;
 
     /// Parse the payload and return the hash of the payload.
     ///
     /// Parse is a stateless operation and may be called out-of-order.
-    fn parse(&self, payload: Payload) -> Option<Hash>;
+    fn parse(&self, parent: Hash, height: Height, payload: Payload) -> Option<Hash>;
 
     /// Verify the payload is valid.
     ///
     /// Verify is a stateful operation and must be called in-order.
-    fn verify(&self, payload: Payload) -> bool;
+    fn verify(&mut self, parent: Hash, height: Height, payload: Payload, hash: Hash) -> bool;
 
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, payload: Payload);
+    fn notarized(&mut self, hash: Hash);
 
     /// Event that the payload has been finalized.
-    fn finalized(&mut self, payload: Payload);
+    fn finalized(&mut self, hash: Hash);
 }
 
 // Example Payload (Transfers):

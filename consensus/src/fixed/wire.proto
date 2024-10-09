@@ -1,8 +1,7 @@
 syntax = "proto3";
 package wire;
 
-// Message is the only allowed message format that can be sent between participants.
-message Message {
+message Consensus {
     oneof payload {
         Proposal proposal = 1;
         Vote vote = 2;
@@ -12,7 +11,6 @@ message Message {
     }
 }
 
-// Reward issued based on partial signatures and participation in DKG
 message Proposal {
     uint64 view = 1;
     uint64 height = 2;
@@ -25,7 +23,7 @@ message Proposal {
 message Vote {
     uint64 view = 1;
     uint64 height = 2;
-    bytes hash = 3; 
+    optional bytes hash = 3; 
 
     Signature signature = 4;
 }
@@ -33,7 +31,7 @@ message Vote {
 message Notarization {
     uint64 view = 1;
     uint64 height = 2;
-    bytes hash = 3;
+    optional bytes hash = 3;
     
     repeated Signature signatures = 4;
 }
@@ -59,11 +57,11 @@ message Signature {
     bytes signature = 2;
 }
 
-// Backfiller (TODO: separate proto?)
 message Backfill {
     oneof payload {
         Request request = 1;
         Resolution resolution = 2;
+        Missing missing = 3;
     }
 }
 message Request {
@@ -72,4 +70,8 @@ message Request {
 
 message Resolution {
     Proposal proposal = 1;
+}
+
+message Missing {
+    bytes hash = 1;
 }
