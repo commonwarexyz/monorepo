@@ -46,7 +46,10 @@ mod tests {
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use commonware_utils::{hash, hex};
     use engine::Engine;
-    use futures::{channel::mpsc, StreamExt};
+    use futures::{
+        channel::{mpsc, oneshot},
+        StreamExt,
+    };
     use prometheus_client::registry::Registry;
     use std::{
         collections::{BTreeMap, HashMap},
@@ -325,6 +328,111 @@ mod tests {
             for _ in 0..(n - 1) {
                 done_receiver.next().await.unwrap();
             }
+        });
+    }
+
+    #[test]
+    fn test_catchup() {
+        // Configure logging
+        tracing_subscriber::fmt()
+            .with_max_level(Level::DEBUG)
+            .with_line_number(true)
+            .init();
+
+        // Create runtime
+        let n = 5;
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let mut network = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                },
+            );
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+
+            // Create engines
+            let (start_delayed, started_delayed) = oneshot::channel();
+            let (done_sender, mut done_receiver) = mpsc::channel(schemes.len());
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Register on network
+                let validator = scheme.public_key();
+                let (block_sender, block_receiver) =
+                    network.register(validator.clone(), 0, 1024 * 1024).unwrap();
+                let (vote_sender, vote_receiver) =
+                    network.register(validator.clone(), 1, 1024 * 1024).unwrap();
+
+                // Link to all other validators
+                for other in validators.iter() {
+                    if other == &validator {
+                        continue;
+                    }
+                    network
+                        .link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency_mean: 10.0,
+                                latency_stddev: 1.0,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .unwrap();
+                }
+
+                // Start engine
+                let cfg = config::Config {
+                    crypto: scheme,
+                    application: MockApplication {
+                        participant: validator,
+                        verified: HashMap::new(),
+                        finalized: HashMap::new(),
+                        done_height: 100,
+                        done: done_sender.clone(),
+                    },
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    namespace: Bytes::from("consensus"),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(1),
+                    null_vote_retry: Duration::from_secs(1),
+                    fetch_timeout: Duration::from_secs(1),
+                    validators: view_validators.clone(),
+                };
+                let engine = Engine::new(runtime.clone(), cfg);
+                runtime.spawn("engine", async move {
+                    if idx == 0 {
+                        started_delayed.await.unwrap();
+                    }
+                    // TODO: enable messages to account
+                    engine
+                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .await;
+                });
+            }
+
+            // Run network
+            runtime.spawn("network", network.run());
+
+            // Wait for all engines to finish
+            for _ in 0..(n - 1) {
+                done_receiver.next().await.unwrap();
+            }
+
+            // Start delayed engine
+            start_delayed.send(()).unwrap();
+            done_receiver.next().await.unwrap();
         });
     }
 }
