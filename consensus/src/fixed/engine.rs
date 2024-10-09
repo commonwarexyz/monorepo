@@ -1,6 +1,10 @@
-use super::{orchestrator, voter::Voter};
+use super::{
+    config::Config,
+    orchestrator,
+    voter::{self, Voter},
+};
 use crate::Application;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{select, Clock, Spawner};
 use rand::Rng;
@@ -8,28 +12,50 @@ use tracing::debug;
 
 pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, A: Application> {
     runtime: E,
-    crypto: C,
 
     orchestrator: orchestrator::Orchestrator<E, A>,
     voter: Voter<E, C>,
 }
 
 impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
-    pub fn new(runtime: E, crypto: C, application: A, mut validators: Vec<PublicKey>) -> Self {
-        // Sort the validators
-        validators.sort();
+    pub fn new(runtime: E, mut cfg: Config<C, A>) -> Self {
+        // Sort the validators at each view
+        if cfg.validators.is_empty() {
+            panic!("no validators specified");
+        }
+        for (_, validators) in cfg.validators.iter_mut() {
+            if validators.is_empty() {
+                panic!("no validators specified");
+            }
+            validators.sort();
+        }
 
         // Create orchestrator
-        let (orchestrator, mailbox) =
-            orchestrator::Orchestrator::new(runtime.clone(), application, validators.clone());
+        let (orchestrator, mailbox) = orchestrator::Orchestrator::new(
+            runtime.clone(),
+            cfg.application,
+            cfg.fetch_timeout,
+            cfg.validators.clone(),
+        );
 
         // Create voter
-        let voter = Voter::new(runtime.clone(), crypto.clone(), mailbox, validators);
+        let voter = Voter::new(
+            runtime.clone(),
+            cfg.crypto,
+            mailbox,
+            voter::Config {
+                registry: cfg.registry,
+                namespace: cfg.namespace,
+                leader_timeout: cfg.leader_timeout,
+                notarization_timeout: cfg.notarization_timeout,
+                null_vote_retry: cfg.null_vote_retry,
+                validators: cfg.validators,
+            },
+        );
 
         // Return the engine
         Self {
-            runtime: runtime.clone(),
-            crypto: crypto.clone(),
+            runtime,
 
             orchestrator,
             voter,
