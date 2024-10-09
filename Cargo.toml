@@ -3,6 +3,7 @@ members = [
     "cryptography",
     "runtime",
     "p2p",
+    "utils",
     "examples/chat",
     "examples/vrf",
 ]

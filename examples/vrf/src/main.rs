@@ -86,7 +86,7 @@ use commonware_runtime::{
     tokio::{self, Executor},
     Runner, Spawner,
 };
-use commonware_utils::{hex, threshold};
+use commonware_utils::{hex, quorum};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -240,7 +240,7 @@ fn main() {
         }
 
         // Infer threshold
-        let threshold = threshold(contributors.len() as u32)
+        let threshold = quorum(contributors.len() as u32)
             .expect("not enough contributors to form a threshold of 2f+1");
         let max_reveals = max_reveals(threshold);
         info!(threshold, max_reveals, "inferred threshold");

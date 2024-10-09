@@ -1,6 +1,6 @@
 //! Utilities for a DKG/Resharing procedure.
 
-/// Assuming that `t = 2f + 1`, compute the maximum number of shares that can be revealed
+/// Assuming that `t >= 2f + 1`, compute the maximum number of shares that can be revealed
 /// without allowing an adversary of size `f` to reconstruct the secret.
 pub fn max_reveals(t: u32) -> u32 {
     (t - 1) / 2

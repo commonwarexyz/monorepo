@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-utils.svg)](https://crates.io/crates/commonware-utils)
 
-TBD
+Leverage common functionality across multiple primitives.
 
 ## Status 
 
