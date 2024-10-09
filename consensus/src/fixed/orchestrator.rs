@@ -246,7 +246,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
     fn notify(&mut self) {
         // Notify application of all finalized proposals
-        let mut next = self.last_notified;
+        let mut next = self.last_notified + 1;
         loop {
             // Get info
             let knowledge = match self.knowledge.get(&next) {
@@ -278,8 +278,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     if !self.blocks.contains_key(hash) {
                         return;
                     }
-                    self.notarizations_sent.remove(&self.last_notified);
-                    self.last_notified += 1;
+                    self.notarizations_sent.remove(&next);
+                    self.last_notified = next;
                     self.application.finalized(hash.clone());
                 }
             }

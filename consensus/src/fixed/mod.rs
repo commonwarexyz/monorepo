@@ -41,7 +41,7 @@ mod tests {
     use super::*;
     use crate::{Application, Hash, Height, Payload};
     use bytes::Bytes;
-    use commonware_cryptography::{Ed25519, PublicKey, Scheme};
+    use commonware_cryptography::{utils::hex, Ed25519, PublicKey, Scheme};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use engine::Engine;
@@ -119,8 +119,8 @@ mod tests {
         }
 
         fn finalized(&mut self, hash: Hash) {
-            if self.finalized.contains_key(&hash) {
-                panic!("hash already finalized");
+            if let Some(height) = self.finalized.get(&hash) {
+                panic!("hash already finalized: {}:{:?}", height, hex(&hash));
             }
             let height = self.verified.get(&hash).expect("hash not finalized");
             self.finalized.insert(hash, *height);

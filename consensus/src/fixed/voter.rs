@@ -92,15 +92,13 @@ impl Record {
         let public_key = &vote.signature.as_ref().unwrap().public_key;
         if vote.hash.is_none() {
             // Check if already issued finalize
-            if self.finalizers.contains_key(public_key) {
+            if self.finalizers.contains_key(public_key) && !skip_invalid {
                 warn!(
                     view = vote.view,
                     signer = hex(public_key),
                     "already voted finalize",
                 );
-                if skip_invalid {
-                    return;
-                }
+                return;
             }
 
             // Store the null vote
@@ -110,14 +108,14 @@ impl Record {
         let hash = vote.hash.clone().unwrap();
 
         // Check if already voted
-        if let Some(previous_vote) = self.proposal_voters.get(public_key) {
-            warn!(
-                view = vote.view,
-                signer = hex(public_key),
-                previous_vote = hex(previous_vote),
-                "already voted"
-            );
-            if skip_invalid {
+        if !skip_invalid {
+            if let Some(previous_vote) = self.proposal_voters.get(public_key) {
+                warn!(
+                    view = vote.view,
+                    signer = hex(public_key),
+                    previous_vote = hex(previous_vote),
+                    "already voted"
+                );
                 return;
             }
         }
@@ -125,7 +123,7 @@ impl Record {
         // Store the vote
         self.proposal_voters
             .insert(public_key.clone(), hash.clone());
-        let entry = self.proposal_votes.entry(hash).or_insert_with(HashMap::new);
+        let entry = self.proposal_votes.entry(hash).or_default();
         entry.insert(public_key.clone(), vote);
     }
 
@@ -146,13 +144,19 @@ impl Record {
                 Some((hash, pro)) => {
                     if hash != proposal {
                         debug!(
-                            proposal = hex(&proposal),
-                            hash = hex(&hash),
+                            view = pro.view,
+                            proposal = hex(proposal),
                             reason = "proposal mismatch",
                             "skipping notarization broadcast"
                         );
                         continue;
                     }
+                    debug!(
+                        view = pro.view,
+                        height = pro.height,
+                        proposal = hex(proposal),
+                        "broadcasting notarization"
+                    );
                     pro.height
                 }
                 None => {
@@ -185,26 +189,24 @@ impl Record {
     fn add_verified_finalize(&mut self, skip_invalid: bool, finalize: wire::Finalize) {
         // Check if also issued null vote
         let public_key = &finalize.signature.as_ref().unwrap().public_key;
-        if self.null_votes.contains_key(public_key) {
+        if self.null_votes.contains_key(public_key) && !skip_invalid {
             warn!(
                 view = finalize.view,
                 signer = hex(public_key),
                 "already voted null",
             );
-            if skip_invalid {
-                return;
-            }
+            return;
         }
 
         // Check if already finalized
-        if let Some(previous_finalize) = self.finalizers.get(public_key) {
-            warn!(
-                view = finalize.view,
-                signer = hex(public_key),
-                previous_finalize = hex(previous_finalize),
-                "already voted finalize"
-            );
-            if skip_invalid {
+        if !skip_invalid {
+            if let Some(previous_finalize) = self.finalizers.get(public_key) {
+                warn!(
+                    view = finalize.view,
+                    signer = hex(public_key),
+                    previous_finalize = hex(previous_finalize),
+                    "already voted finalize"
+                );
                 return;
             }
         }
@@ -212,10 +214,7 @@ impl Record {
         // Store the finalize
         self.finalizers
             .insert(public_key.clone(), finalize.hash.clone());
-        let entry = self
-            .finalizes
-            .entry(finalize.hash.clone())
-            .or_insert_with(HashMap::new);
+        let entry = self.finalizes.entry(finalize.hash.clone()).or_default();
         entry.insert(public_key.clone(), finalize);
     }
 
@@ -288,6 +287,7 @@ pub struct Voter<E: Clock + Rng, C: Scheme> {
     views: BTreeMap<View, Record>,
 
     current_view: Gauge,
+    tracked_views: Gauge,
 }
 
 impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
@@ -341,11 +341,14 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
         // Initialize metrics
         let current_view = Gauge::<i64, AtomicI64>::default();
+        let tracked_views = Gauge::<i64, AtomicI64>::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
             registry.register("current_view", "current view", current_view.clone());
+            registry.register("tracked_views", "tracked views", tracked_views.clone());
         }
         current_view.set(1);
+        tracked_views.set(1);
 
         // Initialize store
         Self {
@@ -368,6 +371,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             views,
 
             current_view,
+            tracked_views,
         }
     }
 
@@ -389,14 +393,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .expect("validators do not cover range of allowed views")
             .1;
         (validators.0 as usize, validators.1.len())
-    }
-
-    fn validators(&self, view: View) -> &(u32, Vec<PublicKey>, HashMap<PublicKey, u32>) {
-        self.validators
-            .range(..=view)
-            .next_back()
-            .expect("validators do not cover range of allowed views")
-            .1
     }
 
     async fn propose(&mut self) -> Option<wire::Proposal> {
@@ -435,7 +431,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         Some(proposal)
     }
 
-    pub fn timeout_deadline(&mut self) -> SystemTime {
+    fn timeout_deadline(&mut self) -> SystemTime {
         // Return the earliest deadline
         let view = self.views.get_mut(&self.view).unwrap();
         if let Some(deadline) = view.leader_deadline {
@@ -457,7 +453,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         null_vote_retry
     }
 
-    pub fn timeout(&mut self) -> wire::Vote {
+    fn timeout(&mut self) -> wire::Vote {
         // Set timeout fired
         let view = self.views.get_mut(&self.view).unwrap();
         view.timeout_fired = true;
@@ -480,7 +476,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
     }
 
-    pub async fn proposal(&mut self, proposal: wire::Proposal) {
+    async fn proposal(&mut self, proposal: wire::Proposal) {
         // Parse signature
         let signature = match &proposal.signature {
             Some(signature) => signature,
@@ -633,7 +629,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
     }
 
-    pub fn vote(&mut self, vote: wire::Vote) {
+    fn vote(&mut self, vote: wire::Vote) {
         // Ensure we are in the right view to process this message
         if vote.view != self.view && vote.view != self.view + 1 {
             debug!(
@@ -680,6 +676,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             return;
         }
 
+        // Handle vote
+        self.handle_vote(vote);
+    }
+
+    fn handle_vote(&mut self, vote: wire::Vote) {
         // Check to see if vote is for proposal in view
         let view = self
             .views
@@ -687,10 +688,10 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .or_insert_with(|| Record::new(Self::leader(&self.validators, vote.view), None, None));
 
         // Handle vote
-        view.add_verified_vote(true, vote);
+        view.add_verified_vote(false, vote);
     }
 
-    pub async fn notarization(&mut self, notarization: wire::Notarization) {
+    async fn notarization(&mut self, notarization: wire::Notarization) {
         // Check if we are still in a view where this notarization could help
         if notarization.view <= self.last_finalized {
             trace!(
@@ -726,7 +727,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
         // Ensure notarization has valid number of signatures
         let (threshold, count) = self.participation(notarization.view);
-        if notarization.signatures.len() < threshold as usize {
+        if notarization.signatures.len() < threshold {
             debug!(
                 threshold,
                 signatures = notarization.signatures.len(),
@@ -786,6 +787,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
         debug!(view = notarization.view, "notarization verified");
 
+        // Handle notarization
+        self.handle_notarization(notarization).await;
+    }
+
+    async fn handle_notarization(&mut self, notarization: wire::Notarization) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = self.views.entry(notarization.view).or_insert_with(|| {
             Record::new(
@@ -801,7 +807,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 hash: notarization.hash.clone(),
                 signature: Some(signature),
             };
-            view.add_verified_vote(false, vote);
+            view.add_verified_vote(true, vote);
         }
 
         // Inform orchestrator of notarization if not null vote
@@ -819,9 +825,9 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         self.enter_view(notarization.view + 1);
     }
 
-    pub fn finalize(&mut self, finalize: wire::Finalize) {
+    fn finalize(&mut self, finalize: wire::Finalize) {
         // Ensure we are in the right view to process this message
-        if finalize.view != self.view && finalize.view != self.view + 1 {
+        if finalize.view <= self.last_finalized || finalize.view > self.view + 1 {
             debug!(
                 finalize_view = finalize.view,
                 our_view = self.view,
@@ -871,16 +877,21 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             return;
         }
 
+        // Handle finalize
+        self.handle_finalize(finalize);
+    }
+
+    fn handle_finalize(&mut self, finalize: wire::Finalize) {
         // Get view for finalize
         let view = self.views.entry(finalize.view).or_insert_with(|| {
             Record::new(Self::leader(&self.validators, finalize.view), None, None)
         });
 
         // Handle finalize
-        view.add_verified_finalize(true, finalize);
+        view.add_verified_finalize(false, finalize);
     }
 
-    pub async fn finalization(&mut self, finalization: wire::Finalization) {
+    async fn finalization(&mut self, finalization: wire::Finalization) {
         // Check if we are still in a view where this finalization could help
         if finalization.view <= self.last_finalized {
             trace!(
@@ -964,6 +975,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
         debug!(view = finalization.view, "finalization verified");
 
+        // Process finalization
+        self.handle_finalization(finalization).await;
+    }
+
+    async fn handle_finalization(&mut self, finalization: wire::Finalization) {
         // Add signatures to view (needed to broadcast finalization if we get proposal)
         let view = self.views.entry(finalization.view).or_insert_with(|| {
             Record::new(
@@ -972,14 +988,14 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 None,
             )
         });
-        for signature in finalization.signatures {
+        for signature in finalization.signatures.iter() {
             let finalize = wire::Finalize {
                 view: finalization.view,
                 height: finalization.height,
                 hash: finalization.hash.clone(),
-                signature: Some(signature),
+                signature: Some(signature.clone()),
             };
-            view.add_verified_finalize(false, finalize);
+            view.add_verified_finalize(true, finalize);
         }
 
         // Track view finalized
@@ -1004,7 +1020,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
     }
 
-    pub fn construct_proposal_vote(&mut self, view: u64) -> Option<wire::Vote> {
+    fn construct_proposal_vote(&mut self, view: u64) -> Option<wire::Vote> {
         let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1038,7 +1054,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         })
     }
 
-    pub fn construct_notarization(&mut self, view: u64) -> Option<wire::Notarization> {
+    fn construct_notarization(&mut self, view: u64) -> Option<wire::Notarization> {
         // Get requested view
         let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -1071,7 +1087,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         Some(notarization)
     }
 
-    pub fn construct_finalize(&mut self, view: u64) -> Option<wire::Finalize> {
+    fn construct_finalize(&mut self, view: u64) -> Option<wire::Finalize> {
         let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1109,7 +1125,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         })
     }
 
-    pub fn construct_finalization(&mut self, view: u64) -> Option<wire::Finalization> {
+    fn construct_finalization(&mut self, view: u64) -> Option<wire::Finalization> {
         let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1137,7 +1153,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         Some(finalization)
     }
 
-    async fn send_view_messages(&mut self, sender: &mut impl Sender, view: u64) {
+    async fn broadcast(&mut self, sender: &mut impl Sender, view: u64) {
         // Attempt to vote
         if let Some(vote) = self.construct_proposal_vote(view) {
             // Broadcast the vote
@@ -1151,7 +1167,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the vote
-            self.vote(vote);
+            self.handle_vote(vote);
         };
 
         // Attempt to notarize
@@ -1167,7 +1183,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the notarization
-            self.notarization(notarization).await;
+            self.handle_notarization(notarization).await;
         };
 
         // Attempt to finalize
@@ -1183,7 +1199,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the finalize
-            self.finalize(finalize);
+            self.handle_finalize(finalize);
         };
 
         // Attempt to finalization
@@ -1199,7 +1215,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the finalization
-            self.finalization(finalization).await;
+            self.handle_finalization(finalization).await;
         };
     }
 
@@ -1221,7 +1237,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 // Handle the proposal
                 let proposal_view = proposal.view;
                 self.proposal(proposal).await;
-                self.send_view_messages(&mut sender, proposal_view).await;
+                self.broadcast(&mut sender, proposal_view).await;
             }
 
             // Wait for a timeout to fire or for a message to arrive
@@ -1243,8 +1259,10 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
                     // Handle the vote
                     let vote_view = vote.view;
-                    self.vote(vote);
-                    self.send_view_messages(&mut sender, vote_view).await;
+                    self.handle_vote(vote);
+
+                    // Attempt to send any new view messages
+                    self.broadcast(&mut sender, vote_view).await;
                 },
                 result = receiver.recv() => {
                     // Parse message
@@ -1320,16 +1338,15 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                     };
 
                     // Attempt to send any new view messages
-                    self.send_view_messages(&mut sender, view).await;
+                    self.broadcast(&mut sender, view).await;
 
                     // After sending all required messages, prune any views
                     // we no longer need
                     self.prune_views();
 
                     // Update metrics
-                    if let Ok(view) = self.view.try_into() {
-                        self.current_view.set(view);
-                    }
+                    self.current_view.set(view as i64);
+                    self.tracked_views.set(self.views.len() as i64);
                 },
             };
         }
