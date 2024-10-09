@@ -19,6 +19,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
+use tracing_subscriber::field::debug;
 
 const PROPOSAL_SUFFIX: &[u8] = b"_PROPOSAL";
 const VOTE_SUFFIX: &[u8] = b"_VOTE";
@@ -146,13 +147,20 @@ impl Record {
                 Some((hash, pro)) => {
                     if hash != proposal {
                         debug!(
-                            proposal = hex(&proposal),
-                            hash = hex(&hash),
+                            view = pro.view,
+                            proposal = hex(proposal),
+                            hash = hex(hash),
                             reason = "proposal mismatch",
                             "skipping notarization broadcast"
                         );
                         continue;
                     }
+                    debug!(
+                        view = pro.view,
+                        proposal = hex(proposal),
+                        hash = hex(hash),
+                        "broadcasting notarization"
+                    );
                     pro.height
                 }
                 None => {
@@ -389,14 +397,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .expect("validators do not cover range of allowed views")
             .1;
         (validators.0 as usize, validators.1.len())
-    }
-
-    fn validators(&self, view: View) -> &(u32, Vec<PublicKey>, HashMap<PublicKey, u32>) {
-        self.validators
-            .range(..=view)
-            .next_back()
-            .expect("validators do not cover range of allowed views")
-            .1
     }
 
     async fn propose(&mut self) -> Option<wire::Proposal> {
@@ -706,6 +706,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         // case we can ignore this message)
         let view = self.views.get_mut(&notarization.view);
         if let Some(ref view) = view {
+            // TODO: if called immediately after broadcast, we have not yet parsed this yet
             if notarization.hash.is_some() && view.broadcast_proposal_notarization {
                 debug!(
                     view = notarization.view,
@@ -726,7 +727,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
         // Ensure notarization has valid number of signatures
         let (threshold, count) = self.participation(notarization.view);
-        if notarization.signatures.len() < threshold as usize {
+        if notarization.signatures.len() < threshold {
             debug!(
                 threshold,
                 signatures = notarization.signatures.len(),
