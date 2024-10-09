@@ -4,11 +4,11 @@ use super::{
     voter::{hash, proposal_digest},
     wire,
 };
-use crate::{Application, Hash, Height, Payload, View};
+use crate::{Application, Hash, Height, Payload, View, HASH_LENGTH};
 use commonware_cryptography::{utils::hex, PublicKey};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock, Spawner};
-use core::{panic, task};
+use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -17,19 +17,17 @@ use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use sha2::digest::crypto_common::rand_core::block;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    time::SystemTime,
-};
 use tracing::{debug, warn};
 
 pub enum Message {
     Propose {
-        response: oneshot::Sender<Option<((Hash, Height), (Hash, Payload))>>,
+        response: oneshot::Sender<Option<(Hash, Height, Hash, Payload)>>,
     },
     Parse {
+        parent: Hash,
+        height: Height,
         payload: Payload,
         response: oneshot::Sender<Option<Hash>>,
     },
@@ -55,7 +53,7 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn propose(&mut self) -> Option<((Hash, Height), (Hash, Payload))> {
+    pub async fn propose(&mut self) -> Option<(Hash, Height, Hash, Payload)> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Propose { response: sender })
@@ -64,10 +62,12 @@ impl Mailbox {
         receiver.await.unwrap()
     }
 
-    pub async fn parse(&mut self, payload: Payload) -> Option<Hash> {
+    pub async fn parse(&mut self, parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Parse {
+                parent,
+                height,
                 payload,
                 response: sender,
             })
@@ -190,8 +190,6 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         )
     }
 
-    // TODO: base this off of notarized/finalized (don't want to build index until finalized data, could
-    // have a separate index for notarized blocks by view and another for finalized blocks by height)
     async fn resolve(&mut self, proposal: Proposal) {
         // Parse proposal
         let (hash, proposal) = match proposal {
@@ -262,7 +260,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             None => continue,
                         };
                         notifications.insert(hash.clone());
-                        self.application.notarized(proposal.payload.clone());
+                        self.application.notarized(
+                            proposal.parent.clone(),
+                            proposal.height,
+                            proposal.payload.clone(),
+                        );
                     }
                 }
                 Lock::Finalized(hash) => {
@@ -273,7 +275,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             return;
                         }
                     };
-                    self.application.finalized(proposal.payload.clone());
+                    self.application.finalized(
+                        proposal.parent.clone(),
+                        proposal.height,
+                        proposal.payload.clone(),
+                    );
                     self.notarizations_sent.remove(&self.last_notified);
                     self.last_notified += 1;
                 }
@@ -315,8 +321,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
     }
 
-    // Simplified application functions
-    pub fn propose(&mut self) -> Option<((Hash, Height), (Hash, Payload))> {
+    pub fn propose(&mut self) -> Option<(Hash, Height, Hash, Payload)> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
@@ -326,23 +331,25 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         };
 
         // Propose block
-        //
-        // TODO: provide more info to application
-        let payload = match self.application.propose(parent.0.clone()) {
+        let height = parent.1 + 1;
+        let payload = match self.application.propose(parent.0.clone(), height) {
             Some(payload) => payload,
             None => {
                 return None;
             }
         };
 
-        let payload_hash = self.application.parse(payload.clone()).unwrap();
+        let payload_hash = self
+            .application
+            .parse(parent.0.clone(), height, payload.clone())
+            .unwrap();
 
         // Generate proposal
-        Some((parent, (payload_hash, payload)))
+        Some((parent.0, height, payload_hash, payload))
     }
 
-    pub fn parse(&self, payload: Payload) -> Option<Hash> {
-        self.application.parse(payload)
+    pub fn parse(&self, parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
+        self.application.parse(parent, height, payload)
     }
 
     fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
@@ -434,7 +441,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Verify payload
-        self.application.verify(proposal.payload.clone())
+        self.application
+            .verify(proposal.parent, proposal.height, proposal.payload.clone())
     }
 
     pub async fn notarized(&mut self, proposal: Proposal) {
@@ -634,17 +642,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Propose { response } => {
-                            let proposal = match self.propose() {
-                                Some(proposal) => proposal,
-                                None => {
-                                    response.send(None).unwrap();
-                                    continue;
-                                }
-                            };
-                            response.send(Some(proposal)).unwrap();
+                            let proposal = self.propose();
+                            response.send(proposal).unwrap();
                         }
-                        Message::Parse { payload, response } => {
-                            let hash = self.application.parse(payload);
+                        Message::Parse { parent, height, payload, response } => {
+                            let hash = self.parse(parent, height, payload);
                             response.send(hash).unwrap();
                         }
                         Message::Verify { proposal, response } => {
@@ -673,6 +675,10 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     };
                     match payload {
                         wire::backfill::Payload::Request(request) => {
+                            if request.hash.len() != HASH_LENGTH {
+                                warn!(sender = hex(&s), "invalid request hash size");
+                                continue;
+                            }
                             let proposal = self.blocks.get(&request.hash).cloned();
                             let msg = wire::Resolution {
                                 proposal,
@@ -680,8 +686,12 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             sender.send(Recipients::One(s), msg, false).await.unwrap();
                         }
                         wire::backfill::Payload::Missing(missing) => {
+                            if missing.hash.len() != HASH_LENGTH {
+                                warn!(sender = hex(&s), "invalid missing hash size");
+                                continue;
+                            }
                             if let Some(ref outstanding) = outstanding_task {
-                                let request = outstanding.1;
+                                let request = outstanding.1.clone();
                                 if outstanding.0 == s && request == missing.hash {
                                     debug!(hash = hex(&missing.hash), peer = hex(&s), "peer missing proposal");
 
@@ -702,7 +712,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                     continue;
                                 }
                             };
-                            let payload_hash = match self.application.parse(proposal.payload.clone()) {
+                            if proposal.parent.len() != HASH_LENGTH {
+                                warn!(sender = hex(&s), "invalid proposal parent hash size");
+                                continue;
+                            }
+                            let payload_hash = match self.application.parse(proposal.parent.clone(), proposal.height, proposal.payload.clone()) {
                                 Some(payload_hash) => payload_hash,
                                 None => {
                                     warn!(sender = hex(&s), "unable to parse notarized/finalized payload");

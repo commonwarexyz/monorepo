@@ -1,4 +1,5 @@
 use super::{orchestrator::Mailbox, voter::Voter, wire, Error};
+use crate::HASH_LENGTH;
 use commonware_cryptography::{utils::hex, PublicKey, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{select, Clock, Spawner};
@@ -32,8 +33,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
         // Attempt to vote
         if let Some(vote) = self.voter.construct_vote(view) {
             // Broadcast the vote
-            let msg = wire::Message {
-                payload: Some(wire::message::Payload::Vote(vote.clone())),
+            let msg = wire::Consensus {
+                payload: Some(wire::consensus::Payload::Vote(vote.clone())),
             };
             let msg = msg.encode_to_vec();
             sender
@@ -48,8 +49,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
         // Attempt to notarize
         if let Some(notarization) = self.voter.construct_notarization(view) {
             // Broadcast the notarization
-            let msg = wire::Message {
-                payload: Some(wire::message::Payload::Notarization(notarization.clone())),
+            let msg = wire::Consensus {
+                payload: Some(wire::consensus::Payload::Notarization(notarization.clone())),
             };
             let msg = msg.encode_to_vec();
             sender
@@ -64,8 +65,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
         // Attempt to finalize
         if let Some(finalize) = self.voter.construct_finalize(view) {
             // Broadcast the finalize
-            let msg = wire::Message {
-                payload: Some(wire::message::Payload::Finalize(finalize.clone())),
+            let msg = wire::Consensus {
+                payload: Some(wire::consensus::Payload::Finalize(finalize.clone())),
             };
             let msg = msg.encode_to_vec();
             sender
@@ -80,8 +81,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
         // Attempt to finalization
         if let Some(finalization) = self.voter.construct_finalization(view) {
             // Broadcast the finalization
-            let msg = wire::Message {
-                payload: Some(wire::message::Payload::Finalization(finalization.clone())),
+            let msg = wire::Consensus {
+                payload: Some(wire::consensus::Payload::Finalization(finalization.clone())),
             };
             let msg = msg.encode_to_vec();
             sender
@@ -100,8 +101,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
             // Attempt to propose a block
             if let Some(proposal) = self.voter.propose().await {
                 // Broadcast the proposal
-                let msg = wire::Message {
-                    payload: Some(wire::message::Payload::Proposal(proposal.clone())),
+                let msg = wire::Consensus {
+                    payload: Some(wire::consensus::Payload::Proposal(proposal.clone())),
                 };
                 let msg = msg.encode_to_vec();
                 sender
@@ -123,8 +124,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
                     let vote = self.voter.timeout();
 
                     // Broadcast the vote
-                    let msg = wire::Message {
-                        payload: Some(wire::message::Payload::Vote(vote.clone())),
+                    let msg = wire::Consensus{
+                        payload: Some(wire::consensus::Payload::Vote(vote.clone())),
                     };
                     let msg = msg.encode_to_vec();
                     sender
@@ -140,7 +141,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
                 result = receiver.recv() => {
                     // Parse message
                     let (s, msg) = result.unwrap();
-                    let msg = match wire::Message::decode(msg) {
+                    let msg = match wire::Consensus::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             debug!(?err, sender = hex(&s), "failed to decode message");
@@ -161,24 +162,43 @@ impl<E: Clock + Rng + Spawner, C: Scheme> Engine<E, C> {
                     // tip (immediately vote dummy when entering round).
                     let view;
                     match payload {
-                        // TODO: check correctness prior to passing on to voter (like hash size)
-                        wire::message::Payload::Proposal(proposal) => {
+                        wire::consensus::Payload::Proposal(proposal) => {
+                            if proposal.parent.len() != HASH_LENGTH {
+                                debug!(sender = hex(&s), "invalid proposal parent hash size");
+                                continue;
+                            }
                             view = proposal.view;
                             self.voter.proposal(proposal).await;
                         }
-                        wire::message::Payload::Vote(vote) => {
+                        wire::consensus::Payload::Vote(vote) => {
+                            if vote.hash.is_some() && vote.hash.as_ref().unwrap().len() != HASH_LENGTH {
+                                debug!(sender = hex(&s), "invalid vote hash size");
+                                continue;
+                            }
                             view = vote.view;
                             self.voter.vote(vote);
                         }
-                        wire::message::Payload::Notarization(notarization) => {
+                        wire::consensus::Payload::Notarization(notarization) => {
+                            if notarization.hash.is_some() && notarization.hash.as_ref().unwrap().len() != HASH_LENGTH {
+                                debug!(sender = hex(&s), "invalid notarization hash size");
+                                continue;
+                            }
                             view = notarization.view;
                             self.voter.notarization(notarization).await;
                         }
-                        wire::message::Payload::Finalize(finalize) => {
+                        wire::consensus::Payload::Finalize(finalize) => {
+                            if finalize.hash.len() != HASH_LENGTH {
+                                debug!(sender = hex(&s), "invalid finalize hash size");
+                                continue;
+                            }
                             view = finalize.view;
                             self.voter.finalize(finalize);
                         }
-                        wire::message::Payload::Finalization(finalization) => {
+                        wire::consensus::Payload::Finalization(finalization) => {
+                            if finalization.hash.len() != HASH_LENGTH {
+                                debug!(sender = hex(&s), "invalid finalization hash size");
+                                continue;
+                            }
                             view = finalization.view;
                             self.voter.finalization(finalization).await;
                         }
