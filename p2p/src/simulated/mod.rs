@@ -58,6 +58,7 @@
 //! });
 //! ```
 
+mod ingress;
 mod metrics;
 mod network;
 
@@ -71,13 +72,17 @@ pub enum Error {
     NetworkClosed,
     #[error("not valid to link self")]
     LinkingSelf,
+    #[error("link missing")]
+    LinkMissing,
     #[error("invalid success rate (must be in [0, 1]): {0}")]
     InvalidSuccessRate(f64),
     #[error("channel already registered: {0}")]
     ChannelAlreadyRegistered(u32),
+    #[error("peer missing")]
+    PeerMissing,
 }
 
-pub use network::{Config, Link, Network};
+pub use network::{Channel, Config, Link, Network, Receiver, Sender};
 
 #[cfg(test)]
 mod tests {

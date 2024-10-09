@@ -1,7 +1,5 @@
 //! Implementation of an `authenticated` network.
 
-use std::marker::PhantomData;
-
 use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
@@ -12,6 +10,7 @@ use commonware_cryptography::Scheme;
 use commonware_runtime::{select, Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
+use std::marker::PhantomData;
 use tracing::{debug, info, warn};
 
 /// Implementation of an `authenticated` network.
