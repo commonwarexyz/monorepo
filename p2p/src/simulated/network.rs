@@ -4,8 +4,9 @@ use super::metrics;
 use super::Error;
 use crate::{Message, Recipients};
 use bytes::Bytes;
-use commonware_cryptography::{utils::hex, PublicKey};
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{select, Clock, Spawner};
+use commonware_utils::hex;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,

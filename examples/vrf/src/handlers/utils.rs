@@ -1,7 +1,5 @@
-use commonware_cryptography::{
-    bls12381::primitives::{group::Element, poly},
-    utils::hex,
-};
+use commonware_cryptography::bls12381::primitives::{group::Element, poly};
+use commonware_utils::hex;
 
 pub const SHARE_NAMESPACE: &[u8] = b"_COMMONWARE_DKG_SHARE_";
 

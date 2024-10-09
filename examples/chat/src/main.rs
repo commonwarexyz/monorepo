@@ -54,12 +54,13 @@ mod handler;
 mod logger;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{utils::hex, Ed25519, Scheme};
+use commonware_cryptography::{Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
     Runner, Spawner,
 };
+use commonware_utils::hex;
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

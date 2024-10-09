@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-vrf"
 commonware-cryptography = { workspace = true }
 commonware-p2p = { workspace = true } 
 commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
 bytes = { workspace = true } 
 rand = { workspace = true }
 tracing = { workspace = true } 

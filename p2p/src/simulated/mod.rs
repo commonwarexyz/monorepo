@@ -84,8 +84,9 @@ mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
-    use commonware_cryptography::{utils::hex, Ed25519, Scheme};
+    use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, select, Clock, Runner, Spawner};
+    use commonware_utils::hex;
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use prometheus_client::registry::Registry;
     use rand::Rng;

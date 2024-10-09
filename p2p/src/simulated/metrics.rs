@@ -1,4 +1,5 @@
-use commonware_cryptography::{utils::hex, PublicKey};
+use commonware_cryptography::PublicKey;
+use commonware_utils::hex;
 use prometheus_client::encoding::EncodeLabelSet;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
