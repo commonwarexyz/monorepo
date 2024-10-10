@@ -674,6 +674,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
         // Send the request
         debug!(
+            height,
             hash = hex(&hash),
             peer = hex(&validator),
             parents,
