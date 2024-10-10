@@ -226,7 +226,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         if self.missing.contains_key(&hash) {
             return;
         }
-        self.missing.insert(hash.clone(), heght);
+        self.missing.insert(hash.clone(), height);
         debug!(height, parent = hex(&hash), "registered missing proposal");
 
         // Enqueue missing proposal for fetching
