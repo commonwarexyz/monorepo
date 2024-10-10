@@ -138,9 +138,9 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
     last_finalized: Height,
 
     // Fetch missing proposals
-    missing: HashSet<Hash>,
-    missing_sender: mpsc::Sender<Hash>,
-    missing_receiver: mpsc::Receiver<Hash>,
+    missing: HashMap<Hash, Height>,
+    missing_sender: mpsc::Sender<(Height, Hash)>,
+    missing_receiver: mpsc::Receiver<(Height, Hash)>,
 
     // Track last notifications
     //
@@ -199,7 +199,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 last_notarized: 0,
                 last_finalized: 0,
 
-                missing: HashSet::new(),
+                missing: HashMap::new(),
                 missing_sender,
                 missing_receiver,
 
@@ -210,28 +210,28 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         )
     }
 
-    async fn register_missing(&mut self, hash: Hash) {
+    async fn register_missing(&mut self, height: Height, hash: Hash) {
         // Check if we have the proposal
         if self.blocks.contains_key(&hash) {
             return;
         }
 
         // Check if have already registered
-        if self.missing.contains(&hash) {
+        if self.missing.contains_key(&hash) {
             return;
         }
-        self.missing.insert(hash.clone());
-        debug!(parent = hex(&hash), "registered missing proposal");
+        self.missing.insert(hash.clone(), height);
+        debug!(height, parent = hex(&hash), "registered missing proposal");
 
         // Enqueue missing proposal for fetching
-        self.missing_sender.send(hash).await.unwrap();
+        self.missing_sender.send((height, hash)).await.unwrap();
     }
 
     async fn resolve(&mut self, proposal: Proposal) {
         // Parse proposal
         let (hash, proposal) = match proposal {
-            Proposal::Reference(_, _, hash) => {
-                self.register_missing(hash).await;
+            Proposal::Reference(_, height, hash) => {
+                self.register_missing(height, hash).await;
                 return;
             }
             Proposal::Populated(hash, proposal) => (hash, proposal),
@@ -243,7 +243,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Remove from missing
-        if self.missing.remove(&hash) {
+        if self.missing.remove(&hash).is_some() {
             debug!(
                 height = proposal.height,
                 hash = hex(&hash),
@@ -266,11 +266,12 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Store proposal
+        let height = proposal.height;
         let parent = proposal.parent.clone();
         self.blocks.insert(hash, proposal);
 
         // Consider fetching parent
-        self.register_missing(parent).await;
+        self.register_missing(height - 1, parent).await;
     }
 
     fn notify(&mut self) {
@@ -599,25 +600,30 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         self.notify();
     }
 
-    fn get_next_missing(&mut self) -> Option<Hash> {
+    fn get_next_missing(&mut self) -> Option<(Height, Hash)> {
         loop {
             // See if we have any missing proposals
-            let next = match self.missing_receiver.try_next() {
+            let (height, hash) = match self.missing_receiver.try_next() {
                 Ok(res) => res.unwrap(),
                 Err(_) => return None,
             };
 
             // Check if still unfulfilled
-            if self.blocks.contains_key(&next) {
+            if self.blocks.contains_key(&hash) {
                 continue;
             }
 
             // Return missing proposal
-            return Some(next);
+            return Some((height, hash));
         }
     }
 
-    async fn send_request(&mut self, hash: Hash, sender: &mut impl Sender) -> PublicKey {
+    async fn send_request(
+        &mut self,
+        height: Height,
+        hash: Hash,
+        sender: &mut impl Sender,
+    ) -> PublicKey {
         // Get validators from highest view we know about
         let (view, validators) = self
             .validators
@@ -627,16 +633,49 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
         // Select random validator to fetch from
         let validator = validators.choose(&mut self.runtime).unwrap().clone();
+
+        // Compute missing blocks from hash
+        let mut parents = 0;
+        loop {
+            // Check to see if we are already at root
+            let target = height - parents;
+            if target == 1 {
+                break;
+            }
+
+            // Check to see if we know anything about the height
+            if let Some(knowledge) = self.knowledge.get(&target) {
+                match knowledge {
+                    Knowledge::Notarized(hashes) => {
+                        // We only want to batch fill finalized data
+                        break;
+                    }
+                    Knowledge::Finalized(hash) => {
+                        if self.blocks.contains_key(hash) {
+                            // We have a block and no longer need to fetch its parent
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // If we have no knowledge of a height, we need to fetch it
+            parents += 1;
+        }
+
+        // Send the request
         debug!(
             hash = hex(&hash),
             peer = hex(&validator),
+            parents,
             validator_view = view,
             "requesting missing proposal"
         );
-
-        // Send the request
         let msg = wire::Backfill {
-            payload: Some(wire::backfill::Payload::Request(wire::Request { hash })),
+            payload: Some(wire::backfill::Payload::Request(wire::Request {
+                hash,
+                parents,
+            })),
         }
         .encode_to_vec()
         .into();
@@ -656,10 +695,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         let mut outstanding_task = None;
         loop {
             // Ensure task has not been resolved
-            if let Some((_, ref request, _)) = outstanding_task {
-                if self.blocks.contains_key(request) {
+            if let Some((_, ref height, ref hash, _)) = outstanding_task {
+                if self.blocks.contains_key(hash) {
                     debug!(
-                        hash = hex(request),
+                        height,
+                        hash = hex(hash),
                         "unexpeted resolution of missing proposal out of backfill"
                     );
                     outstanding_task = None;
@@ -669,23 +709,28 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             // Look for next task if nothing
             if outstanding_task.is_none() {
                 let missing = self.get_next_missing();
-                if let Some(next) = missing {
+                if let Some((height, hash)) = missing {
                     // Check if already have
-                    if self.blocks.contains_key(&next) {
+                    if self.blocks.contains_key(&hash) {
                         continue;
                     }
 
                     // Send request
-                    let validator = self.send_request(next.clone(), &mut sender).await;
+                    let validator = self.send_request(height, hash.clone(), &mut sender).await;
 
                     // Set timeout
                     debug!(
-                        hash = hex(&next),
+                        height,
+                        hash = hex(&hash),
                         peer = hex(&validator),
                         "requesting missing proposal"
                     );
-                    outstanding_task =
-                        Some((validator, next, self.runtime.current() + self.fetch_timeout));
+                    outstanding_task = Some((
+                        validator,
+                        height,
+                        hash,
+                        self.runtime.current() + self.fetch_timeout,
+                    ));
                 }
             };
 
@@ -700,11 +745,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             select! {
                 _task_timeout = missing_timeout => {
                     // Send request again
-                    let (_, request, _)= outstanding_task.take().unwrap();
-                    let validator = self.send_request(request.clone(), &mut sender).await;
+                    let (_, height, hash, _)= outstanding_task.take().unwrap();
+                    let validator = self.send_request(height, hash.clone(), &mut sender).await;
 
                     // Reset timeout
-                    outstanding_task = Some((validator, request, self.runtime.current() + self.fetch_timeout));
+                    outstanding_task = Some((validator, height, hash, self.runtime.current() + self.fetch_timeout));
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
@@ -824,8 +869,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             // Note, we don't care if we are sent the proposal from someone unexpected (although
                             // this is unexpected).
                             if let Some(ref outstanding) = outstanding_task {
-                                if outstanding.1 == incoming_hash {
-                                    debug!(hash = hex(&incoming_hash), peer = hex(&s), "resolved missing proposal via backfill");
+                                if outstanding.2 == incoming_hash {
+                                    debug!(height = outstanding.1, hash = hex(&incoming_hash), peer = hex(&s), "resolved missing proposal via backfill");
                                     outstanding_task = None;
                                 }
                             }

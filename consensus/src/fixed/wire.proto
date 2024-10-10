@@ -66,10 +66,11 @@ message Backfill {
 }
 message Request {
     bytes hash = 1;
+    uint64 parents = 2;
 }
 
 message Resolution {
-    Proposal proposal = 1;
+    repeated Proposal proposal = 1;
 }
 
 message Missing {
