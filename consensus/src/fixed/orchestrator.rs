@@ -427,16 +427,16 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
         // Check if parent has been verified
         if let Some(hashes) = self.verified.get(&parent.height) {
-            if !hashes.contains(&proposal.parent) {
-                debug!(
-                    height = proposal.height,
-                    parent_hash = hex(&proposal.parent),
-                    "parent not verified"
-                );
-                return false;
+            if hashes.contains(&proposal.parent) {
+                return true;
             }
         }
-        true
+        debug!(
+            height = proposal.height,
+            parent_hash = hex(&proposal.parent),
+            "parent not verified"
+        );
+        false
     }
 
     pub fn verify(&mut self, hash: Hash, proposal: wire::Proposal) -> bool {
@@ -467,6 +467,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             proposal.payload.clone(),
             hash.clone(),
         ) {
+            debug!(
+                height = proposal.height,
+                hash = hex(&hash),
+                "verified proposal"
+            );
             // Record verification
             let entry = self.verified.entry(proposal.height).or_default();
             entry.insert(hash);

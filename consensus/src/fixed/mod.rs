@@ -114,7 +114,12 @@ mod tests {
             let parent = match self.verified.get(&parent) {
                 Some(parent) => parent,
                 None => {
-                    panic!("parent {:?} of {}, not verified", hex(&parent), height);
+                    panic!(
+                        "[{:?}] parent {:?} of {}, not verified",
+                        hex(&self.participant),
+                        hex(&parent),
+                        height
+                    );
                 }
             };
             if parent + 1 != height {
