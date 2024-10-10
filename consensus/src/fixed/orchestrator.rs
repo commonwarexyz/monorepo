@@ -830,7 +830,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                 proposals.push(proposal);
 
                                 // If we have all parents requested, stop gathering more
-                                if proposals.len() as u64 >= request.parents {
+                                if proposals.len() as u64 > request.parents {
                                     break;
                                 }
                             }
