@@ -3,6 +3,7 @@
 pub mod fixed;
 
 use bytes::Bytes;
+use std::future::Future;
 
 // TODO: add simulated dialect for applications to test their execution environments under (with arbitary orphans, etc.)
 
@@ -35,7 +36,11 @@ pub trait Application: Send + 'static {
     /// If state is not yet ready, this will return None.
     ///
     /// TODO: provide uptime/fault info here?
-    fn propose(&mut self, parent: Hash, height: Height) -> Option<Payload>;
+    fn propose(
+        &mut self,
+        parent: Hash,
+        height: Height,
+    ) -> impl Future<Output = Option<Payload>> + Send;
 
     /// Parse the payload and return the hash of the payload.
     ///
@@ -45,15 +50,21 @@ pub trait Application: Send + 'static {
     /// Verify the payload is valid.
     ///
     /// Verify is a stateful operation and must be called in-order.
-    fn verify(&mut self, parent: Hash, height: Height, payload: Payload, hash: Hash) -> bool;
+    fn verify(
+        &mut self,
+        parent: Hash,
+        height: Height,
+        payload: Payload,
+        hash: Hash,
+    ) -> impl Future<Output = bool> + Send;
 
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, hash: Hash);
+    fn notarized(&mut self, hash: Hash) -> impl Future<Output = ()> + Send;
 
     /// Event that the payload has been finalized.
-    fn finalized(&mut self, hash: Hash);
+    fn finalized(&mut self, hash: Hash) -> impl Future<Output = ()> + Send;
 }
 
 // Example Payload (Transfers):
