@@ -132,6 +132,7 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
     last_finalized: Height,
 
     // Fetch missing proposals
+    missing: HashSet<Hash>,
     missing_sender: mpsc::Sender<Hash>,
     missing_receiver: mpsc::Receiver<Hash>,
 
@@ -187,6 +188,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 last_notarized: 0,
                 last_finalized: 0,
 
+                missing: HashSet::new(),
                 missing_sender,
                 missing_receiver,
 
@@ -197,19 +199,28 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         )
     }
 
-    // TODO: need to register knowledge for ancestry
+    async fn register_missing(&mut self, hash: Hash) {
+        // Check if we have the proposal
+        if self.blocks.contains_key(&hash) {
+            return;
+        }
+
+        // Check if have already registered
+        if self.missing.contains(&hash) {
+            return;
+        }
+        self.missing.insert(hash.clone());
+        debug!(parent = hex(&hash), "registered missing proposal");
+
+        // Enqueue missing proposal for fetching
+        self.missing_sender.send(hash).await.unwrap();
+    }
+
     async fn resolve(&mut self, proposal: Proposal) {
         // Parse proposal
         let (hash, proposal) = match proposal {
             Proposal::Reference(_, _, hash) => {
-                // Check to see if we have the proposal
-                if self.blocks.contains_key(&hash) {
-                    return;
-                }
-
-                // Record that we are missing the view
-                debug!(parent = hex(&hash), "registering missing parent");
-                self.missing_sender.send(hash.clone()).await.unwrap();
+                self.register_missing(hash).await;
                 return;
             }
             Proposal::Populated(hash, proposal) => (hash, proposal),
@@ -220,7 +231,16 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             return;
         }
 
-        // Record what we know
+        // Remove from missing
+        if self.missing.remove(&hash) {
+            debug!(
+                height = proposal.height,
+                hash = hex(&hash),
+                "resolved missing proposal"
+            );
+        }
+
+        // Record what we learned
         match self.knowledge.entry(proposal.height) {
             Entry::Vacant(e) => {
                 if proposal.height > self.last_finalized {
@@ -238,11 +258,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         let parent = proposal.parent.clone();
         self.blocks.insert(hash, proposal);
 
-        // Check if we are missing the parent
-        if !parent.is_empty() && !self.blocks.contains_key(&parent) {
-            debug!(parent = hex(&parent), "registering missing parent");
-            self.missing_sender.send(parent).await.unwrap();
-        }
+        // Consider fetching parent
+        self.register_missing(parent).await;
     }
 
     fn notify(&mut self) {
@@ -622,7 +639,18 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
     pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
         let mut outstanding_task = None;
         loop {
-            // Check to see if we should add a task
+            // Ensure task has not been resolved
+            if let Some((_, ref request, _)) = outstanding_task {
+                if self.blocks.contains_key(request) {
+                    debug!(
+                        hash = hex(request),
+                        "unexpeted resolution of missing proposal out of backfill"
+                    );
+                    outstanding_task = None;
+                }
+            }
+
+            // Look for next task if nothing
             if outstanding_task.is_none() {
                 let missing = self.get_next_missing();
                 if let Some(next) = missing {
@@ -755,52 +783,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                 &proposal.parent,
                                 &payload_hash,
                             ));
-
-                            // Check if we were expecting this hash
-                            //
-                            // It is ok if we get something we don't need, we may have gotten
-                            // what we need from a variety of other places.
-                            match self.knowledge.get(&proposal.height) {
-                                Some(Knowledge::Notarized(seen)) => {
-                                    let entry = seen.get(&proposal.view);
-                                    if entry.is_none() {
-                                        warn!(
-                                            sender = hex(&s),
-                                            height = proposal.height,
-                                            "unexpected block hash on resolution"
-                                        );
-                                        continue;
-                                    }
-                                    if entry.unwrap() != &incoming_hash {
-                                        warn!(
-                                            sender = hex(&s),
-                                            height = proposal.height,
-                                            "unexpected block hash on resolution"
-                                        );
-                                        continue;
-                                    }
-                                }
-                                Some(Knowledge::Finalized(expected)) => {
-                                    if incoming_hash != *expected {
-                                        warn!(
-                                            sender = hex(&s),
-                                            height = proposal.height,
-                                            "unexpected block hash on resolution"
-                                        );
-                                        continue;
-                                    }
-                                }
-                                None => {
-                                    warn!(
-                                        sender = hex(&s),
-                                        height = proposal.height,
-                                        hash = hex(&incoming_hash),
-                                        "unexpected block hash"
-                                    );
-                                    continue;
-                                }
-                            }
-                            debug!(height = proposal.height, hash = hex(&incoming_hash), peer = hex(&s), "received proposal via backfill");
+                            let height = proposal.height;
+                            debug!(height, hash = hex(&incoming_hash), peer = hex(&s), "received proposal via backfill");
 
                             // Record the proposal
                             let proposal = Proposal::Populated(incoming_hash.clone(), proposal.clone());
@@ -812,7 +796,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             // this is unexpected).
                             if let Some(ref outstanding) = outstanding_task {
                                 if outstanding.1 == incoming_hash {
-                                    debug!(hash = hex(&incoming_hash), peer = hex(&s), "resolved missing proposal");
+                                    debug!(hash = hex(&incoming_hash), peer = hex(&s), "resolved missing proposal via backfill");
                                     outstanding_task = None;
                                 }
                             }
