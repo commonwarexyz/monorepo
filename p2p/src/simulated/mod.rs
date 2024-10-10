@@ -82,6 +82,7 @@ pub enum Error {
     PeerMissing,
 }
 
+pub use ingress::Oracle;
 pub use network::{Channel, Config, Link, Network, Receiver, Sender};
 
 #[cfg(test)]
@@ -460,7 +461,7 @@ mod tests {
                     pk2.clone(),
                     Link {
                         latency_mean: 5.0,
-                        latency_stddev: 2.5,
+                        latency_stddev: 0.0,
                         success_rate: 1.0,
                     },
                 )
@@ -479,7 +480,7 @@ mod tests {
                 _msg = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _timeout = runtime.sleep(Duration::from_secs(100000)) => {},
+                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
             }
         });
     }
@@ -512,7 +513,7 @@ mod tests {
                     pk2.clone(),
                     Link {
                         latency_mean: 5.0,
-                        latency_stddev: 2.5,
+                        latency_stddev: 0.0,
                         success_rate: 1.0,
                     },
                 )
@@ -531,8 +532,133 @@ mod tests {
                 _msg = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _timeout = runtime.sleep(Duration::from_secs(100000)) => {},
+                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
             }
+        });
+    }
+
+    #[test]
+    fn test_dynamic_links() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                },
+            );
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Register agents
+            let pk1 = Ed25519::from_seed(0).public_key();
+            let pk2 = Ed25519::from_seed(1).public_key();
+            let (mut sender1, mut receiver1) =
+                oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
+            let (mut sender2, mut receiver2) =
+                oracle.register(pk2.clone(), 0, 1024 * 1024).await.unwrap();
+
+            // Send messages
+            let msg1 = Bytes::from("attempt 1: hello from pk1");
+            let msg2 = Bytes::from("attempt 1: hello from pk2");
+            sender1
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
+                .await
+                .unwrap();
+            sender2
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
+                .await
+                .unwrap();
+
+            // Confirm no message delivery
+            select! {
+                _msg1 = receiver1.recv() => {
+                    panic!("unexpected message");
+                },
+                _msg2 = receiver2.recv() => {
+                    panic!("unexpected message");
+                },
+                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
+            }
+
+            // Link agents
+            oracle
+                .add_link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    pk2.clone(),
+                    pk1.clone(),
+                    Link {
+                        latency_mean: 5.0,
+                        latency_stddev: 2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Send messages
+            let msg1 = Bytes::from("attempt 2: hello from pk1");
+            let msg2 = Bytes::from("attempt 2: hello from pk2");
+            sender1
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
+                .await
+                .unwrap();
+            sender2
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
+                .await
+                .unwrap();
+
+            // Confirm message delivery
+            let (sender, message) = receiver1.recv().await.unwrap();
+            assert_eq!(sender, pk2);
+            assert_eq!(message, msg2);
+            let (sender, message) = receiver2.recv().await.unwrap();
+            assert_eq!(sender, pk1);
+            assert_eq!(message, msg1);
+
+            // Remove links
+            oracle.remove_link(pk1.clone(), pk2.clone()).await.unwrap();
+            oracle.remove_link(pk2.clone(), pk1.clone()).await.unwrap();
+
+            // Send messages
+            let msg1 = Bytes::from("attempt 3: hello from pk1");
+            let msg2 = Bytes::from("attempt 3: hello from pk2");
+            sender1
+                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
+                .await
+                .unwrap();
+            sender2
+                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
+                .await
+                .unwrap();
+
+            // Confirm no message delivery
+            select! {
+                _msg1 = receiver1.recv() => {
+                    panic!("unexpected message");
+                },
+                _msg2 = receiver2.recv() => {
+                    panic!("unexpected message");
+                },
+                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
+            }
+
+            // Remove non-existent links
+            let result = oracle.remove_link(pk1.clone(), pk2.clone()).await;
+            assert!(matches!(result, Err(Error::LinkMissing)));
         });
     }
 }
