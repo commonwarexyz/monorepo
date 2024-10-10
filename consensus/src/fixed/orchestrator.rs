@@ -227,19 +227,21 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         self.missing_sender.send((height, hash)).await.unwrap();
     }
 
-    async fn resolve(&mut self, proposal: Proposal) {
+    fn resolve(&mut self, proposal: Proposal) -> Option<(Height, Hash)> {
         // Parse proposal
         let (hash, proposal) = match proposal {
             Proposal::Reference(_, height, hash) => {
-                self.register_missing(height, hash).await;
-                return;
+                if self.blocks.contains_key(&hash) {
+                    return None;
+                }
+                return Some((height, hash));
             }
             Proposal::Populated(hash, proposal) => (hash, proposal),
         };
 
         // If already resolved, do nothing.
         if self.blocks.contains_key(&hash) {
-            return;
+            return None;
         }
 
         // Remove from missing
@@ -270,8 +272,11 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         let parent = proposal.parent.clone();
         self.blocks.insert(hash, proposal);
 
-        // Consider fetching parent
-        self.register_missing(height - 1, parent).await;
+        // Check if parent is missing
+        if self.blocks.contains_key(&parent) {
+            return None;
+        }
+        Some((height - 1, parent))
     }
 
     fn notify(&mut self) {
@@ -519,7 +524,9 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Mark as seen
-        self.resolve(proposal).await;
+        if let Some((height, hash)) = self.resolve(proposal) {
+            self.register_missing(height, hash).await;
+        }
 
         // Notify application
         self.notify();
@@ -594,7 +601,9 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Mark as seen
-        self.resolve(proposal).await;
+        if let Some((height, hash)) = self.resolve(proposal) {
+            self.register_missing(height, hash).await;
+        }
 
         // Notify application
         self.notify();
@@ -646,7 +655,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             // Check to see if we know anything about the height
             if let Some(knowledge) = self.knowledge.get(&target) {
                 match knowledge {
-                    Knowledge::Notarized(hashes) => {
+                    Knowledge::Notarized(_) => {
                         // We only want to batch fill finalized data
                         break;
                     }
@@ -735,7 +744,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             };
 
             // Avoid arbitrarily long sleep
-            let missing_timeout = if let Some((_, _, ref deadline)) = outstanding_task {
+            let missing_timeout = if let Some((_, _, _, ref deadline)) = outstanding_task {
                 Either::Left(self.runtime.sleep_until(*deadline))
             } else {
                 Either::Right(futures::future::pending())
@@ -801,17 +810,46 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     };
                     match payload {
                         wire::backfill::Payload::Request(request) => {
+                            // Confirm request is valid
                             if request.hash.len() != HASH_LENGTH {
                                 warn!(sender = hex(&s), "invalid request hash size");
                                 continue;
                             }
-                            let proposal = self.blocks.get(&request.hash).cloned();
-                            let msg = wire::Backfill {
-                                payload: Some(wire::backfill::Payload::Resolution(wire::Resolution {
-                                    proposal,
-                                })),
-                            }.encode_to_vec().into();
-                            sender.send(Recipients::One(s), msg, false).await.unwrap();
+
+                            // Populate as many proposals as we can
+                            let mut proposals = Vec::new();
+                            let mut cursor = request.hash.clone();
+                            loop {
+                                let proposal = match self.blocks.get(&cursor).cloned() {
+                                    Some(proposal) => proposal,
+                                    None => {
+                                        break;
+                                    }
+                                };
+                                cursor = proposal.parent.clone();
+                                proposals.push(proposal);
+
+                                // If we have all parents requested, stop gathering more
+                                if proposals.len() as u64 >= request.parents {
+                                    break;
+                                }
+                            }
+
+                            // Send messages
+                            debug!(hash = hex(&request.hash), requested = request.parents + 1, found = proposals.len(), peer = hex(&s), "responding to backfill request");
+                            let msg = match proposals.len() {
+                                0 => wire::Backfill {
+                                    payload: Some(wire::backfill::Payload::Missing(wire::Missing {
+                                        hash: request.hash,
+                                    })),
+                                },
+                                _ => wire::Backfill {
+                                    payload: Some(wire::backfill::Payload::Resolution(wire::Resolution {
+                                        proposals,
+                                    })),
+                                },
+                            };
+                            sender.send(Recipients::One(s), msg.encode_to_vec().into(), false).await.unwrap();
                         }
                         wire::backfill::Payload::Missing(missing) => {
                             if missing.hash.len() != HASH_LENGTH {
@@ -819,64 +857,80 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                 continue;
                             }
                             if let Some(ref outstanding) = outstanding_task {
-                                let request = outstanding.1.clone();
-                                if outstanding.0 == s && request == missing.hash {
+                                let hash = outstanding.2.clone();
+                                if outstanding.0 == s && hash == missing.hash {
                                     debug!(hash = hex(&missing.hash), peer = hex(&s), "peer missing proposal");
 
                                     // Send request again
-                                    let validator = self.send_request(request.clone(), &mut sender).await;
+                                    let validator = self.send_request(outstanding.1, hash.clone(), &mut sender).await;
 
                                     // Reset timeout
-                                    outstanding_task = Some((validator, request, self.runtime.current() + Duration::from_secs(1)));
+                                    outstanding_task = Some((validator, outstanding.1, hash, self.runtime.current() + Duration::from_secs(1)));
                                 }
                             }
                         }
                         wire::backfill::Payload::Resolution(resolution) => {
-                            // Parse proposal
-                            let proposal = match resolution.proposal {
-                                Some(proposal) => proposal,
-                                None => {
-                                    warn!(sender = hex(&s), "resolution missing proposal");
-                                    continue;
+                            // Parse proposals
+                            let mut next = None;
+                            for proposal in resolution.proposals {
+                                if proposal.parent.len() != HASH_LENGTH {
+                                    warn!(sender = hex(&s), "invalid proposal parent hash size");
+                                    break;
                                 }
-                            };
-                            if proposal.parent.len() != HASH_LENGTH {
-                                warn!(sender = hex(&s), "invalid proposal parent hash size");
-                                continue;
+                                let payload_hash = match self.application.parse(proposal.parent.clone(), proposal.height, proposal.payload.clone()) {
+                                    Some(payload_hash) => payload_hash,
+                                    None => {
+                                        warn!(sender = hex(&s), "unable to parse notarized/finalized payload");
+                                        break;
+                                    }
+                                };
+                                let incoming_hash = hash(&proposal_digest(
+                                    proposal.view,
+                                    proposal.height,
+                                    &proposal.parent,
+                                    &payload_hash,
+                                ));
+
+                                // Ensure this is the block we want
+                                if let Some((height, ref hash)) = next {
+                                    if proposal.height != height || incoming_hash != hash {
+                                        warn!(sender = hex(&s), "received invalid batch proposal");
+                                        break;
+                                    }
+                                }
+
+                                // Record the proposal
+                                let height = proposal.height;
+                                debug!(height, hash = hex(&incoming_hash), peer = hex(&s), "received proposal via backfill");
+                                let proposal = Proposal::Populated(incoming_hash.clone(), proposal.clone());
+                                next = self.resolve(proposal);
+
+                                // Remove outstanding task if we were waiting on this
+                                //
+                                // Note, we don't care if we are sent the proposal from someone unexpected (although
+                                // this is unexpected).
+                                if let Some(ref outstanding) = outstanding_task {
+                                    if outstanding.2 == incoming_hash {
+                                        debug!(height = outstanding.1, hash = hex(&incoming_hash), peer = hex(&s), "resolved missing proposal via backfill");
+                                        outstanding_task = None;
+                                    }
+                                }
+
+                                // Notify application if we can
+                                self.notify();
+
+                                // Stop processing if we don't need anything else
+                                if next.is_none() {
+                                    break;
+                                }
                             }
-                            let payload_hash = match self.application.parse(proposal.parent.clone(), proposal.height, proposal.payload.clone()) {
-                                Some(payload_hash) => payload_hash,
-                                None => {
-                                    warn!(sender = hex(&s), "unable to parse notarized/finalized payload");
-                                    continue;
-                                }
-                            };
-                            let incoming_hash = hash(&proposal_digest(
-                                proposal.view,
-                                proposal.height,
-                                &proposal.parent,
-                                &payload_hash,
-                            ));
-                            let height = proposal.height;
-                            debug!(height, hash = hex(&incoming_hash), peer = hex(&s), "received proposal via backfill");
 
-                            // Record the proposal
-                            let proposal = Proposal::Populated(incoming_hash.clone(), proposal.clone());
-                            self.resolve(proposal).await;
-
-                            // Remove outstanding task if we were waiting on this
-                            //
-                            // Note, we don't care if we are sent the proposal from someone unexpected (although
-                            // this is unexpected).
-                            if let Some(ref outstanding) = outstanding_task {
-                                if outstanding.2 == incoming_hash {
-                                    debug!(height = outstanding.1, hash = hex(&incoming_hash), peer = hex(&s), "resolved missing proposal via backfill");
-                                    outstanding_task = None;
-                                }
+                            // Notify missing if next is not none
+                            if let Some((height, hash)) = next {
+                                // By waiting to register missing until the end, we avoid a bunch of unnecessary
+                                // backfill request additions.
+                                self.register_missing(height, hash).await;
                             }
-
-                            // Notify application if we can
-                            self.notify();
                         }
                     }
                 },
