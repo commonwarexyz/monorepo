@@ -285,7 +285,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         Some((height - 1, parent))
     }
 
-    fn notify(&mut self) {
+    async fn notify(&mut self) {
         // Notify application of all finalized proposals
         let mut next = self.last_notified + 1;
         loop {
@@ -316,7 +316,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                 continue;
                             }
                         };
-                        if !self.verify(hash.clone(), proposal.clone()) {
+                        if !self.verify(hash.clone(), proposal.clone()).await {
                             debug!(
                                 height = next,
                                 hash = hex(&hash),
@@ -328,7 +328,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             .entry(next)
                             .or_default()
                             .insert(hash.clone());
-                        self.application.notarized(hash.clone());
+                        self.application.notarized(hash.clone()).await;
                     }
                 }
                 Knowledge::Finalized(hash) => {
@@ -343,18 +343,18 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             return;
                         }
                     };
-                    if !self.verify(hash.clone(), proposal.clone()) {
+                    if !self.verify(hash.clone(), proposal.clone()).await {
                         debug!(
                             height = next,
                             hash = hex(&hash),
                             "failed to verify finalized proposal"
                         );
                         return;
-                    }
+                    };
                     self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
-                    self.application.finalized(hash.clone());
+                    self.application.finalized(hash.clone()).await;
                 }
             }
 
@@ -395,7 +395,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
     }
 
-    pub fn propose(&mut self) -> Option<(Hash, Height, Hash, Payload)> {
+    pub async fn propose(&mut self) -> Option<(Hash, Height, Hash, Payload)> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
@@ -406,7 +406,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
         // Propose block
         let height = parent.1 + 1;
-        let payload = match self.application.propose(parent.0.clone(), height) {
+        let payload = match self.application.propose(parent.0.clone(), height).await {
             Some(payload) => payload,
             None => {
                 return None;
@@ -453,7 +453,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         false
     }
 
-    pub fn verify(&mut self, hash: Hash, proposal: wire::Proposal) -> bool {
+    pub async fn verify(&mut self, hash: Hash, proposal: wire::Proposal) -> bool {
         // If already verified, do nothing
         if self
             .verified
@@ -475,12 +475,16 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Verify payload
-        if self.application.verify(
-            proposal.parent.clone(),
-            proposal.height,
-            proposal.payload.clone(),
-            hash.clone(),
-        ) {
+        if self
+            .application
+            .verify(
+                proposal.parent.clone(),
+                proposal.height,
+                proposal.payload.clone(),
+                hash.clone(),
+            )
+            .await
+        {
             debug!(
                 height = proposal.height,
                 hash = hex(&hash),
@@ -535,7 +539,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Notify application
-        self.notify();
+        self.notify().await;
     }
 
     pub async fn finalized(&mut self, proposal: Proposal) {
@@ -612,7 +616,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Notify application
-        self.notify();
+        self.notify().await;
     }
 
     fn get_next_missing(&mut self) -> Option<(Height, Hash)> {
@@ -771,7 +775,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Propose { response } => {
-                            let proposal = self.propose();
+                            let proposal = self.propose().await;
                             response.send(proposal).unwrap();
                         }
                         Message::Parse { parent, height, payload, response } => {
@@ -793,7 +797,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             }
 
                             // Attempt to verify proposal
-                            response.send(self.verify(hash, proposal)).unwrap();
+                            let result = self.verify(hash, proposal).await;
+                            response.send(result).unwrap();
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,
                         Message::Finalized { proposal } => self.finalized(proposal).await,
@@ -941,7 +946,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                 }
 
                                 // Notify application if we can
-                                self.notify();
+                                self.notify().await;
 
                                 // Stop processing if we don't need anything else
                                 if next.is_none() {

@@ -315,6 +315,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     }
 
     pub fn new(runtime: E, crypto: C, orchestrator: Mailbox, cfg: Config) -> Self {
+        // Assert correctness of timeouts
+        if cfg.leader_timeout >= cfg.notarization_timeout {
+            panic!("leader timeout must be less than notarization timeout");
+        }
+
         // Initialize ordered validators
         let mut parsed_validators = BTreeMap::new();
         for (view, validators) in cfg.validators.into_iter() {

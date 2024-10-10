@@ -35,7 +35,11 @@ pub trait Application: Send + 'static {
     /// If state is not yet ready, this will return None.
     ///
     /// TODO: provide uptime/fault info here?
-    fn propose(&mut self, parent: Hash, height: Height) -> Option<Payload>;
+    fn propose(
+        &mut self,
+        parent: Hash,
+        height: Height,
+    ) -> impl std::future::Future<Output = Option<Payload>> + std::marker::Send;
 
     /// Parse the payload and return the hash of the payload.
     ///
@@ -45,15 +49,27 @@ pub trait Application: Send + 'static {
     /// Verify the payload is valid.
     ///
     /// Verify is a stateful operation and must be called in-order.
-    fn verify(&mut self, parent: Hash, height: Height, payload: Payload, hash: Hash) -> bool;
+    fn verify(
+        &mut self,
+        parent: Hash,
+        height: Height,
+        payload: Payload,
+        hash: Hash,
+    ) -> impl std::future::Future<Output = bool> + std::marker::Send;
 
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, hash: Hash);
+    fn notarized(
+        &mut self,
+        hash: Hash,
+    ) -> impl std::future::Future<Output = ()> + std::marker::Send;
 
     /// Event that the payload has been finalized.
-    fn finalized(&mut self, hash: Hash);
+    fn finalized(
+        &mut self,
+        hash: Hash,
+    ) -> impl std::future::Future<Output = ()> + std::marker::Send;
 }
 
 // Example Payload (Transfers):
