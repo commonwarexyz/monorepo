@@ -359,8 +359,6 @@ mod tests {
 
     #[test]
     fn test_catchup() {
-        // TODO: remove connection advantage for catch up host once make backfill more efficient
-
         // Configure logging
         tracing_subscriber::fmt()
             .with_max_level(Level::DEBUG)
@@ -423,8 +421,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 200.0,
-                                latency_stddev: 1.0,
+                                latency_mean: 10.0,
+                                latency_stddev: 2.5,
                                 success_rate: 1.0,
                             },
                         )
@@ -485,8 +483,8 @@ mod tests {
                         validator.clone(),
                         other.clone(),
                         Link {
-                            latency_mean: 1.0,
-                            latency_stddev: 0.0,
+                            latency_mean: 10.0,
+                            latency_stddev: 2.5,
                             success_rate: 1.0,
                         },
                     )
