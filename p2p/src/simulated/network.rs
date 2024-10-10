@@ -117,14 +117,16 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 // Ensure doesn't already exist
                 let entry = self.peers.entry(public_key.clone()).or_default();
                 if entry.get(&channel).is_some() {
-                    let _ = result.send(Err(Error::ChannelAlreadyRegistered(channel)));
+                    if let Err(err) = result.send(Err(Error::ChannelAlreadyRegistered(channel))) {
+                        error!(?err, "failed to send register err to oracle");
+                    }
                     return;
                 }
 
                 // Initialize agent channel
                 let (sender, receiver) = mpsc::unbounded();
                 entry.insert(channel, (max_size, sender));
-                let _ = result.send(Ok((
+                let result = result.send(Ok((
                     Sender::new(
                         self.runtime.clone(),
                         public_key,
@@ -134,13 +136,20 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     ),
                     Receiver { receiver },
                 )));
+                if let Err(err) = result {
+                    error!(?err, "failed to send register ack to oracle");
+                }
             }
             ingress::Message::Deregister { public_key, result } => {
                 if self.peers.remove(&public_key).is_none() {
-                    let _ = result.send(Err(Error::PeerMissing));
+                    if let Err(err) = result.send(Err(Error::PeerMissing)) {
+                        error!(?err, "failed to send deregister err to oracle");
+                    }
                     return;
                 }
-                let _ = result.send(Ok(()));
+                if let Err(err) = result.send(Ok(())) {
+                    error!(?err, "failed to send deregister ack to oracle");
+                }
             }
             ingress::Message::AddLink {
                 sender,
@@ -152,7 +161,9 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     .entry(sender)
                     .or_default()
                     .insert(receiver, config);
-                let _ = result.send(());
+                if let Err(err) = result.send(()) {
+                    error!(?err, "failed to send add link ack to oracle");
+                }
             }
             ingress::Message::RemoveLink {
                 sender,
@@ -162,15 +173,21 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 let recipients = match self.links.get_mut(&sender) {
                     Some(entry) => entry,
                     None => {
-                        result.send(Err(Error::LinkMissing)).unwrap();
+                        if let Err(err) = result.send(Err(Error::LinkMissing)) {
+                            error!(?err, "failed to send remove link err to oracle");
+                        }
                         return;
                     }
                 };
                 if recipients.remove(&receiver).is_none() {
-                    result.send(Err(Error::LinkMissing)).unwrap();
+                    if let Err(err) = result.send(Err(Error::LinkMissing)) {
+                        error!(?err, "failed to send remove link err to oracle");
+                    }
                     return;
                 }
-                let _ = result.send(Ok(()));
+                if let Err(err) = result.send(Ok(())) {
+                    error!(?err, "failed to send remove link ack to oracle");
+                }
             }
         }
     }
@@ -249,8 +266,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             // Send message
             self.runtime.spawn("messenger", {
                 let runtime = self.runtime.clone();
-                let mut sender = sender.clone();
                 let recipient = recipient.clone();
+                let sender = sender.get(&channel).cloned();
                 let message = message.clone();
                 let mut acquired_sender = acquired_sender.clone();
                 let origin = origin.clone();
@@ -276,7 +293,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     }
 
                     // Drop message if not listening on channel
-                    let (max_size, sender) = match sender.get_mut(&channel) {
+                    let (max_size, mut sender) = match sender {
                         Some(sender) => sender,
                         None => {
                             debug!(
@@ -290,12 +307,12 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     };
 
                     // Drop message if too large
-                    if message.len() > *max_size {
+                    if message.len() > max_size {
                         debug!(
                             recipient = hex(&recipient),
                             channel,
                             size = message.len(),
-                            max_size = *max_size,
+                            max_size,
                             reason = "message too large",
                             "dropping message",
                         );
@@ -368,7 +385,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 }
 
 /// Implementation of a [`crate::Sender`] for the simulated network.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Sender {
     channel: Channel,
     max_size: usize,
@@ -453,6 +470,7 @@ impl crate::Sender for Sender {
 }
 
 /// Implementation of a [`crate::Receiver`] for the simulated network.
+#[derive(Debug)]
 pub struct Receiver {
     receiver: mpsc::UnboundedReceiver<Message>,
 }
