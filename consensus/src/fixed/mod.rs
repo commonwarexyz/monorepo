@@ -111,7 +111,12 @@ mod tests {
                 panic!("hash already verified: {}:{:?}", height, hex(&hash));
             }
             Self::verify_payload(height, &payload);
-            let parent = self.verified.get(&parent).expect("parent not verified");
+            let parent = match self.verified.get(&parent) {
+                Some(parent) => parent,
+                None => {
+                    panic!("parent {:?} of {}, not verified", hex(&parent), height);
+                }
+            };
             if parent + 1 != height {
                 panic!("invalid height");
             }
@@ -139,6 +144,9 @@ mod tests {
             }
         }
     }
+
+    // TODO: add test where vote broadcast very very close to timeout (to ensure no safety faults)
+    // TODO: follow-up with updated links after x views to improve speed and ensure finalizes
 
     #[test]
     fn test_all_online() {
@@ -413,7 +421,7 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 500.0,
+                                latency_mean: 200.0,
                                 latency_stddev: 1.0,
                                 success_rate: 1.0,
                             },

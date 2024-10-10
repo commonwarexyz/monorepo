@@ -345,8 +345,6 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
     // TODO: no guarantee this approach will ensure we load off verified
     fn best_parent(&self) -> Option<(Hash, Height)> {
-        panic!("fix this with verified");
-
         // Find highest block that we have notified the application of
         let mut next = self.last_notarized;
         loop {
@@ -713,7 +711,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             response.send(hash).unwrap();
                         }
                         Message::Verify { hash, proposal, response } => {
-                            let valid = self.verify(hash, &proposal);
+                            let valid = self.verify(hash, proposal);
                             response.send(valid).unwrap();
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,
