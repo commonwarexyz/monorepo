@@ -316,8 +316,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
     pub fn new(runtime: E, crypto: C, orchestrator: Mailbox, cfg: Config) -> Self {
         // Assert correctness of timeouts
-        if cfg.leader_timeout >= cfg.notarization_timeout {
-            panic!("leader timeout must be less than notarization timeout");
+        if cfg.leader_timeout > cfg.notarization_timeout {
+            panic!("leader timeout must be less than or equal to notarization timeout");
         }
 
         // Initialize ordered validators
