@@ -1014,6 +1014,9 @@ mod tests {
         });
     }
 
+    // TODO: failing because blocks in consecutive views have the same height (likely need to be
+    // more particular about honoring notarizations)
+
     #[test]
     fn test_jank_links() {
         // Configure logging

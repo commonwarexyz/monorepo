@@ -1223,7 +1223,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the vote
-            debug!(view = vote.view, "broadcast vote");
+            let hash = vote.hash.clone().unwrap();
+            debug!(view = vote.view, hash = hex(&hash), "broadcast vote");
             self.handle_vote(vote);
         };
 
