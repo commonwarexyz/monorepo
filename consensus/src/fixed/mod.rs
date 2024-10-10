@@ -407,7 +407,7 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 100.0,
+                                latency_mean: 500.0,
                                 latency_stddev: 1.0,
                                 success_rate: 1.0,
                             },

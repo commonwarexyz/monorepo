@@ -309,6 +309,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
     }
 
+    // TODO: no guarantee this approach will ensure we load off verified
     fn best_parent(&self) -> Option<(Hash, Height)> {
         // Find highest block that we have notified the application of
         let mut next = self.last_notarized;
