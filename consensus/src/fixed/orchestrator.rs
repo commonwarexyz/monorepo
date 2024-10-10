@@ -207,6 +207,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 }
 
                 // Record that we are missing the view
+                debug!(parent = hex(&hash), "registering missing parent");
                 self.missing_sender.send(hash.clone()).await.unwrap();
                 return;
             }
@@ -238,6 +239,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
         // Check if we are missing the parent
         if !parent.is_empty() && !self.blocks.contains_key(&parent) {
+            debug!(parent = hex(&parent), "registering missing parent");
             self.missing_sender.send(parent).await.unwrap();
         }
     }
@@ -621,23 +623,24 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         loop {
             // Check to see if we should add a task
             if outstanding_task.is_none() {
-                // Loop until we find a task that is missing
-                loop {
-                    let missing = self.get_next_missing();
-                    if let Some(next) = missing {
-                        // Check if already have
-                        if self.blocks.contains_key(&next) {
-                            continue;
-                        }
-
-                        // Send request
-                        let validator = self.send_request(next.clone(), &mut sender).await;
-
-                        // Set timeout
-                        outstanding_task =
-                            Some((validator, next, self.runtime.current() + self.fetch_timeout));
+                let missing = self.get_next_missing();
+                if let Some(next) = missing {
+                    // Check if already have
+                    if self.blocks.contains_key(&next) {
+                        continue;
                     }
-                    break;
+
+                    // Send request
+                    let validator = self.send_request(next.clone(), &mut sender).await;
+
+                    // Set timeout
+                    debug!(
+                        hash = hex(&next),
+                        peer = hex(&validator),
+                        "requesting missing proposal"
+                    );
+                    outstanding_task =
+                        Some((validator, next, self.runtime.current() + self.fetch_timeout));
                 }
             };
 
@@ -700,8 +703,10 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                 continue;
                             }
                             let proposal = self.blocks.get(&request.hash).cloned();
-                            let msg = wire::Resolution {
-                                proposal,
+                            let msg = wire::Backfill {
+                                payload: Some(wire::backfill::Payload::Resolution(wire::Resolution {
+                                    proposal,
+                                })),
                             }.encode_to_vec().into();
                             sender.send(Recipients::One(s), msg, false).await.unwrap();
                         }
@@ -788,11 +793,13 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                     warn!(
                                         sender = hex(&s),
                                         height = proposal.height,
+                                        hash = hex(&incoming_hash),
                                         "unexpected block hash"
                                     );
                                     continue;
                                 }
                             }
+                            debug!(height = proposal.height, hash = hex(&incoming_hash), peer = hex(&s), "received proposal via backfill");
 
                             // Record the proposal
                             let proposal = Proposal::Populated(incoming_hash.clone(), proposal.clone());
@@ -803,7 +810,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             // Note, we don't care if we are sent the proposal from someone unexpected (although
                             // this is unexpected).
                             if let Some(ref outstanding) = outstanding_task {
-                                if outstanding.0 == incoming_hash {
+                                if outstanding.1 == incoming_hash {
                                     debug!(hash = hex(&incoming_hash), peer = hex(&s), "resolved missing proposal");
                                     outstanding_task = None;
                                 }

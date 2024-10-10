@@ -598,7 +598,12 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     fn enter_view(&mut self, view: u64) {
         // Ensure view is valid
         if view <= self.view {
-            panic!("cannot enter previous or current view");
+            debug!(
+                view = view,
+                our_view = self.view,
+                "skipping useless view change"
+            );
+            return;
         }
 
         // Setup new view
@@ -1015,10 +1020,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         };
         self.orchestrator.finalized(proposal).await;
 
-        // Enter next view (if applicable)
-        if finalization.view >= self.view {
-            self.enter_view(finalization.view + 1);
-        }
+        // Enter next view
+        self.enter_view(finalization.view + 1);
     }
 
     fn construct_proposal_vote(&mut self, view: u64) -> Option<wire::Vote> {
