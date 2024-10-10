@@ -995,8 +995,6 @@ mod tests {
                 }
             }
 
-            // TODO: stuck where one is posting null votes from view=103 and the other is posting from view=104
-
             // Wait for all engines to finish
             let mut completed = HashSet::new();
             loop {
@@ -1014,9 +1012,6 @@ mod tests {
         });
     }
 
-    // TODO: failing because blocks in consecutive views have the same height (likely need to be
-    // more particular about honoring notarizations)
-
     #[test]
     fn test_jank_links() {
         // Configure logging
@@ -1024,6 +1019,9 @@ mod tests {
             .with_max_level(Level::DEBUG)
             .with_line_number(true)
             .init();
+
+        // TODO: failing because blocks in consecutive views have the same height (likely need to be
+        // more particular about honoring notarizations)
 
         // Create runtime
         let n = 10;

@@ -226,7 +226,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         if self.missing.contains_key(&hash) {
             return;
         }
-        self.missing.insert(hash.clone(), height);
+        self.missing.insert(hash.clone(), heght);
         debug!(height, parent = hex(&hash), "registered missing proposal");
 
         // Enqueue missing proposal for fetching
@@ -438,6 +438,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             return false;
         }
         let parent = parent.unwrap();
+
+        // TODO: add condition to ensure we can't skip a proposal notarization unless there is a null block notarization?
 
         // Check if parent has been verified
         if let Some(hashes) = self.verified.get(&parent.height) {
