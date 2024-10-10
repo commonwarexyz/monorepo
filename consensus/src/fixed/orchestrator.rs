@@ -18,7 +18,6 @@ use rand::Rng;
 use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, warn};
-use tracing_subscriber::field::debug;
 
 pub enum Message {
     Propose {
@@ -340,8 +339,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                         );
                         return;
                     }
-                    // TODO: fix verification removal (should be n-1)
-                    // self.verified.remove(&next);
+                    self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
                     self.application.finalized(hash.clone());

@@ -20,7 +20,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
-use tracing_subscriber::field::debug;
 
 const PROPOSAL_SUFFIX: &[u8] = b"_PROPOSAL";
 const VOTE_SUFFIX: &[u8] = b"_VOTE";

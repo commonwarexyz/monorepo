@@ -46,10 +46,7 @@ mod tests {
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use commonware_utils::{hash, hex};
     use engine::Engine;
-    use futures::{
-        channel::{mpsc, oneshot},
-        StreamExt,
-    };
+    use futures::{channel::mpsc, StreamExt};
     use prometheus_client::registry::Registry;
     use std::{
         collections::{BTreeMap, HashMap},
