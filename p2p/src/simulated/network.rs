@@ -454,6 +454,6 @@ impl crate::Receiver for Receiver {
     type Error = Error;
 
     async fn recv(&mut self) -> Result<Message, Error> {
-        self.receiver.next().await.ok_or(Error::NetworkClosed)
+        self.receiver.next().await.ok_or(Error::PeerClosed)
     }
 }
