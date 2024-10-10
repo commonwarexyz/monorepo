@@ -24,7 +24,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tracing::{debug, error};
+use tracing::{error, trace};
 
 /// Task type representing a message to be sent within the network.
 type Task = (
@@ -210,7 +210,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         for recipient in recipients {
             // Skip self
             if recipient == origin {
-                debug!(
+                trace!(
                     recipient = hex(&recipient),
                     reason = "self",
                     "dropping message",
@@ -222,7 +222,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             let sender = match self.peers.get(&recipient) {
                 Some(sender) => sender,
                 None => {
-                    debug!(
+                    trace!(
                         recipient = hex(&recipient),
                         reason = "no agent",
                         "dropping message",
@@ -239,7 +239,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             {
                 Some(link) => link,
                 None => {
-                    debug!(
+                    trace!(
                         recipient = hex(&recipient),
                         reason = "no link",
                         "dropping message",
@@ -259,7 +259,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             let delay = Normal::new(link.latency_mean, link.latency_stddev)
                 .unwrap()
                 .sample(&mut self.runtime);
-            debug!(
+            trace!(
                 origin = hex(&origin),
                 recipient = hex(&recipient),
                 ?delay,
@@ -287,7 +287,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 
                     // Drop message if success rate is too low
                     if !should_deliver {
-                        debug!(
+                        trace!(
                             recipient = hex(&recipient),
                             reason = "random link failure",
                             "dropping message",
@@ -299,7 +299,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     let (max_size, mut sender) = match sender {
                         Some(sender) => sender,
                         None => {
-                            debug!(
+                            trace!(
                                 recipient = hex(&recipient),
                                 channel,
                                 reason = "missing channel",
@@ -311,7 +311,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 
                     // Drop message if too large
                     if message.len() > max_size {
-                        debug!(
+                        trace!(
                             recipient = hex(&recipient),
                             channel,
                             size = message.len(),
