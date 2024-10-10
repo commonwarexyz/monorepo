@@ -29,6 +29,7 @@ pub enum Message {
     },
 }
 
+#[derive(Clone)]
 pub struct Oracle {
     sender: mpsc::UnboundedSender<Message>,
 }
