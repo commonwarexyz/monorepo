@@ -732,8 +732,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             }
 
                             // Attempt to verify proposal
-                            let valid = self.verify(hash, proposal);
-                            response.send(valid).unwrap();
+                            response.send(self.verify(hash, proposal)).unwrap();
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,
                         Message::Finalized { proposal } => self.finalized(proposal).await,
