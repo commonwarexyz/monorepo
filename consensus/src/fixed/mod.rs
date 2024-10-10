@@ -107,6 +107,9 @@ mod tests {
         }
 
         fn verify(&mut self, parent: Hash, height: Height, payload: Payload, hash: Hash) -> bool {
+            if let Some(height) = self.verified.get(&hash) {
+                panic!("hash already verified: {}:{:?}", height, hex(&hash));
+            }
             Self::verify_payload(height, &payload);
             let parent = self.verified.get(&parent).expect("parent not verified");
             if parent + 1 != height {
