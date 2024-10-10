@@ -440,6 +440,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         let parent = parent.unwrap();
 
         // TODO: add condition to ensure we can't skip a proposal notarization unless there is a null block notarization?
+        // if building at height 5 (view 10), need to ensure there are null notarizations to parent (height 4, view V) -> if there are
+        // not null notarizations, it is possible those intermediate views could be finalized
 
         // Check if parent has been verified
         if let Some(hashes) = self.verified.get(&parent.height) {
