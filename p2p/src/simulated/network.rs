@@ -107,6 +107,9 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 
     fn handle_ingress(&mut self, message: ingress::Message) {
         // Handle ingress message
+        //
+        // It is important to ensure that no failed receipt of a message will cause us to exit.
+        // This could happen if the caller drops the `Oracle` after updating the network topology.
         match message {
             ingress::Message::Register {
                 public_key,
