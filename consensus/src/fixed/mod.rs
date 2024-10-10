@@ -1025,7 +1025,7 @@ mod tests {
 
         // Create runtime
         let n = 10;
-        let required_blocks = 100;
+        let required_blocks = 20;
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network

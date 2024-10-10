@@ -15,7 +15,7 @@ use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
+use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -36,6 +36,9 @@ pub enum Message {
     },
     Notarized {
         proposal: Proposal,
+    },
+    NullNotarized {
+        view: View,
     },
     Finalized {
         proposal: Proposal,
@@ -95,6 +98,13 @@ impl Mailbox {
             .unwrap();
     }
 
+    pub async fn null_notarized(&mut self, view: View) {
+        self.sender
+            .send(Message::NullNotarized { view })
+            .await
+            .unwrap();
+    }
+
     pub async fn finalized(&mut self, proposal: Proposal) {
         self.sender
             .send(Message::Finalized { proposal })
@@ -127,6 +137,7 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
 
     validators: BTreeMap<View, Vec<PublicKey>>,
 
+    null_notarizations: BTreeSet<View>,
     knowledge: HashMap<Height, Knowledge>,
     blocks: HashMap<Hash, wire::Proposal>,
 
@@ -197,6 +208,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
                 validators,
 
+                null_notarizations: BTreeSet::new(),
                 knowledge,
                 blocks,
 
@@ -442,10 +454,37 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         // TODO: add condition to ensure we can't skip a proposal notarization unless there is a null block notarization?
         // if building at height 5 (view 10), need to ensure there are null notarizations to parent (height 4, view V) -> if there are
         // not null notarizations, it is possible those intermediate views could be finalized
+        for view in (parent.view + 1)..proposal.view {
+            if !self.null_notarizations.contains(&view) {
+                debug!(
+                    height = proposal.height,
+                    view,
+                    proposal_view = proposal.view,
+                    parent_view = parent.view,
+                    "missing null notarization"
+                );
+                return false;
+            } else {
+                debug!(
+                    height = proposal.height,
+                    view,
+                    proposal_view = proposal.view,
+                    parent_view = parent.view,
+                    "depending on null notarization"
+                );
+            }
+        }
 
         // Check if parent has been verified
         if let Some(hashes) = self.verified.get(&parent.height) {
             if hashes.contains(&proposal.parent) {
+                debug!(
+                    height = proposal.height,
+                    parent_hash = hex(&proposal.parent),
+                    proposal_view = proposal.view,
+                    parent_view = parent.view,
+                    "ancestry verified"
+                );
                 return true;
             }
         }
@@ -502,6 +541,12 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         false
     }
 
+    pub async fn null_notarized(&mut self, view: View) {
+        // TODO: write up explanation for why we don't set last_notarized here (which
+        // is really just used to select the best parent for building)
+        self.null_notarizations.insert(view);
+    }
+
     pub async fn notarized(&mut self, proposal: Proposal) {
         // Extract height and hash
         let (view, height, hash) = match &proposal {
@@ -548,14 +593,23 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
     pub async fn finalized(&mut self, proposal: Proposal) {
         // Extract height and hash
-        let (height, mut hash) = match &proposal {
-            Proposal::Reference(_, height, hash) => (*height, hash.clone()),
-            Proposal::Populated(hash, proposal) => (proposal.height, hash.clone()),
+        let (view, height, mut hash) = match &proposal {
+            Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
+            Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
         };
 
         // Set last finalized
         if height > self.last_finalized {
             self.last_finalized = height;
+        }
+
+        // Prune all null notarizations below this view
+        while let Some(null_view) = self.null_notarizations.iter().next().cloned() {
+            if null_view > view {
+                break;
+            }
+            self.null_notarizations.remove(&null_view);
+            debug!(view = null_view, "pruned null notarization");
         }
 
         // Finalize all locks we have that are ancestors of this block
@@ -810,6 +864,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             response.send(result).unwrap();
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,
+                        Message::NullNotarized { view } => self.null_notarized(view).await,
                         Message::Finalized { proposal } => self.finalized(proposal).await,
                     };
                 },

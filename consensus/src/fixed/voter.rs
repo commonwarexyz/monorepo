@@ -873,6 +873,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 }
             };
             self.orchestrator.notarized(proposal).await;
+        } else {
+            self.orchestrator.null_notarized(notarization.view).await;
         }
 
         // Enter next view
