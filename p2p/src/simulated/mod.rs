@@ -28,10 +28,13 @@
 //! let (executor, runtime, _) = Executor::seeded(0);
 //! executor.start(async move {
 //!     // Initialize network
-//!     let mut network = Network::new(runtime.clone(), p2p_cfg);
+//!     let (network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+//!
+//!     // Start network
+//!     let network_handler = runtime.spawn("network", network.run());
 //!
 //!     // Link 2 peers
-//!     network.link(
+//!     oracle.add_link(
 //!         peers[0].clone(),
 //!         peers[1].clone(),
 //!         Link {
@@ -39,17 +42,14 @@
 //!             latency_stddev: 2.5,
 //!             success_rate: 0.75,
 //!         },
-//!     ).unwrap();
+//!     ).await.unwrap();
 //!
 //!     // Register some channel
-//!     let (sender, receiver) = network.register(
+//!     let (sender, receiver) = oracle.register(
 //!         peers[0].clone(),
 //!         0,
 //!         1024 * 1024, // 1KB
-//!     ).unwrap();
-//!
-//!     // Run network
-//!     let network_handler = runtime.spawn("network", network.run());
+//!     ).await.unwrap();
 //!
 //!     // ... Use sender and receiver ...
 //!
