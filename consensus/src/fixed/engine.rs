@@ -35,6 +35,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
             runtime.clone(),
             cfg.application,
             cfg.fetch_timeout,
+            cfg.max_fetch_count,
+            cfg.max_fetch_size,
             cfg.validators.clone(),
         );
 

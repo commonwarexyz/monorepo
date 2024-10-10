@@ -234,6 +234,8 @@ mod tests {
                     notarization_timeout: Duration::from_secs(1),
                     null_vote_retry: Duration::from_secs(1),
                     fetch_timeout: Duration::from_secs(1),
+                    max_fetch_count: 1,
+                    max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
@@ -340,6 +342,8 @@ mod tests {
                     notarization_timeout: Duration::from_secs(1),
                     null_vote_retry: Duration::from_secs(1),
                     fetch_timeout: Duration::from_secs(1),
+                    max_fetch_count: 1,
+                    max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
@@ -446,6 +450,8 @@ mod tests {
                     notarization_timeout: Duration::from_secs(1),
                     null_vote_retry: Duration::from_secs(1),
                     fetch_timeout: Duration::from_secs(1),
+                    max_fetch_count: 32,
+                    max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
@@ -508,6 +514,8 @@ mod tests {
                 notarization_timeout: Duration::from_secs(1),
                 null_vote_retry: Duration::from_secs(1),
                 fetch_timeout: Duration::from_secs(1),
+                max_fetch_count: 32,
+                max_fetch_size: 1024 * 512,
                 validators: view_validators.clone(),
             };
             let engine = Engine::new(runtime.clone(), cfg);

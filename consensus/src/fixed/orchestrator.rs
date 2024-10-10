@@ -120,6 +120,8 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
     application: A,
 
     fetch_timeout: Duration,
+    max_fetch_count: u64,
+    max_fetch_size: usize,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -156,6 +158,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         runtime: E,
         mut application: A,
         fetch_timeout: Duration,
+        max_fetch_count: u64,
+        max_fetch_size: usize,
         validators: BTreeMap<View, Vec<PublicKey>>,
     ) -> (Self, Mailbox) {
         // Create genesis block and store it
@@ -186,6 +190,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 application,
 
                 fetch_timeout,
+                max_fetch_count,
+                max_fetch_size,
 
                 mailbox_receiver,
 
@@ -648,7 +654,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         loop {
             // Check to see if we are already at root
             let target = height - parents;
-            if target == 1 {
+            if target == 1 || parents + 1 == self.max_fetch_count {
                 break;
             }
 
@@ -818,20 +824,37 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             }
 
                             // Populate as many proposals as we can
+                            let mut proposal_bytes = 0; // TODO: add a buffer
                             let mut proposals = Vec::new();
                             let mut cursor = request.hash.clone();
                             loop {
+                                // Check to see if we have proposal
                                 let proposal = match self.blocks.get(&cursor).cloned() {
                                     Some(proposal) => proposal,
                                     None => {
                                         break;
                                     }
                                 };
+
+                                // If we don't have any more space, stop
+                                proposal_bytes += proposal.encoded_len();
+                                if proposal_bytes > self.max_fetch_size {
+                                    debug!(
+                                        requested = request.parents + 1,
+                                        found = proposals.len(),
+                                        peer = hex(&s),
+                                        "reached max response size",
+                                    );
+                                    break;
+                                }
+
+                                // If we do have space, add to proposals
                                 cursor = proposal.parent.clone();
                                 proposals.push(proposal);
 
                                 // If we have all parents requested, stop gathering more
-                                if proposals.len() as u64 > request.parents {
+                                let fetched = proposals.len() as u64;
+                                if fetched == request.parents + 1 || fetched == self.max_fetch_count {
                                     break;
                                 }
                             }

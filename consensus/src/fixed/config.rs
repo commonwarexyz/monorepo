@@ -19,7 +19,10 @@ pub struct Config<C: Scheme, A: Application> {
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
     pub null_vote_retry: Duration,
+
     pub fetch_timeout: Duration,
+    pub max_fetch_count: u64,
+    pub max_fetch_size: usize,
 
     /// Validators to use for each range of views. Any view without
     /// an explicit view will use the next smallest view.
