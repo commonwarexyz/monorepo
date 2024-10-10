@@ -30,6 +30,10 @@ pub enum Message {
     },
 }
 
+/// Interface for modifying the simulated network.
+///
+/// At any point, peers can be added/removed and links
+/// between said peers can be modified.
 #[derive(Clone)]
 pub struct Oracle {
     sender: mpsc::UnboundedSender<Message>,

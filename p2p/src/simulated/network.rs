@@ -35,7 +35,7 @@ type Task = (
     oneshot::Sender<Vec<PublicKey>>,
 );
 
-/// Implementation of a `simulated` network.
+/// Implementation of a simulated network.
 pub struct Network<E: Spawner + Rng + Clock> {
     runtime: E,
 
@@ -65,13 +65,17 @@ pub struct Link {
     pub success_rate: f64,
 }
 
-/// Configuration for a `simulated` network.
+/// Configuration for the simulated network.
 pub struct Config {
+    /// Registry for prometheus metrics.
     pub registry: Arc<Mutex<Registry>>,
 }
 
 impl<E: Spawner + Rng + Clock> Network<E> {
     /// Create a new simulated network with a given runtime and configuration.
+    ///
+    /// Returns a tuple containing the network instance and the oracle that can
+    /// be used to modify the state of the network during runtime.
     pub fn new(runtime: E, cfg: Config) -> (Self, Oracle) {
         let (sender, receiver) = mpsc::unbounded();
         let sent_messages = Family::<metrics::Message, Counter>::default();
@@ -335,6 +339,9 @@ impl<E: Spawner + Rng + Clock> Network<E> {
     }
 
     /// Run the simulated network.
+    ///
+    /// It is not necessary to invoke this method before modifying the network topology, however,
+    /// no messages will be sent until this method is called.
     pub async fn run(mut self) {
         loop {
             select! {
