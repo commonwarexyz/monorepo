@@ -3,6 +3,7 @@
 pub mod fixed;
 
 use bytes::Bytes;
+use std::future::Future;
 
 // TODO: add simulated dialect for applications to test their execution environments under (with arbitary orphans, etc.)
 
@@ -39,7 +40,7 @@ pub trait Application: Send + 'static {
         &mut self,
         parent: Hash,
         height: Height,
-    ) -> impl std::future::Future<Output = Option<Payload>> + std::marker::Send;
+    ) -> impl Future<Output = Option<Payload>> + Send;
 
     /// Parse the payload and return the hash of the payload.
     ///
@@ -55,21 +56,15 @@ pub trait Application: Send + 'static {
         height: Height,
         payload: Payload,
         hash: Hash,
-    ) -> impl std::future::Future<Output = bool> + std::marker::Send;
+    ) -> impl Future<Output = bool> + Send;
 
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(
-        &mut self,
-        hash: Hash,
-    ) -> impl std::future::Future<Output = ()> + std::marker::Send;
+    fn notarized(&mut self, hash: Hash) -> impl Future<Output = ()> + Send;
 
     /// Event that the payload has been finalized.
-    fn finalized(
-        &mut self,
-        hash: Hash,
-    ) -> impl std::future::Future<Output = ()> + std::marker::Send;
+    fn finalized(&mut self, hash: Hash) -> impl Future<Output = ()> + Send;
 }
 
 // Example Payload (Transfers):
