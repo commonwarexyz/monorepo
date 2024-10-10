@@ -1,6 +1,6 @@
 use crate::{
     authenticated::{actors::peer, channels::Channels},
-    Recipients,
+    Channel, Recipients,
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -20,7 +20,7 @@ pub enum Message {
     },
     Content {
         recipients: Recipients,
-        channel: u32,
+        channel: Channel,
         message: Bytes,
         priority: bool,
         success: oneshot::Sender<Vec<PublicKey>>,
@@ -68,7 +68,7 @@ impl Messenger {
     pub async fn content(
         &mut self,
         recipients: Recipients,
-        channel: u32,
+        channel: Channel,
         message: Bytes,
         priority: bool,
     ) -> Vec<PublicKey> {

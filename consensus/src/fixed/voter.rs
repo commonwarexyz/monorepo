@@ -236,8 +236,8 @@ impl Record {
                 Some((hash, pro)) => {
                     if hash != proposal {
                         debug!(
-                            proposal = hex(&proposal),
-                            hash = hex(&hash),
+                            proposal = hex(proposal),
+                            hash = hex(hash),
                             reason = "proposal mismatch",
                             "skipping finalization broadcast"
                         );
@@ -598,7 +598,12 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     fn enter_view(&mut self, view: u64) {
         // Ensure view is valid
         if view <= self.view {
-            panic!("cannot enter previous or current view");
+            debug!(
+                view = view,
+                our_view = self.view,
+                "skipping useless view change"
+            );
+            return;
         }
 
         // Setup new view
@@ -811,6 +816,10 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             view.add_verified_vote(true, vote);
         }
 
+        // Clear leader and advance deadlines (if they exist)
+        view.leader_deadline = None;
+        view.advance_deadline = None;
+
         // Inform orchestrator of notarization if not null vote
         if let Some(notarization_hash) = notarization.hash {
             let proposal = match view.proposal.as_ref() {
@@ -1015,10 +1024,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         };
         self.orchestrator.finalized(proposal).await;
 
-        // Enter next view (if applicable)
-        if finalization.view >= self.view {
-            self.enter_view(finalization.view + 1);
-        }
+        // Enter next view
+        self.enter_view(finalization.view + 1);
     }
 
     fn construct_proposal_vote(&mut self, view: u64) -> Option<wire::Vote> {
@@ -1102,6 +1109,10 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             // Ensure we vote before we finalize
             return None;
         }
+        if !view_obj.broadcast_proposal_notarization {
+            // Ensure we notarize before we finalize
+            return None;
+        }
         if view_obj.broadcast_finalize {
             return None;
         }
@@ -1168,6 +1179,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the vote
+            debug!(view = vote.view, "broadcast vote");
             self.handle_vote(vote);
         };
 
@@ -1184,6 +1196,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the notarization
+            debug!(
+                view = notarization.view,
+                null = notarization.hash.is_none(),
+                "broadcast notarization"
+            );
             self.handle_notarization(notarization).await;
         };
 
@@ -1200,6 +1217,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the finalize
+            debug!(view = finalize.view, "broadcast finalize");
             self.handle_finalize(finalize);
         };
 
@@ -1216,6 +1234,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the finalization
+            debug!(view = finalization.view, "broadcast finalization");
             self.handle_finalization(finalization).await;
         };
     }
