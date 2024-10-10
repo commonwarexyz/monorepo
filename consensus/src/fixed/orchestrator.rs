@@ -275,6 +275,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 }
             };
 
+            // TODO: add verification once backfill history
+
             // Send event
             match knowledge {
                 Knowledge::Notarized(hashes) => {

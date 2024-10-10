@@ -126,7 +126,7 @@ mod tests {
             if let Some(height) = self.finalized.get(&hash) {
                 panic!("hash already finalized: {}:{:?}", height, hex(&hash));
             }
-            let height = self.verified.get(&hash).expect("hash not finalized");
+            let height = self.verified.get(&hash).expect("hash not verified");
             self.finalized.insert(hash, *height);
             if *height == self.done_height {
                 self.done.try_send(()).unwrap();
@@ -343,6 +343,8 @@ mod tests {
 
     #[test]
     fn test_catchup() {
+        // TODO: remove connection advantage for catch up host once make backfill more efficient
+
         // Configure logging
         tracing_subscriber::fmt()
             .with_max_level(Level::DEBUG)
@@ -405,7 +407,7 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
+                                latency_mean: 100.0,
                                 latency_stddev: 1.0,
                                 success_rate: 1.0,
                             },
@@ -467,8 +469,8 @@ mod tests {
                         validator.clone(),
                         other.clone(),
                         Link {
-                            latency_mean: 10.0,
-                            latency_stddev: 1.0,
+                            latency_mean: 1.0,
+                            latency_stddev: 0.0,
                             success_rate: 1.0,
                         },
                     )
