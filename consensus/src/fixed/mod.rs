@@ -966,7 +966,7 @@ mod tests {
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             select! {
-                _timeout = runtime.sleep(Duration::from_secs(60)) => {},
+                _timeout = runtime.sleep(Duration::from_secs(180)) => {},
                 _done = done_receiver.next() => {
                     panic!("engine should not notarize or finalize anything");
                 }
@@ -994,6 +994,8 @@ mod tests {
                         .unwrap();
                 }
             }
+
+            // TODO: stuck where one is posting null votes from view=103 and the other is posting from view=104
 
             // Wait for all engines to finish
             let mut completed = HashSet::new();

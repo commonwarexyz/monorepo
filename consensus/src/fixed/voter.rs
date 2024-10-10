@@ -131,8 +131,9 @@ impl Record {
     fn notarizable_proposal(
         &mut self,
         threshold: u32,
+        force: bool,
     ) -> Option<(Option<Hash>, Height, &HashMap<PublicKey, wire::Vote>)> {
-        if self.broadcast_proposal_notarization || self.broadcast_null_notarization {
+        if !force && (self.broadcast_proposal_notarization || self.broadcast_null_notarization) {
             return None;
         }
         for (proposal, votes) in self.proposal_votes.iter() {
@@ -176,8 +177,9 @@ impl Record {
     fn notarizable_null(
         &mut self,
         threshold: u32,
+        force: bool,
     ) -> Option<(Option<Hash>, Height, &HashMap<PublicKey, wire::Vote>)> {
-        if self.broadcast_null_notarization || self.broadcast_proposal_notarization {
+        if !force && (self.broadcast_null_notarization || self.broadcast_proposal_notarization) {
             return None;
         }
         if (self.null_votes.len() as u32) < threshold {
@@ -459,9 +461,13 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         null_vote_retry
     }
 
-    fn timeout(&mut self) -> wire::Vote {
+    async fn timeout(&mut self, sender: &mut impl Sender) {
         // Set timeout fired
         let view = self.views.get_mut(&self.view).unwrap();
+        let mut retry = false;
+        if view.timeout_fired {
+            retry = true;
+        }
         view.timeout_fired = true;
 
         // Remove deadlines
@@ -469,9 +475,28 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         view.advance_deadline = None;
         view.null_vote_retry = None;
 
+        // Broadcast notarization that led to entrance to this view
+        let past_view = self.view - 1;
+        if retry && past_view > 0 {
+            match self.construct_notarization(past_view, true) {
+                Some(notarization) => {
+                    debug!(view = past_view, "rebroadcasting notarization");
+                    let msg = wire::Consensus {
+                        payload: Some(wire::consensus::Payload::Notarization(notarization)),
+                    }
+                    .encode_to_vec()
+                    .into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
+                }
+                None => {
+                    warn!(view = past_view, "no notarization to rebroadcast");
+                }
+            }
+        }
+
         // Construct null vote
         let digest = vote_digest(self.view, 0, None);
-        wire::Vote {
+        let vote = wire::Vote {
             view: self.view,
             height: 0,
             hash: None,
@@ -479,7 +504,17 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(&self.vote_namespace, &digest),
             }),
+        };
+        let msg = wire::Consensus {
+            payload: Some(wire::consensus::Payload::Vote(vote.clone())),
         }
+        .encode_to_vec()
+        .into();
+        sender.send(Recipients::All, msg, true).await.unwrap();
+
+        // Handle the vote
+        debug!(view = self.view, "broadcasted null vote");
+        self.handle_vote(vote);
     }
 
     async fn proposal(&mut self, proposal: wire::Proposal) {
@@ -631,9 +666,13 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             };
 
             // Compare to last finalized
-            if next <= self.last_finalized {
+            if next < self.last_finalized {
                 self.views.remove(&next);
-                debug!(view = next, "pruned view");
+                debug!(
+                    view = next,
+                    last_finalized = self.last_finalized,
+                    "pruned view"
+                );
             } else {
                 return;
             }
@@ -1067,7 +1106,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         })
     }
 
-    fn construct_notarization(&mut self, view: u64) -> Option<wire::Notarization> {
+    fn construct_notarization(&mut self, view: u64, force: bool) -> Option<wire::Notarization> {
         // Get requested view
         let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -1078,9 +1117,9 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
         // Attempt to construct notarization
         let (threshold, validators, _) = Self::validator_info(&self.validators, view);
-        let mut result = view_obj.notarizable_proposal(*threshold);
+        let mut result = view_obj.notarizable_proposal(*threshold, force);
         if result.is_none() {
-            result = view_obj.notarizable_null(*threshold);
+            result = view_obj.notarizable_null(*threshold, force);
         }
         let (hash, height, votes) = result?;
 
@@ -1189,7 +1228,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         };
 
         // Attempt to notarize
-        if let Some(notarization) = self.construct_notarization(view) {
+        if let Some(notarization) = self.construct_notarization(view, false) {
             // Broadcast the notarization
             let msg = wire::Consensus {
                 payload: Some(wire::consensus::Payload::Notarization(notarization.clone())),
@@ -1267,28 +1306,12 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
 
             // Wait for a timeout to fire or for a message to arrive
             let null_timeout = self.timeout_deadline();
+            let view;
             select! {
                 _timeout = self.runtime.sleep_until(null_timeout) => {
                     // Trigger the timeout
-                    let vote = self.timeout();
-
-                    // Broadcast the vote
-                    let msg = wire::Consensus{
-                        payload: Some(wire::consensus::Payload::Vote(vote.clone())),
-                    };
-                    let msg = msg.encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
-
-                    // Handle the vote
-                    let vote_view = vote.view;
-                    self.handle_vote(vote);
-
-                    // Attempt to send any new view messages
-                    self.broadcast(&mut sender, vote_view).await;
-                    debug!(view = vote_view, "broadcast null vote");
+                    self.timeout(&mut sender).await;
+                    view = self.view;
                 },
                 result = receiver.recv() => {
                     // Parse message
@@ -1311,7 +1334,6 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                     // Process message
                     //
                     // All messages are semantically verified before being passed to the `voter`.
-                    let view;
                     match payload {
                         wire::consensus::Payload::Proposal(proposal) => {
                             if proposal.parent.len() != HASH_LENGTH {
@@ -1362,19 +1384,19 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                             self.finalization(finalization).await;
                         }
                     };
-
-                    // Attempt to send any new view messages
-                    self.broadcast(&mut sender, view).await;
-
-                    // After sending all required messages, prune any views
-                    // we no longer need
-                    self.prune_views();
-
-                    // Update metrics
-                    self.current_view.set(view as i64);
-                    self.tracked_views.set(self.views.len() as i64);
                 },
             };
+
+            // Attempt to send any new view messages
+            self.broadcast(&mut sender, view).await;
+
+            // After sending all required messages, prune any views
+            // we no longer need
+            self.prune_views();
+
+            // Update metrics
+            self.current_view.set(view as i64);
+            self.tracked_views.set(self.views.len() as i64);
         }
     }
 }
