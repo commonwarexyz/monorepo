@@ -1,6 +1,6 @@
 //! Implementation of an `authenticated` network.
 
-use std::marker::PhantomData;
+use crate::Channel;
 
 use super::{
     actors::{dialer, listener, router, spawner, tracker},
@@ -12,6 +12,7 @@ use commonware_cryptography::Scheme;
 use commonware_runtime::{select, Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
+use std::marker::PhantomData;
 use tracing::{debug, info, warn};
 
 /// Implementation of an `authenticated` network.
@@ -111,7 +112,7 @@ impl<
     ///   without impacting the ability to process messages on other channels.
     pub fn register(
         &mut self,
-        channel: u32,
+        channel: Channel,
         rate: Quota,
         max_size: usize,
         backlog: usize,

@@ -20,6 +20,9 @@ pub mod simulated;
 /// will already be decrypted and authenticated.
 pub type Message = (PublicKey, Bytes);
 
+/// Alias for identifying communication channels.
+pub type Channel = u32;
+
 /// Enum indicating the set of recipients to send a message to.
 #[derive(Clone)]
 pub enum Recipients {
@@ -29,7 +32,7 @@ pub enum Recipients {
 }
 
 /// Interface for sending messages to a set of recipients.
-pub trait Sender: Clone + Send + 'static {
+pub trait Sender: Clone + Debug + Send + 'static {
     type Error: Debug + StdError + Send;
 
     /// Send a message to a set of recipients.
@@ -42,7 +45,7 @@ pub trait Sender: Clone + Send + 'static {
 }
 
 /// Interface for receiving messages from arbitrary recipients.
-pub trait Receiver: Send + 'static {
+pub trait Receiver: Debug + Send + 'static {
     type Error: Debug + StdError + Send;
 
     /// Receive a message from an arbitrary recipient.
