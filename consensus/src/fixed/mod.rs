@@ -123,6 +123,9 @@ mod tests {
             if !self.verified.contains_key(&hash) {
                 panic!("hash not verified");
             }
+            if self.finalized.contains_key(&hash) {
+                panic!("hash already finalized");
+            }
         }
 
         fn finalized(&mut self, hash: Hash) {
