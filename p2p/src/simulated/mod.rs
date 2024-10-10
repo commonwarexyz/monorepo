@@ -1,6 +1,7 @@
 //! Simulate messaging between arbitrary peers with configurable performance (i.e. drops, latency, corruption, etc.).
 //!
-//! Dynamic addition/removal of both peers and the links between them is supported.
+//! To support advanced testing, dynamic addition/removal of both peers and the links between them is supported. This can
+//! be used to simulate network partitions.
 //!
 //! To make the simulation deterministic, employ `commonware-runtime`'s `deterministic::Executor` (with a given seed).
 //!
@@ -100,7 +101,7 @@ pub enum Error {
 }
 
 pub use ingress::Oracle;
-pub use network::{Channel, Config, Link, Network, Receiver, Sender};
+pub use network::{Config, Link, Network, Receiver, Sender};
 
 #[cfg(test)]
 mod tests {

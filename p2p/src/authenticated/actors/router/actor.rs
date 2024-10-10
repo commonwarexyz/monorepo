@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     authenticated::{actors::peer, channels::Channels, metrics},
-    Recipients,
+    Channel, Recipients,
 };
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -50,7 +50,7 @@ impl Actor {
     async fn send_to_recipient(
         &mut self,
         recipient: &PublicKey,
-        channel: u32,
+        channel: Channel,
         message: Bytes,
         priority: bool,
         sent: &mut Vec<PublicKey>,

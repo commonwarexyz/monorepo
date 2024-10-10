@@ -1,5 +1,5 @@
 use super::{actors::Messenger, Error};
-use crate::{Message, Recipients};
+use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, StreamExt};
@@ -11,7 +11,7 @@ use zstd::bulk::{compress, decompress};
 /// a set of recipients over a pre-defined channel.
 #[derive(Clone, Debug)]
 pub struct Sender {
-    channel: u32,
+    channel: Channel,
     max_size: usize,
     compression: Option<u8>,
     messenger: Messenger,
@@ -19,7 +19,7 @@ pub struct Sender {
 
 impl Sender {
     pub(super) fn new(
-        channel: u32,
+        channel: Channel,
         max_size: usize,
         compression: Option<u8>,
         messenger: Messenger,
@@ -129,7 +129,7 @@ impl crate::Receiver for Receiver {
 #[derive(Clone)]
 pub struct Channels {
     messenger: Messenger,
-    receivers: BTreeMap<u32, (Quota, usize, mpsc::Sender<Message>)>,
+    receivers: BTreeMap<Channel, (Quota, usize, mpsc::Sender<Message>)>,
 }
 
 impl Channels {
@@ -142,7 +142,7 @@ impl Channels {
 
     pub fn register(
         &mut self,
-        channel: u32,
+        channel: Channel,
         rate: governor::Quota,
         max_size: usize,
         backlog: usize,

@@ -1,9 +1,10 @@
-//! Implementation of a `simulated` network.
+//! Implementation of a simulated p2p network.
 
-use super::ingress::{self, Oracle};
-use super::metrics;
-use super::Error;
-use crate::{Message, Recipients};
+use super::{
+    ingress::{self, Oracle},
+    metrics, Error,
+};
+use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{select, Clock, Spawner};
@@ -25,8 +26,7 @@ use std::{
 };
 use tracing::{debug, error};
 
-pub type Channel = u32;
-
+/// Task type representing a message to be sent within the network.
 type Task = (
     Channel,
     PublicKey,
@@ -375,7 +375,7 @@ impl Sender {
     fn new(
         runtime: impl Spawner,
         me: PublicKey,
-        channel: u32,
+        channel: Channel,
         max_size: usize,
         mut sender: mpsc::UnboundedSender<Task>,
     ) -> Self {

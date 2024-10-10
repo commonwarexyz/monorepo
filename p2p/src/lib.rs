@@ -20,6 +20,9 @@ pub mod simulated;
 /// will already be decrypted and authenticated.
 pub type Message = (PublicKey, Bytes);
 
+/// Alias for identifying communication channels.
+pub type Channel = u32;
+
 /// Enum indicating the set of recipients to send a message to.
 #[derive(Clone)]
 pub enum Recipients {

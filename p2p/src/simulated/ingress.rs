@@ -1,4 +1,5 @@
-use super::{Channel, Error, Link, Receiver, Sender};
+use super::{Error, Link, Receiver, Sender};
+use crate::Channel;
 use commonware_cryptography::PublicKey;
 use futures::{
     channel::{mpsc, oneshot},

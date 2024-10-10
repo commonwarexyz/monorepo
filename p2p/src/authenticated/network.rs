@@ -1,5 +1,7 @@
 //! Implementation of an `authenticated` network.
 
+use crate::Channel;
+
 use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
@@ -110,7 +112,7 @@ impl<
     ///   without impacting the ability to process messages on other channels.
     pub fn register(
         &mut self,
-        channel: u32,
+        channel: Channel,
         rate: Quota,
         max_size: usize,
         backlog: usize,
