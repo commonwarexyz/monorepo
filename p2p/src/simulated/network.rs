@@ -44,7 +44,7 @@ pub struct Network<E: Spawner + Rng + Clock> {
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
     links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
-    agents: BTreeMap<PublicKey, HashMap<Channel, (usize, mpsc::UnboundedSender<Message>)>>,
+    peers: BTreeMap<PublicKey, HashMap<Channel, (usize, mpsc::UnboundedSender<Message>)>>,
 
     received_messages: Family<metrics::Message, Counter>,
     sent_messages: Family<metrics::Message, Counter>,
@@ -93,7 +93,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 sender,
                 receiver,
                 links: HashMap::new(),
-                agents: BTreeMap::new(),
+                peers: BTreeMap::new(),
                 received_messages,
                 sent_messages,
             },
@@ -111,7 +111,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 result,
             } => {
                 // Ensure doesn't already exist
-                let entry = self.agents.entry(public_key.clone()).or_default();
+                let entry = self.peers.entry(public_key.clone()).or_default();
                 if entry.get(&channel).is_some() {
                     let _ = result.send(Err(Error::ChannelAlreadyRegistered(channel)));
                     return;
@@ -132,7 +132,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 )));
             }
             ingress::Message::Deregister { public_key, result } => {
-                if self.agents.remove(&public_key).is_none() {
+                if self.peers.remove(&public_key).is_none() {
                     let _ = result.send(Err(Error::PeerMissing));
                     return;
                 }
@@ -175,7 +175,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         // Collect recipients
         let (channel, origin, recipients, message, reply) = task;
         let recipients = match recipients {
-            Recipients::All => self.agents.keys().cloned().collect(),
+            Recipients::All => self.peers.keys().cloned().collect(),
             Recipients::Some(keys) => keys,
             Recipients::One(key) => vec![key],
         };
@@ -195,7 +195,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             }
 
             // Determine if recipient exists
-            let sender = match self.agents.get(&recipient) {
+            let sender = match self.peers.get(&recipient) {
                 Some(sender) => sender,
                 None => {
                     debug!(
