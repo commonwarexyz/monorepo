@@ -46,10 +46,7 @@ mod tests {
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use commonware_utils::{hash, hex};
     use engine::Engine;
-    use futures::{
-        channel::{mpsc, oneshot},
-        StreamExt,
-    };
+    use futures::{channel::mpsc, StreamExt};
     use prometheus_client::registry::Registry;
     use std::{
         collections::{BTreeMap, HashMap},
@@ -111,7 +108,17 @@ mod tests {
                 panic!("hash already verified: {}:{:?}", height, hex(&hash));
             }
             Self::verify_payload(height, &payload);
-            let parent = self.verified.get(&parent).expect("parent not verified");
+            let parent = match self.verified.get(&parent) {
+                Some(parent) => parent,
+                None => {
+                    panic!(
+                        "[{:?}] parent {:?} of {}, not verified",
+                        hex(&self.participant),
+                        hex(&parent),
+                        height
+                    );
+                }
+            };
             if parent + 1 != height {
                 panic!("invalid height");
             }
@@ -122,6 +129,9 @@ mod tests {
         fn notarized(&mut self, hash: Hash) {
             if !self.verified.contains_key(&hash) {
                 panic!("hash not verified");
+            }
+            if self.finalized.contains_key(&hash) {
+                panic!("hash already finalized");
             }
         }
 
@@ -136,6 +146,9 @@ mod tests {
             }
         }
     }
+
+    // TODO: add test where vote broadcast very very close to timeout (to ensure no safety faults)
+    // TODO: follow-up with updated links after x views to improve speed and ensure finalizes
 
     #[test]
     fn test_all_online() {
@@ -410,7 +423,7 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 500.0,
+                                latency_mean: 200.0,
                                 latency_stddev: 1.0,
                                 success_rate: 1.0,
                             },

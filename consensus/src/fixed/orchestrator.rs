@@ -109,6 +109,7 @@ pub enum Proposal {
     Populated(Hash, wire::Proposal),
 }
 
+#[derive(Clone)]
 enum Knowledge {
     Notarized(BTreeMap<View, Hash>), // priotize building off of earliest view (avoid wasting work)
     Finalized(Hash),
@@ -126,6 +127,11 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
 
     knowledge: HashMap<Height, Knowledge>,
     blocks: HashMap<Hash, wire::Proposal>,
+
+    // Track verifications
+    //
+    // We never verify the same block twice.
+    verified: HashMap<Height, HashSet<Hash>>,
 
     // Track notarization/finalization
     last_notarized: Height,
@@ -153,10 +159,13 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         validators: BTreeMap<View, Vec<PublicKey>>,
     ) -> (Self, Mailbox) {
         // Create genesis block and store it
+        let mut verified = HashMap::new();
         let mut knowledge = HashMap::new();
         let mut blocks = HashMap::new();
         let genesis = application.genesis();
+        verified.insert(0, HashSet::from([genesis.0.clone()]));
         knowledge.insert(0, Knowledge::Finalized(genesis.0.clone()));
+
         blocks.insert(
             genesis.0.clone(),
             wire::Proposal {
@@ -184,6 +193,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
                 knowledge,
                 blocks,
+
+                verified,
 
                 last_notarized: 0,
                 last_finalized: 0,
@@ -267,7 +278,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         let mut next = self.last_notified + 1;
         loop {
             // Get info
-            let knowledge = match self.knowledge.get(&next) {
+            let knowledge = match self.knowledge.get(&next).cloned() {
                 Some(knowledge) => knowledge,
                 None => {
                     // No more blocks to notify
@@ -275,29 +286,60 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 }
             };
 
-            // TODO: add verification once backfill history
-
             // Send event
             match knowledge {
                 Knowledge::Notarized(hashes) => {
                     // Send fulfilled unsent notarizations
-                    let notifications = self.notarizations_sent.entry(next).or_default();
-                    for (_, hash) in hashes.iter() {
-                        if notifications.contains(hash) {
+                    for (_, hash) in hashes {
+                        let already_notified = self
+                            .notarizations_sent
+                            .get(&next)
+                            .map_or(false, |notifications| notifications.contains(&hash));
+                        if already_notified {
                             continue;
                         }
-                        if !self.blocks.contains_key(hash) {
+                        let proposal = match self.blocks.get(&hash) {
+                            Some(proposal) => proposal,
+                            None => {
+                                continue;
+                            }
+                        };
+                        if !self.verify(hash.clone(), proposal.clone()) {
+                            debug!(
+                                height = next,
+                                hash = hex(&hash),
+                                "failed to verify notarized proposal"
+                            );
                             continue;
                         }
-                        notifications.insert(hash.clone());
+                        self.notarizations_sent
+                            .entry(next)
+                            .or_default()
+                            .insert(hash.clone());
                         self.application.notarized(hash.clone());
                     }
                 }
                 Knowledge::Finalized(hash) => {
-                    // Send finalized blocks as soon as we have them
-                    if !self.blocks.contains_key(hash) {
+                    let proposal = match self.blocks.get(&hash) {
+                        Some(proposal) => proposal,
+                        None => {
+                            debug!(
+                                height = next,
+                                hash = hex(&hash),
+                                "missing finalized proposal, exiting backfill"
+                            );
+                            return;
+                        }
+                    };
+                    if !self.verify(hash.clone(), proposal.clone()) {
+                        debug!(
+                            height = next,
+                            hash = hex(&hash),
+                            "failed to verify finalized proposal"
+                        );
                         return;
                     }
+                    self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
                     self.application.finalized(hash.clone());
@@ -385,70 +427,30 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
         let parent = parent.unwrap();
 
-        // If proposal height is already finalized, fail
-        if proposal.height <= self.last_finalized {
-            debug!(height = proposal.height, "already finalized");
-            return false;
-        }
-
-        // Check if parent is notarized or finalized and that the application
-        // has been notified of the parent (ancestry is processed)
-        match self.knowledge.get(&parent.height) {
-            Some(Knowledge::Notarized(hashes)) => {
-                if !hashes.contains_key(&parent.view) {
-                    debug!(
-                        height = proposal.height,
-                        parent_hash = hex(&proposal.parent),
-                        "parent not notarized"
-                    );
-                    return false;
-                }
-                let notifications = match self.notarizations_sent.get(&parent.height) {
-                    Some(notifications) => notifications,
-                    None => {
-                        debug!(
-                            height = proposal.height,
-                            parent_hash = hex(&proposal.parent),
-                            "parent not notified of notarization"
-                        );
-                        return false;
-                    }
-                };
-                let contains = notifications.contains(&proposal.parent);
-                if !contains {
-                    let notifications = notifications.iter().map(hex).collect::<Vec<_>>();
-                    debug!(
-                        height = proposal.height,
-                        parent_hash = hex(&proposal.parent),
-                        ?notifications,
-                        "parent not notified of notarization"
-                    );
-                }
-                contains
-            }
-            Some(Knowledge::Finalized(hash)) => {
-                if proposal.parent != *hash {
-                    debug!(
-                        height = proposal.height,
-                        parent_hash = hex(&proposal.parent),
-                        "parent mismatch"
-                    );
-                    return false;
-                }
-                self.last_notified >= parent.height
-            }
-            None => {
-                debug!(
-                    height = proposal.height,
-                    parent_hash = hex(&proposal.parent),
-                    "parent not notarized nor finalized"
-                );
-                false
+        // Check if parent has been verified
+        if let Some(hashes) = self.verified.get(&parent.height) {
+            if hashes.contains(&proposal.parent) {
+                return true;
             }
         }
+        debug!(
+            height = proposal.height,
+            parent_hash = hex(&proposal.parent),
+            "parent not verified"
+        );
+        false
     }
 
     pub fn verify(&mut self, hash: Hash, proposal: wire::Proposal) -> bool {
+        // If already verified, do nothing
+        if self
+            .verified
+            .get(&proposal.height)
+            .map_or(false, |hashes| hashes.contains(&hash))
+        {
+            return true;
+        }
+
         // If don't have ancestry yet, do nothing.
         if !self.valid_ancestry(&proposal) {
             // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
@@ -461,12 +463,23 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         }
 
         // Verify payload
-        self.application.verify(
-            proposal.parent,
+        if self.application.verify(
+            proposal.parent.clone(),
             proposal.height,
             proposal.payload.clone(),
-            hash,
-        )
+            hash.clone(),
+        ) {
+            debug!(
+                height = proposal.height,
+                hash = hex(&hash),
+                "verified proposal"
+            );
+            // Record verification
+            let entry = self.verified.entry(proposal.height).or_default();
+            entry.insert(hash);
+            return true;
+        }
+        false
     }
 
     pub async fn notarized(&mut self, proposal: Proposal) {
@@ -705,6 +718,20 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             response.send(hash).unwrap();
                         }
                         Message::Verify { hash, proposal, response } => {
+                            // If proposal height is already finalized, fail
+                            //
+                            // We will only verify old proposals via notify loop.
+                            if proposal.height <= self.last_finalized {
+                                debug!(
+                                    height = proposal.height,
+                                    finalized = self.last_finalized,
+                                    "already finalized"
+                                );
+                                response.send(false).unwrap();
+                                continue;
+                            }
+
+                            // Attempt to verify proposal
                             let valid = self.verify(hash, proposal);
                             response.send(valid).unwrap();
                         }
