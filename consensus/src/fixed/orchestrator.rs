@@ -18,6 +18,7 @@ use rand::Rng;
 use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 use tracing::{debug, warn};
+use tracing_subscriber::field::debug;
 
 pub enum Message {
     Propose {
@@ -159,10 +160,13 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         validators: BTreeMap<View, Vec<PublicKey>>,
     ) -> (Self, Mailbox) {
         // Create genesis block and store it
+        let mut verified = HashMap::new();
         let mut knowledge = HashMap::new();
         let mut blocks = HashMap::new();
         let genesis = application.genesis();
+        verified.insert(0, HashSet::from([genesis.0.clone()]));
         knowledge.insert(0, Knowledge::Finalized(genesis.0.clone()));
+
         blocks.insert(
             genesis.0.clone(),
             wire::Proposal {
@@ -191,7 +195,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 knowledge,
                 blocks,
 
-                verified: HashMap::new(),
+                verified,
 
                 last_notarized: 0,
                 last_finalized: 0,
@@ -320,7 +324,12 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                     let proposal = match self.blocks.get(&hash) {
                         Some(proposal) => proposal,
                         None => {
-                            continue;
+                            debug!(
+                                height = next,
+                                hash = hex(&hash),
+                                "missing finalized proposal, exiting backfill"
+                            );
+                            return;
                         }
                     };
                     if !self.verify(hash.clone(), proposal.clone()) {
@@ -331,7 +340,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                         );
                         return;
                     }
-                    self.verified.remove(&next);
+                    // TODO: fix verification removal (should be n-1)
+                    // self.verified.remove(&next);
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
                     self.application.finalized(hash.clone());
@@ -418,12 +428,6 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
             return false;
         }
         let parent = parent.unwrap();
-
-        // If proposal height is already finalized, fail
-        if proposal.height <= self.last_finalized {
-            debug!(height = proposal.height, "already finalized");
-            return false;
-        }
 
         // Check if parent has been verified
         if let Some(hashes) = self.verified.get(&parent.height) {
@@ -716,6 +720,20 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             response.send(hash).unwrap();
                         }
                         Message::Verify { hash, proposal, response } => {
+                            // If proposal height is already finalized, fail
+                            //
+                            // We will only verify old proposals via notify loop.
+                            if proposal.height <= self.last_finalized {
+                                debug!(
+                                    height = proposal.height,
+                                    finalized = self.last_finalized,
+                                    "already finalized"
+                                );
+                                response.send(false).unwrap();
+                                continue;
+                            }
+
+                            // Attempt to verify proposal
                             let valid = self.verify(hash, proposal);
                             response.send(valid).unwrap();
                         }
