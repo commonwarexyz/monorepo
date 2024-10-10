@@ -574,7 +574,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
                     // Store finalized block record
                     self.knowledge
-                        .insert(height, Knowledge::Finalized(hash.clone()));
+                        .insert(next, Knowledge::Finalized(hash.clone()));
 
                     // Update value of hash to be parent of this block
                     if let Some(parent) = self.blocks.get(&hash) {
@@ -586,7 +586,12 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                 }
                 Some(Knowledge::Finalized(seen)) => {
                     if *seen != hash {
-                        panic!("finalized block hash mismatch");
+                        panic!(
+                            "finalized block hash mismatch at height {}: expected={}, found={}",
+                            next,
+                            hex(seen),
+                            hex(&hash)
+                        );
                     }
                     break;
                 }

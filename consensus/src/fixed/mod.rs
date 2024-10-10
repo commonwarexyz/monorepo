@@ -966,7 +966,7 @@ mod tests {
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             select! {
-                _timeout = runtime.sleep(Duration::from_secs(180)) => {},
+                _timeout = runtime.sleep(Duration::from_secs(600)) => {},
                 _done = done_receiver.next() => {
                     panic!("engine should not notarize or finalize anything");
                 }
