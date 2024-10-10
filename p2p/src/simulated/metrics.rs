@@ -1,8 +1,7 @@
+use crate::Channel;
 use commonware_cryptography::PublicKey;
 use commonware_utils::hex;
 use prometheus_client::encoding::EncodeLabelSet;
-
-use crate::Channel;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Message {

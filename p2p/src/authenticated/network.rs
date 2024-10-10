@@ -1,13 +1,12 @@
 //! Implementation of an `authenticated` network.
 
-use crate::Channel;
-
 use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
     config::Config,
     connection,
 };
+use crate::Channel;
 use commonware_cryptography::Scheme;
 use commonware_runtime::{select, Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
 use governor::{clock::ReasonablyRealtime, Quota};
