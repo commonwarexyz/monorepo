@@ -251,6 +251,7 @@ mod wire {
 
 use thiserror::Error;
 
+/// Errors that can occur when interacting with the network.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("message too large: {0}")]

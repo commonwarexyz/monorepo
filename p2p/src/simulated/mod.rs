@@ -84,7 +84,7 @@ mod network;
 
 use thiserror::Error;
 
-/// Errors that can occur within the simulate network.
+/// Errors that can occur when interacting with the network.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("message too large: {0}")]
