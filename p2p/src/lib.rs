@@ -32,8 +32,8 @@ pub enum Recipients {
 }
 
 /// Interface for sending messages to a set of recipients.
-pub trait Sender: Clone {
-    type Error: Debug + StdError;
+pub trait Sender: Clone + Debug + Send + 'static {
+    type Error: Debug + StdError + Send;
 
     /// Send a message to a set of recipients.
     fn send(
@@ -45,8 +45,8 @@ pub trait Sender: Clone {
 }
 
 /// Interface for receiving messages from arbitrary recipients.
-pub trait Receiver {
-    type Error: Debug + StdError;
+pub trait Receiver: Debug + Send + 'static {
+    type Error: Debug + StdError + Send;
 
     /// Receive a message from an arbitrary recipient.
     fn recv(&mut self) -> impl Future<Output = Result<Message, Self::Error>> + Send;

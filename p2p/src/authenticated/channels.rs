@@ -83,6 +83,7 @@ impl crate::Sender for Sender {
 }
 
 /// Channel to asynchronously receive messages from a channel.
+#[derive(Debug)]
 pub struct Receiver {
     max_size: usize,
     compression: bool,

@@ -443,7 +443,9 @@ impl crate::Runner for Runner {
             let mut current;
             {
                 let mut time = self.executor.time.lock().unwrap();
-                *time += self.executor.cycle;
+                *time = time
+                    .checked_add(self.executor.cycle)
+                    .expect("executor time overflow");
                 current = *time;
             }
             trace!(

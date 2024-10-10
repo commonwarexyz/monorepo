@@ -6,7 +6,7 @@ use commonware_runtime::{select, Clock, Sink, Spawner, Stream};
 use prost::Message;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_HANDSHAKE_";
+const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_AUTHENTICATED_HANDSHAKE_";
 
 pub fn create_handshake<E: Clock, C: Scheme>(
     runtime: E,
