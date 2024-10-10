@@ -197,6 +197,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         )
     }
 
+    // TODO: need to register knowledge for ancestry
     async fn resolve(&mut self, proposal: Proposal) {
         // Parse proposal
         let (hash, proposal) = match proposal {
