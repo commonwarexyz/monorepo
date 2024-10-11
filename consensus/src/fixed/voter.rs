@@ -6,8 +6,9 @@ use super::{
 use crate::{Hash, Height, View, HASH_LENGTH};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_cryptography::{PublicKey, Scheme};
+use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{select, Clock};
+use commonware_runtime::Clock;
 use commonware_utils::{hash, hex, quorum};
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
@@ -873,6 +874,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 }
             };
             self.orchestrator.notarized(proposal).await;
+        } else {
+            self.orchestrator.null_notarized(notarization.view).await;
         }
 
         // Enter next view
@@ -964,6 +967,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             if view.broadcast_finalization {
                 debug!(
                     view = finalization.view,
+                    height = finalization.height,
                     reason = "already broadcast finalization",
                     "dropping finalization"
                 );
@@ -1223,7 +1227,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the vote
-            debug!(view = vote.view, "broadcast vote");
+            let hash = vote.hash.clone().unwrap();
+            debug!(view = vote.view, hash = hex(&hash), "broadcast vote");
             self.handle_vote(vote);
         };
 
@@ -1261,7 +1266,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the finalize
-            debug!(view = finalize.view, "broadcast finalize");
+            debug!(
+                view = finalize.view,
+                height = finalize.height,
+                "broadcast finalize"
+            );
             self.handle_finalize(finalize);
         };
 
@@ -1278,7 +1287,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the finalization
-            debug!(view = finalization.view, "broadcast finalization");
+            debug!(
+                view = finalization.view,
+                height = finalization.height,
+                "broadcast finalization"
+            );
             self.handle_finalization(finalization).await;
         };
     }
@@ -1308,14 +1321,14 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             let null_timeout = self.timeout_deadline();
             let view;
             select! {
-                _timeout = self.runtime.sleep_until(null_timeout) => {
+                _ = self.runtime.sleep_until(null_timeout) => {
                     // Trigger the timeout
                     self.timeout(&mut sender).await;
                     view = self.view;
                 },
-                result = receiver.recv() => {
+                msg = receiver.recv() => {
                     // Parse message
-                    let (s, msg) = result.unwrap();
+                    let (s, msg) = msg.unwrap();
                     let msg = match wire::Consensus::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {

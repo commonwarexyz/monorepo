@@ -42,8 +42,9 @@ mod tests {
     use crate::{Application, Hash, Height, Payload};
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, PublicKey, Scheme};
+    use commonware_macros::{select, test_with_logging};
     use commonware_p2p::simulated::{Config, Link, Network};
-    use commonware_runtime::{deterministic::Executor, select, Clock, Runner, Spawner};
+    use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use commonware_utils::{hash, hex};
     use engine::Engine;
     use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -53,7 +54,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::{debug, Level};
+    use tracing::debug;
 
     // TODO: break into official mock object that any consensus can use
     enum Progress {
@@ -171,17 +172,8 @@ mod tests {
         }
     }
 
-    // TODO: add test where vote broadcast very very close to timeout (to ensure no safety faults)
-    // TODO: follow-up with updated links after x views to improve speed and ensure finalizes
-
-    #[test]
+    #[test_with_logging]
     fn test_all_online() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .init();
-
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -282,14 +274,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_one_offline() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .init();
-
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -395,14 +381,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_catchup() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .init();
-
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -579,14 +559,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_all_recovery() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .init();
-
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -717,14 +691,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_no_finality() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .init();
-
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -830,14 +798,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_partition() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .init();
-
         // Create runtime
         let n = 10;
         let required_blocks = 100;
@@ -995,14 +957,114 @@ mod tests {
                 }
             }
 
-            // TODO: stuck where one is posting null votes from view=103 and the other is posting from view=104
-
             // Wait for all engines to finish
             let mut completed = HashSet::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let Progress::Finalized(height) = event {
                     if height < required_blocks + highest_finalized {
+                        continue;
+                    }
+                    completed.insert(validator);
+                }
+                if completed.len() == n {
+                    break;
+                }
+            }
+        });
+    }
+
+    #[test_with_logging]
+    fn test_jank_links() {
+        // Create runtime
+        let n = 10;
+        let required_blocks = 20;
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                },
+            );
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+
+            // Create engines
+            let (done_sender, mut done_receiver) = mpsc::unbounded();
+            for scheme in schemes.into_iter() {
+                // Register on network
+                let validator = scheme.public_key();
+                let (block_sender, block_receiver) = oracle
+                    .register(validator.clone(), 0, 1024 * 1024)
+                    .await
+                    .unwrap();
+                let (vote_sender, vote_receiver) = oracle
+                    .register(validator.clone(), 1, 1024 * 1024)
+                    .await
+                    .unwrap();
+
+                // Link to all other validators
+                for other in validators.iter() {
+                    if other == &validator {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency_mean: 200.0,
+                                latency_stddev: 10.0,
+                                success_rate: 0.8,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                // Start engine
+                let cfg = config::Config {
+                    crypto: scheme,
+                    application: MockApplication::new(validator, done_sender.clone()),
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    namespace: Bytes::from("consensus"),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    null_vote_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    max_fetch_count: 1,
+                    max_fetch_size: 1024 * 512,
+                    validators: view_validators.clone(),
+                };
+                let engine = Engine::new(runtime.clone(), cfg);
+                runtime.spawn("engine", async move {
+                    engine
+                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .await;
+                });
+            }
+
+            // Wait for all engines to finish
+            let mut completed = HashSet::new();
+            loop {
+                let (validator, event) = done_receiver.next().await.unwrap();
+                if let Progress::Finalized(height) = event {
+                    if height < required_blocks {
                         continue;
                     }
                     completed.insert(validator);

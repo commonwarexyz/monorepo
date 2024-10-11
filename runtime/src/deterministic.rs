@@ -8,8 +8,6 @@
 //!
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::{Executor, Config}};
-//! use prometheus_client::{registry::Registry, metrics::{counter::Counter, family::Family, gauge::Gauge}};
-//! use std::{sync::{Mutex, Arc}, time::Duration};
 //!
 //! let (executor, runtime, auditor) = Executor::default();
 //! executor.start(async move {
