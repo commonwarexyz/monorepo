@@ -13,10 +13,11 @@
 //! * Backfill blocks from notarizing peers rather than passing along with notarization
 
 mod config;
-mod engine;
 mod orchestrator;
 mod utils;
 mod voter;
+
+pub mod engine;
 
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
