@@ -113,7 +113,6 @@ impl<
     pub fn register(
         &mut self,
         channel: Channel,
-        channel: Channel,
         rate: Quota,
         max_size: usize,
         backlog: usize,
