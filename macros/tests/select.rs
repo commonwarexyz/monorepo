@@ -1,31 +1,30 @@
 #[cfg(test)]
 mod tests {
     use commonware_macros::select;
-    use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
-    use futures::{channel::mpsc, SinkExt, StreamExt};
-    use std::time::Duration;
+    use futures::{channel::mpsc, executor::block_on, SinkExt, StreamExt};
+    use futures_timer::Delay;
+    use std::{thread, time::Duration};
 
     #[test]
     fn test_select_macro() {
-        // Create a deterministic executor
-        let (executor, runtime, _) = Executor::default();
-        executor.start(async move {
+        block_on(async move {
             // Create channels to track futures that complete at different times
             let (mut tx, mut rx) = mpsc::unbounded();
 
             // Spawn another future with a shorter delay
-            runtime.spawn("task 2", {
-                let runtime = runtime.clone();
-                let mut tx = tx.clone();
-                async move {
-                    runtime.sleep(Duration::from_millis(50)).await;
-                    tx.send(2).await.unwrap();
-                }
+            let mut tx_clone = tx.clone();
+            thread::spawn(move || {
+                block_on(async move {
+                    Delay::new(Duration::from_millis(50)).await;
+                    tx_clone.send(2).await.unwrap();
+                });
             });
 
             // Spawn a future that sends a message immediately
-            runtime.spawn("task 3", async move {
-                tx.send(3).await.unwrap();
+            thread::spawn(move || {
+                block_on(async move {
+                    tx.send(3).await.unwrap();
+                });
             });
 
             // Wait for task to complete
@@ -33,7 +32,7 @@ mod tests {
             while completed.len() < 3 {
                 select! {
                     // Use wildcard pattern for the first future
-                    _ = runtime.sleep(Duration::from_millis(45)) => {
+                    _ = Delay::new(Duration::from_millis(45)) => {
                         completed.push(1);
                     },
                     // Bind the result to a variable 'result' for the second future

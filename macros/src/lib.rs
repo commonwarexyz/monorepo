@@ -134,16 +134,16 @@ impl Parse for SelectInput {
 /// ```rust
 /// use std::time::Duration;
 /// use commonware_macros::select;
-/// use commonware_runtime::{Clock, Spawner, Runner, deterministic::{Executor, Config}};
+/// use futures::executor::block_on;
+/// use futures_timer::Delay;
 ///
 /// async fn task() -> usize {
 ///     42
 /// }
 //
-/// let (executor, runtime, auditor) = Executor::default();
-/// executor.start(async move {
+/// block_on(async move {
 ///     select! {
-///         _ = runtime.sleep(Duration::from_secs(1)) => {
+///         _ = Delay::new(Duration::from_secs(1)) => {
 ///             println!("timeout fired");
 ///         },
 ///         v = task() => {
