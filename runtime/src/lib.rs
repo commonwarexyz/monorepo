@@ -239,7 +239,7 @@ mod tests {
                     v = receiver.next() => {
                         panic!("unexpected value: {:?}", v);
                     },
-                    _timeout = context.sleep(Duration::from_millis(100)) => {
+                    _ = context.sleep(Duration::from_millis(100)) => {
                         continue;
                     },
                 };
@@ -251,7 +251,7 @@ mod tests {
 
             // Prefer not reading channel without losing messages
             select! {
-                _timeout = async {} => {
+                _ = async {} => {
                     // Skip reading from channel eventhough populated
                 },
                 v = receiver.next() => {
@@ -262,7 +262,7 @@ mod tests {
             // Process messages
             for i in 0..2 {
                 select! {
-                    _timeout = context.sleep(Duration::from_millis(100)) => {
+                    _ = context.sleep(Duration::from_millis(100)) => {
                         panic!("timeout");
                     },
                     v = receiver.next() => {

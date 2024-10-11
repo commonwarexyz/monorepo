@@ -92,7 +92,7 @@ impl<E: Clock> Vrf<E> {
         let mut received = HashSet::new();
         loop {
             select! {
-                _timeout = self.runtime.sleep_until(t_signature) => {
+                _ = self.runtime.sleep_until(t_signature) => {
                     debug!(round, "signature timeout");
                     break;
                 },

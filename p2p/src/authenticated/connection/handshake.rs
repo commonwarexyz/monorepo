@@ -151,7 +151,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 
         // Wait for up to handshake timeout for response
         let msg = select! {
-            _timeout = runtime.sleep_until(deadline) => {
+            _ = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout);
             },
             result = stream.recv() => {

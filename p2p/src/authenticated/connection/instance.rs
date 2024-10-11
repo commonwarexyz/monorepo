@@ -45,7 +45,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
 
         // Wait for up to handshake timeout to send
         select! {
-            _timeout = runtime.sleep_until(deadline) => {
+            _ = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = sink.send(msg) => {
@@ -55,7 +55,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
 
         // Wait for up to handshake timeout for response
         let msg = select! {
-            _timeout = runtime.sleep_until(deadline) => {
+            _ = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = stream.recv() => {
@@ -111,7 +111,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
 
         // Wait for up to handshake timeout
         select! {
-            _timeout = runtime.sleep_until(handshake.deadline) => {
+            _ = runtime.sleep_until(handshake.deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = handshake.sink.send(msg) => {

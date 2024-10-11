@@ -104,7 +104,7 @@ impl<E: Clock> Arbiter<E> {
         );
         loop {
             select! {
-                _timeout = self.runtime.sleep_until(t_commitment) => {
+                _ = self.runtime.sleep_until(t_commitment) => {
                     debug!("commitment phase timed out");
                     break
                 },
@@ -207,7 +207,7 @@ impl<E: Clock> Arbiter<E> {
         // Collect acks and complaints
         loop {
             select! {
-                _timeout = self.runtime.sleep_until(t_ack) => {
+                _ = self.runtime.sleep_until(t_ack) => {
                     debug!("ack phase timed out");
                     break
                 },
@@ -373,7 +373,7 @@ impl<E: Clock> Arbiter<E> {
         let mut signatures = HashMap::new();
         loop {
             select! {
-                _timeout = self.runtime.sleep_until(t_repair) => {
+                _ = self.runtime.sleep_until(t_repair) => {
                     break
                 },
                 result = receiver.recv() => {

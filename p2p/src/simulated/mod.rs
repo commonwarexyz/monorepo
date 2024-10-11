@@ -501,10 +501,10 @@ mod tests {
 
             // Confirm no message delivery
             select! {
-                _msg = receiver2.recv() => {
+                _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = runtime.sleep(Duration::from_secs(1)) => {},
             }
         });
     }
@@ -553,10 +553,10 @@ mod tests {
 
             // Confirm no message delivery
             select! {
-                _msg = receiver2.recv() => {
+                _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = runtime.sleep(Duration::from_secs(1)) => {},
             }
         });
     }
@@ -695,13 +695,13 @@ mod tests {
 
             // Confirm no message delivery
             select! {
-                _msg1 = receiver1.recv() => {
+                _ = receiver1.recv() => {
                     panic!("unexpected message");
                 },
-                _msg2 = receiver2.recv() => {
+                _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = runtime.sleep(Duration::from_secs(1)) => {},
             }
 
             // Link agents
@@ -768,13 +768,13 @@ mod tests {
 
             // Confirm no message delivery
             select! {
-                _msg1 = receiver1.recv() => {
+                _ = receiver1.recv() => {
                     panic!("unexpected message");
                 },
-                _msg2 = receiver2.recv() => {
+                _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = runtime.sleep(Duration::from_secs(1)) => {},
             }
 
             // Remove non-existent links
