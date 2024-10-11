@@ -2,7 +2,12 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, LitStr};
+use syn::{
+    parse::{Parse, ParseStream, Result},
+    parse_macro_input,
+    spanned::Spanned,
+    Block, Expr, Ident, ItemFn, LitStr, Pat, Token,
+};
 
 /// Capture logs (based on the provided log level) from a test run using
 /// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
@@ -78,4 +83,116 @@ pub fn test_with_logging(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
     TokenStream::from(expanded)
+}
+
+struct SelectInput {
+    branches: Vec<Branch>,
+}
+
+struct Branch {
+    pattern: Pat,
+    future: Expr,
+    block: Block,
+}
+
+impl Parse for SelectInput {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let mut branches = Vec::new();
+
+        while !input.is_empty() {
+            let pattern: Pat = input.parse()?;
+            input.parse::<Token![=]>()?;
+            let future: Expr = input.parse()?;
+            input.parse::<Token![=>]>()?;
+            let block: Block = input.parse()?;
+
+            branches.push(Branch {
+                pattern,
+                future,
+                block,
+            });
+
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            } else {
+                break;
+            }
+        }
+
+        Ok(SelectInput { branches })
+    }
+}
+
+/// Select the first future that completes (biased by order).
+///
+/// # Example
+///
+/// ```rust
+/// use std::time::Duration;
+/// use commonware_macros::select;
+/// use commonware_runtime::{Clock, Spawner, Runner, deterministic::{Executor, Config}};
+///
+/// async fn task() -> usize {
+///     42
+/// }
+//
+/// let (executor, runtime, auditor) = Executor::default();
+/// executor.start(async move {
+///     select! {
+///         _ = runtime.sleep(Duration::from_secs(1)) => {
+///             println!("timeout fired");
+///         },
+///         v = task() => {
+///             println!("task completed with value: {}", v);
+///         },
+///     };
+/// });
+/// ```
+#[proc_macro]
+pub fn select(input: TokenStream) -> TokenStream {
+    // Parse the input tokens
+    let SelectInput { branches } = parse_macro_input!(input as SelectInput);
+
+    // Generate code from provided statements
+    let mut stmts = Vec::new();
+    let mut select_branches = Vec::new();
+    for (
+        index,
+        Branch {
+            pattern,
+            future,
+            block,
+        },
+    ) in branches.into_iter().enumerate()
+    {
+        // Generate a unique identifier for each future
+        let future_ident = Ident::new(&format!("__select_future_{}", index), pattern.span());
+
+        // Fuse and pin each future
+        let stmt = quote! {
+            let #future_ident = (#future).fuse();
+            futures::pin_mut!(#future_ident);
+        };
+        stmts.push(stmt);
+
+        // Generate branch for `select_biased!` macro
+        let branch_code = quote! {
+            #pattern = #future_ident => #block,
+        };
+        select_branches.push(branch_code);
+    }
+
+    // Generate the final output code
+    quote! {
+        {
+            use futures::{FutureExt, select_biased};
+
+            #(#stmts)*
+
+            select_biased! {
+                #(#select_branches)*
+            }
+        }
+    }
+    .into()
 }

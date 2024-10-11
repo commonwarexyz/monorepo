@@ -419,6 +419,8 @@ dependencies = [
 name = "commonware-macros"
 version = "0.0.1"
 dependencies = [
+ "commonware-runtime",
+ "futures",
  "proc-macro2",
  "quote",
  "syn 1.0.109",
