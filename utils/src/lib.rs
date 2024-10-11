@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
-/// Converts a byte slice to a hexadecimal string.
+/// Converts `Bytes` to a hexadecimal string.
 pub fn hex(bytes: &Bytes) -> String {
     let mut hex = String::new();
     for byte in bytes.iter() {
