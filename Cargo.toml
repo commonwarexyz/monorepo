@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "cryptography",
+    "macros",
     "runtime",
     "p2p",
     "utils",
