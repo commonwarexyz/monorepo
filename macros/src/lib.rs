@@ -20,6 +20,7 @@ use syn::{parse_macro_input, ItemFn, LitStr};
 ///     debug!("This is a debug log (won't be shown)");
 ///     assert_eq!(2 + 2, 4);
 /// }
+/// ```
 #[proc_macro_attribute]
 pub fn test_with_logging(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
