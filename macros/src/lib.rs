@@ -2,6 +2,22 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, ItemFn, LitStr};
 
+/// Capture logs (based on the provided log level) from a test run using
+/// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
+///
+/// This macro defaults to a log level of `DEBUG` if no level is provided.
+///
+/// # Example
+/// ```rust
+/// use commonware_macros::test_with_logging;
+/// use tracing::{debug, info};
+///
+/// #[test_with_logging("INFO")]
+/// fn test_info_level() {
+///     info!("This is an info log");
+///     debug!("This is a debug log (won't be shown)");
+///     assert_eq!(2 + 2, 4);
+/// }
 #[proc_macro_attribute]
 pub fn test_with_logging(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
