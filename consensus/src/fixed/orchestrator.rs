@@ -3,8 +3,9 @@
 use super::{utils::proposal_digest, wire};
 use crate::{Application, Hash, Height, Payload, View, HASH_LENGTH};
 use commonware_cryptography::PublicKey;
+use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{select, Clock, Spawner};
+use commonware_runtime::{Clock, Spawner};
 use commonware_utils::{hash, hex};
 use core::panic;
 use futures::{

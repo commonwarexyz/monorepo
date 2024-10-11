@@ -405,6 +405,7 @@ version = "0.0.2"
 dependencies = [
  "bytes",
  "commonware-cryptography",
+ "commonware-macros",
  "commonware-p2p",
  "commonware-runtime",
  "commonware-utils",

@@ -42,8 +42,9 @@ mod tests {
     use crate::{Application, Hash, Height, Payload};
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, PublicKey, Scheme};
+    use commonware_macros::{select, test_with_logging};
     use commonware_p2p::simulated::{Config, Link, Network};
-    use commonware_runtime::{deterministic::Executor, select, Clock, Runner, Spawner};
+    use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use commonware_utils::{hash, hex};
     use engine::Engine;
     use futures::{channel::mpsc, SinkExt, StreamExt};
@@ -53,7 +54,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::{debug, Level};
+    use tracing::debug;
 
     // TODO: break into official mock object that any consensus can use
     enum Progress {
@@ -171,18 +172,8 @@ mod tests {
         }
     }
 
-    // TODO: add test where vote broadcast very very close to timeout (to ensure no safety faults)
-    // TODO: follow-up with updated links after x views to improve speed and ensure finalizes
-
-    #[test]
+    #[test_with_logging]
     fn test_all_online() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .try_init();
-
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -283,15 +274,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_one_offline() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .try_init();
-
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -397,15 +381,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_catchup() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .try_init();
-
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -582,15 +559,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_all_recovery() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .try_init();
-
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -721,15 +691,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_no_finality() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .try_init();
-
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -835,15 +798,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_partition() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .try_init();
-
         // Create runtime
         let n = 10;
         let required_blocks = 100;
@@ -1018,18 +974,8 @@ mod tests {
         });
     }
 
-    #[test]
+    #[test_with_logging]
     fn test_jank_links() {
-        // Configure logging
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_max_level(Level::DEBUG)
-            .with_line_number(true)
-            .try_init();
-
-        // TODO: failing because blocks in consecutive views have the same height (likely need to be
-        // more particular about honoring notarizations)
-
         // Create runtime
         let n = 10;
         let required_blocks = 20;

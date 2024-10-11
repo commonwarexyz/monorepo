@@ -6,8 +6,9 @@ use super::{
 use crate::{Hash, Height, View, HASH_LENGTH};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_cryptography::{PublicKey, Scheme};
+use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{select, Clock};
+use commonware_runtime::Clock;
 use commonware_utils::{hash, hex, quorum};
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
