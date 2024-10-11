@@ -457,7 +457,8 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         if self.last_finalized < proposal.height {
             // TODO: remove all of this jank/spread out logic around when we verify ancestry during backfill vs at tip
             //
-            // TODO: do we need to broadcast both notarizations?
+            // We broadcast any notarizations we see for a view, so everyone should be able to recover even at tip (as long
+            // as we have not finalized past the view)?
             for view in (parent.view + 1)..proposal.view {
                 if !self.null_notarizations.contains(&view) {
                     debug!(
