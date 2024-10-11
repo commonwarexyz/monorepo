@@ -454,24 +454,29 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         // TODO: add condition to ensure we can't skip a proposal notarization unless there is a null block notarization?
         // if building at height 5 (view 10), need to ensure there are null notarizations to parent (height 4, view V) -> if there are
         // not null notarizations, it is possible those intermediate views could be finalized
-        for view in (parent.view + 1)..proposal.view {
-            if !self.null_notarizations.contains(&view) {
-                debug!(
-                    height = proposal.height,
-                    view,
-                    proposal_view = proposal.view,
-                    parent_view = parent.view,
-                    "missing null notarization"
-                );
-                return false;
-            } else {
-                debug!(
-                    height = proposal.height,
-                    view,
-                    proposal_view = proposal.view,
-                    parent_view = parent.view,
-                    "depending on null notarization"
-                );
+        if self.last_finalized < proposal.height {
+            // TODO: remove all of this jank/spread out logic around when we verify ancestry during backfill vs at tip
+            //
+            // TODO: do we need to broadcast both notarizations?
+            for view in (parent.view + 1)..proposal.view {
+                if !self.null_notarizations.contains(&view) {
+                    debug!(
+                        height = proposal.height,
+                        view,
+                        proposal_view = proposal.view,
+                        parent_view = parent.view,
+                        "missing null notarization"
+                    );
+                    return false;
+                } else {
+                    debug!(
+                        height = proposal.height,
+                        view,
+                        proposal_view = proposal.view,
+                        parent_view = parent.view,
+                        "depending on null notarization"
+                    );
+                }
             }
         }
 

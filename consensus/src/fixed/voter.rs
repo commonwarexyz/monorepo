@@ -966,6 +966,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             if view.broadcast_finalization {
                 debug!(
                     view = finalization.view,
+                    height = finalization.height,
                     reason = "already broadcast finalization",
                     "dropping finalization"
                 );
@@ -1264,7 +1265,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the finalize
-            debug!(view = finalize.view, "broadcast finalize");
+            debug!(
+                view = finalize.view,
+                height = finalize.height,
+                "broadcast finalize"
+            );
             self.handle_finalize(finalize);
         };
 
@@ -1281,7 +1286,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 .unwrap();
 
             // Handle the finalization
-            debug!(view = finalization.view, "broadcast finalization");
+            debug!(
+                view = finalization.view,
+                height = finalization.height,
+                "broadcast finalization"
+            );
             self.handle_finalization(finalization).await;
         };
     }
