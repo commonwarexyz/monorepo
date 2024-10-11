@@ -9,7 +9,8 @@ use super::{
     connection,
 };
 use commonware_cryptography::Scheme;
-use commonware_runtime::{select, Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use commonware_macros::select;
+use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;

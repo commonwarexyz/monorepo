@@ -10,8 +10,9 @@ use commonware_cryptography::{
     },
     PublicKey,
 };
+use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{select, Clock};
+use commonware_runtime::Clock;
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use prost::Message;

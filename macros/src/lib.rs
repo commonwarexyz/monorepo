@@ -6,13 +6,14 @@ use syn::{
     parse::{Parse, ParseStream, Result},
     parse_macro_input,
     spanned::Spanned,
-    Block, Expr, Ident, ItemFn, LitStr, Pat, Token,
+    Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
 
 /// Capture logs (based on the provided log level) from a test run using
 /// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
-///
 /// This macro defaults to a log level of `DEBUG` if no level is provided.
+///
+/// This macro is powered by the `tracing` and `tracing-subscriber` crates.
 ///
 /// # Example
 /// ```rust
@@ -47,7 +48,7 @@ pub fn test_with_logging(attr: TokenStream, item: TokenStream) -> TokenStream {
             "ERROR" => quote! { tracing::Level::ERROR },
             _ => {
                 // Return a compile error for invalid log levels
-                return syn::Error::new_spanned(
+                return Error::new_spanned(
                     level_str,
                     "Invalid log level. Expected one of: TRACE, DEBUG, INFO, WARN, ERROR.",
                 )
@@ -124,6 +125,9 @@ impl Parse for SelectInput {
 }
 
 /// Select the first future that completes (biased by order).
+///
+/// This macro is powered by the `futures::select_biased!` macro
+/// and as such is not bound to a particular executor or runtime.
 ///
 /// # Example
 ///

@@ -7,7 +7,8 @@ use super::{
 use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{select, Clock, Spawner};
+use commonware_macros::select;
+use commonware_runtime::{Clock, Spawner};
 use commonware_utils::hex;
 use futures::{
     channel::{mpsc, oneshot},

@@ -10,7 +10,8 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::{select, Clock, Sink, Spawner, Stream};
+use commonware_macros::select;
+use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use prost::Message;
 use rand::{CryptoRng, Rng};
 

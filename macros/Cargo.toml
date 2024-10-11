@@ -14,12 +14,12 @@ documentation = "https://docs.rs/commonware-macros"
 proc-macro = true
 
 [dependencies]
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+futures = { workspace = true }
 syn = { version = "1.0", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0"
-futures = { workspace = true }
 
 [dev-dependencies]
-tracing = { workspace = true }
 commonware-runtime = { workspace = true }

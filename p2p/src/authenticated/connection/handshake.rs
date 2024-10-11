@@ -2,7 +2,8 @@ use super::{x25519, Error};
 use crate::authenticated::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::{select, Clock, Sink, Spawner, Stream};
+use commonware_macros::select;
+use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use prost::Message;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
