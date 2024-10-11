@@ -1,5 +1,5 @@
 use super::Error;
-use crate::authenticated::wire;
+use crate::{authenticated::wire, Channel};
 use bytes::Bytes;
 use futures::{channel::mpsc, SinkExt};
 
@@ -39,7 +39,7 @@ impl Mailbox {
 }
 
 pub struct Data {
-    pub channel: u32,
+    pub channel: Channel,
     pub message: Bytes,
 }
 
@@ -61,7 +61,7 @@ impl Relay {
     /// business.
     pub async fn content(
         &mut self,
-        channel: u32,
+        channel: Channel,
         message: Bytes,
         priority: bool,
     ) -> Result<(), Error> {

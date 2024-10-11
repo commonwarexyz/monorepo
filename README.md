@@ -7,12 +7,11 @@
 
 ## Primitives 
 
-_Crates in this repository are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
+_Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
-* [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections. 
-* [utils](./utils/README.md): Leverage common functionality across multiple primitives.
+* [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
 
 ## Examples
 
@@ -21,11 +20,13 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends. 
 * [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
-## Documentation 
+## Miscellaneous 
 
-_GitHub hosting does not allow using an arbitrary path for website hosting yet, so we are stuck with `/docs` for now._
+_Sometimes, we opt to maintain software that is neither a primitive nor an example to make it easier to interact with the Commonware Library. Unless otherwise indicated, code in this section is intended to be used in production. Please refer to our [security policy](./SECURITY.md) before disclosing an exploit publicly._
 
-* [docs](./docs): Host information about Commonware at https://commonware.xyz.
+* [docs](./docs): Access information about Commonware at https://commonware.xyz.
+* [macros](./macros/README.md): Augment the development of primitives with procedural macros.
+* [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
 ## Licensing
 

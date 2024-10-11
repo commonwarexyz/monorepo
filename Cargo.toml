@@ -2,8 +2,9 @@
 members = [
     "consensus",
     "cryptography",
-    "runtime",
+    "macros",
     "p2p",
+    "runtime",
     "utils",
     "examples/chat",
     "examples/vrf",
@@ -11,10 +12,11 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-commonware-cryptography = { version = "0.0.9", path = "cryptography" }
-commonware-runtime = { version = "0.0.6", path = "runtime" }
-commonware-p2p = { version = "0.0.20", path = "p2p" }
-commonware-utils = { version = "0.0.1", path = "utils" }
+commonware-cryptography = { version = "0.0.10", path = "cryptography" }
+commonware-macros = { version = "0.0.2", path = "macros" }
+commonware-p2p = { version = "0.0.21", path = "p2p" }
+commonware-runtime = { version = "0.0.7", path = "runtime" }
+commonware-utils = { version = "0.0.2", path = "utils" }
 thiserror = "1.0.63"
 bytes = "1.7.1"
 sha2 = "0.10.8"
@@ -22,9 +24,9 @@ rand = "0.8.5"
 futures = "0.3.30"
 tokio = "1.40.0"
 tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
 prost = "0.13.2"
 prost-build = "0.13.2"
 governor = "0.6.3"
 prometheus-client = "0.22.3"
-tracing-subscriber = "0.3.18"
 clap = "4.5.18"

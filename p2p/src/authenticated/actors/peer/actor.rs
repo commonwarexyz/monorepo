@@ -7,7 +7,8 @@ use crate::authenticated::{
 };
 use bytes::BytesMut;
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::{select, Clock, Handle, Sink, Spawner, Stream};
+use commonware_macros::select;
+use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
 use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
@@ -146,7 +147,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                 let mut deadline = runtime.current() + self.gossip_bit_vec_frequency;
                 loop {
                     select! {
-                        _timeout = runtime.sleep_until(deadline) => {
+                        _ = runtime.sleep_until(deadline) => {
                             // Get latest bitset from tracker (also used as ping)
                             tracker.construct(peer.clone(), mailbox.clone()).await;
 

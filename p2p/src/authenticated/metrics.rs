@@ -1,3 +1,4 @@
+use crate::Channel;
 use commonware_cryptography::PublicKey;
 use commonware_utils::hex;
 use prometheus_client::encoding::EncodeLabelSet;
@@ -43,7 +44,7 @@ impl Message {
             message: Self::PEERS_TYPE,
         }
     }
-    pub fn new_chunk(peer: &PublicKey, channel: u32) -> Self {
+    pub fn new_chunk(peer: &PublicKey, channel: Channel) -> Self {
         Self {
             peer: hex(peer),
             message: channel as i32,

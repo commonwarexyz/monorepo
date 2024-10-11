@@ -5,8 +5,9 @@ use super::{
 };
 use crate::Application;
 use commonware_cryptography::Scheme;
+use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::{select, Clock, Spawner};
+use commonware_runtime::{Clock, Spawner};
 use rand::Rng;
 use tracing::debug;
 
@@ -35,6 +36,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
             runtime.clone(),
             cfg.application,
             cfg.fetch_timeout,
+            cfg.max_fetch_count,
+            cfg.max_fetch_size,
             cfg.validators.clone(),
         );
 
@@ -83,10 +86,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
 
         // Wait for the orchestrator or voter to finish
         select! {
-            _orchestrator = orchestrator => {
+            _ = orchestrator => {
                 debug!("orchestrator finished");
             },
-            _voter = voter => {
+            _ = voter => {
                 debug!("voter finished");
             },
         }

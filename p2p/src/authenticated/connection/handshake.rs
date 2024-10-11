@@ -2,7 +2,8 @@ use super::{x25519, Error};
 use crate::authenticated::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::{select, Clock, Sink, Spawner, Stream};
+use commonware_macros::select;
+use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use prost::Message;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -150,7 +151,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 
         // Wait for up to handshake timeout for response
         let msg = select! {
-            _timeout = runtime.sleep_until(deadline) => {
+            _ = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout);
             },
             result = stream.recv() => {

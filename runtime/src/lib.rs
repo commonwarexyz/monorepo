@@ -127,36 +127,10 @@ pub trait Stream: Sync + Send + 'static {
     fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }
 
-/// Macro to select the first future that completes (biased
-/// by order).
-///
-/// It is not possible to use duplicate variable names with the macro.
-#[macro_export]
-macro_rules! select {
-    (
-        $(
-            $var:ident = $fut:expr => $block:block
-        ),+ $(,)?
-    ) => {{
-        use futures::{pin_mut, select_biased, FutureExt};
-        $(
-            // Fuse each future and assign it to the provided variable
-            let $var = $fut.fuse();
-            pin_mut!($var);
-        )+
-
-        // Use `futures::select_biased!` to await the first future that completes
-        select_biased! {
-            $(
-                $var = $var => $block,
-            )+
-        }
-    }};
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_macros::select;
     use core::panic;
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -265,7 +239,7 @@ mod tests {
                     v = receiver.next() => {
                         panic!("unexpected value: {:?}", v);
                     },
-                    _timeout = context.sleep(Duration::from_millis(100)) => {
+                    _ = context.sleep(Duration::from_millis(100)) => {
                         continue;
                     },
                 };
@@ -277,7 +251,7 @@ mod tests {
 
             // Prefer not reading channel without losing messages
             select! {
-                _timeout = async {} => {
+                _ = async {} => {
                     // Skip reading from channel eventhough populated
                 },
                 v = receiver.next() => {
@@ -288,7 +262,7 @@ mod tests {
             // Process messages
             for i in 0..2 {
                 select! {
-                    _timeout = context.sleep(Duration::from_millis(100)) => {
+                    _ = context.sleep(Duration::from_millis(100)) => {
                         panic!("timeout");
                     },
                     v = receiver.next() => {
