@@ -10,7 +10,8 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use commonware_cryptography::{PublicKey, Scheme};
-use commonware_runtime::{select, Clock, Sink, Spawner, Stream};
+use commonware_macros::select;
+use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use prost::Message;
 use rand::{CryptoRng, Rng};
 
@@ -44,7 +45,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
 
         // Wait for up to handshake timeout to send
         select! {
-            _timeout = runtime.sleep_until(deadline) => {
+            _ = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = sink.send(msg) => {
@@ -54,7 +55,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
 
         // Wait for up to handshake timeout for response
         let msg = select! {
-            _timeout = runtime.sleep_until(deadline) => {
+            _ = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = stream.recv() => {
@@ -110,7 +111,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
 
         // Wait for up to handshake timeout
         select! {
-            _timeout = runtime.sleep_until(handshake.deadline) => {
+            _ = runtime.sleep_until(handshake.deadline) => {
                 return Err(Error::HandshakeTimeout)
             },
             result = handshake.sink.send(msg) => {
