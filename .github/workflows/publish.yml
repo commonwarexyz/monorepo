@@ -17,6 +17,11 @@ jobs:
       uses: ./.github/actions/setup
       with:
         rust-version: ${{ steps.rust-version.outputs.rust_version}}
+    - name: Publish macros 
+      run: cargo publish --manifest-path macros/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish utils 
       run: cargo publish --manifest-path utils/Cargo.toml
       continue-on-error: true

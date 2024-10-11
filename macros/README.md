@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-macros.svg)](https://crates.io/crates/commonware-macros)
 
-TBD
+Augment the development of primitives with procedural macros.
 
 ## Status 
 

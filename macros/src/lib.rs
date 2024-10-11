@@ -1,4 +1,4 @@
-//! TBD
+//! Augment the development of primitives with procedural macros.
 
 use proc_macro::TokenStream;
 use quote::quote;

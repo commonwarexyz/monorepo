@@ -2,8 +2,8 @@
 members = [
     "cryptography",
     "macros",
-    "runtime",
     "p2p",
+    "runtime",
     "utils",
     "examples/chat",
     "examples/vrf",
@@ -12,8 +12,9 @@ resolver = "2"
 
 [workspace.dependencies]
 commonware-cryptography = { version = "0.0.9", path = "cryptography" }
-commonware-runtime = { version = "0.0.6", path = "runtime" }
+commonware-macros = { version = "0.0.1", path = "macros" }
 commonware-p2p = { version = "0.0.20", path = "p2p" }
+commonware-runtime = { version = "0.0.6", path = "runtime" }
 commonware-utils = { version = "0.0.1", path = "utils" }
 thiserror = "1.0.63"
 bytes = "1.7.1"
