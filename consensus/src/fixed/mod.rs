@@ -178,9 +178,10 @@ mod tests {
     fn test_all_online() {
         // Configure logging
         tracing_subscriber::fmt()
+            .with_test_writer()
             .with_max_level(Level::DEBUG)
             .with_line_number(true)
-            .init();
+            .try_init();
 
         // Create runtime
         let n = 5;
@@ -286,9 +287,10 @@ mod tests {
     fn test_one_offline() {
         // Configure logging
         tracing_subscriber::fmt()
+            .with_test_writer()
             .with_max_level(Level::DEBUG)
             .with_line_number(true)
-            .init();
+            .try_init();
 
         // Create runtime
         let n = 5;
@@ -399,9 +401,10 @@ mod tests {
     fn test_catchup() {
         // Configure logging
         tracing_subscriber::fmt()
+            .with_test_writer()
             .with_max_level(Level::DEBUG)
             .with_line_number(true)
-            .init();
+            .try_init();
 
         // Create runtime
         let n = 5;
@@ -583,9 +586,10 @@ mod tests {
     fn test_all_recovery() {
         // Configure logging
         tracing_subscriber::fmt()
+            .with_test_writer()
             .with_max_level(Level::DEBUG)
             .with_line_number(true)
-            .init();
+            .try_init();
 
         // Create runtime
         let n = 5;
@@ -721,9 +725,10 @@ mod tests {
     fn test_no_finality() {
         // Configure logging
         tracing_subscriber::fmt()
+            .with_test_writer()
             .with_max_level(Level::DEBUG)
             .with_line_number(true)
-            .init();
+            .try_init();
 
         // Create runtime
         let n = 5;
@@ -834,9 +839,10 @@ mod tests {
     fn test_partition() {
         // Configure logging
         tracing_subscriber::fmt()
+            .with_test_writer()
             .with_max_level(Level::DEBUG)
             .with_line_number(true)
-            .init();
+            .try_init();
 
         // Create runtime
         let n = 10;
@@ -1016,9 +1022,10 @@ mod tests {
     fn test_jank_links() {
         // Configure logging
         tracing_subscriber::fmt()
+            .with_test_writer()
             .with_max_level(Level::DEBUG)
             .with_line_number(true)
-            .init();
+            .try_init();
 
         // TODO: failing because blocks in consecutive views have the same height (likely need to be
         // more particular about honoring notarizations)
