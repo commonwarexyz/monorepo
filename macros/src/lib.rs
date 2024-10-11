@@ -2,6 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, ItemFn, LitStr};
 
+// TODO: log test?
 #[proc_macro_attribute]
 pub fn traced_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
