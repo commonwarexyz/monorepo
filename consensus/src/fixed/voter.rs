@@ -1321,14 +1321,14 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             let null_timeout = self.timeout_deadline();
             let view;
             select! {
-                _timeout = self.runtime.sleep_until(null_timeout) => {
+                _ = self.runtime.sleep_until(null_timeout) => {
                     // Trigger the timeout
                     self.timeout(&mut sender).await;
                     view = self.view;
                 },
-                result = receiver.recv() => {
+                msg = receiver.recv() => {
                     // Parse message
-                    let (s, msg) = result.unwrap();
+                    let (s, msg) = msg.unwrap();
                     let msg = match wire::Consensus::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {

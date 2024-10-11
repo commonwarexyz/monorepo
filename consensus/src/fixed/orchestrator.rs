@@ -833,7 +833,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
             // Wait for an event
             select! {
-                _task_timeout = missing_timeout => {
+                _ = missing_timeout => {
                     // Send request again
                     let (_, height, hash, _)= outstanding_task.take().unwrap();
                     let validator = self.send_request(height, hash.clone(), &mut sender).await;
