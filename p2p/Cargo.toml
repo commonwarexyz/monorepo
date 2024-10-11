@@ -2,7 +2,7 @@
 name = "commonware-p2p"
 edition = "2021"
 publish = true
-version = "0.0.20"
+version = "0.0.21"
 license = "MIT OR Apache-2.0"
 description = "Communicate with authenticated peers over encrypted connections."
 readme = "README.md"
@@ -12,6 +12,7 @@ documentation = "https://docs.rs/commonware-p2p"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true } 
@@ -31,3 +32,6 @@ rand_distr = "0.4"
 
 [build-dependencies]
 prost-build = { workspace = true } 
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

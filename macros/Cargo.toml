@@ -1,0 +1,25 @@
+[package]
+name = "commonware-macros"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "Augment the development of primitives with procedural macros."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/macros"
+documentation = "https://docs.rs/commonware-macros"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+syn = { version = "1.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+
+[dev-dependencies]
+futures-timer = "3.0.3"

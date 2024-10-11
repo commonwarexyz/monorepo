@@ -12,8 +12,9 @@ use commonware_cryptography::{
     },
     PublicKey, Scheme,
 };
+use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{select, Clock};
+use commonware_runtime::Clock;
 use commonware_utils::hex;
 use prost::Message;
 use std::{
@@ -103,7 +104,7 @@ impl<E: Clock> Arbiter<E> {
         );
         loop {
             select! {
-                _timeout = self.runtime.sleep_until(t_commitment) => {
+                _ = self.runtime.sleep_until(t_commitment) => {
                     debug!("commitment phase timed out");
                     break
                 },
@@ -206,7 +207,7 @@ impl<E: Clock> Arbiter<E> {
         // Collect acks and complaints
         loop {
             select! {
-                _timeout = self.runtime.sleep_until(t_ack) => {
+                _ = self.runtime.sleep_until(t_ack) => {
                     debug!("ack phase timed out");
                     break
                 },
@@ -372,7 +373,7 @@ impl<E: Clock> Arbiter<E> {
         let mut signatures = HashMap::new();
         loop {
             select! {
-                _timeout = self.runtime.sleep_until(t_repair) => {
+                _ = self.runtime.sleep_until(t_repair) => {
                     break
                 },
                 result = receiver.recv() => {

@@ -114,7 +114,8 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, select, Clock, Runner, Spawner};
+    use commonware_macros::select;
+    use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use commonware_utils::hex;
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use prometheus_client::registry::Registry;
@@ -500,10 +501,10 @@ mod tests {
 
             // Confirm no message delivery
             select! {
-                _msg = receiver2.recv() => {
+                _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = runtime.sleep(Duration::from_secs(1)) => {},
             }
         });
     }
@@ -552,10 +553,10 @@ mod tests {
 
             // Confirm no message delivery
             select! {
-                _msg = receiver2.recv() => {
+                _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = runtime.sleep(Duration::from_secs(1)) => {},
             }
         });
     }
@@ -694,13 +695,13 @@ mod tests {
 
             // Confirm no message delivery
             select! {
-                _msg1 = receiver1.recv() => {
+                _ = receiver1.recv() => {
                     panic!("unexpected message");
                 },
-                _msg2 = receiver2.recv() => {
+                _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = runtime.sleep(Duration::from_secs(1)) => {},
             }
 
             // Link agents
@@ -767,13 +768,13 @@ mod tests {
 
             // Confirm no message delivery
             select! {
-                _msg1 = receiver1.recv() => {
+                _ = receiver1.recv() => {
                     panic!("unexpected message");
                 },
-                _msg2 = receiver2.recv() => {
+                _ = receiver2.recv() => {
                     panic!("unexpected message");
                 },
-                _timeout = runtime.sleep(Duration::from_secs(1)) => {},
+                _ = runtime.sleep(Duration::from_secs(1)) => {},
             }
 
             // Remove non-existent links
