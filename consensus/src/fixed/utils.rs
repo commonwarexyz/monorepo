@@ -5,8 +5,8 @@ pub fn proposal_digest(view: View, height: Height, parent: &Hash, payload_hash: 
     let mut msg = Vec::new();
     msg.extend_from_slice(&view.to_be_bytes());
     msg.extend_from_slice(&height.to_be_bytes());
-    msg.extend_from_slice(&parent);
-    msg.extend_from_slice(&payload_hash);
+    msg.extend_from_slice(parent);
+    msg.extend_from_slice(payload_hash);
     msg.into()
 }
 
@@ -24,6 +24,6 @@ pub fn finalize_digest(view: crate::View, height: Height, proposal_hash: &Hash) 
     let mut msg = Vec::new();
     msg.extend_from_slice(&view.to_be_bytes());
     msg.extend_from_slice(&height.to_be_bytes());
-    msg.extend_from_slice(&proposal_hash);
+    msg.extend_from_slice(proposal_hash);
     msg.into()
 }

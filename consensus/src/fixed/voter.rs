@@ -271,6 +271,9 @@ pub struct Config {
     pub validators: BTreeMap<View, Vec<PublicKey>>,
 }
 
+// TODO: improve name here
+type ValidatorSet = (u32, Vec<PublicKey>, HashMap<PublicKey, u32>);
+
 pub struct Voter<E: Clock + Rng, C: Scheme> {
     runtime: E,
     crypto: C,
@@ -284,7 +287,7 @@ pub struct Voter<E: Clock + Rng, C: Scheme> {
 
     orchestrator: Mailbox,
 
-    validators: BTreeMap<View, (u32, Vec<PublicKey>, HashMap<PublicKey, u32>)>,
+    validators: BTreeMap<View, ValidatorSet>,
 
     last_finalized: View,
     view: View,
@@ -295,10 +298,7 @@ pub struct Voter<E: Clock + Rng, C: Scheme> {
 }
 
 impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
-    fn leader(
-        validators: &BTreeMap<View, (u32, Vec<PublicKey>, HashMap<PublicKey, u32>)>,
-        view: crate::View,
-    ) -> PublicKey {
+    fn leader(validators: &BTreeMap<View, ValidatorSet>, view: crate::View) -> PublicKey {
         let (_, (_, ref validators, _)) = validators
             .range(..=view)
             .next_back()
@@ -307,7 +307,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
     }
 
     fn validator_info(
-        validators: &BTreeMap<View, (u32, Vec<PublicKey>, HashMap<PublicKey, u32>)>,
+        validators: &BTreeMap<View, ValidatorSet>,
         view: crate::View,
     ) -> &(u32, Vec<PublicKey>, HashMap<PublicKey, u32>) {
         validators
