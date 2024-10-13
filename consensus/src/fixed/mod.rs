@@ -40,138 +40,21 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Application, Hash, Height, Payload};
+    use crate::mocks::{self, Progress};
     use bytes::Bytes;
-    use commonware_cryptography::{Ed25519, PublicKey, Scheme};
+    use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::{select, test_with_logging};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
-    use commonware_utils::{hash, hex};
     use engine::Engine;
-    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use futures::{channel::mpsc, StreamExt};
     use prometheus_client::registry::Registry;
     use std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, HashSet},
         sync::{Arc, Mutex},
         time::Duration,
     };
     use tracing::debug;
-
-    // TODO: break into official mock object that any consensus can use
-    enum Progress {
-        Notarized(Height),
-        Finalized(Height),
-    }
-    struct MockApplication {
-        participant: PublicKey,
-
-        verified: HashMap<Hash, Height>,
-        finalized: HashMap<Hash, Height>,
-
-        progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
-    }
-
-    impl MockApplication {
-        fn new(
-            participant: PublicKey,
-            sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
-        ) -> Self {
-            Self {
-                participant,
-                verified: HashMap::new(),
-                finalized: HashMap::new(),
-                progress: sender,
-            }
-        }
-
-        fn verify_payload(height: Height, payload: &Payload) {
-            if payload.len() != 32 + 8 {
-                panic!("invalid payload length");
-            }
-            let parsed_height = Height::from_be_bytes(payload[32..].try_into().unwrap());
-            if parsed_height != height {
-                panic!("invalid height");
-            }
-        }
-    }
-
-    impl Application for MockApplication {
-        fn genesis(&mut self) -> (Hash, Payload) {
-            let payload = Bytes::from("genesis");
-            let hash = hash(&payload);
-            self.verified.insert(hash.clone(), 0);
-            self.finalized.insert(hash.clone(), 0);
-            (hash, payload)
-        }
-
-        async fn propose(&mut self, parent: Hash, height: Height) -> Option<Payload> {
-            let parent = self.verified.get(&parent).expect("parent not verified");
-            if parent + 1 != height {
-                panic!("invalid height");
-            }
-            let mut payload = Vec::new();
-            payload.extend_from_slice(&self.participant);
-            payload.extend_from_slice(&height.to_be_bytes());
-            Some(Bytes::from(payload))
-        }
-
-        fn parse(&self, _parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
-            Self::verify_payload(height, &payload);
-            Some(hash(&payload))
-        }
-
-        async fn verify(
-            &mut self,
-            parent: Hash,
-            height: Height,
-            payload: Payload,
-            hash: Hash,
-        ) -> bool {
-            if let Some(height) = self.verified.get(&hash) {
-                panic!("hash already verified: {}:{:?}", height, hex(&hash));
-            }
-            Self::verify_payload(height, &payload);
-            let parent = match self.verified.get(&parent) {
-                Some(parent) => parent,
-                None => {
-                    panic!(
-                        "[{:?}] parent {:?} of {}, not verified",
-                        hex(&self.participant),
-                        hex(&parent),
-                        height
-                    );
-                }
-            };
-            if parent + 1 != height {
-                panic!("invalid height");
-            }
-            self.verified.insert(hash.clone(), height);
-            true
-        }
-
-        async fn notarized(&mut self, hash: Hash) {
-            let height = self.verified.get(&hash).expect("hash not verified");
-            if self.finalized.contains_key(&hash) {
-                panic!("hash already finalized");
-            }
-            self.progress
-                .send((self.participant.clone(), Progress::Notarized(*height)))
-                .await
-                .unwrap();
-        }
-
-        async fn finalized(&mut self, hash: Hash) {
-            if let Some(height) = self.finalized.get(&hash) {
-                panic!("hash already finalized: {}:{:?}", height, hex(&hash));
-            }
-            let height = self.verified.get(&hash).expect("hash not verified");
-            self.finalized.insert(hash, *height);
-            self.progress
-                .send((self.participant.clone(), Progress::Finalized(*height)))
-                .await
-                .unwrap();
-        }
-    }
 
     #[test_with_logging]
     fn test_all_online() {
@@ -239,7 +122,7 @@ mod tests {
                 // Start engine
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: MockApplication::new(validator, done_sender.clone()),
+                    application: mocks::Application::new(validator, done_sender.clone()),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -346,7 +229,7 @@ mod tests {
                 // Start engine
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: MockApplication::new(validator, done_sender.clone()),
+                    application: mocks::Application::new(validator, done_sender.clone()),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -453,7 +336,7 @@ mod tests {
                 // Start engine
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: MockApplication::new(validator, done_sender.clone()),
+                    application: mocks::Application::new(validator, done_sender.clone()),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -525,7 +408,7 @@ mod tests {
             // Start engine
             let cfg = config::Config {
                 crypto: scheme,
-                application: MockApplication::new(validator, done_sender.clone()),
+                application: mocks::Application::new(validator, done_sender.clone()),
                 registry: Arc::new(Mutex::new(Registry::default())),
                 namespace: Bytes::from("consensus"),
                 leader_timeout: Duration::from_secs(1),
@@ -626,7 +509,7 @@ mod tests {
                 // Start engine
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: MockApplication::new(validator, done_sender.clone()),
+                    application: mocks::Application::new(validator, done_sender.clone()),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -758,7 +641,7 @@ mod tests {
                 // Start engine
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: MockApplication::new(validator, done_sender.clone()),
+                    application: mocks::Application::new(validator, done_sender.clone()),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -865,7 +748,7 @@ mod tests {
                 // Start engine
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: MockApplication::new(validator, done_sender.clone()),
+                    application: mocks::Application::new(validator, done_sender.clone()),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -1041,7 +924,7 @@ mod tests {
                 // Start engine
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: MockApplication::new(validator, done_sender.clone()),
+                    application: mocks::Application::new(validator, done_sender.clone()),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
