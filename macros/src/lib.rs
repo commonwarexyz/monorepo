@@ -231,11 +231,10 @@ pub fn select(input: TokenStream) -> TokenStream {
     // Generate the final output code
     quote! {
         {
-            use futures::{FutureExt, select_biased};
-
+            use futures::FutureExt as _;
             #(#stmts)*
 
-            select_biased! {
+            futures::select_biased! {
                 #(#select_branches)*
             }
         }
