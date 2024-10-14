@@ -1,7 +1,7 @@
 //! Backfill missing proposals seen in consensus.
 
 use super::{utils::proposal_digest, voter::VoterMailbox, wire};
-use crate::{Application, Hash, Height, Parser, Payload, View, HASH_LENGTH};
+use crate::{Hash, Height, Parser, Payload, Processor, View, HASH_LENGTH};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -13,11 +13,8 @@ use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
-use std::{
-    collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
-    marker::PhantomData,
-};
 use tracing::{debug, warn};
 
 pub enum Message {
@@ -95,10 +92,10 @@ enum Knowledge {
     Finalized(Hash),
 }
 
-pub struct Orchestrator<E: Clock + Rng + Spawner, P: Parser, A: Application> {
+pub struct Orchestrator<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> {
     runtime: E,
-    parser: P,
-    application: A,
+    parser: Pa,
+    processor: Pr,
 
     fetch_timeout: Duration,
     max_fetch_count: u64,
@@ -135,11 +132,11 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, P: Parser, A: Application> {
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> {
+impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr> {
     pub fn new(
         runtime: E,
-        parser: P,
-        mut application: A,
+        parser: Pa,
+        mut processor: Pr,
         fetch_timeout: Duration,
         max_fetch_count: u64,
         max_fetch_size: usize,
@@ -149,7 +146,7 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
         let mut verified = HashMap::new();
         let mut knowledge = HashMap::new();
         let mut blocks = HashMap::new();
-        let genesis = application.genesis();
+        let genesis = processor.genesis();
         verified.insert(0, HashSet::from([genesis.0.clone()]));
         knowledge.insert(0, Knowledge::Finalized(genesis.0.clone()));
 
@@ -171,7 +168,7 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
             Self {
                 runtime,
                 parser,
-                application,
+                processor,
 
                 fetch_timeout,
                 max_fetch_count,
@@ -330,7 +327,7 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
                             .entry(next)
                             .or_default()
                             .insert(hash.clone());
-                        self.application.notarized(hash.clone()).await;
+                        self.processor.notarized(hash.clone()).await;
                     }
                 }
                 Knowledge::Finalized(hash) => {
@@ -357,7 +354,7 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
                     self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
-                    self.application.finalized(hash.clone()).await;
+                    self.processor.finalized(hash.clone()).await;
                 }
             }
 
@@ -409,7 +406,7 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
 
         // Propose block
         let height = parent.1 + 1;
-        let payload = match self.application.propose(parent.0.clone(), height).await {
+        let payload = match self.processor.propose(parent.0.clone(), height).await {
             Some(payload) => payload,
             None => {
                 return None;
@@ -515,7 +512,7 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
 
         // Verify payload
         if self
-            .application
+            .processor
             .verify(
                 proposal.parent.clone(),
                 proposal.height,

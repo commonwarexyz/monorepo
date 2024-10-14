@@ -3,7 +3,7 @@ use super::{
     orchestrator::{self, Mailbox},
     voter::{self, Voter, VoterMailbox},
 };
-use crate::{Application, Parser};
+use crate::{Parser, Processor};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -11,18 +11,18 @@ use commonware_runtime::{Clock, Spawner};
 use rand::Rng;
 use tracing::debug;
 
-pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, P: Parser, A: Application> {
+pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, Pa: Parser, Pr: Processor> {
     runtime: E,
 
-    orchestrator: orchestrator::Orchestrator<E, P, A>,
+    orchestrator: orchestrator::Orchestrator<E, Pa, Pr>,
     orchestrator_mailbox: Mailbox,
 
-    voter: Voter<E, C, P>,
+    voter: Voter<E, C, Pa>,
     voter_mailbox: VoterMailbox,
 }
 
-impl<E: Clock + Rng + Spawner, C: Scheme, P: Parser, A: Application> Engine<E, C, P, A> {
-    pub fn new(runtime: E, mut cfg: Config<C, P, A>) -> Self {
+impl<E: Clock + Rng + Spawner, C: Scheme, Pa: Parser, Pr: Processor> Engine<E, C, Pa, Pr> {
+    pub fn new(runtime: E, mut cfg: Config<C, Pa, Pr>) -> Self {
         // Sort the validators at each view
         if cfg.validators.is_empty() {
             panic!("no validators specified");
@@ -38,7 +38,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, P: Parser, A: Application> Engine<E, C
         let (orchestrator, orchestrator_mailbox) = orchestrator::Orchestrator::new(
             runtime.clone(),
             cfg.parser.clone(),
-            cfg.application,
+            cfg.processor,
             cfg.fetch_timeout,
             cfg.max_fetch_count,
             cfg.max_fetch_size,

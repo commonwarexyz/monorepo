@@ -36,7 +36,7 @@ pub trait Parser: Clone + Send + 'static {
 /// outputs of block in next block?
 /// TODO: perform verification async so can keep responding to messages?
 /// TODO: change name
-pub trait Application: Send + 'static {
+pub trait Processor: Send + 'static {
     /// Initialize the application with the genesis block at view=0, height=0.
     fn genesis(&mut self) -> (Hash, Payload);
 
