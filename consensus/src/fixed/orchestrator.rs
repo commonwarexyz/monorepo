@@ -810,15 +810,16 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Propose { response } => {
-                            let proposal = self.propose().await;
-                            response.send(proposal).unwrap();
+                        Message::Propose { view } => {
+                            let (parent, height, payload, payload_hash)= match self.propose().await{
+                                Some(proposal) => proposal,
+                                None => {
+                                    continue;
+                                }
+                            };
+                            voter.proposal(view, parent, height, payload, payload_hash).await;
                         }
-                        Message::Parse { parent, height, payload, response } => {
-                            let hash = self.parse(parent, height, payload).await;
-                            response.send(hash).unwrap();
-                        }
-                        Message::Verify { hash, proposal, response } => {
+                        Message::Verify { hash, proposal } => {
                             // If proposal height is already finalized, fail
                             //
                             // We will only verify old proposals via notify loop.
@@ -828,13 +829,15 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
                                     finalized = self.last_finalized,
                                     "already finalized"
                                 );
-                                response.send(false).unwrap();
                                 continue;
                             }
 
                             // Attempt to verify proposal
-                            let result = self.verify(hash, proposal).await;
-                            response.send(result).unwrap();
+                            let proposal_view = proposal.view;
+                            if !self.verify(hash, proposal).await {
+                                continue;
+                            }
+                            voter.verified(proposal_view).await;
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,
                         Message::NullNotarized { view } => self.null_notarized(view).await,
@@ -943,7 +946,7 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
                                     warn!(sender = hex(&s), "invalid proposal parent hash size");
                                     break;
                                 }
-                                let payload_hash = match P::parse(proposal.payload.clone()) {
+                                let payload_hash = match self.parser.parse(proposal.payload.clone()) {
                                     Some(payload_hash) => payload_hash,
                                     None => {
                                         warn!(sender = hex(&s), "unable to parse notarized/finalized payload");

@@ -15,7 +15,6 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 use prost::Message;
 use rand::Rng;
-use std::marker::PhantomData;
 use std::sync::atomic::AtomicI64;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
