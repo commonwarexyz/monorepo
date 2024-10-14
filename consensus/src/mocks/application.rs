@@ -301,75 +301,110 @@ mod tests {
         });
     }
 
-    // #[test_async]
-    // #[should_panic(expected = "parent not verified")]
-    // async fn test_propose_invalid_parent() {
-    //     // Create the application
-    //     let participant = Ed25519::from_seed(0).public_key();
-    //     let (sender, _) = mpsc::unbounded();
-    //     let mut app = Application::new(participant, sender);
+    #[test]
+    #[should_panic(expected = "parent not verified")]
+    fn test_propose_invalid_parent() {
+        // Create the runtime
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create the application
+            let participant = Ed25519::from_seed(0).public_key();
+            let (sender, _) = mpsc::unbounded();
+            let cfg = Config {
+                participant,
+                sender,
+                propose_latency: (10.0, 5.0),
+                parse_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let mut app = Application::new(runtime, cfg);
 
-    //     // Create an invalid parent hash
-    //     let invalid_parent = hash(&Bytes::from_static(b"invalid"));
+            // Create an invalid parent hash
+            let invalid_parent = hash(&Bytes::from_static(b"invalid"));
 
-    //     // Attempt to propose a block with invalid parent, should panic
-    //     let height = 1;
-    //     app.propose(invalid_parent.clone(), height).await;
-    // }
+            // Attempt to propose a block with invalid parent, should panic
+            let height = 1;
+            app.propose(invalid_parent.clone(), height).await;
+        });
+    }
 
-    // #[test_async]
-    // #[should_panic(expected = "invalid height")]
-    // async fn test_propose_invalid_height() {
-    //     // Create the application
-    //     let participant = Ed25519::from_seed(0).public_key();
-    //     let (sender, _) = mpsc::unbounded();
-    //     let mut app = Application::new(participant, sender);
+    #[test]
+    #[should_panic(expected = "invalid height")]
+    fn test_propose_invalid_height() {
+        // Create the runtime
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create the application
+            let participant = Ed25519::from_seed(0).public_key();
+            let (sender, _) = mpsc::unbounded();
+            let cfg = Config {
+                participant,
+                sender,
+                propose_latency: (10.0, 5.0),
+                parse_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let mut app = Application::new(runtime, cfg);
 
-    //     // Genesis
-    //     let (genesis_hash, _) = app.genesis();
+            // Genesis
+            let (genesis_hash, _) = app.genesis();
 
-    //     // Propose a block at height 1
-    //     let parent = genesis_hash.clone();
-    //     let height = 100;
-    //     app.propose(parent.clone(), height)
-    //         .await
-    //         .expect("propose failed");
-    // }
+            // Propose a block at height 1
+            let parent = genesis_hash.clone();
+            let height = 100;
+            app.propose(parent.clone(), height)
+                .await
+                .expect("propose failed");
+        });
+    }
 
-    // #[test_async]
-    // #[should_panic(expected = "invalid height")]
-    // async fn test_verify_invalid_height() {
-    //     // Create the application
-    //     let participant = Ed25519::from_seed(0).public_key();
-    //     let (sender, _) = mpsc::unbounded();
-    //     let mut app = Application::new(participant, sender);
+    #[test]
+    #[should_panic(expected = "invalid height")]
+    fn test_verify_invalid_height() {
+        // Create the runtime
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create the application
+            let participant = Ed25519::from_seed(0).public_key();
+            let (sender, _) = mpsc::unbounded();
+            let cfg = Config {
+                participant,
+                sender,
+                propose_latency: (10.0, 5.0),
+                parse_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let mut app = Application::new(runtime, cfg);
 
-    //     // Genesis
-    //     let (genesis_hash, _) = app.genesis();
+            // Genesis
+            let (genesis_hash, _) = app.genesis();
 
-    //     // Propose a block at height 1
-    //     let parent = genesis_hash.clone();
-    //     let height = 1;
-    //     let payload = app
-    //         .propose(parent.clone(), height)
-    //         .await
-    //         .expect("propose failed");
+            // Propose a block at height 1
+            let parent = genesis_hash.clone();
+            let height = 1;
+            let (payload, payload_hash) = app
+                .propose(parent.clone(), height)
+                .await
+                .expect("propose failed");
 
-    //     // Parse the payload to get the hash
-    //     let hash = app
-    //         .parse(parent.clone(), height, payload.clone())
-    //         .expect("parse failed");
+            // Parse the payload to get the hash
+            let hash = app
+                .parse(parent.clone(), height, payload.clone())
+                .await
+                .expect("parse failed");
+            assert_eq!(hash, payload_hash);
 
-    //     // Attempt to verify the block with incorrect height (e.g., height 2)
-    //     let invalid_height = 2;
-    //     app.verify(
-    //         parent.clone(),
-    //         invalid_height,
-    //         payload.clone(),
-    //         hash.clone(),
-    //     )
-    //     .await;
-    // }
+            // Attempt to verify the block with incorrect height (e.g., height 2)
+            let invalid_height = 2;
+            app.verify(
+                parent.clone(),
+                invalid_height,
+                payload.clone(),
+                hash.clone(),
+            )
+            .await;
+        });
+    }
 
     // #[test_async]
     // #[should_panic(expected = "parent not verified")]
