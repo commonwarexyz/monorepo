@@ -400,6 +400,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-consensus"
+version = "0.0.2"
+dependencies = [
+ "bytes",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "prometheus-client",
+ "prost",
+ "prost-build",
+ "rand",
+ "rand_distr",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-cryptography"
 version = "0.0.10"
 dependencies = [

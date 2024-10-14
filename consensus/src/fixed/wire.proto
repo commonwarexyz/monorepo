@@ -1,0 +1,78 @@
+syntax = "proto3";
+package wire;
+
+message Consensus {
+    oneof payload {
+        Proposal proposal = 1;
+        Vote vote = 2;
+        Notarization notarization = 3;
+        Finalize finalize = 4;  
+        Finalization finalization = 5;
+    }
+}
+
+message Proposal {
+    uint64 view = 1;
+    uint64 height = 2;
+    bytes parent = 3;
+    bytes payload = 4;
+
+    Signature signature = 5;
+}
+
+message Vote {
+    uint64 view = 1;
+    uint64 height = 2;
+    optional bytes hash = 3; 
+
+    Signature signature = 4;
+}
+
+message Notarization {
+    uint64 view = 1;
+    uint64 height = 2;
+    optional bytes hash = 3;
+    
+    repeated Signature signatures = 4;
+}
+
+message Finalize {
+    uint64 view = 1;
+    uint64 height = 2;
+    bytes hash = 3;
+
+    Signature signature = 4;
+}
+
+message Finalization {
+    uint64 view = 1;
+    uint64 height = 2;
+    bytes hash = 3;
+
+    repeated Signature signatures = 4;
+}
+
+message Signature {
+    bytes public_key = 1;
+    bytes signature = 2;
+}
+
+message Backfill {
+    oneof payload {
+        Request request = 1;
+        Resolution resolution = 2;
+        Missing missing = 3;
+    }
+}
+message Request {
+    bytes hash = 1;
+    uint64 parents = 2;
+}
+
+message Resolution {
+    repeated Proposal proposals = 1;
+}
+
+message Missing {
+    bytes hash = 1;
+}
