@@ -419,24 +419,20 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
         // Propose block
         let height = parent.1 + 1;
-        let payload = match self.application.propose(parent.0.clone(), height).await {
+        let (payload, payload_hash) = match self.application.propose(parent.0.clone(), height).await
+        {
             Some(payload) => payload,
             None => {
                 return None;
             }
         };
 
-        let payload_hash = self
-            .application
-            .parse(parent.0.clone(), height, payload.clone())
-            .unwrap();
-
         // Generate proposal
         Some((parent.0, height, payload_hash, payload))
     }
 
-    pub fn parse(&self, parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
-        self.application.parse(parent, height, payload)
+    pub async fn parse(&mut self, parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
+        self.application.parse(parent, height, payload).await
     }
 
     fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
@@ -849,7 +845,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                             response.send(proposal).unwrap();
                         }
                         Message::Parse { parent, height, payload, response } => {
-                            let hash = self.parse(parent, height, payload);
+                            let hash = self.parse(parent, height, payload).await;
                             response.send(hash).unwrap();
                         }
                         Message::Verify { hash, proposal, response } => {
@@ -977,7 +973,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                     warn!(sender = hex(&s), "invalid proposal parent hash size");
                                     break;
                                 }
-                                let payload_hash = match self.application.parse(proposal.parent.clone(), proposal.height, proposal.payload.clone()) {
+                                let payload_hash = match self.application.parse(proposal.parent.clone(), proposal.height, proposal.payload.clone()).await {
                                     Some(payload_hash) => payload_hash,
                                     None => {
                                         warn!(sender = hex(&s), "unable to parse notarized/finalized payload");

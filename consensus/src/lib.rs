@@ -41,12 +41,17 @@ pub trait Application: Send + 'static {
         &mut self,
         parent: Hash,
         height: Height,
-    ) -> impl Future<Output = Option<Payload>> + Send;
+    ) -> impl Future<Output = Option<(Payload, Hash)>> + Send;
 
     /// Parse the payload and return the hash of the payload.
     ///
     /// Parse is a stateless operation and may be called out-of-order.
-    fn parse(&self, parent: Hash, height: Height, payload: Payload) -> Option<Hash>;
+    fn parse(
+        &mut self,
+        parent: Hash,
+        height: Height,
+        payload: Payload,
+    ) -> impl Future<Output = Option<Hash>> + Send;
 
     /// Verify the payload is valid.
     ///
@@ -56,16 +61,16 @@ pub trait Application: Send + 'static {
         parent: Hash,
         height: Height,
         payload: Payload,
-        hash: Hash,
+        block: Hash,
     ) -> impl Future<Output = bool> + Send;
 
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, hash: Hash) -> impl Future<Output = ()> + Send;
+    fn notarized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
 
     /// Event that the payload has been finalized.
-    fn finalized(&mut self, hash: Hash) -> impl Future<Output = ()> + Send;
+    fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
 }
 
 // Example Payload (Transfers):

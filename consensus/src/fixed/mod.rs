@@ -40,7 +40,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mocks::{self, Progress};
+    use crate::mocks::application::{Application, Config as ApplicationConfig, Progress};
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::{select, test_traced};
@@ -110,8 +110,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 1.0,
+                                latency: 10.0,
+                                jitter: 1.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -120,9 +120,16 @@ mod tests {
                 }
 
                 // Start engine
+                let application_cfg = ApplicationConfig {
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: mocks::Application::new(validator, done_sender.clone()),
+                    application: Application::new(runtime.clone(), application_cfg),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -145,7 +152,7 @@ mod tests {
             let mut completed = HashSet::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height) = event {
+                if let Progress::Finalized(height, _) = event {
                     if height < required_blocks {
                         continue;
                     }
@@ -217,8 +224,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 1.0,
+                                latency: 10.0,
+                                jitter: 1.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -227,9 +234,16 @@ mod tests {
                 }
 
                 // Start engine
+                let application_cfg = ApplicationConfig {
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: mocks::Application::new(validator, done_sender.clone()),
+                    application: Application::new(runtime.clone(), application_cfg),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -252,7 +266,7 @@ mod tests {
             let mut completed = HashSet::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height) = event {
+                if let Progress::Finalized(height, _) = event {
                     if height < required_blocks {
                         continue;
                     }
@@ -324,8 +338,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 2.5,
+                                latency: 10.0,
+                                jitter: 2.5,
                                 success_rate: 1.0,
                             },
                         )
@@ -334,9 +348,16 @@ mod tests {
                 }
 
                 // Start engine
+                let application_cfg = ApplicationConfig {
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: mocks::Application::new(validator, done_sender.clone()),
+                    application: Application::new(runtime.clone(), application_cfg),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -360,7 +381,7 @@ mod tests {
             let mut highest_finalized = 0;
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height) = event {
+                if let Progress::Finalized(height, _) = event {
                     if height > highest_finalized {
                         highest_finalized = height;
                     }
@@ -396,8 +417,8 @@ mod tests {
                         validator.clone(),
                         other.clone(),
                         Link {
-                            latency_mean: 10.0,
-                            latency_stddev: 2.5,
+                            latency: 10.0,
+                            jitter: 2.5,
                             success_rate: 1.0,
                         },
                     )
@@ -406,9 +427,16 @@ mod tests {
             }
 
             // Start engine
+            let application_cfg = ApplicationConfig {
+                participant: validator,
+                sender: done_sender.clone(),
+                propose_latency: (10.0, 5.0),
+                parse_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
             let cfg = config::Config {
                 crypto: scheme,
-                application: mocks::Application::new(validator, done_sender.clone()),
+                application: Application::new(runtime.clone(), application_cfg),
                 registry: Arc::new(Mutex::new(Registry::default())),
                 namespace: Bytes::from("consensus"),
                 leader_timeout: Duration::from_secs(1),
@@ -432,7 +460,7 @@ mod tests {
                 if validator != validator {
                     continue;
                 }
-                if let Progress::Finalized(height) = event {
+                if let Progress::Finalized(height, _) = event {
                     if height < highest_finalized + required_blocks {
                         // We want to see `required_blocks` once we catch up
                         continue;
@@ -497,8 +525,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 3000.0,
-                                latency_stddev: 0.0,
+                                latency: 3000.0,
+                                jitter: 0.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -507,9 +535,16 @@ mod tests {
                 }
 
                 // Start engine
+                let application_cfg = ApplicationConfig {
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: mocks::Application::new(validator, done_sender.clone()),
+                    application: Application::new(runtime.clone(), application_cfg),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -548,8 +583,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 1.0,
+                                latency: 10.0,
+                                jitter: 1.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -562,7 +597,7 @@ mod tests {
             let mut completed = HashSet::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height) = event {
+                if let Progress::Finalized(height, _) = event {
                     if height < required_blocks {
                         continue;
                     }
@@ -629,8 +664,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 800.0,
-                                latency_stddev: 0.0,
+                                latency: 800.0,
+                                jitter: 0.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -639,9 +674,16 @@ mod tests {
                 }
 
                 // Start engine
+                let application_cfg = ApplicationConfig {
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: mocks::Application::new(validator, done_sender.clone()),
+                    application: Application::new(runtime.clone(), application_cfg),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -665,13 +707,13 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 match event {
-                    Progress::Notarized(height) => {
+                    Progress::Notarized(height, _) => {
                         if height < required_blocks {
                             continue;
                         }
                         completed.insert(validator);
                     }
-                    Progress::Finalized(_) => {
+                    Progress::Finalized(_, _) => {
                         panic!("should not finalize");
                     }
                 }
@@ -736,8 +778,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 0.0,
+                                latency: 10.0,
+                                jitter: 0.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -746,9 +788,16 @@ mod tests {
                 }
 
                 // Start engine
+                let application_cfg = ApplicationConfig {
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: mocks::Application::new(validator, done_sender.clone()),
+                    application: Application::new(runtime.clone(), application_cfg),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -772,7 +821,7 @@ mod tests {
             let mut highest_finalized = 0;
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height) = event {
+                if let Progress::Finalized(height, _) = event {
                     if height > highest_finalized {
                         highest_finalized = height;
                     }
@@ -803,6 +852,9 @@ mod tests {
                 }
             }
 
+            // Wait for any in-progress notarizations/finalizations to finish
+            runtime.sleep(Duration::from_secs(10)).await;
+
             // Empty done receiver
             loop {
                 if done_receiver.try_next().is_err() {
@@ -831,8 +883,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 1.0,
+                                latency: 10.0,
+                                jitter: 1.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -845,7 +897,7 @@ mod tests {
             let mut completed = HashSet::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height) = event {
+                if let Progress::Finalized(height, _) = event {
                     if height < required_blocks + highest_finalized {
                         continue;
                     }
@@ -912,8 +964,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 200.0,
-                                latency_stddev: 10.0,
+                                latency: 200.0,
+                                jitter: 10.0,
                                 success_rate: 0.8,
                             },
                         )
@@ -922,9 +974,16 @@ mod tests {
                 }
 
                 // Start engine
+                let application_cfg = ApplicationConfig {
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: mocks::Application::new(validator, done_sender.clone()),
+                    application: Application::new(runtime.clone(), application_cfg),
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -947,7 +1006,7 @@ mod tests {
             let mut completed = HashSet::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height) = event {
+                if let Progress::Finalized(height, _) = event {
                     if height < required_blocks {
                         continue;
                     }
