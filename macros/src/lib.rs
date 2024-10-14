@@ -9,6 +9,33 @@ use syn::{
     Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
 
+#[proc_macro_attribute]
+pub fn async_test(_: TokenStream, item: TokenStream) -> TokenStream {
+    // Parse the input tokens into a syntax tree
+    let input = parse_macro_input!(item as ItemFn);
+
+    // Extract function components
+    let attrs = input.attrs;
+    let vis = input.vis;
+    let mut sig = input.sig;
+    let block = input.block;
+
+    // Remove 'async' from the function signature
+    sig.asyncness
+        .take()
+        .expect("expected test function to be async");
+
+    // Generate output tokens
+    let expanded = quote! {
+        #[test]
+        #(#attrs)*
+        #vis #sig {
+            futures::executor::block_on(async #block);
+        }
+    };
+    TokenStream::from(expanded)
+}
+
 /// Capture logs (based on the provided log level) from a test run using
 /// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
 /// This macro defaults to a log level of `DEBUG` if no level is provided.
