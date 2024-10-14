@@ -139,19 +139,26 @@ impl<E: Clock + RngCore> crate::Application for Application<E> {
         Some(payload_hash)
     }
 
-    async fn verify(&mut self, parent: Hash, height: Height, payload: Payload, hash: Hash) -> bool {
+    async fn verify(
+        &mut self,
+        parent: Hash,
+        height: Height,
+        payload: Payload,
+        block: Hash,
+    ) -> bool {
         // Verify parent exists and we are at the correct height
         if parent.len() != HASH_LENGTH {
             self.panic("invalid parent hash length");
         }
-        if hash.len() != HASH_LENGTH {
+        if block.len() != HASH_LENGTH {
             self.panic("invalid hash length");
         }
-        if !self.parsed.contains(&hash) {
-            self.panic("hash not parsed");
+        let payload_hash = hash(&payload);
+        if !self.parsed.contains(&payload_hash) {
+            self.panic("payload not parsed");
         }
-        if self.verified.contains_key(&hash) {
-            self.panic("hash already verified");
+        if self.verified.contains_key(&block) {
+            self.panic("block already verified");
         }
         if let Some(parent) = self.verified.get(&parent) {
             if parent + 1 != height {
@@ -169,7 +176,7 @@ impl<E: Clock + RngCore> crate::Application for Application<E> {
 
         // Verify the payload
         Self::verify_payload(height, &payload);
-        self.verified.insert(hash.clone(), height);
+        self.verified.insert(block.clone(), height);
         true
     }
 
