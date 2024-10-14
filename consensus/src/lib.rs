@@ -67,10 +67,10 @@ pub trait Application: Send + 'static {
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, hash: Hash) -> impl Future<Output = ()> + Send;
+    fn notarized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
 
     /// Event that the payload has been finalized.
-    fn finalized(&mut self, hash: Hash) -> impl Future<Output = ()> + Send;
+    fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
 }
 
 // Example Payload (Transfers):
