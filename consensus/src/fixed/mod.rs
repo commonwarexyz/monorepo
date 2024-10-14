@@ -40,7 +40,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mocks::{self, Progress};
+    use crate::mocks::application::{self, Progress};
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::{select, test_traced};

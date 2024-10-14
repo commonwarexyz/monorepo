@@ -41,7 +41,7 @@ pub trait Application: Send + 'static {
         &mut self,
         parent: Hash,
         height: Height,
-    ) -> impl Future<Output = Option<Payload>> + Send;
+    ) -> impl Future<Output = Option<(Payload, Hash)>> + Send;
 
     /// Parse the payload and return the hash of the payload.
     ///
@@ -61,7 +61,7 @@ pub trait Application: Send + 'static {
         parent: Hash,
         height: Height,
         payload: Payload,
-        hash: Hash,
+        block: Hash,
     ) -> impl Future<Output = bool> + Send;
 
     /// Event that the payload has been notarized.
