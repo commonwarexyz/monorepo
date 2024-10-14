@@ -17,10 +17,9 @@
 //! * Block timeout in addition to notarization timeout
 //! * Backfill blocks from notarizing peers rather than passing along with notarization
 
+mod actors;
 mod config;
-mod orchestrator;
-mod utils;
-mod voter;
+mod encoding;
 
 pub mod engine;
 

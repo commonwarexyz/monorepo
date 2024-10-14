@@ -1,7 +1,10 @@
 //! Backfill missing proposals seen in consensus.
 
-use super::{utils::proposal_digest, voter::VoterMailbox, wire};
-use crate::{Hash, Height, Parser, Payload, Processor, View, HASH_LENGTH};
+use super::voter::VoterMailbox;
+use crate::{
+    fixed::{encoding::proposal_digest, wire},
+    Hash, Height, Parser, Payload, Processor, View, HASH_LENGTH,
+};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};

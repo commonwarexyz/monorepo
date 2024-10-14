@@ -1,6 +1,10 @@
 use crate::{Hash, Height, View};
 use bytes::Bytes;
 
+pub const PROPOSAL_SUFFIX: &[u8] = b"_PROPOSAL";
+pub const VOTE_SUFFIX: &[u8] = b"_VOTE";
+pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
+
 pub fn proposal_digest(view: View, height: Height, parent: &Hash, payload_hash: &Hash) -> Bytes {
     let mut msg = Vec::new();
     msg.extend_from_slice(&view.to_be_bytes());

@@ -1,9 +1,14 @@
-use super::utils::{finalize_digest, proposal_digest, vote_digest};
-use super::{
-    orchestrator::{Mailbox, Proposal},
-    wire,
+use super::orchestrator::{Mailbox, Proposal};
+use crate::{
+    fixed::{
+        encoding::{
+            finalize_digest, proposal_digest, vote_digest, FINALIZE_SUFFIX, PROPOSAL_SUFFIX,
+            VOTE_SUFFIX,
+        },
+        wire,
+    },
+    Hash, Height, Parser, View, HASH_LENGTH,
 };
-use crate::{Hash, Height, Parser, View, HASH_LENGTH};
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
@@ -22,10 +27,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, trace, warn};
-
-const PROPOSAL_SUFFIX: &[u8] = b"_PROPOSAL";
-const VOTE_SUFFIX: &[u8] = b"_VOTE";
-const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
 // TODO: change name
 // If either of these requests fails, it will not send a reply.

@@ -1,7 +1,9 @@
 use super::{
+    actors::{
+        orchestrator::{self, Mailbox},
+        voter::{self, Voter, VoterMailbox},
+    },
     config::Config,
-    orchestrator::{self, Mailbox},
-    voter::{self, Voter, VoterMailbox},
 };
 use crate::{Parser, Processor};
 use commonware_cryptography::Scheme;
