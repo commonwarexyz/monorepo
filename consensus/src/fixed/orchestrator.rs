@@ -245,17 +245,32 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
         }
 
         // Record what we learned
-        match self.knowledge.entry(proposal.height) {
-            Entry::Vacant(e) => {
-                if proposal.height > self.last_finalized {
+        if proposal.height > self.last_finalized {
+            // Add to notarized if not finalized
+            match self.knowledge.get_mut(&proposal.height) {
+                Some(Knowledge::Notarized(seen)) => {
+                    seen.insert(proposal.view, hash.clone());
+                }
+                None => {
                     let mut seen = BTreeMap::new();
                     seen.insert(proposal.view, hash.clone());
-                    e.insert(Knowledge::Notarized(seen));
-                } else {
-                    e.insert(Knowledge::Finalized(hash.clone()));
+                    self.knowledge
+                        .insert(proposal.height, Knowledge::Notarized(seen));
                 }
+                _ => {}
             }
-            Entry::Occupied(_) => {}
+        } else {
+            // TODO: clean this up
+
+            // Insert as final (in case it doesn't exist)
+            let mut start = (proposal.height, hash.clone());
+            if let Some(Knowledge::Finalized(_)) = self.knowledge.get(&proposal.height) {
+                debug!("overriding backfill start to parent");
+                start = (proposal.height - 1, proposal.parent.clone());
+            }
+
+            // Finalize this block and all blocks we have that are ancestors of this block
+            self.backfill_finalization(start.0, start.1);
         }
 
         // Store proposal
@@ -282,10 +297,12 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
                     return;
                 }
             };
+            debug!(height = next, "notifying application");
 
             // Send event
             match knowledge {
                 Knowledge::Notarized(hashes) => {
+                    debug!(height = next, "notarized");
                     // Send fulfilled unsent notarizations
                     for (_, hash) in hashes {
                         let already_notified = self
@@ -317,6 +334,7 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
                     }
                 }
                 Knowledge::Finalized(hash) => {
+                    debug!(height = next, "finalized");
                     let proposal = match self.blocks.get(&hash) {
                         Some(proposal) => proposal,
                         None => {
@@ -569,9 +587,72 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
         self.notify().await;
     }
 
+    fn backfill_finalization(&mut self, height: Height, mut block: Hash) {
+        debug!(height, hash = hex(&block), "backfilling finalizations");
+        let mut next = height;
+        loop {
+            let previous = self.knowledge.get_mut(&next);
+            match previous {
+                Some(Knowledge::Notarized(hashes)) => {
+                    // Remove unnecessary proposals from memory
+                    for (_, old_hash) in hashes.iter() {
+                        if old_hash != &block {
+                            self.blocks.remove(old_hash);
+                            debug!(
+                                height,
+                                hash = hex(old_hash),
+                                "removing unnecessary proposal"
+                            );
+                        }
+                    }
+
+                    // Store finalized block record
+                    self.knowledge
+                        .insert(next, Knowledge::Finalized(block.clone()));
+
+                    // Update value of hash to be parent of this block
+                    if let Some(parent) = self.blocks.get(&block) {
+                        block = parent.parent.clone();
+                    } else {
+                        // If we don't know the parent, we can't finalize any ancestors
+                        break;
+                    }
+                }
+                Some(Knowledge::Finalized(seen)) => {
+                    if *seen != block {
+                        panic!(
+                            "finalized block hash mismatch at height {}: expected={}, found={}",
+                            next,
+                            hex(seen),
+                            hex(&block)
+                        );
+                    }
+                    break;
+                }
+                None => {
+                    self.knowledge
+                        .insert(next, Knowledge::Finalized(block.clone()));
+
+                    // Attempt to keep recursing backwards until hit a finalized block or 0
+                    if let Some(parent) = self.blocks.get(&block) {
+                        block = parent.parent.clone();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // Update next
+            if next == 0 {
+                break;
+            }
+            next -= 1;
+        }
+    }
+
     pub async fn finalized(&mut self, proposal: Proposal) {
         // Extract height and hash
-        let (view, height, mut hash) = match &proposal {
+        let (view, height, hash) = match &proposal {
             Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
             Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
         };
@@ -590,66 +671,8 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
             debug!(view = null_view, "pruned null notarization");
         }
 
-        // Finalize all locks we have that are ancestors of this block
-        let mut next = height;
-        loop {
-            let previous = self.knowledge.get_mut(&next);
-            match previous {
-                Some(Knowledge::Notarized(hashes)) => {
-                    // Remove unnecessary proposals from memory
-                    for (_, old_hash) in hashes.iter() {
-                        if old_hash != &hash {
-                            self.blocks.remove(old_hash);
-                            debug!(
-                                height,
-                                hash = hex(old_hash),
-                                "removing unnecessary proposal"
-                            );
-                        }
-                    }
-
-                    // Store finalized block record
-                    self.knowledge
-                        .insert(next, Knowledge::Finalized(hash.clone()));
-
-                    // Update value of hash to be parent of this block
-                    if let Some(parent) = self.blocks.get(&hash) {
-                        hash = parent.parent.clone();
-                    } else {
-                        // If we don't know the parent, we can't finalize any ancestors
-                        break;
-                    }
-                }
-                Some(Knowledge::Finalized(seen)) => {
-                    if *seen != hash {
-                        panic!(
-                            "finalized block hash mismatch at height {}: expected={}, found={}",
-                            next,
-                            hex(seen),
-                            hex(&hash)
-                        );
-                    }
-                    break;
-                }
-                None => {
-                    self.knowledge
-                        .insert(next, Knowledge::Finalized(hash.clone()));
-
-                    // Attempt to keep recursing backwards until hit a finalized block or 0
-                    if let Some(parent) = self.blocks.get(&hash) {
-                        hash = parent.parent.clone();
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            // Update next
-            if next == 0 {
-                break;
-            }
-            next -= 1;
-        }
+        // Finalize this block and all blocks we have that are ancestors of this block
+        self.backfill_finalization(height, hash);
 
         // Mark as seen
         if let Some((height, hash)) = self.resolve(proposal) {

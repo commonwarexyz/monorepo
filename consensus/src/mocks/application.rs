@@ -212,7 +212,11 @@ impl<E: Clock + RngCore> crate::Application for Application<E> {
         }
         if let Some(height) = self.verified.get(&block) {
             if self.last_finalized + 1 != *height {
-                self.panic("invalid finalization height");
+                self.panic(&format!(
+                    "invalid finalization height: {} != {}",
+                    self.last_finalized + 1,
+                    height
+                ));
             }
             self.last_finalized = *height;
             self.finalized.insert(block.clone(), *height);
