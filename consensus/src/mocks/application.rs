@@ -16,6 +16,10 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 type Latency = (f64, f64);
 
 pub struct Config {
+    /// The public key of the participant.
+    ///
+    /// It is common to use multiple instances of an application in a single simulation, this
+    /// helps to identify the source of both progress and errors.
     pub participant: PublicKey,
     pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
@@ -25,14 +29,15 @@ pub struct Config {
 }
 
 pub enum Progress {
-    Notarized(Height),
-    Finalized(Height),
+    Notarized(Height, Hash),
+    Finalized(Height, Hash),
 }
 
 pub struct Application<E: Clock + RngCore> {
     runtime: E,
 
     participant: PublicKey,
+    progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
     propose_latency: Normal<f64>,
     parse_latency: Normal<f64>,
@@ -40,9 +45,8 @@ pub struct Application<E: Clock + RngCore> {
 
     parsed: HashSet<Hash>,
     verified: HashMap<Hash, Height>,
+    last_finalized: u64,
     finalized: HashMap<Hash, Height>,
-
-    progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
 }
 
 impl<E: Clock + RngCore> Application<E> {
@@ -55,6 +59,7 @@ impl<E: Clock + RngCore> Application<E> {
             runtime,
 
             participant: cfg.participant,
+            progress: cfg.sender,
 
             propose_latency,
             parse_latency,
@@ -62,9 +67,8 @@ impl<E: Clock + RngCore> Application<E> {
 
             parsed: HashSet::new(),
             verified: HashMap::new(),
+            last_finalized: 0,
             finalized: HashMap::new(),
-
-            progress: cfg.sender,
         }
     }
 
@@ -73,6 +77,10 @@ impl<E: Clock + RngCore> Application<E> {
         if parsed_height != height {
             panic!("invalid height");
         }
+    }
+
+    fn panic(&self, msg: &str) {
+        panic!("[{}] {}", hex(&self.participant), msg);
     }
 }
 
@@ -88,11 +96,14 @@ impl<E: Clock + RngCore> crate::Application for Application<E> {
     async fn propose(&mut self, parent: Hash, height: Height) -> Option<Payload> {
         // Verify parent exists and we are at the correct height
         if parent.len() != HASH_LENGTH {
-            panic!("invalid parent hash length");
+            self.panic("invalid parent hash length");
         }
-        let parent = self.verified.get(&parent).expect("parent not verified");
-        if parent + 1 != height {
-            panic!("invalid height");
+        if let Some(parent) = self.verified.get(&parent) {
+            if parent + 1 != height {
+                self.panic("invalid height");
+            }
+        } else {
+            self.panic("parent not verified");
         }
 
         // Simulate the propose latency
@@ -108,10 +119,10 @@ impl<E: Clock + RngCore> crate::Application for Application<E> {
         Some(Bytes::from(payload))
     }
 
-    async fn parse(&mut self, parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
+    async fn parse(&mut self, parent: Hash, _: Height, payload: Payload) -> Option<Hash> {
         // Verify parent is well-formed
         if parent.len() != HASH_LENGTH {
-            panic!("invalid parent hash length");
+            self.panic("invalid parent hash length");
         }
 
         // Simulate the parse latency
@@ -120,34 +131,33 @@ impl<E: Clock + RngCore> crate::Application for Application<E> {
             .sleep(Duration::from_millis(duration as u64))
             .await;
 
-        // Parse the payload
-        Self::verify_payload(height, &payload);
-        let h = hash(&payload);
-        self.parsed.insert(h.clone());
-        Some(h)
+        // Parse and record the payload
+        let payload_hash = hash(&payload);
+        self.parsed.insert(payload_hash.clone());
+        Some(payload_hash)
     }
 
     async fn verify(&mut self, parent: Hash, height: Height, payload: Payload, hash: Hash) -> bool {
         // Verify parent exists and we are at the correct height
         if parent.len() != HASH_LENGTH {
-            panic!("invalid parent hash length");
+            self.panic("invalid parent hash length");
         }
         if hash.len() != HASH_LENGTH {
-            panic!("invalid hash length");
+            self.panic("invalid hash length");
         }
-        self.parsed.get(&hash).expect("hash not parsed");
-        if let Some(height) = self.verified.get(&hash) {
-            panic!("hash already verified: {}:{:?}", height, hex(&hash));
+        if !self.parsed.contains(&hash) {
+            self.panic("hash not parsed");
         }
-        let parent = match self.verified.get(&parent) {
-            Some(parent) => parent,
-            None => {
-                panic!("parent not verified: {}:{:?}", height, hex(&parent));
+        if self.verified.contains_key(&hash) {
+            self.panic("hash already verified");
+        }
+        if let Some(parent) = self.verified.get(&parent) {
+            if parent + 1 != height {
+                self.panic("invalid height");
             }
+        } else {
+            self.panic("parent not verified");
         };
-        if parent + 1 != height {
-            panic!("invalid height");
-        }
 
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
@@ -163,31 +173,41 @@ impl<E: Clock + RngCore> crate::Application for Application<E> {
 
     async fn notarized(&mut self, hash: Hash) {
         if hash.len() != HASH_LENGTH {
-            panic!("invalid hash length");
+            self.panic("invalid hash length");
         }
-        let height = self.verified.get(&hash).expect("hash not verified");
         if self.finalized.contains_key(&hash) {
-            panic!("hash already finalized");
+            self.panic("hash already finalized");
         }
-        let _ = self
-            .progress
-            .send((self.participant.clone(), Progress::Notarized(*height)))
-            .await;
+        if let Some(height) = self.verified.get(&hash) {
+            let _ = self
+                .progress
+                .send((self.participant.clone(), Progress::Notarized(*height, hash)))
+                .await;
+        } else {
+            self.panic("hash not verified");
+        }
     }
 
     async fn finalized(&mut self, hash: Hash) {
         if hash.len() != HASH_LENGTH {
-            panic!("invalid hash length");
+            self.panic("invalid hash length");
         }
-        if let Some(height) = self.finalized.get(&hash) {
-            panic!("hash already finalized: {}:{:?}", height, hex(&hash));
+        if self.finalized.contains_key(&hash) {
+            self.panic("hash already finalized");
         }
-        let height = self.verified.get(&hash).expect("hash not verified");
-        self.finalized.insert(hash, *height);
-        let _ = self
-            .progress
-            .send((self.participant.clone(), Progress::Finalized(*height)))
-            .await;
+        if let Some(height) = self.verified.get(&hash) {
+            if self.last_finalized + 1 != *height {
+                self.panic("invalid finalization height");
+            }
+            self.last_finalized = *height;
+            self.finalized.insert(hash.clone(), *height);
+            let _ = self
+                .progress
+                .send((self.participant.clone(), Progress::Finalized(*height, hash)))
+                .await;
+        } else {
+            self.panic("hash not verified");
+        }
     }
 }
 
