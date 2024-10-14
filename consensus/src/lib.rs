@@ -73,6 +73,10 @@ pub trait Processor: Send + 'static {
     fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
 }
 
+// TODO: break apart into smaller traits?
+// TODO: how to layer traits (want to call propose different ways depending
+// on whether we are including uptime info/faults)?
+
 // Example Payload (Transfers):
 // - Vec<Tx> => hashed as balanced binary trie by hash
 //
