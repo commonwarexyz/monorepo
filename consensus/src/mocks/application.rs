@@ -429,22 +429,42 @@ mod tests {
         });
     }
 
-    // #[test]
-    // fn test_verify_not_parsed() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant,
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
+    #[test]
+    #[should_panic(expected = "payload not parsed")]
+    fn test_verify_not_parsed() {
+        // Create the runtime
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create the application
+            let participant = Ed25519::from_seed(0).public_key();
+            let (sender, _) = mpsc::unbounded();
+            let cfg = Config {
+                participant: participant.clone(),
+                sender,
+                propose_latency: (10.0, 5.0),
+                parse_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let mut app = Application::new(runtime, cfg);
+
+            // Genesis
+            let (genesis_hash, _) = app.genesis();
+
+            // Get block at height 1
+            let parent = genesis_hash.clone();
+            let height: Height = 1;
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&participant);
+            payload.extend_from_slice(&height.to_be_bytes());
+            let payload = Bytes::from(payload);
+            let payload_hash = hash(&payload);
+            let block_hash = hash(&payload_hash);
+
+            // Verify the block
+            app.verify(parent.clone(), height, payload.clone(), block_hash.clone())
+                .await;
+        });
+    }
 
     // #[test]
     // #[should_panic(expected = "invalid height")]
