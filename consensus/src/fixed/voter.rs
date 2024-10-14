@@ -366,25 +366,6 @@ pub struct Voter<E: Clock + Rng, C: Scheme, P: Parser> {
 }
 
 impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
-    fn leader(validators: &BTreeMap<View, ValidatorSet>, view: crate::View) -> PublicKey {
-        let (_, (_, ref validators, _)) = validators
-            .range(..=view)
-            .next_back()
-            .expect("validators do not cover range of allowed views");
-        validators[view as usize % validators.len()].clone()
-    }
-
-    fn validator_info(
-        validators: &BTreeMap<View, ValidatorSet>,
-        view: crate::View,
-    ) -> &(u32, Vec<PublicKey>, HashMap<PublicKey, u32>) {
-        validators
-            .range(..=view)
-            .next_back()
-            .expect("validators do not cover range of allowed views")
-            .1
-    }
-
     pub fn new(runtime: E, crypto: C, parser: P, cfg: Config) -> (Self, VoterMailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
@@ -455,6 +436,25 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
             },
             VoterMailbox::new(mailbox_sender),
         )
+    }
+
+    fn leader(validators: &BTreeMap<View, ValidatorSet>, view: crate::View) -> PublicKey {
+        let (_, (_, ref validators, _)) = validators
+            .range(..=view)
+            .next_back()
+            .expect("validators do not cover range of allowed views");
+        validators[view as usize % validators.len()].clone()
+    }
+
+    fn validator_info(
+        validators: &BTreeMap<View, ValidatorSet>,
+        view: crate::View,
+    ) -> &(u32, Vec<PublicKey>, HashMap<PublicKey, u32>) {
+        validators
+            .range(..=view)
+            .next_back()
+            .expect("validators do not cover range of allowed views")
+            .1
     }
 
     fn is_participant(&self, view: View, participant: &PublicKey) -> bool {
