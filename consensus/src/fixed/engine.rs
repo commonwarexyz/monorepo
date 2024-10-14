@@ -1,7 +1,7 @@
 use super::{
     config::Config,
-    orchestrator,
-    voter::{self, Voter},
+    orchestrator::{self, Mailbox},
+    voter::{self, Voter, VoterMailbox},
 };
 use crate::Application;
 use commonware_cryptography::Scheme;
@@ -15,7 +15,10 @@ pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, A: Application> {
     runtime: E,
 
     orchestrator: orchestrator::Orchestrator<E, A>,
+    orchestrator_mailbox: Mailbox,
+
     voter: Voter<E, C>,
+    voter_mailbox: VoterMailbox,
 }
 
 impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
@@ -32,7 +35,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
         }
 
         // Create orchestrator
-        let (orchestrator, mailbox) = orchestrator::Orchestrator::new(
+        let (orchestrator, orchestrator_mailbox) = orchestrator::Orchestrator::new(
             runtime.clone(),
             cfg.application,
             cfg.fetch_timeout,
@@ -42,10 +45,9 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
         );
 
         // Create voter
-        let voter = Voter::new(
+        let (voter, voter_mailbox) = Voter::new(
             runtime.clone(),
             cfg.crypto,
-            mailbox,
             voter::Config {
                 registry: cfg.registry,
                 namespace: cfg.namespace,
@@ -61,12 +63,15 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
             runtime,
 
             orchestrator,
+            orchestrator_mailbox,
+
             voter,
+            voter_mailbox,
         }
     }
 
     pub async fn run(
-        self,
+        mut self,
         orchestrator_network: (impl Sender, impl Receiver),
         voter_network: (impl Sender, impl Receiver),
     ) {
@@ -74,14 +79,20 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
         let (orchestrator_sender, orchestrator_receiver) = orchestrator_network;
         let orchestrator = self.runtime.spawn("orchestrator", async move {
             self.orchestrator
-                .run(orchestrator_sender, orchestrator_receiver)
+                .run(
+                    &mut self.voter_mailbox,
+                    orchestrator_sender,
+                    orchestrator_receiver,
+                )
                 .await;
         });
 
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
         let voter = self.runtime.spawn("voter", async move {
-            self.voter.run(voter_sender, voter_receiver).await;
+            self.voter
+                .run(&mut self.orchestrator_mailbox, voter_sender, voter_receiver)
+                .await;
         });
 
         // Wait for the orchestrator or voter to finish

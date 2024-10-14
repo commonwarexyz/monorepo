@@ -10,6 +10,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::{hash, hex, quorum};
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 use prost::Message;
@@ -31,6 +32,59 @@ fn create_namespace(namespace: &Bytes, suffix: &[u8]) -> Bytes {
     new_namespace.put_slice(namespace);
     new_namespace.put_slice(suffix);
     new_namespace.freeze()
+}
+
+// TODO: change name
+// If either of these requests fails, it will not send a reply.
+pub enum VoterMessage {
+    Proposal {
+        view: View,
+        parent: Hash,
+        height: Height,
+        payload: Bytes,
+        payload_hash: Hash,
+    },
+    Verified {
+        view: View,
+        proposal: Hash,
+    },
+}
+
+// TODO: improve name here
+#[derive(Clone)]
+pub struct VoterMailbox {
+    sender: mpsc::Sender<VoterMessage>,
+}
+
+impl VoterMailbox {
+    pub(super) fn new(sender: mpsc::Sender<VoterMessage>) -> Self {
+        Self { sender }
+    }
+
+    pub async fn proposal(
+        &mut self,
+        parent: Hash,
+        height: Height,
+        payload: Bytes,
+        payload_hash: Hash,
+    ) {
+        self.sender
+            .send(VoterMessage::Proposal {
+                parent,
+                height,
+                payload,
+                payload_hash,
+            })
+            .await
+            .unwrap();
+    }
+
+    pub async fn verified(&mut self, block: Hash) {
+        self.sender
+            .send(VoterMessage::Verified { block })
+            .await
+            .unwrap();
+    }
 }
 
 struct Record {
@@ -297,7 +351,7 @@ pub struct Voter<E: Clock + Rng, C: Scheme> {
     notarization_timeout: Duration,
     null_vote_retry: Duration,
 
-    orchestrator: Mailbox,
+    mailbox_receiver: mpsc::Receiver<VoterMessage>,
 
     validators: BTreeMap<View, ValidatorSet>,
 
@@ -329,7 +383,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .1
     }
 
-    pub fn new(runtime: E, crypto: C, orchestrator: Mailbox, cfg: Config) -> Self {
+    pub fn new(runtime: E, crypto: C, cfg: Config) -> (Self, VoterMailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -372,28 +426,32 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         tracked_views.set(1);
 
         // Initialize store
-        Self {
-            runtime,
-            crypto,
+        let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
+        (
+            Self {
+                runtime,
+                crypto,
 
-            proposal_namespace: create_namespace(&cfg.namespace, PROPOSAL_SUFFIX),
-            vote_namespace: create_namespace(&cfg.namespace, VOTE_SUFFIX),
-            finalize_namespace: create_namespace(&cfg.namespace, FINALIZE_SUFFIX),
-            leader_timeout: cfg.leader_timeout,
-            notarization_timeout: cfg.notarization_timeout,
-            null_vote_retry: cfg.null_vote_retry,
+                proposal_namespace: create_namespace(&cfg.namespace, PROPOSAL_SUFFIX),
+                vote_namespace: create_namespace(&cfg.namespace, VOTE_SUFFIX),
+                finalize_namespace: create_namespace(&cfg.namespace, FINALIZE_SUFFIX),
+                leader_timeout: cfg.leader_timeout,
+                notarization_timeout: cfg.notarization_timeout,
+                null_vote_retry: cfg.null_vote_retry,
 
-            orchestrator,
+                mailbox_receiver,
 
-            validators: parsed_validators,
+                validators: parsed_validators,
 
-            last_finalized: 0,
-            view: 1,
-            views,
+                last_finalized: 0,
+                view: 1,
+                views,
 
-            current_view,
-            tracked_views,
-        }
+                current_view,
+                tracked_views,
+            },
+            VoterMailbox::new(mailbox_sender),
+        )
     }
 
     fn is_participant(&self, view: View, participant: &PublicKey) -> bool {
@@ -416,45 +474,27 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         (validators.0 as usize, validators.1.len())
     }
 
-    async fn propose(&mut self) -> Option<wire::Proposal> {
+    async fn propose(&mut self, orchestrator: &mut Mailbox) -> bool {
         // Check if we are leader
-        let view = self.views.get(&self.view).unwrap();
+        let view = self.views.get_mut(&self.view).unwrap();
         if view.leader != self.crypto.public_key() {
-            return None;
+            return false;
         }
 
         // Check if we have already requested a proposal
         if view.requested_proposal {
-            return None;
+            return false;
         }
 
         // Check if we have already proposed
         if view.proposal.is_some() {
-            return None;
+            return false;
         }
 
-        // Select parent block
-        let (parent, height, payload_hash, payload) = match self.orchestrator.propose().await {
-            Some(proposal) => proposal,
-            None => {
-                debug!(reason = "no available parent", "dropping proposal");
-                return None;
-            }
-        };
-
-        // Construct proposal
-        let digest = proposal_digest(self.view, height, &parent, &payload_hash);
-        let proposal = wire::Proposal {
-            view: self.view,
-            height,
-            parent,
-            payload,
-            signature: Some(wire::Signature {
-                public_key: self.crypto.public_key(),
-                signature: self.crypto.sign(&self.proposal_namespace, &digest),
-            }),
-        };
-        Some(proposal)
+        // Request proposal from orchestrator
+        view.requested_proposal = true;
+        orchestrator.propose(self.view).await;
+        true
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -535,7 +575,34 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         self.handle_vote(vote);
     }
 
-    async fn proposal(&mut self, proposal: wire::Proposal) {
+    async fn our_proposal(&mut self, payload_hash: Hash, proposal: wire::Proposal) {
+        // Store the proposal
+        let view = self.views.get_mut(&proposal.view).expect("view missing");
+
+        // Construct hash
+        let proposal_digest = proposal_digest(
+            proposal.view,
+            proposal.height,
+            &proposal.parent,
+            &payload_hash,
+        );
+        let proposal_hash = hash(&proposal_digest);
+
+        // Store the proposal
+        let proposal_view = proposal.view;
+        let proposal_height = proposal.height;
+        view.proposal = Some((proposal_hash.clone(), proposal));
+        view.verified_proposal = true;
+        view.leader_deadline = None;
+        debug!(
+            view = proposal_view,
+            height = proposal_height,
+            hash = hex(&proposal_hash),
+            "stored our proposal"
+        );
+    }
+
+    async fn peer_proposal(&mut self, orchestrator: &mut Mailbox, proposal: wire::Proposal) {
         // Parse signature
         let signature = match &proposal.signature {
             Some(signature) => signature,
@@ -586,8 +653,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
 
         // Verify the signature
-        let payload_hash = match self
-            .orchestrator
+        let payload_hash = match orchestrator
             .parse(
                 proposal.parent.clone(),
                 proposal.height,
@@ -621,8 +687,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         // Verify the proposal
         //
         // This will fail if we haven't notified the application of this parent.
-        if !self
-            .orchestrator
+        if !orchestrator
             .verify(proposal_hash.clone(), proposal.clone())
             .await
         {
@@ -649,7 +714,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             view = proposal_view,
             height = proposal_height,
             hash = hex(&proposal_hash),
-            "stored proposal"
+            "stored peer proposal"
         );
     }
 
@@ -759,7 +824,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         view.add_verified_vote(false, vote);
     }
 
-    async fn notarization(&mut self, notarization: wire::Notarization) {
+    async fn notarization(&mut self, orchestrator: &mut Mailbox, notarization: wire::Notarization) {
         // Check if we are still in a view where this notarization could help
         if notarization.view <= self.last_finalized {
             trace!(
@@ -856,10 +921,14 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         debug!(view = notarization.view, "notarization verified");
 
         // Handle notarization
-        self.handle_notarization(notarization).await;
+        self.handle_notarization(orchestrator, notarization).await;
     }
 
-    async fn handle_notarization(&mut self, notarization: wire::Notarization) {
+    async fn handle_notarization(
+        &mut self,
+        orchestrator: &mut Mailbox,
+        notarization: wire::Notarization,
+    ) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = self.views.entry(notarization.view).or_insert_with(|| {
             Record::new(
@@ -890,9 +959,9 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                     Proposal::Reference(notarization.view, notarization.height, notarization_hash)
                 }
             };
-            self.orchestrator.notarized(proposal).await;
+            orchestrator.notarized(proposal).await;
         } else {
-            self.orchestrator.null_notarized(notarization.view).await;
+            orchestrator.null_notarized(notarization.view).await;
         }
 
         // Enter next view
@@ -965,7 +1034,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         view.add_verified_finalize(false, finalize);
     }
 
-    async fn finalization(&mut self, finalization: wire::Finalization) {
+    async fn finalization(&mut self, orchestrator: &mut Mailbox, finalization: wire::Finalization) {
         // Check if we are still in a view where this finalization could help
         if finalization.view <= self.last_finalized {
             trace!(
@@ -1051,10 +1120,14 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         debug!(view = finalization.view, "finalization verified");
 
         // Process finalization
-        self.handle_finalization(finalization).await;
+        self.handle_finalization(orchestrator, finalization).await;
     }
 
-    async fn handle_finalization(&mut self, finalization: wire::Finalization) {
+    async fn handle_finalization(
+        &mut self,
+        orchestrator: &mut Mailbox,
+        finalization: wire::Finalization,
+    ) {
         // Add signatures to view (needed to broadcast finalization if we get proposal)
         let view = self.views.entry(finalization.view).or_insert_with(|| {
             Record::new(
@@ -1087,7 +1160,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 finalization.hash.clone(),
             ),
         };
-        self.orchestrator.finalized(proposal).await;
+        orchestrator.finalized(proposal).await;
 
         // Enter next view
         self.enter_view(finalization.view + 1);
@@ -1233,7 +1306,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         Some(finalization)
     }
 
-    async fn broadcast(&mut self, sender: &mut impl Sender, view: u64) {
+    async fn broadcast(&mut self, orchestrator: &mut Mailbox, sender: &mut impl Sender, view: u64) {
         // Attempt to vote
         if let Some(vote) = self.construct_proposal_vote(view) {
             // Broadcast the vote
@@ -1270,7 +1343,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 null = notarization.hash.is_none(),
                 "broadcast notarization"
             );
-            self.handle_notarization(notarization).await;
+            self.handle_notarization(orchestrator, notarization).await;
         };
 
         // Attempt to finalize
@@ -1312,29 +1385,21 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 height = finalization.height,
                 "broadcast finalization"
             );
-            self.handle_finalization(finalization).await;
+            self.handle_finalization(orchestrator, finalization).await;
         };
     }
 
-    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        mut self,
+        orchestrator: &mut Mailbox,
+        mut sender: impl Sender,
+        mut receiver: impl Receiver,
+    ) {
         // Process messages
         loop {
             // Attempt to propose a block
-            if let Some(proposal) = self.propose().await {
-                // Broadcast the proposal
-                let msg = wire::Consensus {
-                    payload: Some(wire::consensus::Payload::Proposal(proposal.clone())),
-                };
-                let msg = msg.encode_to_vec();
-                sender
-                    .send(Recipients::All, msg.into(), true)
-                    .await
-                    .unwrap();
-
-                // Handle the proposal
-                let proposal_view = proposal.view;
-                self.proposal(proposal).await;
-                self.broadcast(&mut sender, proposal_view).await;
+            if self.propose(orchestrator).await {
+                debug!(view = self.view, "requested proposal");
             }
 
             // Wait for a timeout to fire or for a message to arrive
@@ -1345,6 +1410,52 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                     // Trigger the timeout
                     self.timeout(&mut sender).await;
                     view = self.view;
+                },
+                mailbox = self.mailbox_receiver.next() => {
+                    let msg = mailbox.unwrap();
+                    match msg {
+                        VoterMessage::Proposal{ view, parent, height, payload, payload_hash} => {
+                            debug!(view = view, our_view = self.view, "received proposal");
+
+                            // If we have already moved to another view, drop the response as we will
+                            // not broadcast it
+                            if self.view != view {
+                                debug!(view = view, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
+                                continue;
+                            }
+
+                            // Construct proposal
+                            let digest = proposal_digest(self.view, height, &parent, &payload_hash);
+                            let proposal = wire::Proposal {
+                                view: self.view,
+                                height,
+                                parent,
+                                payload,
+                                signature: Some(wire::Signature {
+                                    public_key: self.crypto.public_key(),
+                                    signature: self.crypto.sign(&self.proposal_namespace, &digest),
+                                }),
+                            };
+
+                            // Broadcast the proposal
+                            let msg = wire::Consensus {
+                                payload: Some(wire::consensus::Payload::Proposal(proposal.clone())),
+                            };
+                            let msg = msg.encode_to_vec();
+                            sender
+                                .send(Recipients::All, msg.into(), true)
+                                .await
+                                .unwrap();
+
+                            // Handle the proposal
+                            let proposal_view = proposal.view;
+                            self.our_proposal(payload_hash, proposal).await;
+                            self.broadcast(orchestrator, &mut sender, proposal_view).await;
+                        },
+                        VoterMessage::Verified { view, proposal } => {
+                            unimplemented!("verified message not handled");
+                        },
+                    }
                 },
                 msg = receiver.recv() => {
                     // Parse message
@@ -1374,7 +1485,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                                 continue;
                             }
                             view = proposal.view;
-                            self.proposal(proposal).await;
+                            self.proposal(orchestrator, proposal).await;
                         }
                         wire::consensus::Payload::Vote(vote) => {
                             if vote.hash.is_none() && vote.height != 0 {
@@ -1398,7 +1509,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                                 continue;
                             }
                             view = notarization.view;
-                            self.notarization(notarization).await;
+                            self.notarization(orchestrator, notarization).await;
                         }
                         wire::consensus::Payload::Finalize(finalize) => {
                             if finalize.hash.len() != HASH_LENGTH {
@@ -1414,14 +1525,14 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                                 continue;
                             }
                             view = finalization.view;
-                            self.finalization(finalization).await;
+                            self.finalization(orchestrator, finalization).await;
                         }
                     };
                 },
             };
 
             // Attempt to send any new view messages
-            self.broadcast(&mut sender, view).await;
+            self.broadcast(orchestrator, &mut sender, view).await;
 
             // After sending all required messages, prune any views
             // we no longer need

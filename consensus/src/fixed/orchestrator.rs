@@ -1,6 +1,6 @@
 //! Backfill missing proposals seen in consensus.
 
-use super::{utils::proposal_digest, wire};
+use super::{utils::proposal_digest, voter::VoterMailbox, wire};
 use crate::{Application, Hash, Height, Payload, View, HASH_LENGTH};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
@@ -22,7 +22,7 @@ use tracing::{debug, warn};
 
 pub enum Message {
     Propose {
-        response: oneshot::Sender<Option<(Hash, Height, Hash, Payload)>>,
+        view: View,
     },
     Parse {
         parent: Hash,
@@ -33,7 +33,6 @@ pub enum Message {
     Verify {
         hash: Hash,
         proposal: wire::Proposal,
-        response: oneshot::Sender<bool>,
     },
     Notarized {
         proposal: Proposal,
@@ -57,13 +56,8 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn propose(&mut self) -> Option<(Hash, Height, Hash, Payload)> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Propose { response: sender })
-            .await
-            .unwrap();
-        receiver.await.unwrap()
+    pub async fn propose(&mut self, view: View) {
+        self.sender.send(Message::Propose { view }).await.unwrap();
     }
 
     pub async fn parse(&mut self, parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
@@ -775,10 +769,12 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         validator
     }
 
-    // This is a pretty basic backfiller (in that it only attempts to resolve one missing
-    // proposal at a time). In `tbd`, this will operate very differently because we can
-    // verify the integrity of any proposal we receive at an index by the threshold signature.
-    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        mut self,
+        voter: &mut VoterMailbox,
+        mut sender: impl Sender,
+        mut receiver: impl Receiver,
+    ) {
         let mut outstanding_task = None;
         loop {
             // Ensure task has not been resolved
