@@ -1,4 +1,4 @@
-use crate::{Application, View};
+use crate::{Parser, Processor, View};
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use prometheus_client::registry::Registry;
@@ -8,9 +8,10 @@ use std::{
     time::Duration,
 };
 
-pub struct Config<C: Scheme, A: Application> {
+pub struct Config<C: Scheme, Pa: Parser, Pr: Processor> {
     pub crypto: C,
-    pub application: A,
+    pub parser: Pa,
+    pub processor: Pr,
 
     pub registry: Arc<Mutex<Registry>>,
 

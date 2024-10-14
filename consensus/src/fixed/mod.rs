@@ -7,15 +7,19 @@
 //! Wait for block finalization at tip (2f+1), fetch heights backwards (don't
 //! need to backfill views).
 //!
+//! # Async Handling
+//!
+//! All application interaction occurs asynchronously, meaning that the engine can continue processing messages
+//! while a payload is being built or verified (usually take hundres of milliseconds).
+//!
 //! # Differences from Simplex Paper
 //!
 //! * Block timeout in addition to notarization timeout
 //! * Backfill blocks from notarizing peers rather than passing along with notarization
 
+mod actors;
 mod config;
-mod orchestrator;
-mod utils;
-mod voter;
+mod encoding;
 
 pub mod engine;
 
@@ -54,7 +58,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::debug;
+    use tracing::{debug, info};
 
     #[test_traced]
     fn test_all_online() {
@@ -127,9 +131,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    processor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -241,9 +247,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    processor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -355,9 +363,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    processor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -434,9 +444,11 @@ mod tests {
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
             };
+            let (parser, processor) = Application::init(runtime.clone(), application_cfg);
             let cfg = config::Config {
                 crypto: scheme,
-                application: Application::new(runtime.clone(), application_cfg),
+                parser,
+                processor,
                 registry: Arc::new(Mutex::new(Registry::default())),
                 namespace: Bytes::from("consensus"),
                 leader_timeout: Duration::from_secs(1),
@@ -542,9 +554,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    processor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -681,9 +695,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    processor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -795,9 +811,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    processor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -910,12 +928,11 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_jank_links() {
+    fn jank_links(seed: u64) {
         // Create runtime
         let n = 10;
         let required_blocks = 20;
-        let (executor, runtime, _) = Executor::default();
+        let (executor, runtime, _) = Executor::seeded(seed);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -965,7 +982,7 @@ mod tests {
                             other.clone(),
                             Link {
                                 latency: 200.0,
-                                jitter: 10.0,
+                                jitter: 100.0,
                                 success_rate: 0.8,
                             },
                         )
@@ -977,13 +994,15 @@ mod tests {
                 let application_cfg = ApplicationConfig {
                     participant: validator,
                     sender: done_sender.clone(),
-                    propose_latency: (10.0, 5.0),
+                    propose_latency: (50.0, 10.0),
                     parse_latency: (10.0, 5.0),
-                    verify_latency: (10.0, 5.0),
+                    verify_latency: (25.0, 5.0),
                 };
+                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    processor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -1017,5 +1036,13 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test_traced]
+    fn test_jank_links() {
+        for seed in 0..10 {
+            info!(seed, "running test with seed");
+            jank_links(seed);
+        }
     }
 }

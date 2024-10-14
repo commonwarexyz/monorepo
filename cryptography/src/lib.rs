@@ -12,7 +12,6 @@ pub mod bls12381;
 pub use bls12381::Bls12381;
 pub mod ed25519;
 pub use ed25519::Ed25519;
-pub mod utils;
 
 /// Byte array representing an arbitrary private key.
 pub type PrivateKey = Bytes;

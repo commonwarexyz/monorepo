@@ -1,9 +1,11 @@
 use super::{
+    actors::{
+        orchestrator::{self, Mailbox},
+        voter::{self, Voter, VoterMailbox},
+    },
     config::Config,
-    orchestrator,
-    voter::{self, Voter},
 };
-use crate::Application;
+use crate::{Parser, Processor};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -11,15 +13,18 @@ use commonware_runtime::{Clock, Spawner};
 use rand::Rng;
 use tracing::debug;
 
-pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, A: Application> {
+pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, Pa: Parser, Pr: Processor> {
     runtime: E,
 
-    orchestrator: orchestrator::Orchestrator<E, A>,
-    voter: Voter<E, C>,
+    orchestrator: orchestrator::Orchestrator<E, Pa, Pr>,
+    orchestrator_mailbox: Mailbox,
+
+    voter: Voter<E, C, Pa>,
+    voter_mailbox: VoterMailbox,
 }
 
-impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
-    pub fn new(runtime: E, mut cfg: Config<C, A>) -> Self {
+impl<E: Clock + Rng + Spawner, C: Scheme, Pa: Parser, Pr: Processor> Engine<E, C, Pa, Pr> {
+    pub fn new(runtime: E, mut cfg: Config<C, Pa, Pr>) -> Self {
         // Sort the validators at each view
         if cfg.validators.is_empty() {
             panic!("no validators specified");
@@ -32,9 +37,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
         }
 
         // Create orchestrator
-        let (orchestrator, mailbox) = orchestrator::Orchestrator::new(
+        let (orchestrator, orchestrator_mailbox) = orchestrator::Orchestrator::new(
             runtime.clone(),
-            cfg.application,
+            cfg.parser.clone(),
+            cfg.processor,
             cfg.fetch_timeout,
             cfg.max_fetch_count,
             cfg.max_fetch_size,
@@ -42,10 +48,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
         );
 
         // Create voter
-        let voter = Voter::new(
+        let (voter, voter_mailbox) = Voter::new(
             runtime.clone(),
             cfg.crypto,
-            mailbox,
+            cfg.parser,
             voter::Config {
                 registry: cfg.registry,
                 namespace: cfg.namespace,
@@ -61,12 +67,15 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
             runtime,
 
             orchestrator,
+            orchestrator_mailbox,
+
             voter,
+            voter_mailbox,
         }
     }
 
     pub async fn run(
-        self,
+        mut self,
         orchestrator_network: (impl Sender, impl Receiver),
         voter_network: (impl Sender, impl Receiver),
     ) {
@@ -74,14 +83,20 @@ impl<E: Clock + Rng + Spawner, C: Scheme, A: Application> Engine<E, C, A> {
         let (orchestrator_sender, orchestrator_receiver) = orchestrator_network;
         let orchestrator = self.runtime.spawn("orchestrator", async move {
             self.orchestrator
-                .run(orchestrator_sender, orchestrator_receiver)
+                .run(
+                    &mut self.voter_mailbox,
+                    orchestrator_sender,
+                    orchestrator_receiver,
+                )
                 .await;
         });
 
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
         let voter = self.runtime.spawn("voter", async move {
-            self.voter.run(voter_sender, voter_receiver).await;
+            self.voter
+                .run(&mut self.orchestrator_mailbox, voter_sender, voter_receiver)
+                .await;
         });
 
         // Wait for the orchestrator or voter to finish

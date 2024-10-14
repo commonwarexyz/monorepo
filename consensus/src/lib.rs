@@ -25,10 +25,20 @@ type Hash = Bytes; // use fixed size bytes
 const HASH_LENGTH: usize = 32;
 type Payload = Bytes;
 
+pub trait Parser: Clone + Send + 'static {
+    /// Parse the payload and return the hash of the payload. We don't just hash
+    /// the payload because it may be more efficient to prove against a hash
+    /// that is specifically formatted (like a trie root).
+    ///
+    /// Parse is a stateless operation and may be called out-of-order.
+    fn parse(&mut self, payload: Payload) -> impl Future<Output = Option<Hash>> + Send;
+}
+
 /// TODO: call verify after voting (before finalization votes) or before voting? Can include
 /// outputs of block in next block?
 /// TODO: perform verification async so can keep responding to messages?
-pub trait Application: Send + 'static {
+/// TODO: change name
+pub trait Processor: Send + 'static {
     /// Initialize the application with the genesis block at view=0, height=0.
     fn genesis(&mut self) -> (Hash, Payload);
 
@@ -41,17 +51,7 @@ pub trait Application: Send + 'static {
         &mut self,
         parent: Hash,
         height: Height,
-    ) -> impl Future<Output = Option<(Payload, Hash)>> + Send;
-
-    /// Parse the payload and return the hash of the payload.
-    ///
-    /// Parse is a stateless operation and may be called out-of-order.
-    fn parse(
-        &mut self,
-        parent: Hash,
-        height: Height,
-        payload: Payload,
-    ) -> impl Future<Output = Option<Hash>> + Send;
+    ) -> impl Future<Output = Option<Payload>> + Send;
 
     /// Verify the payload is valid.
     ///
@@ -72,6 +72,10 @@ pub trait Application: Send + 'static {
     /// Event that the payload has been finalized.
     fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
 }
+
+// TODO: break apart into smaller traits?
+// TODO: how to layer traits (want to call propose different ways depending
+// on whether we are including uptime info/faults)?
 
 // Example Payload (Transfers):
 // - Vec<Tx> => hashed as balanced binary trie by hash
