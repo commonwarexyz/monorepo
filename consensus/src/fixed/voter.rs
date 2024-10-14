@@ -673,6 +673,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         // Verify the signature
         //
         // TODO: don't put in same channel as verify
+        // TODO: stuffing parse requests can backlog proposal/verification
         let payload_hash = match orchestrator
             .parse(
                 proposal.parent.clone(),
