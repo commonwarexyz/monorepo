@@ -983,7 +983,7 @@ mod tests {
                             other.clone(),
                             Link {
                                 latency: 200.0,
-                                jitter: 10.0,
+                                jitter: 100.0,
                                 success_rate: 0.8,
                             },
                         )
@@ -995,9 +995,9 @@ mod tests {
                 let application_cfg = ApplicationConfig {
                     participant: validator,
                     sender: done_sender.clone(),
-                    propose_latency: (10.0, 5.0),
+                    propose_latency: (50.0, 10.0),
                     parse_latency: (10.0, 5.0),
-                    verify_latency: (10.0, 5.0),
+                    verify_latency: (25.0, 5.0),
                 };
                 let (parser, processor) = Application::init(runtime.clone(), application_cfg);
                 let cfg = config::Config {
