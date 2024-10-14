@@ -4,12 +4,12 @@ use super::{
     wire,
 };
 use crate::{Hash, Height, Parser, View, HASH_LENGTH};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::{hash, hex, quorum};
+use commonware_utils::{hash, hex, quorum, union};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
@@ -26,13 +26,6 @@ use tracing::{debug, info, trace, warn};
 const PROPOSAL_SUFFIX: &[u8] = b"_PROPOSAL";
 const VOTE_SUFFIX: &[u8] = b"_VOTE";
 const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
-
-fn create_namespace(namespace: &Bytes, suffix: &[u8]) -> Bytes {
-    let mut new_namespace = BytesMut::with_capacity(namespace.len() + suffix.len());
-    new_namespace.put_slice(namespace);
-    new_namespace.put_slice(suffix);
-    new_namespace.freeze()
-}
 
 // TODO: change name
 // If either of these requests fails, it will not send a reply.
@@ -346,9 +339,10 @@ pub struct Voter<E: Clock + Rng, C: Scheme, P: Parser> {
     crypto: C,
     parser: P,
 
-    proposal_namespace: Bytes,
-    vote_namespace: Bytes,
-    finalize_namespace: Bytes,
+    proposal_namespace: Vec<u8>,
+    vote_namespace: Vec<u8>,
+    finalize_namespace: Vec<u8>,
+
     leader_timeout: Duration,
     notarization_timeout: Duration,
     null_vote_retry: Duration,
@@ -416,9 +410,10 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
                 crypto,
                 parser,
 
-                proposal_namespace: create_namespace(&cfg.namespace, PROPOSAL_SUFFIX),
-                vote_namespace: create_namespace(&cfg.namespace, VOTE_SUFFIX),
-                finalize_namespace: create_namespace(&cfg.namespace, FINALIZE_SUFFIX),
+                proposal_namespace: union(&cfg.namespace, PROPOSAL_SUFFIX),
+                vote_namespace: union(&cfg.namespace, VOTE_SUFFIX),
+                finalize_namespace: union(&cfg.namespace, FINALIZE_SUFFIX),
+
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 null_vote_retry: cfg.null_vote_retry,
