@@ -26,7 +26,9 @@ const HASH_LENGTH: usize = 32;
 type Payload = Bytes;
 
 pub trait Parser: Clone + Send + 'static {
-    /// Parse the payload and return the hash of the payload.
+    /// Parse the payload and return the hash of the payload. We don't just hash
+    /// the payload because it may be more efficient to prove against a hash
+    /// that is specifically formatted (like a trie root).
     ///
     /// Parse is a stateless operation and may be called out-of-order.
     fn parse(&mut self, payload: Payload) -> impl Future<Output = Option<Hash>> + Send;

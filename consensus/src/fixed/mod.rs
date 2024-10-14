@@ -10,8 +10,7 @@
 //! # Async Handling
 //!
 //! All application interaction occurs asynchronously, meaning that the engine can continue processing messages
-//! while a payload is being built or verified. Parsing is expected to be fast and so it is called directly rather
-//! than waiting for future resolution.
+//! while a payload is being built or verified (usually take hundres of milliseconds).
 //!
 //! # Differences from Simplex Paper
 //!
