@@ -1,34 +1,28 @@
 //! Backfill missing proposals seen in consensus.
 
 use super::{utils::proposal_digest, voter::VoterMailbox, wire};
-use crate::{Application, Hash, Height, Payload, View, HASH_LENGTH};
+use crate::{Application, Hash, Height, Parser, Payload, View, HASH_LENGTH};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::{hash, hex};
 use core::panic;
-use futures::{
-    channel::{mpsc, oneshot},
-    future::Either,
-};
+use futures::{channel::mpsc, future::Either};
 use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
+use std::{
+    collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap, HashSet},
+    marker::PhantomData,
+};
 use tracing::{debug, warn};
 
 pub enum Message {
     Propose {
         view: View,
-    },
-    Parse {
-        parent: Hash,
-        height: Height,
-        payload: Payload,
-        response: oneshot::Sender<Option<Hash>>,
     },
     Verify {
         hash: Hash,
@@ -58,20 +52,6 @@ impl Mailbox {
 
     pub async fn propose(&mut self, view: View) {
         self.sender.send(Message::Propose { view }).await.unwrap();
-    }
-
-    pub async fn parse(&mut self, parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Parse {
-                parent,
-                height,
-                payload,
-                response: sender,
-            })
-            .await
-            .unwrap();
-        receiver.await.unwrap()
     }
 
     pub async fn verify(&mut self, hash: Hash, proposal: wire::Proposal) {
@@ -115,8 +95,9 @@ enum Knowledge {
     Finalized(Hash),
 }
 
-pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
+pub struct Orchestrator<E: Clock + Rng + Spawner, P: Parser, A: Application> {
     runtime: E,
+    parser: P,
     application: A,
 
     fetch_timeout: Duration,
@@ -154,9 +135,10 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, A: Application> {
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
+impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> {
     pub fn new(
         runtime: E,
+        parser: P,
         mut application: A,
         fetch_timeout: Duration,
         max_fetch_count: u64,
@@ -188,6 +170,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
         (
             Self {
                 runtime,
+                parser,
                 application,
 
                 fetch_timeout,
@@ -418,10 +401,6 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
 
         // Generate proposal
         Some((parent.0, height, payload_hash, payload))
-    }
-
-    pub async fn parse(&mut self, parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
-        self.application.parse(parent, height, payload).await
     }
 
     fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
@@ -964,7 +943,7 @@ impl<E: Clock + Rng + Spawner, A: Application> Orchestrator<E, A> {
                                     warn!(sender = hex(&s), "invalid proposal parent hash size");
                                     break;
                                 }
-                                let payload_hash = match self.application.parse(proposal.parent.clone(), proposal.height, proposal.payload.clone()).await {
+                                let payload_hash = match P::parse(proposal.payload.clone()) {
                                     Some(payload_hash) => payload_hash,
                                     None => {
                                         warn!(sender = hex(&s), "unable to parse notarized/finalized payload");

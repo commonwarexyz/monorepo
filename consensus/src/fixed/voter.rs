@@ -3,7 +3,7 @@ use super::{
     orchestrator::{Mailbox, Proposal},
     wire,
 };
-use crate::{Hash, Height, View, HASH_LENGTH};
+use crate::{Hash, Height, Parser, View, HASH_LENGTH};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
@@ -15,6 +15,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 use prost::Message;
 use rand::Rng;
+use std::marker::PhantomData;
 use std::sync::atomic::AtomicI64;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -62,6 +63,7 @@ impl VoterMailbox {
 
     pub async fn proposal(
         &mut self,
+        view: View,
         parent: Hash,
         height: Height,
         payload: Bytes,
@@ -69,6 +71,7 @@ impl VoterMailbox {
     ) {
         self.sender
             .send(VoterMessage::Proposal {
+                view,
                 parent,
                 height,
                 payload,
@@ -78,9 +81,9 @@ impl VoterMailbox {
             .unwrap();
     }
 
-    pub async fn verified(&mut self, block: Hash) {
+    pub async fn verified(&mut self, view: View) {
         self.sender
-            .send(VoterMessage::Verified { block })
+            .send(VoterMessage::Verified { view })
             .await
             .unwrap();
     }
@@ -339,9 +342,10 @@ pub struct Config {
 // TODO: improve name here
 type ValidatorSet = (u32, Vec<PublicKey>, HashMap<PublicKey, u32>);
 
-pub struct Voter<E: Clock + Rng, C: Scheme> {
+pub struct Voter<E: Clock + Rng, C: Scheme, P: Parser> {
     runtime: E,
     crypto: C,
+    parser: P,
 
     proposal_namespace: Bytes,
     vote_namespace: Bytes,
@@ -362,7 +366,7 @@ pub struct Voter<E: Clock + Rng, C: Scheme> {
     tracked_views: Gauge,
 }
 
-impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
+impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
     fn leader(validators: &BTreeMap<View, ValidatorSet>, view: crate::View) -> PublicKey {
         let (_, (_, ref validators, _)) = validators
             .range(..=view)
@@ -382,7 +386,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             .1
     }
 
-    pub fn new(runtime: E, crypto: C, cfg: Config) -> (Self, VoterMailbox) {
+    pub fn new(runtime: E, crypto: C, parser: P, cfg: Config) -> (Self, VoterMailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -430,6 +434,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             Self {
                 runtime,
                 crypto,
+                parser,
 
                 proposal_namespace: create_namespace(&cfg.namespace, PROPOSAL_SUFFIX),
                 vote_namespace: create_namespace(&cfg.namespace, VOTE_SUFFIX),
@@ -668,22 +673,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                     "dropping proposal"
                 );
                 return;
+            }
         }
 
         // Verify the signature
-        //
-        // TODO: don't put in same channel as verify
-        // TODO: stuffing parse requests can backlog proposal/verification
-        // -> should not be possible to spawn an async task until we've identified this is the only
-        // proposal we are willing to consider at this view
-        let payload_hash = match orchestrator
-            .parse(
-                proposal.parent.clone(),
-                proposal.height,
-                proposal.payload.clone(),
-            )
-            .await
-        {
+        let payload_hash = match self.parser.parse(proposal.payload.clone()) {
             Some(hash) => hash,
             None => {
                 debug!(reason = "invalid payload", "dropping proposal");
@@ -722,7 +716,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             view = proposal.view,
             height = proposal.height,
             hash = hex(&proposal_hash),
-            "requested proposal verification"
+            "requested proposal verification",
         );
     }
 

@@ -25,9 +25,17 @@ type Hash = Bytes; // use fixed size bytes
 const HASH_LENGTH: usize = 32;
 type Payload = Bytes;
 
+pub trait Parser: Clone + Send + 'static {
+    /// Parse the payload and return the hash of the payload.
+    ///
+    /// Parse is a stateless operation and may be called out-of-order.
+    fn parse(&self, payload: Payload) -> Option<Hash>;
+}
+
 /// TODO: call verify after voting (before finalization votes) or before voting? Can include
 /// outputs of block in next block?
 /// TODO: perform verification async so can keep responding to messages?
+/// TODO: change name
 pub trait Application: Send + 'static {
     /// Initialize the application with the genesis block at view=0, height=0.
     fn genesis(&mut self) -> (Hash, Payload);
@@ -42,16 +50,6 @@ pub trait Application: Send + 'static {
         parent: Hash,
         height: Height,
     ) -> impl Future<Output = Option<(Payload, Hash)>> + Send;
-
-    /// Parse the payload and return the hash of the payload.
-    ///
-    /// Parse is a stateless operation and may be called out-of-order.
-    fn parse(
-        &mut self,
-        parent: Hash,
-        height: Height,
-        payload: Payload,
-    ) -> impl Future<Output = Option<Hash>> + Send;
 
     /// Verify the payload is valid.
     ///
