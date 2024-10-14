@@ -45,8 +45,8 @@
 //!         peers[0].clone(),
 //!         peers[1].clone(),
 //!         Link {
-//!             latency_mean: 5.0,
-//!             latency_stddev: 2.5,
+//!             latency: 5.0,
+//!             jitter: 2.5,
 //!             success_rate: 0.75,
 //!         },
 //!     ).await.unwrap();
@@ -65,8 +65,8 @@
 //!         peers[0].clone(),
 //!         peers[1].clone(),
 //!         Link {
-//!             latency_mean: 100.0,
-//!             latency_stddev: 25.0,
+//!             latency: 100.0,
+//!             jitter: 25.0,
 //!             success_rate: 0.8,
 //!         },
 //!     ).await.unwrap();
@@ -172,8 +172,8 @@ mod tests {
                             agent.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 5.0,
-                                latency_stddev: 2.5,
+                                latency: 5.0,
+                                jitter: 2.5,
                                 success_rate: 0.75,
                             },
                         )
@@ -306,8 +306,8 @@ mod tests {
                     pk.clone(),
                     pk.clone(),
                     Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 2.5,
+                        latency: 5.0,
+                        jitter: 2.5,
                         success_rate: 0.75,
                     },
                 )
@@ -370,8 +370,8 @@ mod tests {
                     pk1.clone(),
                     pk2.clone(),
                     Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 2.5,
+                        latency: 5.0,
+                        jitter: 2.5,
                         success_rate: 1.5,
                     },
                 )
@@ -415,8 +415,8 @@ mod tests {
                     pk1.clone(),
                     pk2.clone(),
                     Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 2.5,
+                        latency: 5.0,
+                        jitter: 2.5,
                         success_rate: 1.0,
                     },
                 )
@@ -427,8 +427,8 @@ mod tests {
                     pk2.clone(),
                     pk1.clone(),
                     Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 2.5,
+                        latency: 5.0,
+                        jitter: 2.5,
                         success_rate: 1.0,
                     },
                 )
@@ -484,8 +484,8 @@ mod tests {
                     pk1.clone(),
                     pk2.clone(),
                     Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 0.0,
+                        latency: 5.0,
+                        jitter: 0.0,
                         success_rate: 1.0,
                     },
                 )
@@ -536,8 +536,8 @@ mod tests {
                     pk1.clone(),
                     pk2.clone(),
                     Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 0.0,
+                        latency: 5.0,
+                        jitter: 0.0,
                         success_rate: 1.0,
                     },
                 )
@@ -590,8 +590,8 @@ mod tests {
                     pk1.clone(),
                     pk2.clone(),
                     Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 2.5,
+                        latency: 5.0,
+                        jitter: 2.5,
                         success_rate: 1.0,
                     },
                 )
@@ -602,8 +602,8 @@ mod tests {
                     pk2.clone(),
                     pk1.clone(),
                     Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 2.5,
+                        latency: 5.0,
+                        jitter: 2.5,
                         success_rate: 1.0,
                     },
                 )
@@ -710,8 +710,8 @@ mod tests {
                     pk1.clone(),
                     pk2.clone(),
                     Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 2.5,
+                        latency: 5.0,
+                        jitter: 2.5,
                         success_rate: 1.0,
                     },
                 )
@@ -722,8 +722,8 @@ mod tests {
                     pk2.clone(),
                     pk1.clone(),
                     Link {
-                        latency_mean: 5.0,
-                        latency_stddev: 2.5,
+                        latency: 5.0,
+                        jitter: 2.5,
                         success_rate: 1.0,
                     },
                 )

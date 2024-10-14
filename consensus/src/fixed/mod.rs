@@ -110,8 +110,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 1.0,
+                                latency: 10.0,
+                                jitter: 1.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -224,8 +224,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 1.0,
+                                latency: 10.0,
+                                jitter: 1.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -338,8 +338,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 2.5,
+                                latency: 10.0,
+                                jitter: 2.5,
                                 success_rate: 1.0,
                             },
                         )
@@ -417,8 +417,8 @@ mod tests {
                         validator.clone(),
                         other.clone(),
                         Link {
-                            latency_mean: 10.0,
-                            latency_stddev: 2.5,
+                            latency: 10.0,
+                            jitter: 2.5,
                             success_rate: 1.0,
                         },
                     )
@@ -525,8 +525,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 3000.0,
-                                latency_stddev: 0.0,
+                                latency: 3000.0,
+                                jitter: 0.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -583,8 +583,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 1.0,
+                                latency: 10.0,
+                                jitter: 1.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -664,8 +664,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 800.0,
-                                latency_stddev: 0.0,
+                                latency: 800.0,
+                                jitter: 0.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -778,8 +778,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 0.0,
+                                latency: 10.0,
+                                jitter: 0.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -883,8 +883,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 10.0,
-                                latency_stddev: 1.0,
+                                latency: 10.0,
+                                jitter: 1.0,
                                 success_rate: 1.0,
                             },
                         )
@@ -964,8 +964,8 @@ mod tests {
                             validator.clone(),
                             other.clone(),
                             Link {
-                                latency_mean: 200.0,
-                                latency_stddev: 10.0,
+                                latency: 200.0,
+                                jitter: 10.0,
                                 success_rate: 0.8,
                             },
                         )

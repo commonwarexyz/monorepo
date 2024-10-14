@@ -5,6 +5,7 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
 };
+use rand_distr::Normal;
 
 pub enum Message {
     Register {
@@ -20,7 +21,8 @@ pub enum Message {
     AddLink {
         sender: PublicKey,
         receiver: PublicKey,
-        config: Link,
+        sampler: Normal<f64>,
+        success_rate: f64,
         result: oneshot::Sender<()>,
     },
     RemoveLink {
@@ -100,13 +102,17 @@ impl Oracle {
             return Err(Error::InvalidSuccessRate(config.success_rate));
         }
 
+        // Create distribution
+        let sampler = Normal::new(config.latency, config.jitter).unwrap();
+
         // Wait for update to complete
         let (s, r) = oneshot::channel();
         self.sender
             .send(Message::AddLink {
                 sender,
                 receiver,
-                config,
+                sampler,
+                success_rate: config.success_rate,
                 result: s,
             })
             .await

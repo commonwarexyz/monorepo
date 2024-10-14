@@ -57,10 +57,10 @@ pub struct Network<E: Spawner + Rng + Clock> {
 /// for a bidirectional connection).
 pub struct Link {
     /// Mean latency for the delivery of a message in milliseconds.
-    pub latency_mean: f64,
+    pub latency: f64,
 
     /// Standard deviation of the latency for the delivery of a message in milliseconds.
-    pub latency_stddev: f64,
+    pub jitter: f64,
 
     /// Probability of a message being delivered successfully (in range [0,1]).
     pub success_rate: f64,
@@ -158,14 +158,14 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             ingress::Message::AddLink {
                 sender,
                 receiver,
-                config,
+                sampler,
+                success_rate,
                 result,
             } => {
-                let sampler = Normal::new(config.latency_mean, config.latency_stddev).unwrap();
                 self.links
                     .entry(sender)
                     .or_default()
-                    .insert(receiver, (sampler, config.success_rate));
+                    .insert(receiver, (sampler, success_rate));
                 if let Err(err) = result.send(()) {
                     error!(?err, "failed to send add link ack to oracle");
                 }
