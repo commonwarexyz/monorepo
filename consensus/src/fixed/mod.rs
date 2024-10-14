@@ -43,7 +43,7 @@ mod tests {
     use crate::mocks::{self, Progress};
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_macros::{select, test_with_logging};
+    use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use engine::Engine;
@@ -56,7 +56,7 @@ mod tests {
     };
     use tracing::debug;
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_all_online() {
         // Create runtime
         let n = 5;
@@ -158,7 +158,7 @@ mod tests {
         });
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_one_offline() {
         // Create runtime
         let n = 5;
@@ -265,7 +265,7 @@ mod tests {
         });
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_catchup() {
         // Create runtime
         let n = 5;
@@ -443,7 +443,7 @@ mod tests {
         });
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_all_recovery() {
         // Create runtime
         let n = 5;
@@ -575,7 +575,7 @@ mod tests {
         });
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_no_finality() {
         // Create runtime
         let n = 5;
@@ -682,7 +682,7 @@ mod tests {
         });
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_partition() {
         // Create runtime
         let n = 10;
@@ -858,7 +858,7 @@ mod tests {
         });
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_jank_links() {
         // Create runtime
         let n = 10;

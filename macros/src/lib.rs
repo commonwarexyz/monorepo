@@ -9,8 +9,21 @@ use syn::{
     Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
 
+/// Run a test function asynchronously.
+///
+/// This macro is powered by the `futures` crate.
+///
+/// # Example
+/// ```rust
+/// use commonware_macros::test_async;
+///
+/// #[test_async]
+/// async fn test_async_fn() {
+///    assert_eq!(2 + 2, 4);
+/// }
+/// ```
 #[proc_macro_attribute]
-pub fn async_test(_: TokenStream, item: TokenStream) -> TokenStream {
+pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
     let input = parse_macro_input!(item as ItemFn);
 
@@ -44,10 +57,10 @@ pub fn async_test(_: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Example
 /// ```rust
-/// use commonware_macros::test_with_logging;
+/// use commonware_macros::test_traced;
 /// use tracing::{debug, info};
 ///
-/// #[test_with_logging("INFO")]
+/// #[test_traced("INFO")]
 /// fn test_info_level() {
 ///     info!("This is an info log");
 ///     debug!("This is a debug log (won't be shown)");
@@ -55,7 +68,7 @@ pub fn async_test(_: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn test_with_logging(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
     let input = parse_macro_input!(item as ItemFn);
 

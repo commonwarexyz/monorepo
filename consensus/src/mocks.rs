@@ -135,10 +135,10 @@ mod tests {
     use super::*;
     use crate::Application as _;
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_macros::async_test;
+    use commonware_macros::test_async;
     use futures::StreamExt;
 
-    #[async_test]
+    #[test_async]
     async fn test_normal_flow() {
         // Create the application
         let participant = Ed25519::from_seed(0).public_key();
@@ -194,7 +194,7 @@ mod tests {
         }
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "parent not verified")]
     async fn test_propose_invalid_parent() {
         // Create the application
@@ -210,7 +210,7 @@ mod tests {
         app.propose(invalid_parent.clone(), height).await;
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "invalid height")]
     async fn test_propose_invalid_height() {
         // Create the application
@@ -229,7 +229,7 @@ mod tests {
             .expect("propose failed");
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "invalid height")]
     async fn test_verify_invalid_height() {
         // Create the application
@@ -264,7 +264,7 @@ mod tests {
         .await;
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "parent not verified")]
     async fn test_verify_unverified_parent() {
         // Create the application
@@ -297,7 +297,7 @@ mod tests {
         .await;
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "invalid payload length")]
     async fn test_verify_payload_invalid_length() {
         // Create the application
@@ -316,7 +316,7 @@ mod tests {
         app.parse(genesis_hash.clone(), height, invalid_payload.clone());
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "hash already verified")]
     async fn test_verify_same_hash_twice() {
         // Create the application
@@ -349,7 +349,7 @@ mod tests {
             .await;
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "hash already finalized")]
     async fn test_notarize_after_finalize() {
         // Create the application
@@ -387,7 +387,7 @@ mod tests {
         app.notarized(hash.clone()).await;
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "hash not verified")]
     async fn test_notarization_not_verified() {
         let (sender, _) = mpsc::unbounded();
@@ -395,7 +395,7 @@ mod tests {
         app.notarized(hash(&Bytes::from_static(b"hello"))).await;
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "invalid hash length")]
     async fn test_notarization_invalid_hash() {
         let (sender, _) = mpsc::unbounded();
@@ -403,7 +403,7 @@ mod tests {
         app.notarized(Bytes::from_static(b"hello")).await;
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "hash already finalized")]
     async fn test_notarization_genesis_block() {
         // Create the application
@@ -418,7 +418,7 @@ mod tests {
         app.notarized(genesis_hash.clone()).await;
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "hash not verified")]
     async fn test_finalization_not_verified() {
         let (sender, _) = mpsc::unbounded();
@@ -426,7 +426,7 @@ mod tests {
         app.finalized(hash(&Bytes::from_static(b"hello"))).await;
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "invalid hash length")]
     async fn test_finalization_invalid_hash() {
         let (sender, _) = mpsc::unbounded();
@@ -434,7 +434,7 @@ mod tests {
         app.finalized(Bytes::from_static(b"hello")).await;
     }
 
-    #[async_test]
+    #[test_async]
     #[should_panic(expected = "hash already finalized")]
     async fn test_finalization_genesis_block() {
         // Create the application
