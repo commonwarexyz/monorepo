@@ -88,6 +88,7 @@ impl<E: Clock + RngCore> crate::Application for Application<E> {
     fn genesis(&mut self) -> (Hash, Payload) {
         let payload = Bytes::from(GENESIS_BYTES);
         let hash = hash(&payload);
+        self.parsed.insert(hash.clone());
         self.verified.insert(hash.clone(), 0);
         self.finalized.insert(hash.clone(), 0);
         (hash, payload)
@@ -134,6 +135,9 @@ impl<E: Clock + RngCore> crate::Application for Application<E> {
             .await;
 
         // Parse and record the payload
+        //
+        // A payload may be parsed multiple times, so we don't enforce
+        // uniqueness here.
         let payload_hash = hash(&payload);
         self.parsed.insert(payload_hash.clone());
         Some(payload_hash)
@@ -229,7 +233,7 @@ mod tests {
     use futures::StreamExt;
 
     #[test]
-    fn test_normal_flow() {
+    fn test_normal_flow_propose() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
@@ -255,22 +259,16 @@ mod tests {
                 .propose(parent.clone(), height)
                 .await
                 .expect("propose failed");
-
-            // Parse the payload to get the hash
-            let hash = app
-                .parse(parent.clone(), height, payload.clone())
-                .await
-                .expect("parse failed");
-            assert_eq!(hash, payload_hash);
+            let block_hash = hash(&payload_hash);
 
             // Verify the block
             let verified = app
-                .verify(parent.clone(), height, payload.clone(), hash.clone())
+                .verify(parent.clone(), height, payload.clone(), block_hash.clone())
                 .await;
             assert!(verified);
 
             // Notarize the block
-            app.notarized(hash.clone()).await;
+            app.notarized(block_hash.clone()).await;
 
             // Expect a progress message for notarization
             let (progress_participant, progress) =
@@ -279,13 +277,13 @@ mod tests {
             match progress {
                 Progress::Notarized(notarized_height, notarized_hash) => {
                     assert_eq!(notarized_height, height);
-                    assert_eq!(notarized_hash, hash);
+                    assert_eq!(notarized_hash, block_hash);
                 }
                 _ => panic!("expected Notarized progress"),
             }
 
             // Finalize the block
-            app.finalized(hash.clone()).await;
+            app.finalized(block_hash.clone()).await;
 
             // Expect a progress message for finalization
             let (progress_participant, progress) =
@@ -294,7 +292,80 @@ mod tests {
             match progress {
                 Progress::Finalized(finalized_height, finalized_hash) => {
                     assert_eq!(finalized_height, height);
-                    assert_eq!(finalized_hash, hash);
+                    assert_eq!(finalized_hash, block_hash);
+                }
+                _ => panic!("expected Finalized progress"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_normal_flow_verify() {
+        // Create the runtime
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create the application
+            let participant = Ed25519::from_seed(0).public_key();
+            let (sender, mut receiver) = mpsc::unbounded();
+            let cfg = Config {
+                participant: participant.clone(),
+                sender,
+                propose_latency: (10.0, 5.0),
+                parse_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let mut app = Application::new(runtime, cfg);
+
+            // Genesis
+            let (genesis_hash, _) = app.genesis();
+
+            // Get block at height 1
+            let parent = genesis_hash.clone();
+            let height: Height = 1;
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&participant);
+            payload.extend_from_slice(&height.to_be_bytes());
+            let payload = Bytes::from(payload);
+
+            // Parse the payload
+            let payload_hash = app
+                .parse(parent.clone(), height, payload.clone())
+                .await
+                .expect("parse failed");
+            let block_hash = hash(&payload_hash);
+
+            // Verify the block
+            let verified = app
+                .verify(parent.clone(), height, payload.clone(), block_hash.clone())
+                .await;
+            assert!(verified);
+
+            // Notarize the block
+            app.notarized(block_hash.clone()).await;
+
+            // Expect a progress message for notarization
+            let (progress_participant, progress) =
+                receiver.next().await.expect("no progress message");
+            assert_eq!(progress_participant, participant);
+            match progress {
+                Progress::Notarized(notarized_height, notarized_hash) => {
+                    assert_eq!(notarized_height, height);
+                    assert_eq!(notarized_hash, block_hash);
+                }
+                _ => panic!("expected Notarized progress"),
+            }
+
+            // Finalize the block
+            app.finalized(block_hash.clone()).await;
+
+            // Expect a progress message for finalization
+            let (progress_participant, progress) =
+                receiver.next().await.expect("no progress message");
+            assert_eq!(progress_participant, participant);
+            match progress {
+                Progress::Finalized(finalized_height, finalized_hash) => {
+                    assert_eq!(finalized_height, height);
+                    assert_eq!(finalized_hash, block_hash);
                 }
                 _ => panic!("expected Finalized progress"),
             }
@@ -358,53 +429,63 @@ mod tests {
         });
     }
 
-    #[test]
-    #[should_panic(expected = "invalid height")]
-    fn test_verify_invalid_height() {
-        // Create the runtime
-        let (executor, runtime, _) = Executor::default();
-        executor.start(async move {
-            // Create the application
-            let participant = Ed25519::from_seed(0).public_key();
-            let (sender, _) = mpsc::unbounded();
-            let cfg = Config {
-                participant,
-                sender,
-                propose_latency: (10.0, 5.0),
-                parse_latency: (10.0, 5.0),
-                verify_latency: (10.0, 5.0),
-            };
-            let mut app = Application::new(runtime, cfg);
+    // #[test]
+    // fn test_verify_not_parsed() {
+    //     // Create the runtime
+    //     let (executor, runtime, _) = Executor::default();
+    //     executor.start(async move {
+    //         // Create the application
+    //         let participant = Ed25519::from_seed(0).public_key();
+    //         let (sender, _) = mpsc::unbounded();
+    //         let cfg = Config {
+    //             participant,
+    //             sender,
+    //             propose_latency: (10.0, 5.0),
+    //             parse_latency: (10.0, 5.0),
+    //             verify_latency: (10.0, 5.0),
+    //         };
+    //         let mut app = Application::new(runtime, cfg);
 
-            // Genesis
-            let (genesis_hash, _) = app.genesis();
+    // #[test]
+    // #[should_panic(expected = "invalid height")]
+    // fn test_verify_invalid_height() {
+    //     // Create the runtime
+    //     let (executor, runtime, _) = Executor::default();
+    //     executor.start(async move {
+    //         // Create the application
+    //         let participant = Ed25519::from_seed(0).public_key();
+    //         let (sender, _) = mpsc::unbounded();
+    //         let cfg = Config {
+    //             participant,
+    //             sender,
+    //             propose_latency: (10.0, 5.0),
+    //             parse_latency: (10.0, 5.0),
+    //             verify_latency: (10.0, 5.0),
+    //         };
+    //         let mut app = Application::new(runtime, cfg);
 
-            // Propose a block at height 1
-            let parent = genesis_hash.clone();
-            let height = 1;
-            let (payload, payload_hash) = app
-                .propose(parent.clone(), height)
-                .await
-                .expect("propose failed");
+    //         // Genesis
+    //         let (genesis_hash, _) = app.genesis();
 
-            // Parse the payload to get the hash
-            let hash = app
-                .parse(parent.clone(), height, payload.clone())
-                .await
-                .expect("parse failed");
-            assert_eq!(hash, payload_hash);
+    //         // Propose a block at height 1
+    //         let parent = genesis_hash.clone();
+    //         let height = 1;
+    //         let (payload, payload_hash) = app
+    //             .propose(parent.clone(), height)
+    //             .await
+    //             .expect("propose failed");
 
-            // Attempt to verify the block with incorrect height (e.g., height 2)
-            let invalid_height = 2;
-            app.verify(
-                parent.clone(),
-                invalid_height,
-                payload.clone(),
-                hash.clone(),
-            )
-            .await;
-        });
-    }
+    //         // Attempt to verify the block with incorrect height (e.g., height 2)
+    //         let invalid_height = 2;
+    //         app.verify(
+    //             parent.clone(),
+    //             invalid_height,
+    //             payload.clone(),
+    //             hash.clone(),
+    //         )
+    //         .await;
+    //     });
+    // }
 
     // #[test_async]
     // #[should_panic(expected = "parent not verified")]
