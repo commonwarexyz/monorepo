@@ -1,43 +1,74 @@
 use crate::{Hash, Height, Payload, HASH_LENGTH};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
+use commonware_runtime::Clock;
 use commonware_utils::{hash, hex};
 use futures::{channel::mpsc, SinkExt};
-use std::collections::HashMap;
+use rand::RngCore;
+use rand_distr::{Distribution, Normal};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 const GENESIS_BYTES: &[u8] = b"genesis";
+
+type Latency = (f64, f64);
+
+pub struct Config {
+    pub participant: PublicKey,
+    pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
+
+    pub propose_latency: Latency,
+    pub parse_latency: Latency,
+    pub verify_latency: Latency,
+}
 
 pub enum Progress {
     Notarized(Height),
     Finalized(Height),
 }
 
-pub struct Application {
+pub struct Application<E: Clock + RngCore> {
+    runtime: E,
+
     participant: PublicKey,
 
+    propose_latency: Normal<f64>,
+    parse_latency: Normal<f64>,
+    verify_latency: Normal<f64>,
+
+    parsed: HashSet<Hash>,
     verified: HashMap<Hash, Height>,
     finalized: HashMap<Hash, Height>,
 
     progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
 }
 
-impl Application {
-    pub fn new(
-        participant: PublicKey,
-        sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
-    ) -> Self {
+impl<E: Clock + RngCore> Application<E> {
+    pub fn new(runtime: E, cfg: Config) -> Self {
+        // Generate samplers
+        let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
+        let parse_latency = Normal::new(cfg.parse_latency.0, cfg.parse_latency.1).unwrap();
+        let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
         Self {
-            participant,
+            runtime,
+
+            participant: cfg.participant,
+
+            propose_latency,
+            parse_latency,
+            verify_latency,
+
+            parsed: HashSet::new(),
             verified: HashMap::new(),
             finalized: HashMap::new(),
-            progress: sender,
+
+            progress: cfg.sender,
         }
     }
 
     fn verify_payload(height: Height, payload: &Payload) {
-        if payload.len() != HASH_LENGTH + 8 {
-            panic!("invalid payload length");
-        }
         let parsed_height = Height::from_be_bytes(payload[HASH_LENGTH..].try_into().unwrap());
         if parsed_height != height {
             panic!("invalid height");
@@ -45,7 +76,7 @@ impl Application {
     }
 }
 
-impl crate::Application for Application {
+impl<E: Clock + RngCore> crate::Application for Application<E> {
     fn genesis(&mut self) -> (Hash, Payload) {
         let payload = Bytes::from(GENESIS_BYTES);
         let hash = hash(&payload);
@@ -55,6 +86,7 @@ impl crate::Application for Application {
     }
 
     async fn propose(&mut self, parent: Hash, height: Height) -> Option<Payload> {
+        // Verify parent exists and we are at the correct height
         if parent.len() != HASH_LENGTH {
             panic!("invalid parent hash length");
         }
@@ -62,31 +94,51 @@ impl crate::Application for Application {
         if parent + 1 != height {
             panic!("invalid height");
         }
+
+        // Simulate the propose latency
+        let duration = self.propose_latency.sample(&mut self.runtime);
+        self.runtime
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
+
+        // Generate the payload
         let mut payload = Vec::new();
         payload.extend_from_slice(&self.participant);
         payload.extend_from_slice(&height.to_be_bytes());
         Some(Bytes::from(payload))
     }
 
-    fn parse(&self, parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
+    async fn parse(&mut self, parent: Hash, height: Height, payload: Payload) -> Option<Hash> {
+        // Verify parent is well-formed
         if parent.len() != HASH_LENGTH {
             panic!("invalid parent hash length");
         }
+
+        // Simulate the parse latency
+        let duration = self.parse_latency.sample(&mut self.runtime);
+        self.runtime
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
+
+        // Parse the payload
         Self::verify_payload(height, &payload);
-        Some(hash(&payload))
+        let h = hash(&payload);
+        self.parsed.insert(h.clone());
+        Some(h)
     }
 
     async fn verify(&mut self, parent: Hash, height: Height, payload: Payload, hash: Hash) -> bool {
+        // Verify parent exists and we are at the correct height
         if parent.len() != HASH_LENGTH {
             panic!("invalid parent hash length");
         }
         if hash.len() != HASH_LENGTH {
             panic!("invalid hash length");
         }
+        self.parsed.get(&hash).expect("hash not parsed");
         if let Some(height) = self.verified.get(&hash) {
             panic!("hash already verified: {}:{:?}", height, hex(&hash));
         }
-        Self::verify_payload(height, &payload);
         let parent = match self.verified.get(&parent) {
             Some(parent) => parent,
             None => {
@@ -96,6 +148,15 @@ impl crate::Application for Application {
         if parent + 1 != height {
             panic!("invalid height");
         }
+
+        // Simulate the verify latency
+        let duration = self.verify_latency.sample(&mut self.runtime);
+        self.runtime
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
+
+        // Verify the payload
+        Self::verify_payload(height, &payload);
         self.verified.insert(hash.clone(), height);
         true
     }

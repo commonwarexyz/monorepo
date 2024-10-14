@@ -46,7 +46,12 @@ pub trait Application: Send + 'static {
     /// Parse the payload and return the hash of the payload.
     ///
     /// Parse is a stateless operation and may be called out-of-order.
-    fn parse(&self, parent: Hash, height: Height, payload: Payload) -> Option<Hash>;
+    fn parse(
+        &mut self,
+        parent: Hash,
+        height: Height,
+        payload: Payload,
+    ) -> impl Future<Output = Option<Hash>> + Send;
 
     /// Verify the payload is valid.
     ///

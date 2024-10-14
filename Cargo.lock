@@ -414,6 +414,7 @@ dependencies = [
  "prost",
  "prost-build",
  "rand",
+ "rand_distr",
  "thiserror",
  "tracing",
  "tracing-subscriber",
