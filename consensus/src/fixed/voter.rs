@@ -40,7 +40,9 @@ struct Record {
     null_vote_retry: Option<SystemTime>,
 
     // Track one proposal per view
+    requested_proposal: bool,
     proposal: Option<(Hash /* proposal */, wire::Proposal)>,
+    verified_proposal: bool,
     broadcast_vote: bool,
     broadcast_finalize: bool,
 
@@ -71,7 +73,9 @@ impl Record {
             advance_deadline,
             null_vote_retry: None,
 
+            requested_proposal: false,
             proposal: None,
+            verified_proposal: false,
             broadcast_vote: false,
             broadcast_finalize: false,
 
@@ -134,7 +138,13 @@ impl Record {
         threshold: u32,
         force: bool,
     ) -> Option<(Option<Hash>, Height, &HashMap<PublicKey, wire::Vote>)> {
-        if !force && (self.broadcast_proposal_notarization || self.broadcast_null_notarization) {
+        if !force
+            && (self.broadcast_proposal_notarization
+                || self.broadcast_null_notarization
+                || !self.verified_proposal)
+        {
+            // We only want to broadcast a notarization if we have verified some proposal at
+            // this point.
             return None;
         }
         for (proposal, votes) in self.proposal_votes.iter() {
@@ -226,7 +236,9 @@ impl Record {
         &mut self,
         threshold: u32,
     ) -> Option<(Hash, Height, &HashMap<PublicKey, wire::Finalize>)> {
-        if self.broadcast_finalization {
+        if self.broadcast_finalization || !self.verified_proposal {
+            // We only want to broadcast a finalization if we have verified some proposal at
+            // this point.
             return None;
         }
         for (proposal, finalizes) in self.finalizes.iter() {
@@ -408,6 +420,11 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         // Check if we are leader
         let view = self.views.get(&self.view).unwrap();
         if view.leader != self.crypto.public_key() {
+            return None;
+        }
+
+        // Check if we have already requested a proposal
+        if view.requested_proposal {
             return None;
         }
 
@@ -1087,6 +1104,9 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             return None;
         }
         if view_obj.timeout_fired {
+            return None;
+        }
+        if !view_obj.verified_proposal {
             return None;
         }
         let (hash, proposal) = match &view_obj.proposal {

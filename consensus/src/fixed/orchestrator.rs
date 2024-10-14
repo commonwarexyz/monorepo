@@ -39,6 +39,7 @@ pub enum Message {
         proposal: Proposal,
     },
     NullNotarized {
+        // TODO: unify with `Notarized`?
         view: View,
     },
     Finalized {

@@ -7,6 +7,12 @@
 //! Wait for block finalization at tip (2f+1), fetch heights backwards (don't
 //! need to backfill views).
 //!
+//! # Async Handling
+//!
+//! All application interaction occurs asynchronously, meaning that the engine can continue processing messages
+//! while a payload is being built or verified. Parsing is expected to be fast and so it is called directly rather
+//! than waiting for future resolution.
+//!
 //! # Differences from Simplex Paper
 //!
 //! * Block timeout in addition to notarization timeout
