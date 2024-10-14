@@ -674,6 +674,8 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         //
         // TODO: don't put in same channel as verify
         // TODO: stuffing parse requests can backlog proposal/verification
+        // -> should not be possible to spawn an async task until we've identified this is the only
+        // proposal we are willing to consider at this view
         let payload_hash = match orchestrator
             .parse(
                 proposal.parent.clone(),
