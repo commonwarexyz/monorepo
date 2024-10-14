@@ -11,7 +11,8 @@ use syn::{
 
 /// Run a test function asynchronously.
 ///
-/// This macro is powered by the `futures` crate.
+/// This macro is powered by the [futures](https://docs.rs/futures) crate
+/// and is not bound to a particular executor or runtime.
 ///
 /// # Example
 /// ```rust
@@ -53,7 +54,8 @@ pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
 /// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
 /// This macro defaults to a log level of `DEBUG` if no level is provided.
 ///
-/// This macro is powered by the `tracing` and `tracing-subscriber` crates.
+/// This macro is powered by the [tracing](https://docs.rs/tracing) and
+/// [tracing-subscriber](https://docs.rs/tracing-subscriber) crates.
 ///
 /// # Example
 /// ```rust
@@ -166,8 +168,8 @@ impl Parse for SelectInput {
 
 /// Select the first future that completes (biased by order).
 ///
-/// This macro is powered by the `futures::select_biased!` macro
-/// and as such is not bound to a particular executor or runtime.
+/// This macro is powered by the [futures](https://docs.rs/futures) crate
+/// and is not bound to a particular executor or runtime.
 ///
 /// # Example
 ///
