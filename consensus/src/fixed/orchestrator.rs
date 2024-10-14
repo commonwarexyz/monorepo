@@ -74,17 +74,11 @@ impl Mailbox {
         receiver.await.unwrap()
     }
 
-    pub async fn verify(&mut self, hash: Hash, proposal: wire::Proposal) -> bool {
-        let (sender, receiver) = oneshot::channel();
+    pub async fn verify(&mut self, hash: Hash, proposal: wire::Proposal) {
         self.sender
-            .send(Message::Verify {
-                hash,
-                proposal,
-                response: sender,
-            })
+            .send(Message::Verify { hash, proposal })
             .await
             .unwrap();
-        receiver.await.unwrap()
     }
 
     pub async fn notarized(&mut self, proposal: Proposal) {

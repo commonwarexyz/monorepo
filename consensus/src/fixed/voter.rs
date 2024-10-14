@@ -46,7 +46,6 @@ pub enum VoterMessage {
     },
     Verified {
         view: View,
-        proposal: Hash,
     },
 }
 
@@ -575,9 +574,19 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         self.handle_vote(vote);
     }
 
-    async fn our_proposal(&mut self, payload_hash: Hash, proposal: wire::Proposal) {
+    async fn our_proposal(&mut self, payload_hash: Hash, proposal: wire::Proposal) -> bool {
         // Store the proposal
         let view = self.views.get_mut(&proposal.view).expect("view missing");
+
+        // Check if view timed out
+        if view.timeout_fired {
+            debug!(
+                view = proposal.view,
+                reason = "view timed out",
+                "dropping our proposal"
+            );
+            return false;
+        }
 
         // Construct hash
         let proposal_digest = proposal_digest(
@@ -600,6 +609,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
             hash = hex(&proposal_hash),
             "stored our proposal"
         );
+        true
     }
 
     async fn peer_proposal(&mut self, orchestrator: &mut Mailbox, proposal: wire::Proposal) {
@@ -640,7 +650,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         }
 
         // Check to see if we have already received a proposal for this view (if exists)
-        if let Some(view) = self.views.get(&proposal.view) {
+        if let Some(view) = self.views.get_mut(&proposal.view) {
             if view.proposal.is_some() {
                 warn!(
                     leader = hex(&expected_leader),
@@ -650,9 +660,19 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 );
                 return;
             }
+            if view.timeout_fired {
+                warn!(
+                    leader = hex(&expected_leader),
+                    view = proposal.view,
+                    reason = "view already timed out",
+                    "dropping proposal"
+                );
+                return;
         }
 
         // Verify the signature
+        //
+        // TODO: don't put in same channel as verify
         let payload_hash = match orchestrator
             .parse(
                 proposal.parent.clone(),
@@ -687,35 +707,47 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
         // Verify the proposal
         //
         // This will fail if we haven't notified the application of this parent.
-        if !orchestrator
-            .verify(proposal_hash.clone(), proposal.clone())
-            .await
-        {
-            debug!(
-                view = proposal.view,
-                height = proposal.height,
-                hash = hex(&proposal_hash),
-                reason = "verify failed",
-                "dropping proposal"
-            );
-            return;
-        };
-
-        // Store the proposal
-        let proposal_view = proposal.view;
-        let proposal_height = proposal.height;
         let view = self
             .views
             .entry(proposal.view)
             .or_insert_with(|| Record::new(expected_leader, None, None));
-        view.proposal = Some((proposal_hash.clone(), proposal));
-        view.leader_deadline = None;
+        view.proposal = Some((proposal_hash.clone(), proposal.clone()));
+        orchestrator
+            .verify(proposal_hash.clone(), proposal.clone())
+            .await;
         debug!(
-            view = proposal_view,
-            height = proposal_height,
+            view = proposal.view,
+            height = proposal.height,
             hash = hex(&proposal_hash),
-            "stored peer proposal"
+            "requested proposal verification"
         );
+    }
+
+    fn verified(&mut self, view: View) -> bool {
+        // Check if view still relevant
+        let view_obj = match self.views.get_mut(&view) {
+            Some(view) => view,
+            None => {
+                debug!(view, reason = "view missing", "dropping verified proposal");
+                return false;
+            }
+        };
+
+        // Ensure we haven't timed out
+        if view_obj.timeout_fired {
+            debug!(
+                view,
+                reason = "view timed out",
+                "dropping verified proposal"
+            );
+            return false;
+        }
+
+        // Mark proposal as verified
+        view_obj.leader_deadline = None;
+        view_obj.verified_proposal = true;
+        debug!(view, "verified peer proposal");
+        true
     }
 
     fn enter_view(&mut self, view: u64) {
@@ -1414,13 +1446,13 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        VoterMessage::Proposal{ view, parent, height, payload, payload_hash} => {
-                            debug!(view = view, our_view = self.view, "received proposal");
+                        VoterMessage::Proposal{ view: proposal_view, parent, height, payload, payload_hash} => {
+                            debug!(view = proposal_view, our_view = self.view, "received proposal");
 
                             // If we have already moved to another view, drop the response as we will
                             // not broadcast it
-                            if self.view != view {
-                                debug!(view = view, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
+                            if self.view != proposal_view {
+                                debug!(view = proposal_view, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
                                 continue;
                             }
 
@@ -1437,6 +1469,12 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                                 }),
                             };
 
+                            // Handle our proposal
+                            if !self.our_proposal(payload_hash, proposal.clone()).await {
+                                continue;
+                            }
+                            view = proposal_view;
+
                             // Broadcast the proposal
                             let msg = wire::Consensus {
                                 payload: Some(wire::consensus::Payload::Proposal(proposal.clone())),
@@ -1446,14 +1484,15 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                                 .send(Recipients::All, msg.into(), true)
                                 .await
                                 .unwrap();
-
-                            // Handle the proposal
-                            let proposal_view = proposal.view;
-                            self.our_proposal(payload_hash, proposal).await;
-                            self.broadcast(orchestrator, &mut sender, proposal_view).await;
                         },
-                        VoterMessage::Verified { view, proposal } => {
-                            unimplemented!("verified message not handled");
+                        VoterMessage::Verified { view: verified_view } => {
+                            debug!(view = verified_view, "received verified proposal");
+
+                            // Handle verified proposal
+                            if !self.verified(verified_view) {
+                                continue;
+                            }
+                            view = verified_view;
                         },
                     }
                 },
@@ -1485,7 +1524,7 @@ impl<E: Clock + Rng, C: Scheme> Voter<E, C> {
                                 continue;
                             }
                             view = proposal.view;
-                            self.proposal(orchestrator, proposal).await;
+                            self.peer_proposal(orchestrator, proposal).await;
                         }
                         wire::consensus::Payload::Vote(vote) => {
                             if vote.hash.is_none() && vote.height != 0 {
