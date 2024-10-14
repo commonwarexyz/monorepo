@@ -407,7 +407,7 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
         };
 
         // Generate proposal
-        Some((parent.0, height, payload_hash, payload))
+        Some((parent.0, height, payload, payload_hash))
     }
 
     fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
