@@ -46,7 +46,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mocks::application::{Application, Config as ApplicationConfig, Progress};
+    use crate::mocks::application::{self, Application, Config as ApplicationConfig, Progress};
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::{select, test_traced};
@@ -133,9 +133,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, application) = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -247,9 +249,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, application) = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -361,9 +365,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, application) = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -440,9 +446,11 @@ mod tests {
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
             };
+            let (parser, application) = Application::new(runtime.clone(), application_cfg);
             let cfg = config::Config {
                 crypto: scheme,
-                application: Application::new(runtime.clone(), application_cfg),
+                parser,
+                application,
                 registry: Arc::new(Mutex::new(Registry::default())),
                 namespace: Bytes::from("consensus"),
                 leader_timeout: Duration::from_secs(1),
@@ -548,9 +556,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, application) = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -687,9 +697,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, application) = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -801,9 +813,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, application) = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -987,9 +1001,11 @@ mod tests {
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
+                let (parser, application) = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    application: Application::new(runtime.clone(), application_cfg),
+                    parser,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),

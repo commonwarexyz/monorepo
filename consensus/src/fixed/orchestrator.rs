@@ -391,9 +391,16 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
 
         // Propose block
         let height = parent.1 + 1;
-        let (payload, payload_hash) = match self.application.propose(parent.0.clone(), height).await
-        {
+        let payload = match self.application.propose(parent.0.clone(), height).await {
             Some(payload) => payload,
+            None => {
+                return None;
+            }
+        };
+
+        // Compute payload hash
+        let payload_hash = match self.parser.parse(payload.clone()).await {
+            Some(hash) => hash,
             None => {
                 return None;
             }
@@ -946,7 +953,7 @@ impl<E: Clock + Rng + Spawner, P: Parser, A: Application> Orchestrator<E, P, A> 
                                     warn!(sender = hex(&s), "invalid proposal parent hash size");
                                     break;
                                 }
-                                let payload_hash = match self.parser.parse(proposal.payload.clone()) {
+                                let payload_hash = match self.parser.parse(proposal.payload.clone()).await {
                                     Some(payload_hash) => payload_hash,
                                     None => {
                                         warn!(sender = hex(&s), "unable to parse notarized/finalized payload");

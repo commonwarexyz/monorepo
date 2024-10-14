@@ -676,7 +676,7 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
         }
 
         // Verify the signature
-        let payload_hash = match self.parser.parse(proposal.payload.clone()) {
+        let payload_hash = match self.parser.parse(proposal.payload.clone()).await {
             Some(hash) => hash,
             None => {
                 debug!(reason = "invalid payload", "dropping proposal");

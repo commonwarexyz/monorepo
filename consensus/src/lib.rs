@@ -29,7 +29,7 @@ pub trait Parser: Clone + Send + 'static {
     /// Parse the payload and return the hash of the payload.
     ///
     /// Parse is a stateless operation and may be called out-of-order.
-    fn parse(&self, payload: Payload) -> Option<Hash>;
+    fn parse(&mut self, payload: Payload) -> impl Future<Output = Option<Hash>> + Send;
 }
 
 /// TODO: call verify after voting (before finalization votes) or before voting? Can include
@@ -49,7 +49,7 @@ pub trait Application: Send + 'static {
         &mut self,
         parent: Hash,
         height: Height,
-    ) -> impl Future<Output = Option<(Payload, Hash)>> + Send;
+    ) -> impl Future<Output = Option<Payload>> + Send;
 
     /// Verify the payload is valid.
     ///
