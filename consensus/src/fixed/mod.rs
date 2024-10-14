@@ -59,7 +59,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::debug;
+    use tracing::{debug, info};
 
     #[test_traced]
     fn test_all_online() {
@@ -929,12 +929,11 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_jank_links() {
+    fn jank_links(seed: u64) {
         // Create runtime
         let n = 10;
         let required_blocks = 20;
-        let (executor, runtime, _) = Executor::default();
+        let (executor, runtime, _) = Executor::seeded(seed);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1038,5 +1037,13 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test_traced]
+    fn test_jank_links() {
+        for seed in 0..10 {
+            info!(seed, "running test with seed");
+            jank_links(seed);
+        }
     }
 }
