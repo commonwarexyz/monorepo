@@ -34,7 +34,8 @@ pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
     let mut sig = input.sig;
     let block = input.block;
 
-    // Remove 'async' from the function signature
+    // Remove 'async' from the function signature (#[test] only
+    // accepts sync functions)
     sig.asyncness
         .take()
         .expect("expected test function to be async");
