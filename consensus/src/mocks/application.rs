@@ -8,6 +8,7 @@ use rand::RngCore;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -37,6 +38,14 @@ pub enum Progress {
 
 type ViewInfo = (HashSet<PublicKey>, Vec<PublicKey>);
 
+#[derive(Default)]
+struct State {
+    parsed: HashSet<Hash>,
+    verified: HashMap<Hash, Height>,
+    last_finalized: u64,
+    finalized: HashMap<Hash, Height>,
+}
+
 // TODO: add arc/mutex to support copying of state
 #[derive(Clone)]
 pub struct Application<E: Clock + RngCore, H: Hasher> {
@@ -50,11 +59,9 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     parse_latency: Normal<f64>,
     verify_latency: Normal<f64>,
 
-    parsed: HashSet<Hash>,
-    verified: HashMap<Hash, Height>,
-    last_finalized: u64,
-    finalized: HashMap<Hash, Height>,
     progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
+
+    state: Arc<Mutex<State>>,
 }
 
 impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
@@ -84,11 +91,9 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
             propose_latency,
             verify_latency,
 
-            parsed: HashSet::new(),
-            verified: HashMap::new(),
-            last_finalized: 0,
-            finalized: HashMap::new(),
             progress: cfg.sender,
+
+            state: Arc::new(Mutex::new(State::default())),
         }
     }
 
@@ -101,9 +106,10 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
     fn genesis(&mut self) -> (Hash, Payload) {
         let payload = Bytes::from(GENESIS_BYTES);
         let hash = self.hasher.hash(&payload);
-        self.parsed.insert(hash.clone());
-        self.verified.insert(hash.clone(), 0);
-        self.finalized.insert(hash.clone(), 0);
+        let mut state = self.state.lock().unwrap();
+        state.parsed.insert(hash.clone());
+        state.verified.insert(hash.clone(), 0);
+        state.finalized.insert(hash.clone(), 0);
         (hash, payload)
     }
 
@@ -128,12 +134,15 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
         if !H::validate(&context.parent) {
             self.panic("invalid parent hash length");
         }
-        if let Some(parent) = self.verified.get(&context.parent) {
-            if parent + 1 != context.height {
-                self.panic("invalid height");
+        {
+            let state = self.state.lock().unwrap();
+            if state.verified.contains_key(&context.parent) {
+                if state.verified.get(&context.parent).unwrap() + 1 != context.height {
+                    self.panic("invalid height");
+                }
+            } else {
+                self.panic("parent not verified");
             }
-        } else {
-            self.panic("parent not verified");
         }
 
         // Simulate the propose latency
@@ -163,7 +172,10 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
 
         // Parse the payload
         let hash = self.hasher.hash(&payload);
-        self.parsed.insert(hash.clone());
+        {
+            let mut state = self.state.lock().unwrap();
+            state.parsed.insert(hash.clone());
+        }
         Some(hash)
     }
 
@@ -174,6 +186,12 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
         payload: Payload,
         block: Hash,
     ) -> bool {
+        // Simulate the verify latency
+        let duration = self.verify_latency.sample(&mut self.runtime);
+        self.runtime
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
+
         // Verify parent exists and we are at the correct height
         if !H::validate(&context.parent) {
             self.panic("invalid parent hash length");
@@ -181,32 +199,29 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
         if !H::validate(&block) {
             self.panic("invalid hash length");
         }
-        if self.verified.contains_key(&block) {
-            self.panic("block already verified");
-        }
-        if let Some(parent) = self.verified.get(&context.parent) {
-            if parent + 1 != context.height {
-                self.panic("invalid height");
-            }
-        } else {
-            self.panic("parent not verified");
-        };
-        if !self.parsed.contains(&self.hasher.hash(&payload)) {
-            self.panic("payload not parsed");
-        }
-
-        // Simulate the verify latency
-        let duration = self.verify_latency.sample(&mut self.runtime);
-        self.runtime
-            .sleep(Duration::from_millis(duration as u64))
-            .await;
 
         // Verify the payload
         let parsed_height = Height::from_be_bytes(payload[32..].try_into().unwrap());
         if parsed_height != context.height {
             self.panic("invalid height");
         }
-        self.verified.insert(block.clone(), context.height);
+
+        // Ensure not duplicate check
+        let mut state = self.state.lock().unwrap();
+        if state.verified.contains_key(&block) {
+            self.panic("block already verified");
+        }
+        if let Some(parent) = state.verified.get(&context.parent) {
+            if parent + 1 != context.height {
+                self.panic("invalid height");
+            }
+        } else {
+            self.panic("parent not verified");
+        };
+        if !state.parsed.contains(&self.hasher.hash(&payload)) {
+            self.panic("payload not parsed");
+        }
+        state.verified.insert(block.clone(), context.height);
         true
     }
 
@@ -214,49 +229,51 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
         if !H::validate(&block) {
             self.panic("invalid hash length");
         }
-        if self.finalized.contains_key(&block) {
-            self.panic("block already finalized");
-        }
-        if let Some(height) = self.verified.get(&block) {
-            let _ = self
-                .progress
-                .send((
-                    self.participant.clone(),
-                    Progress::Notarized(*height, block),
-                ))
-                .await;
-        } else {
-            self.panic("block not verified");
-        }
+        let height = {
+            let state = self.state.lock().unwrap();
+            if state.finalized.contains_key(&block) {
+                self.panic("block already finalized");
+            }
+            if let Some(height) = state.verified.get(&block) {
+                *height
+            } else {
+                self.panic("block not verified");
+            }
+        };
+        let _ = self
+            .progress
+            .send((self.participant.clone(), Progress::Notarized(height, block)))
+            .await;
     }
 
     async fn finalized(&mut self, block: Hash) {
         if !H::validate(&block) {
             self.panic("invalid hash length");
         }
-        if self.finalized.contains_key(&block) {
-            self.panic("block already finalized");
-        }
-        if let Some(height) = self.verified.get(&block) {
-            if self.last_finalized + 1 != *height {
+        let height = {
+            let mut state = self.state.lock().unwrap();
+            if state.finalized.contains_key(&block) {
+                self.panic("block already finalized");
+            }
+            let height = match state.verified.get(&block) {
+                Some(height) => *height,
+                None => self.panic("block not verified"),
+            };
+            if state.last_finalized + 1 != height {
                 self.panic(&format!(
                     "invalid finalization height: {} != {}",
-                    self.last_finalized + 1,
+                    state.last_finalized + 1,
                     height
                 ));
             }
-            self.last_finalized = *height;
-            self.finalized.insert(block.clone(), *height);
-            let _ = self
-                .progress
-                .send((
-                    self.participant.clone(),
-                    Progress::Finalized(*height, block),
-                ))
-                .await;
-        } else {
-            self.panic("block not verified");
-        }
+            state.last_finalized = height;
+            state.finalized.insert(block.clone(), height);
+            height
+        };
+        let _ = self
+            .progress
+            .send((self.participant.clone(), Progress::Finalized(height, block)))
+            .await;
     }
 }
 
