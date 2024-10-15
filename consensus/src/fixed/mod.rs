@@ -29,9 +29,8 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
-use thiserror::Error;
-
 use crate::{FaultType, SupportType};
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -48,7 +47,7 @@ pub enum Error {
 pub const VOTE: SupportType = 0;
 pub const FINALIZE: SupportType = 1;
 
-pub const DUPLICATE_BLOCK: FaultType = 0;
+pub const CONFLICTING_BLOCK: FaultType = 0;
 pub const CONFLICTING_VOTE: FaultType = 1;
 pub const CONFLICTING_FINALIZE: FaultType = 2;
 pub const NULL_AND_FINALIZE: FaultType = 3;

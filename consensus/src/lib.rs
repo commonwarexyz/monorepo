@@ -125,6 +125,14 @@ pub trait Handler: Send + 'static {
     fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
 }
 
+/// Oracle is a mechanism for updating the set of validators participating in consensus.
+///
+/// It is up to the developer to ensure changes are synchronized across nodes in the network
+/// at a given view. If care is not taken to do this, the chain could fork/halt.
+pub trait Oracle: Send + 'static {
+    fn activate(&self, view: View, validators: Vec<PublicKey>);
+}
+
 // TODO: break apart into smaller traits?
 // TODO: how to layer traits (want to call propose different ways depending
 // on whether we are including uptime info/faults)?
