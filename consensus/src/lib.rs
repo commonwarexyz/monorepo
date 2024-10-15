@@ -105,7 +105,6 @@ pub trait Application: Clone + Send + 'static {
     /// at the next height (asynchronous finalization), a synchrony bound should be enforced around
     /// changes to the set (i.e. participant joining in view 10 should only become active in view 20, where
     /// we assume all other participants have finalized view 10).
-    // TODO: when syncing, we might need to get creative on how to handle this
     fn participants(&self, view: View) -> Option<Vec<PublicKey>>;
 
     /// Generate a new payload for the given parent hash.
@@ -147,6 +146,7 @@ pub trait Application: Clone + Send + 'static {
 }
 
 type Epoch = u64;
+
 pub struct EpochContext {
     pub epoch: Epoch,
     pub context: Context,
