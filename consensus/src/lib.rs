@@ -24,6 +24,7 @@ use std::future::Future;
 // - 33% double-voting
 // - block sent to one honest party different than block sent to all others, does it drop at notarization and fetch actual?
 
+type Epoch = u64;
 type View = u64;
 type Height = u64;
 type Hash = Bytes; // use fixed size bytes
@@ -43,9 +44,10 @@ type Support = (PublicKey, SupportType);
 
 /// Context is a collection of information about the context in which a block is built.
 pub struct Context {
+    pub epoch: Option<Epoch>,
+    pub view: Option<View>,
+
     pub parent: Hash,
-    // TODO: epoch?
-    pub view: View,
     pub height: Height,
 }
 
@@ -75,22 +77,29 @@ pub struct Participation {
     pub faults: HashMap<View, Vec<Fault>>,
 }
 
-pub trait Parser: Clone + Send + 'static {
-    /// Parse the payload and return the hash of the payload. We don't just hash
-    /// the payload because it may be more efficient to prove against a hash
-    /// that is specifically formatted (like a trie root).
-    ///
-    /// Parse is a stateless operation and may be called out-of-order.
-    fn parse(&mut self, payload: Payload) -> impl Future<Output = Option<Hash>> + Send;
+/// Hasher is provided by the application for hashing.
+///
+/// This is configurable because some hash functions are better suited for
+/// SNARK/STARK proofs than others.
+pub trait Hasher: Clone + Send + 'static {
+    fn size() -> usize;
+    fn hash(data: &[u8]) -> Hash;
 }
 
-/// TODO: call verify after voting (before finalization votes) or before voting? Can include
-/// outputs of block in next block?
-/// TODO: perform verification async so can keep responding to messages?
-/// TODO: change name
-pub trait Processor: Send + 'static {
+/// Application is the interface for the consensus engine to inform of progress.
+///
+/// While an application may be logically instantiated as a single entity, it may be
+/// cloned by multiple sub-components of a consensus engine.
+pub trait Application: Clone + Send + 'static {
     /// Initialize the application with the genesis block at view=0, height=0.
     fn genesis(&mut self) -> (Hash, Payload);
+
+    /// Get the participants for the given view. This is called when entering a new view before
+    /// listening for proposals or votes. If nothing is returned, the view will not be entered.
+    ///
+    /// It is up to the developer to ensure changes to this list are synchronized across nodes in the network
+    /// at a given view. If care is not taken to do this, the chain could fork/halt.
+    fn participants(&self, view: View) -> Option<Vec<PublicKey>>;
 
     /// Generate a new payload for the given parent hash.
     ///
@@ -103,6 +112,13 @@ pub trait Processor: Send + 'static {
         participation: Participation,
     ) -> impl Future<Output = Option<Payload>> + Send;
 
+    /// Parse the payload and return the hash of the payload. We don't just hash
+    /// the payload because it may be more efficient to prove against a hash
+    /// that is specifically formatted (like a trie root).
+    ///
+    /// Parse is a stateless operation and may be called out-of-order.
+    fn parse(&mut self, payload: Payload) -> impl Future<Output = Option<Hash>> + Send;
+
     /// Verify the payload is valid.
     ///
     /// Verify is a stateful operation and must be called in-order.
@@ -113,9 +129,7 @@ pub trait Processor: Send + 'static {
         payload: Payload,
         block: Hash,
     ) -> impl Future<Output = bool> + Send;
-}
 
-pub trait Handler: Send + 'static {
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
@@ -123,14 +137,6 @@ pub trait Handler: Send + 'static {
 
     /// Event that the payload has been finalized.
     fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
-}
-
-/// Oracle is a mechanism for updating the set of validators participating in consensus.
-///
-/// It is up to the developer to ensure changes are synchronized across nodes in the network
-/// at a given view. If care is not taken to do this, the chain could fork/halt.
-pub trait Oracle: Send + 'static {
-    fn activate(&self, view: View, validators: Vec<PublicKey>);
 }
 
 // TODO: break apart into smaller traits?
