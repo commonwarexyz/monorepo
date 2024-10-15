@@ -44,6 +44,7 @@ type Support = (PublicKey, SupportType);
 /// Context is a collection of information about the context in which a block is built.
 pub struct Context {
     pub parent: Hash,
+    // TODO: epoch?
     pub view: View,
     pub height: Height,
 }
