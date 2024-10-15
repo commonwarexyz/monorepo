@@ -43,6 +43,7 @@ type View = u64;
 type Height = u64;
 
 /// Context is a collection of information about the context in which a block is built.
+#[derive(Clone)]
 pub struct Context {
     pub view: View,
     pub parent: Hash,
@@ -65,6 +66,7 @@ type Contribution = (PublicKey, ContributionType);
 ///
 /// It is up to the application to determine how to act on this information (attributing
 /// rewards, removing validators, etc.).
+#[derive(Clone)]
 pub struct Activity {
     pub proposer: PublicKey,
 
@@ -145,6 +147,7 @@ pub trait Application: Clone + Send + 'static {
 
 type Epoch = u64;
 
+#[derive(Clone)]
 pub struct EpochContext {
     pub epoch: Epoch,
     pub context: Context,
