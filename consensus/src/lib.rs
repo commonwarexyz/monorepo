@@ -1,11 +1,14 @@
 //! TBD
+//!
+//! Makes some assumptions about the consensus construction:
+//! * Cryptographic proof of participation
 
 pub mod fixed;
 pub mod mocks;
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 
 // TODO: add simulated dialect for applications to test their execution environments under (with arbitary orphans, etc.)
@@ -26,8 +29,20 @@ type Height = u64;
 type Hash = Bytes; // use fixed size bytes
 const HASH_LENGTH: usize = 32;
 type Payload = Bytes;
+/// Faults are specified by the underlying primitive and can be interpreted if desired (not
+/// interpreting just means all faults would be treated equally).
+type Fault = u32;
 
-pub struct Consensus {
+/// Context is a collection of information about the context in which a block is built.
+pub struct Context {
+    pub parent: Hash,
+    pub view: View,
+    pub height: Height,
+}
+
+/// Participation is a collection of information about consensus performance
+/// included in the block wrapper.
+pub struct Participation {
     pub proposer: PublicKey,
 
     /// Votes for a canonical block at a given height.
@@ -36,8 +51,8 @@ pub struct Consensus {
     /// timeliness.
     // TODO: ensure a validator can only support if active at a given
     // view
-    pub support: HashMap<Height, HashSet<PublicKey>>,
-    pub faults: HashSet<PublicKey>,
+    pub support: HashMap<Height, Vec<PublicKey>>,
+    pub faults: HashMap<PublicKey, Fault>,
 }
 
 pub trait Parser: Clone + Send + 'static {
@@ -64,9 +79,8 @@ pub trait Processor: Send + 'static {
     /// TODO: provide uptime/fault info here?
     fn propose(
         &mut self,
-        parent: Hash,
-        height: Height,
-        consensus: Consensus,
+        context: Context,
+        participation: Participation,
     ) -> impl Future<Output = Option<Payload>> + Send;
 
     /// Verify the payload is valid.
@@ -74,9 +88,8 @@ pub trait Processor: Send + 'static {
     /// Verify is a stateful operation and must be called in-order.
     fn verify(
         &mut self,
-        parent: Hash,
-        height: Height,
-        consensus: Consensus,
+        context: Context,
+        participation: Participation,
         payload: Payload,
         block: Hash,
     ) -> impl Future<Output = bool> + Send;
@@ -88,6 +101,14 @@ pub trait Processor: Send + 'static {
 
     /// Event that the payload has been finalized.
     fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
+}
+
+/// Oracle is a trait that allows the application to update the participants
+/// in consensus at a given view.
+pub trait Oracle {
+    /// It is up to the developer to ensure that any updates cannot cause a halt (if some validators
+    /// apply the change and others do not, often as a result of delayed finality at a previous view).
+    fn participants(&mut self, view: View, validators: Vec<PublicKey>);
 }
 
 // TODO: break apart into smaller traits?
