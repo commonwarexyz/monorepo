@@ -1,12 +1,15 @@
-use crate::{Hash, Height, Payload, HASH_LENGTH};
+use crate::{Activity, Context, Hash, Hasher, Height, Payload, View};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Clock;
-use commonware_utils::{hash, hex};
+use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt};
 use rand::RngCore;
 use rand_distr::{Distribution, Normal};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    time::Duration,
+};
 
 const GENESIS_BYTES: &[u8] = b"genesis";
 
@@ -18,6 +21,8 @@ pub struct Config {
     /// It is common to use multiple instances of an application in a single simulation, this
     /// helps to identify the source of both progress and errors.
     pub participant: PublicKey,
+    pub participants: BTreeMap<View, Vec<PublicKey>>,
+
     pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
     pub propose_latency: Latency,
@@ -31,120 +36,94 @@ pub enum Progress {
 }
 
 #[derive(Clone)]
-pub struct Application {
+pub struct Application<E: Clock + RngCore, H: Hasher> {
+    runtime: E,
+    hasher: H,
+
     participant: PublicKey,
-}
-
-impl Application {
-    pub fn init<E: Clock + RngCore>(runtime: E, cfg: Config) -> (Parser<E>, Processor<E>) {
-        // Generate application
-        let application = Self {
-            participant: cfg.participant,
-        };
-
-        // Generate samplers
-        let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
-        let parse_latency = Normal::new(cfg.parse_latency.0, cfg.parse_latency.1).unwrap();
-        let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
-
-        // Return constructed application
-        (
-            Parser {
-                runtime: runtime.clone(),
-                application: application.clone(),
-                parse_latency,
-            },
-            Processor {
-                runtime,
-
-                application,
-
-                progress: cfg.sender,
-
-                propose_latency,
-                verify_latency,
-
-                verified: HashMap::new(),
-                last_finalized: 0,
-                finalized: HashMap::new(),
-            },
-        )
-    }
-
-    fn panic(&self, msg: &str) {
-        panic!("[{}] {}", hex(&self.participant), msg);
-    }
-}
-
-#[derive(Clone)]
-pub struct Parser<E: Clock + RngCore> {
-    runtime: E,
-
-    application: Application,
-    parse_latency: Normal<f64>,
-}
-
-impl<E: Clock + RngCore> crate::Parser for Parser<E> {
-    async fn parse(&mut self, payload: Payload) -> Option<Hash> {
-        // Verify the payload is well-formed
-        if payload.len() != HASH_LENGTH + 8 {
-            self.application.panic("invalid payload length");
-        }
-
-        // Simulate the parse latency
-        let duration = self.parse_latency.sample(&mut self.runtime);
-        self.runtime
-            .sleep(Duration::from_millis(duration as u64))
-            .await;
-
-        // Parse the payload
-        Some(hash(&payload))
-    }
-}
-
-pub struct Processor<E: Clock + RngCore> {
-    runtime: E,
-
-    application: Application,
+    participants: BTreeMap<View, Vec<PublicKey>>,
 
     propose_latency: Normal<f64>,
+    parse_latency: Normal<f64>,
     verify_latency: Normal<f64>,
 
+    parsed: HashSet<Hash>,
     verified: HashMap<Hash, Height>,
     last_finalized: u64,
     finalized: HashMap<Hash, Height>,
     progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
 }
 
-impl<E: Clock + RngCore> Processor<E> {
-    fn verify_payload(height: Height, payload: &Payload) {
-        let parsed_height = Height::from_be_bytes(payload[HASH_LENGTH..].try_into().unwrap());
+impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
+    pub fn init(runtime: E, hasher: H, cfg: Config) -> Self {
+        // Generate samplers
+        let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
+        let parse_latency = Normal::new(cfg.parse_latency.0, cfg.parse_latency.1).unwrap();
+        let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
+
+        // Return constructed application
+        Self {
+            runtime,
+            hasher,
+
+            participant: cfg.participant,
+            participants: cfg.participants,
+
+            parse_latency,
+            propose_latency,
+            verify_latency,
+
+            parsed: HashSet::new(),
+            verified: HashMap::new(),
+            last_finalized: 0,
+            finalized: HashMap::new(),
+            progress: cfg.sender,
+        }
+    }
+
+    fn panic(&self, msg: &str) -> ! {
+        panic!("[{}] {}", hex(&self.participant), msg);
+    }
+
+    fn verify_payload(&self, height: Height, payload: &Payload) {
+        let parsed_height = Height::from_be_bytes(payload[32..].try_into().unwrap());
         if parsed_height != height {
-            panic!("invalid height");
+            self.panic("invalid height");
         }
     }
 }
 
-impl<E: Clock + RngCore> crate::Processor for Processor<E> {
+impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
     fn genesis(&mut self) -> (Hash, Payload) {
         let payload = Bytes::from(GENESIS_BYTES);
-        let hash = hash(&payload);
+        let hash = self.hasher.hash(&payload);
+        self.parsed.insert(hash.clone());
         self.verified.insert(hash.clone(), 0);
         self.finalized.insert(hash.clone(), 0);
         (hash, payload)
     }
 
-    async fn propose(&mut self, parent: Hash, height: Height) -> Option<Payload> {
+    fn participants(&self, view: View) -> Option<Vec<PublicKey>> {
+        let closest = match self.participants.range(..=view).next_back() {
+            Some((v, p)) => p.clone(),
+            None => {
+                self.panic("no participants in required range");
+            }
+        };
+        Some(closest)
+    }
+
+    async fn propose(&mut self, context: Context, activity: Activity) -> Option<Payload> {
         // Verify parent exists and we are at the correct height
-        if parent.len() != HASH_LENGTH {
-            self.application.panic("invalid parent hash length");
+        if !H::validate(&context.parent) {
+            self.panic("invalid parent hash length");
         }
-        if let Some(parent) = self.verified.get(&parent) {
-            if parent + 1 != height {
-                self.application.panic("invalid height");
+        if let Some(parent) = self.verified.get(&context.parent) {
+            if parent + 1 != context.height {
+                self.panic("invalid height");
             }
         } else {
-            self.application.panic("parent not verified");
+            self.panic("parent not verified");
         }
 
         // Simulate the propose latency
@@ -155,35 +134,56 @@ impl<E: Clock + RngCore> crate::Processor for Processor<E> {
 
         // Generate the payload
         let mut payload = Vec::new();
-        payload.extend_from_slice(&self.application.participant);
-        payload.extend_from_slice(&height.to_be_bytes());
+        payload.extend_from_slice(&self.participant);
+        payload.extend_from_slice(&context.height.to_be_bytes());
         Some(Bytes::from(payload))
+    }
+
+    async fn parse(&mut self, payload: Payload) -> Option<Hash> {
+        // Verify the payload is well-formed
+        if payload.len() != 40 {
+            self.panic("invalid payload length");
+        }
+
+        // Simulate the parse latency
+        let duration = self.parse_latency.sample(&mut self.runtime);
+        self.runtime
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
+
+        // Parse the payload
+        let hash = self.hasher.hash(&payload);
+        self.parsed.insert(hash.clone());
+        Some(hash)
     }
 
     async fn verify(
         &mut self,
-        parent: Hash,
-        height: Height,
+        context: Context,
+        activity: Activity,
         payload: Payload,
         block: Hash,
     ) -> bool {
         // Verify parent exists and we are at the correct height
-        if parent.len() != HASH_LENGTH {
-            self.application.panic("invalid parent hash length");
+        if !H::validate(&context.parent) {
+            self.panic("invalid parent hash length");
         }
-        if block.len() != HASH_LENGTH {
-            self.application.panic("invalid hash length");
+        if !H::validate(&block) {
+            self.panic("invalid hash length");
         }
         if self.verified.contains_key(&block) {
-            self.application.panic("block already verified");
+            self.panic("block already verified");
         }
-        if let Some(parent) = self.verified.get(&parent) {
-            if parent + 1 != height {
-                self.application.panic("invalid height");
+        if let Some(parent) = self.verified.get(&context.parent) {
+            if parent + 1 != context.height {
+                self.panic("invalid height");
             }
         } else {
-            self.application.panic("parent not verified");
+            self.panic("parent not verified");
         };
+        if !self.parsed.contains(&self.hasher.hash(&payload)) {
+            self.panic("payload not parsed");
+        }
 
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
@@ -192,17 +192,17 @@ impl<E: Clock + RngCore> crate::Processor for Processor<E> {
             .await;
 
         // Verify the payload
-        Self::verify_payload(height, &payload);
-        self.verified.insert(block.clone(), height);
+        self.verify_payload(context.height, &payload);
+        self.verified.insert(block.clone(), context.height);
         true
     }
 
     async fn notarized(&mut self, block: Hash) {
-        if block.len() != HASH_LENGTH {
-            self.application.panic("invalid hash length");
+        if !H::validate(&block) {
+            self.panic("invalid hash length");
         }
         if self.finalized.contains_key(&block) {
-            self.application.panic("block already finalized");
+            self.panic("block already finalized");
         }
         if let Some(height) = self.verified.get(&block) {
             let _ = self
@@ -213,13 +213,13 @@ impl<E: Clock + RngCore> crate::Processor for Processor<E> {
                 ))
                 .await;
         } else {
-            self.application.panic("block not verified");
+            self.panic("block not verified");
         }
     }
 
     async fn finalized(&mut self, block: Hash) {
-        if block.len() != HASH_LENGTH {
-            self.application.panic("invalid hash length");
+        if !H::validate(&block) {
+            self.panic("invalid hash length");
         }
         if self.finalized.contains_key(&block) {
             self.application.panic("block already finalized");
