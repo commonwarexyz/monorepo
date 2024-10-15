@@ -35,6 +35,7 @@ pub enum Progress {
     Finalized(Height, Hash),
 }
 
+// TODO: add arc/mutex to support copying of state
 #[derive(Clone)]
 pub struct Application<E: Clock + RngCore, H: Hasher> {
     runtime: E,
@@ -83,13 +84,6 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
 
     fn panic(&self, msg: &str) -> ! {
         panic!("[{}] {}", hex(&self.participant), msg);
-    }
-
-    fn verify_payload(&self, height: Height, payload: &Payload) {
-        let parsed_height = Height::from_be_bytes(payload[32..].try_into().unwrap());
-        if parsed_height != height {
-            self.panic("invalid height");
-        }
     }
 }
 
@@ -192,7 +186,10 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
             .await;
 
         // Verify the payload
-        self.verify_payload(context.height, &payload);
+        let parsed_height = Height::from_be_bytes(payload[32..].try_into().unwrap());
+        if parsed_height != context.height {
+            self.panic("invalid height");
+        }
         self.verified.insert(block.clone(), context.height);
         true
     }

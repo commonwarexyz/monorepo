@@ -5,7 +5,7 @@ use super::{
     },
     config::Config,
 };
-use crate::{Parser, Processor};
+use crate::{Application, Hasher};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -13,18 +13,18 @@ use commonware_runtime::{Clock, Spawner};
 use rand::Rng;
 use tracing::debug;
 
-pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, Pa: Parser, Pr: Processor> {
+pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> {
     runtime: E,
 
-    orchestrator: orchestrator::Orchestrator<E, Pa, Pr>,
+    orchestrator: orchestrator::Orchestrator<E, H, A>,
     orchestrator_mailbox: Mailbox,
 
-    voter: Voter<E, C, Pa>,
+    voter: Voter<E, C, H, A>,
     voter_mailbox: VoterMailbox,
 }
 
-impl<E: Clock + Rng + Spawner, C: Scheme, Pa: Parser, Pr: Processor> Engine<E, C, Pa, Pr> {
-    pub fn new(runtime: E, mut cfg: Config<C, Pa, Pr>) -> Self {
+impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> Engine<E, C, H, A> {
+    pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> Self {
         // Sort the validators at each view
         if cfg.validators.is_empty() {
             panic!("no validators specified");
@@ -39,26 +39,25 @@ impl<E: Clock + Rng + Spawner, C: Scheme, Pa: Parser, Pr: Processor> Engine<E, C
         // Create orchestrator
         let (orchestrator, orchestrator_mailbox) = orchestrator::Orchestrator::new(
             runtime.clone(),
-            cfg.parser.clone(),
-            cfg.processor,
+            cfg.hasher.clone(),
+            cfg.application.clone(),
             cfg.fetch_timeout,
             cfg.max_fetch_count,
             cfg.max_fetch_size,
-            cfg.validators.clone(),
         );
 
         // Create voter
         let (voter, voter_mailbox) = Voter::new(
             runtime.clone(),
             cfg.crypto,
-            cfg.parser,
+            cfg.hasher,
+            cfg.application,
             voter::Config {
                 registry: cfg.registry,
                 namespace: cfg.namespace,
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 null_vote_retry: cfg.null_vote_retry,
-                validators: cfg.validators,
             },
         );
 

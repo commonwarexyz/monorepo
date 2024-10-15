@@ -3,7 +3,7 @@
 use super::voter::VoterMailbox;
 use crate::{
     fixed::{encoding::proposal_digest, wire},
-    Hash, Height, Parser, Payload, Processor, View, HASH_LENGTH,
+    Activity, Application, Context, Hash, Hasher, Height, Payload, View,
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
@@ -23,6 +23,7 @@ use tracing::{debug, warn};
 pub enum Message {
     Propose {
         view: View,
+        proposer: PublicKey, // will be self
     },
     Verify {
         hash: Hash,
@@ -50,8 +51,11 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn propose(&mut self, view: View) {
-        self.sender.send(Message::Propose { view }).await.unwrap();
+    pub async fn propose(&mut self, view: View, proposer: PublicKey) {
+        self.sender
+            .send(Message::Propose { view, proposer })
+            .await
+            .unwrap();
     }
 
     pub async fn verify(&mut self, hash: Hash, proposal: wire::Proposal) {
@@ -95,18 +99,16 @@ enum Knowledge {
     Finalized(Hash),
 }
 
-pub struct Orchestrator<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> {
+pub struct Orchestrator<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
     runtime: E,
-    parser: Pa,
-    processor: Pr,
+    hasher: H,
+    application: A,
 
     fetch_timeout: Duration,
     max_fetch_count: u64,
     max_fetch_size: usize,
 
     mailbox_receiver: mpsc::Receiver<Message>,
-
-    validators: BTreeMap<View, Vec<PublicKey>>,
 
     null_notarizations: BTreeSet<View>,
     knowledge: HashMap<Height, Knowledge>,
@@ -135,21 +137,20 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> {
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr> {
+impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Orchestrator<E, H, A> {
     pub fn new(
         runtime: E,
-        parser: Pa,
-        mut processor: Pr,
+        hasher: H,
+        mut application: A,
         fetch_timeout: Duration,
         max_fetch_count: u64,
         max_fetch_size: usize,
-        validators: BTreeMap<View, Vec<PublicKey>>,
     ) -> (Self, Mailbox) {
         // Create genesis block and store it
         let mut verified = HashMap::new();
         let mut knowledge = HashMap::new();
         let mut blocks = HashMap::new();
-        let genesis = processor.genesis();
+        let genesis = application.genesis();
         verified.insert(0, HashSet::from([genesis.0.clone()]));
         knowledge.insert(0, Knowledge::Finalized(genesis.0.clone()));
 
@@ -170,16 +171,14 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         (
             Self {
                 runtime,
-                parser,
-                processor,
+                hasher,
+                application,
 
                 fetch_timeout,
                 max_fetch_count,
                 max_fetch_size,
 
                 mailbox_receiver,
-
-                validators,
 
                 null_notarizations: BTreeSet::new(),
                 knowledge,
@@ -330,7 +329,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                             .entry(next)
                             .or_default()
                             .insert(hash.clone());
-                        self.processor.notarized(hash.clone()).await;
+                        self.application.notarized(hash.clone()).await;
                     }
                 }
                 Knowledge::Finalized(hash) => {
@@ -357,7 +356,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                     self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
-                    self.processor.finalized(hash.clone()).await;
+                    self.application.finalized(hash.clone()).await;
                 }
             }
 
@@ -398,7 +397,11 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         }
     }
 
-    pub async fn propose(&mut self) -> Option<(Hash, Height, Hash, Payload)> {
+    pub async fn propose(
+        &mut self,
+        view: View,
+        proposer: PublicKey,
+    ) -> Option<(Hash, Height, Hash, Payload)> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
@@ -408,8 +411,18 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         };
 
         // Propose block
+        let context = Context {
+            view,
+            parent: parent.0.clone(),
+            height: parent.1 + 1,
+        };
+        let activity = Activity {
+            proposer,
+            contributions: HashMap::new(),
+            faults: HashMap::new(),
+        };
         let height = parent.1 + 1;
-        let payload = match self.processor.propose(parent.0.clone(), height).await {
+        let payload = match self.application.propose(context, activity).await {
             Some(payload) => payload,
             None => {
                 return None;
@@ -417,7 +430,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         };
 
         // Compute payload hash
-        let payload_hash = match self.parser.parse(payload.clone()).await {
+        let payload_hash = match self.application.parse(payload.clone()).await {
             Some(hash) => hash,
             None => {
                 return None;
@@ -514,14 +527,19 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         }
 
         // Verify payload
+        let context = Context {
+            view: proposal.view,
+            parent: proposal.parent.clone(),
+            height: proposal.height,
+        };
+        let activity = Activity {
+            proposer: proposal.signature.unwrap().public_key.clone(),
+            contributions: HashMap::new(),
+            faults: HashMap::new(),
+        };
         if self
-            .processor
-            .verify(
-                proposal.parent.clone(),
-                proposal.height,
-                proposal.payload.clone(),
-                hash.clone(),
-            )
+            .application
+            .verify(context, activity, proposal.payload.clone(), hash.clone())
             .await
         {
             debug!(
@@ -708,11 +726,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         sender: &mut impl Sender,
     ) -> PublicKey {
         // Get validators from highest view we know about
-        let (view, validators) = self
-            .validators
-            .range(..=self.last_notarized)
-            .next_back()
-            .expect("validators do not cover range of allowed views");
+        let validators = self.application.participants(self.last_notarized).unwrap();
 
         // Select random validator to fetch from
         let validator = validators.choose(&mut self.runtime).unwrap().clone();
@@ -752,7 +766,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
             hash = hex(&hash),
             peer = hex(&validator),
             parents,
-            validator_view = view,
+            last_notarized = self.last_notarized,
             "requesting missing proposal"
         );
         let msg = wire::Backfill {
@@ -840,8 +854,8 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Propose { view } => {
-                            let (parent, height, payload, payload_hash)= match self.propose().await{
+                        Message::Propose { view, proposer } => {
+                            let (parent, height, payload, payload_hash)= match self.propose(view, proposer).await{
                                 Some(proposal) => proposal,
                                 None => {
                                     continue;
@@ -893,7 +907,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                     match payload {
                         wire::backfill::Payload::Request(request) => {
                             // Confirm request is valid
-                            if request.hash.len() != HASH_LENGTH {
+                            if !H::validate(&request.hash) {
                                 warn!(sender = hex(&s), "invalid request hash size");
                                 continue;
                             }
@@ -951,7 +965,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                             sender.send(Recipients::One(s), msg.encode_to_vec().into(), false).await.unwrap();
                         }
                         wire::backfill::Payload::Missing(missing) => {
-                            if missing.hash.len() != HASH_LENGTH {
+                            if !H::validate(&missing.hash) {
                                 warn!(sender = hex(&s), "invalid missing hash size");
                                 continue;
                             }
@@ -972,11 +986,11 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                             // Parse proposals
                             let mut next = None;
                             for proposal in resolution.proposals {
-                                if proposal.parent.len() != HASH_LENGTH {
+                                if !H::validate(&proposal.parent) {
                                     warn!(sender = hex(&s), "invalid proposal parent hash size");
                                     break;
                                 }
-                                let payload_hash = match self.parser.parse(proposal.payload.clone()).await {
+                                let payload_hash = match self.application.parse(proposal.payload.clone()).await {
                                     Some(payload_hash) => payload_hash,
                                     None => {
                                         warn!(sender = hex(&s), "unable to parse notarized/finalized payload");

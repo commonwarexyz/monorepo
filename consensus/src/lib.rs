@@ -97,7 +97,7 @@ pub trait Application: Clone + Send + 'static {
     /// Initialize the application with the genesis block at view=0, height=0.
     fn genesis(&mut self) -> (Hash, Payload);
 
-    /// Get the participants for the given view. This is called when entering a new view before
+    /// Get the **sorted** participants for the given view. This is called when entering a new view before
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.
     ///
     /// It is up to the developer to ensure changes to this list are synchronized across nodes in the network

@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256 as InnerSha256};
 
 const HASH_LENGTH: usize = 32;
 
+#[derive(Clone)]
 pub struct Sha256 {
     hasher: InnerSha256,
 }

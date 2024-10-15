@@ -7,14 +7,14 @@ use crate::{
         },
         wire,
     },
-    Hash, Height, Parser, View, HASH_LENGTH,
+    Application, Hash, Hasher, Height, View,
 };
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::{hash, hex, quorum, union};
+use commonware_utils::{hex, quorum, union};
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
@@ -113,6 +113,7 @@ struct Record {
 impl Record {
     pub fn new(
         leader: PublicKey,
+        validators: Vec<PublicKey>,
         leader_deadline: Option<SystemTime>,
         advance_deadline: Option<SystemTime>,
     ) -> Self {
@@ -329,16 +330,13 @@ pub struct Config {
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
     pub null_vote_retry: Duration,
-    pub validators: BTreeMap<View, Vec<PublicKey>>,
 }
 
-// TODO: improve name here
-type ValidatorSet = (u32, Vec<PublicKey>, HashMap<PublicKey, u32>);
-
-pub struct Voter<E: Clock + Rng, C: Scheme, P: Parser> {
+pub struct Voter<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> {
     runtime: E,
     crypto: C,
-    parser: P,
+    hasher: H,
+    application: A,
 
     proposal_namespace: Vec<u8>,
     vote_namespace: Vec<u8>,
@@ -350,8 +348,6 @@ pub struct Voter<E: Clock + Rng, C: Scheme, P: Parser> {
 
     mailbox_receiver: mpsc::Receiver<VoterMessage>,
 
-    validators: BTreeMap<View, ValidatorSet>,
-
     last_finalized: View,
     view: View,
     views: BTreeMap<View, Record>,
@@ -360,33 +356,29 @@ pub struct Voter<E: Clock + Rng, C: Scheme, P: Parser> {
     tracked_views: Gauge,
 }
 
-impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
-    pub fn new(runtime: E, crypto: C, parser: P, cfg: Config) -> (Self, VoterMailbox) {
+impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
+    pub fn new(
+        runtime: E,
+        crypto: C,
+        hasher: H,
+        application: A,
+        cfg: Config,
+    ) -> (Self, VoterMailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
         }
 
-        // Initialize ordered validators
-        let mut parsed_validators = BTreeMap::new();
-        for (view, validators) in cfg.validators.into_iter() {
-            let mut ordered = HashMap::new();
-            for (i, validator) in validators.iter().enumerate() {
-                ordered.insert(validator.clone(), i as u32);
-            }
-            let quorum =
-                quorum(validators.len() as u32).expect("not possible to satisfy 2f+1 threshold");
-            parsed_validators.insert(view, (quorum, validators, ordered));
-        }
-
         // Add first view
         //
         // We start on view 1 because the genesis block occupies view 0/height 0.
+        let validators = application.participants(1).unwrap();
         let mut views = BTreeMap::new();
         views.insert(
             1,
             Record::new(
-                Self::leader(&parsed_validators, 1),
+                Self::leader(&validators, 1),
+                validators,
                 Some(runtime.current() + cfg.leader_timeout),
                 Some(runtime.current() + cfg.notarization_timeout),
             ),
@@ -409,7 +401,8 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
             Self {
                 runtime,
                 crypto,
-                parser,
+                hasher,
+                application,
 
                 proposal_namespace: union(&cfg.namespace, PROPOSAL_SUFFIX),
                 vote_namespace: union(&cfg.namespace, VOTE_SUFFIX),
@@ -420,8 +413,6 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
                 null_vote_retry: cfg.null_vote_retry,
 
                 mailbox_receiver,
-
-                validators: parsed_validators,
 
                 last_finalized: 0,
                 view: 1,
@@ -434,33 +425,8 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
         )
     }
 
-    fn leader(validators: &BTreeMap<View, ValidatorSet>, view: crate::View) -> PublicKey {
-        let (_, (_, ref validators, _)) = validators
-            .range(..=view)
-            .next_back()
-            .expect("validators do not cover range of allowed views");
+    fn leader(validators: &Vec<PublicKey>, view: View) -> PublicKey {
         validators[view as usize % validators.len()].clone()
-    }
-
-    fn validator_info(
-        validators: &BTreeMap<View, ValidatorSet>,
-        view: crate::View,
-    ) -> &(u32, Vec<PublicKey>, HashMap<PublicKey, u32>) {
-        validators
-            .range(..=view)
-            .next_back()
-            .expect("validators do not cover range of allowed views")
-            .1
-    }
-
-    fn is_participant(&self, view: View, participant: &PublicKey) -> bool {
-        self.validators
-            .range(..=view)
-            .next_back()
-            .expect("validators do not cover range of allowed views")
-            .1
-             .1
-            .contains(participant)
     }
 
     fn participation(&self, view: View) -> (usize, usize) {
@@ -492,7 +458,9 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
 
         // Request proposal from orchestrator
         view.requested_proposal = true;
-        orchestrator.propose(self.view).await;
+        orchestrator
+            .propose(self.view, self.crypto.public_key())
+            .await;
         true
     }
 
@@ -595,7 +563,7 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
             &proposal.parent,
             &payload_hash,
         );
-        let proposal_hash = hash(&proposal_digest);
+        let proposal_hash = self.hasher.hash(&proposal_digest);
 
         // Store the proposal
         let proposal_view = proposal.view;
@@ -634,7 +602,18 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
         }
 
         // Check expected leader
-        let expected_leader = Self::leader(&self.validators, proposal.view);
+        let validators = match self.application.participants(proposal.view) {
+            Some(validators) => validators,
+            None => {
+                debug!(
+                    proposal.view,
+                    reason = "unable to compute participants for view",
+                    "dropping proposal"
+                );
+                return;
+            }
+        };
+        let expected_leader = Self::leader(&validators, proposal.view);
         if !C::validate(&signature.public_key) {
             debug!(reason = "invalid signature", "dropping proposal");
             return;
@@ -672,7 +651,7 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
         }
 
         // Verify the signature
-        let payload_hash = match self.parser.parse(proposal.payload.clone()).await {
+        let payload_hash = match self.application.parse(proposal.payload.clone()).await {
             Some(hash) => hash,
             None => {
                 debug!(reason = "invalid payload", "dropping proposal");
@@ -694,7 +673,7 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
             debug!(reason = "invalid signature", "dropping proposal");
             return;
         }
-        let proposal_hash = hash(&proposal_digest);
+        let proposal_hash = self.hasher.hash(&proposal_digest);
 
         // Verify the proposal
         //
@@ -702,7 +681,7 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
         let view = self
             .views
             .entry(proposal.view)
-            .or_insert_with(|| Record::new(expected_leader, None, None));
+            .or_insert_with(|| Record::new(expected_leader, validators, None, None));
         view.proposal = Some((proposal_hash.clone(), proposal.clone()));
         orchestrator
             .verify(proposal_hash.clone(), proposal.clone())
@@ -753,11 +732,23 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
             return;
         }
 
+        // Get validators
+        let validators = match self.application.participants(view) {
+            Some(validators) => validators,
+            None => {
+                debug!(
+                    view,
+                    reason = "unable to compute participants for view",
+                    "skipping view change"
+                );
+                return;
+            }
+        };
+
         // Setup new view
-        let entry = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Record::new(Self::leader(&self.validators, view), None, None));
+        let entry = self.views.entry(view).or_insert_with(|| {
+            Record::new(Self::leader(&validators, view), validators, None, None)
+        });
         entry.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
         entry.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         self.view = view;
@@ -839,10 +830,10 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
 
     fn handle_vote(&mut self, vote: wire::Vote) {
         // Check to see if vote is for proposal in view
-        let view = self
-            .views
-            .entry(vote.view)
-            .or_insert_with(|| Record::new(Self::leader(&self.validators, vote.view), None, None));
+        let view = self.views.entry(vote.view).or_insert_with(|| {
+            let validators = self.application.participants(vote.view).unwrap();
+            Record::new(Self::leader(&validators, vote.view), validators, None, None)
+        });
 
         // Handle vote
         view.add_verified_vote(false, vote);
@@ -955,8 +946,10 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
     ) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = self.views.entry(notarization.view).or_insert_with(|| {
+            let validators = self.application.participants(notarization.view).unwrap();
             Record::new(
-                Self::leader(&self.validators, notarization.view),
+                Self::leader(&validators, notarization.view),
+                validators,
                 None,
                 None,
             )
@@ -1051,7 +1044,13 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
     fn handle_finalize(&mut self, finalize: wire::Finalize) {
         // Get view for finalize
         let view = self.views.entry(finalize.view).or_insert_with(|| {
-            Record::new(Self::leader(&self.validators, finalize.view), None, None)
+            let validators = self.application.participants(finalize.view).unwrap();
+            Record::new(
+                Self::leader(&validators, finalize.view),
+                validators,
+                None,
+                None,
+            )
         });
 
         // Handle finalize
@@ -1154,8 +1153,10 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
     ) {
         // Add signatures to view (needed to broadcast finalization if we get proposal)
         let view = self.views.entry(finalization.view).or_insert_with(|| {
+            let validators = self.application.participants(finalization.view).unwrap();
             Record::new(
-                Self::leader(&self.validators, finalization.view),
+                Self::leader(&validators, finalization.view),
+                validators,
                 None,
                 None,
             )
@@ -1511,7 +1512,7 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
                     // All messages are semantically verified before being passed to the `voter`.
                     match payload {
                         wire::consensus::Payload::Proposal(proposal) => {
-                            if proposal.parent.len() != HASH_LENGTH {
+                            if !H::validate(&proposal.parent) {
                                 debug!(sender = hex(&s), "invalid proposal parent hash size");
                                 continue;
                             }
@@ -1523,7 +1524,7 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
                                 debug!(sender = hex(&s), "invalid vote height for null block");
                                 continue;
                             }
-                            if vote.hash.is_some() && vote.hash.as_ref().unwrap().len() != HASH_LENGTH {
+                            if vote.hash.is_some() && !H::validate(&vote.hash.as_ref().unwrap()) {
                                 debug!(sender = hex(&s), "invalid vote hash size");
                                 continue;
                             }
@@ -1535,7 +1536,7 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
                                 debug!(sender = hex(&s), "invalid notarization height for null block");
                                 continue;
                             }
-                            if notarization.hash.is_some() && notarization.hash.as_ref().unwrap().len() != HASH_LENGTH {
+                            if notarization.hash.is_some() && !H::validate(notarization.hash.as_ref().unwrap()) {
                                 debug!(sender = hex(&s), "invalid notarization hash size");
                                 continue;
                             }
@@ -1543,7 +1544,7 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
                             self.notarization(orchestrator, notarization).await;
                         }
                         wire::consensus::Payload::Finalize(finalize) => {
-                            if finalize.hash.len() != HASH_LENGTH {
+                            if !H::validate(&finalize.hash) {
                                 debug!(sender = hex(&s), "invalid finalize hash size");
                                 continue;
                             }
@@ -1551,7 +1552,7 @@ impl<E: Clock + Rng, C: Scheme, P: Parser> Voter<E, C, P> {
                             self.finalize(finalize);
                         }
                         wire::consensus::Payload::Finalization(finalization) => {
-                            if finalization.hash.len() != HASH_LENGTH {
+                            if !H::validate(&finalization.hash) {
                                 debug!(sender = hex(&s), "invalid finalization hash size");
                                 continue;
                             }
