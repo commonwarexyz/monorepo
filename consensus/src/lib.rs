@@ -31,7 +31,12 @@ pub struct Consensus {
     pub proposer: PublicKey,
 
     /// Votes for a canonical block at a given height.
-    pub votes: HashMap<Height, HashSet<PublicKey>>,
+    ///
+    /// Height is exposed such that rewards can be scaled by
+    /// timeliness.
+    // TODO: ensure a validator can only support if active at a given
+    // view
+    pub support: HashMap<Height, HashSet<PublicKey>>,
     pub faults: HashSet<PublicKey>,
 }
 
