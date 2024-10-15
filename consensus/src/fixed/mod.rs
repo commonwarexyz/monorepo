@@ -31,6 +31,8 @@ mod wire {
 
 use thiserror::Error;
 
+use crate::{FaultType, SupportType};
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Network closed")]
@@ -42,6 +44,14 @@ pub enum Error {
     #[error("Invalid signature")]
     InvalidSignature,
 }
+
+pub const VOTE: SupportType = 0;
+pub const FINALIZE: SupportType = 1;
+
+pub const DUPLICATE_BLOCK: FaultType = 0;
+pub const CONFLICTING_VOTE: FaultType = 1;
+pub const CONFLICTING_FINALIZE: FaultType = 2;
+pub const NULL_AND_FINALIZE: FaultType = 3;
 
 #[cfg(test)]
 mod tests {

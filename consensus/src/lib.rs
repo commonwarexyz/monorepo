@@ -61,11 +61,16 @@ pub struct Participation {
     ///
     /// Height is exposed such that rewards can be scaled by
     /// timeliness.
+    ///
+    /// Inactivity (no posted support) can be inferred from the
+    /// contents of `support`.
     // TODO: ensure a validator can only support if active at a given
     // view
     //
     // TODO: How to deliniate between votes/finalizations?
     pub support: HashMap<Height, Vec<Support>>,
+    /// Faults are not gossiped through the network and are only
+    /// posted once locally observed (as this would create a DoS vector).
     pub faults: Vec<Fault>,
 }
 
