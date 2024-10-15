@@ -76,10 +76,6 @@ pub struct Activity {
     ///
     /// Inactivity (no posted support) can be inferred from the
     /// contents of `support`.
-    // TODO: ensure a validator can only support if active at a given
-    // view
-    //
-    // TODO: How to deliniate between votes/finalizations?
     pub contributions: HashMap<Height, Vec<Contribution>>,
 
     /// Faults are not gossiped through the network and are only
@@ -106,13 +102,14 @@ pub trait Application: Clone + Send + 'static {
     /// at the next height (asynchronous finalization), a synchrony bound should be enforced around
     /// changes to the set (i.e. participant joining in view 10 should only become active in view 20, where
     /// we assume all other participants have finalized view 10).
-    fn participants(&self, view: View) -> Option<Vec<PublicKey>>;
+    fn participants(&self, view: View) -> Option<&Vec<PublicKey>>;
+
+    // Indicate whether a PublicKey is a participant at the given view.
+    fn is_participant(&self, view: View, candidate: &PublicKey) -> Option<bool>;
 
     /// Generate a new payload for the given parent hash.
     ///
     /// If state is not yet ready, this will return None.
-    ///
-    /// TODO: provide uptime/fault info here?
     fn propose(
         &mut self,
         context: Context,

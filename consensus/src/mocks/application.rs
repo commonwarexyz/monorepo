@@ -21,7 +21,7 @@ pub struct Config {
     /// It is common to use multiple instances of an application in a single simulation, this
     /// helps to identify the source of both progress and errors.
     pub participant: PublicKey,
-    pub participants: BTreeMap<View, Vec<PublicKey>>,
+    pub participants: HashMap<View, Vec<PublicKey>>,
 
     pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
@@ -35,6 +35,8 @@ pub enum Progress {
     Finalized(Height, Hash),
 }
 
+type ViewInfo = (HashSet<PublicKey>, Vec<PublicKey>);
+
 // TODO: add arc/mutex to support copying of state
 #[derive(Clone)]
 pub struct Application<E: Clock + RngCore, H: Hasher> {
@@ -42,7 +44,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     hasher: H,
 
     participant: PublicKey,
-    participants: BTreeMap<View, Vec<PublicKey>>,
+    parsed_participants: BTreeMap<View, ViewInfo>,
 
     propose_latency: Normal<f64>,
     parse_latency: Normal<f64>,
@@ -62,13 +64,21 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         let parse_latency = Normal::new(cfg.parse_latency.0, cfg.parse_latency.1).unwrap();
         let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
 
+        // Generate participants map
+        let mut participants = BTreeMap::new();
+        for (view, keys) in cfg.participants.into_iter() {
+            let set: HashSet<PublicKey> = keys.iter().cloned().collect();
+            let info = (set, keys);
+            participants.insert(view, info);
+        }
+
         // Return constructed application
         Self {
             runtime,
             hasher,
 
             participant: cfg.participant,
-            participants: cfg.participants,
+            parsed_participants: participants,
 
             parse_latency,
             propose_latency,
@@ -97,14 +107,20 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
         (hash, payload)
     }
 
-    fn participants(&self, view: View) -> Option<Vec<PublicKey>> {
-        let closest = match self.participants.range(..=view).next_back() {
-            Some((_, p)) => p.clone(),
+    fn participants(&self, view: View) -> Option<&Vec<PublicKey>> {
+        let closest = match self.parsed_participants.range(..=view).next_back() {
+            Some((_, p)) => p,
             None => {
                 self.panic("no participants in required range");
             }
         };
-        Some(closest)
+        Some(&closest.1)
+    }
+
+    fn is_participant(&self, view: View, candidate: &PublicKey) -> Option<bool> {
+        self.parsed_participants
+            .get(&view)
+            .map(|(set, _)| set.contains(candidate))
     }
 
     async fn propose(&mut self, context: Context, _activity: Activity) -> Option<Payload> {
