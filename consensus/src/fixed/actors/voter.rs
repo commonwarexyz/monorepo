@@ -368,20 +368,6 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
             panic!("leader timeout must be less than or equal to notarization timeout");
         }
 
-        // Add first view
-        //
-        // We start on view 1 because the genesis block occupies view 0/height 0.
-        let validators = application.participants(1).unwrap();
-        let mut views = BTreeMap::new();
-        views.insert(
-            1,
-            Record::new(
-                Self::leader(validators, 1),
-                Some(runtime.current() + cfg.leader_timeout),
-                Some(runtime.current() + cfg.notarization_timeout),
-            ),
-        );
-
         // Initialize metrics
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
@@ -390,8 +376,6 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
             registry.register("current_view", "current view", current_view.clone());
             registry.register("tracked_views", "tracked views", tracked_views.clone());
         }
-        current_view.set(1);
-        tracked_views.set(1);
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
@@ -414,7 +398,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
 
                 last_finalized: 0,
                 view: 1,
-                views,
+                views: BTreeMap::new(),
 
                 current_view,
                 tracked_views,
@@ -423,8 +407,12 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
         )
     }
 
-    fn leader(validators: &[PublicKey], view: View) -> PublicKey {
-        validators[view as usize % validators.len()].clone()
+    fn leader(&self, view: View) -> Option<PublicKey> {
+        let validators = match self.application.participants(view) {
+            Some(validators) => validators,
+            None => return None,
+        };
+        Some(validators[view as usize % validators.len()].clone())
     }
 
     async fn propose(&mut self, orchestrator: &mut Mailbox) -> bool {
@@ -590,22 +578,21 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
         }
 
         // Check expected leader
-        let validators = match self.application.participants(proposal.view) {
-            Some(validators) => validators,
+        if !C::validate(&signature.public_key) {
+            debug!(reason = "invalid signature", "dropping proposal");
+            return;
+        }
+        let expected_leader = match self.leader(proposal.view) {
+            Some(leader) => leader,
             None => {
                 debug!(
-                    proposal.view,
-                    reason = "unable to compute participants for view",
+                    proposal_leader = hex(&signature.public_key),
+                    reason = "unable to compute leader",
                     "dropping proposal"
                 );
                 return;
             }
         };
-        let expected_leader = Self::leader(validators, proposal.view);
-        if !C::validate(&signature.public_key) {
-            debug!(reason = "invalid signature", "dropping proposal");
-            return;
-        }
         if expected_leader != signature.public_key {
             debug!(
                 proposal_leader = hex(&signature.public_key),
@@ -720,24 +707,12 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
             return;
         }
 
-        // Get validators
-        let validators = match self.application.participants(view) {
-            Some(validators) => validators,
-            None => {
-                debug!(
-                    view,
-                    reason = "unable to compute participants for view",
-                    "skipping view change"
-                );
-                return;
-            }
-        };
-
         // Setup new view
+        let leader = self.leader(view).expect("unable to get leader");
         let entry = self
             .views
             .entry(view)
-            .or_insert_with(|| Record::new(Self::leader(validators, view), None, None));
+            .or_insert_with(|| Record::new(leader, None, None));
         entry.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
         entry.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         self.view = view;
@@ -843,10 +818,21 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
 
     fn handle_vote(&mut self, vote: wire::Vote) {
         // Check to see if vote is for proposal in view
-        let view = self.views.entry(vote.view).or_insert_with(|| {
-            let validators = self.application.participants(vote.view).unwrap();
-            Record::new(Self::leader(validators, vote.view), None, None)
-        });
+        let leader = match self.leader(vote.view) {
+            Some(leader) => leader,
+            None => {
+                debug!(
+                    view = vote.view,
+                    reason = "unable to compute leader",
+                    "dropping vote"
+                );
+                return;
+            }
+        };
+        let view = self
+            .views
+            .entry(vote.view)
+            .or_insert_with(|| Record::new(leader, None, None));
 
         // Handle vote
         view.add_verified_vote(false, vote);
@@ -968,10 +954,13 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
         notarization: wire::Notarization,
     ) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
-        let view = self.views.entry(notarization.view).or_insert_with(|| {
-            let validators = self.application.participants(notarization.view).unwrap();
-            Record::new(Self::leader(validators, notarization.view), None, None)
-        });
+        let leader = self
+            .leader(notarization.view)
+            .expect("unable to get leader");
+        let view = self
+            .views
+            .entry(notarization.view)
+            .or_insert_with(|| Record::new(leader, None, None));
         for signature in notarization.signatures {
             let vote = wire::Vote {
                 view: notarization.view,
@@ -1075,10 +1064,11 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
 
     fn handle_finalize(&mut self, finalize: wire::Finalize) {
         // Get view for finalize
-        let view = self.views.entry(finalize.view).or_insert_with(|| {
-            let validators = self.application.participants(finalize.view).unwrap();
-            Record::new(Self::leader(validators, finalize.view), None, None)
-        });
+        let leader = self.leader(finalize.view).expect("unable to get leader");
+        let view = self
+            .views
+            .entry(finalize.view)
+            .or_insert_with(|| Record::new(leader, None, None));
 
         // Handle finalize
         view.add_verified_finalize(false, finalize);
@@ -1189,10 +1179,13 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
         finalization: wire::Finalization,
     ) {
         // Add signatures to view (needed to broadcast finalization if we get proposal)
-        let view = self.views.entry(finalization.view).or_insert_with(|| {
-            let validators = self.application.participants(finalization.view).unwrap();
-            Record::new(Self::leader(validators, finalization.view), None, None)
-        });
+        let leader = self
+            .leader(finalization.view)
+            .expect("unable to get leader");
+        let view = self
+            .views
+            .entry(finalization.view)
+            .or_insert_with(|| Record::new(leader, None, None));
         for signature in finalization.signatures.iter() {
             let finalize = wire::Finalize {
                 view: finalization.view,
@@ -1466,6 +1459,13 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Voter<E, C, H, A> {
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
+        // Add initial view
+        //
+        // We start on view 1 because the genesis block occupies view 0/height 0.
+        self.enter_view(1);
+        self.current_view.set(1);
+        self.tracked_views.set(1);
+
         // Process messages
         loop {
             // Attempt to propose a block
