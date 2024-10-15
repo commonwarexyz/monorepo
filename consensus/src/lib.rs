@@ -27,11 +27,17 @@ use std::future::Future;
 type View = u64;
 type Height = u64;
 type Hash = Bytes; // use fixed size bytes
-const HASH_LENGTH: usize = 32;
+const HASH_LENGTH: usize = 32; // TODO: up to consensus to define hasher?
 type Payload = Bytes;
+
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not
 /// interpreting just means all faults would be treated equally).
-type Fault = u32;
+type FaultType = u16;
+type Fault = (PublicKey, FaultType);
+
+/// Various consensus implementations may want to reward participation in different ways.
+type SupportType = u16;
+type Support = (PublicKey, SupportType);
 
 /// Context is a collection of information about the context in which a block is built.
 pub struct Context {
@@ -54,8 +60,8 @@ pub struct Participation {
     // view
     //
     // TODO: How to deliniate between votes/finalizations?
-    pub support: HashMap<Height, Vec<PublicKey>>,
-    pub faults: HashMap<PublicKey, Fault>,
+    pub support: HashMap<Height, Vec<Support>>,
+    pub faults: Vec<Fault>,
 }
 
 pub trait Parser: Clone + Send + 'static {
