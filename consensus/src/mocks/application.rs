@@ -99,7 +99,7 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
 
     fn participants(&self, view: View) -> Option<Vec<PublicKey>> {
         let closest = match self.participants.range(..=view).next_back() {
-            Some((v, p)) => p.clone(),
+            Some((_, p)) => p.clone(),
             None => {
                 self.panic("no participants in required range");
             }
@@ -107,7 +107,7 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
         Some(closest)
     }
 
-    async fn propose(&mut self, context: Context, activity: Activity) -> Option<Payload> {
+    async fn propose(&mut self, context: Context, _activity: Activity) -> Option<Payload> {
         // Verify parent exists and we are at the correct height
         if !H::validate(&context.parent) {
             self.panic("invalid parent hash length");
@@ -154,7 +154,7 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
     async fn verify(
         &mut self,
         context: Context,
-        activity: Activity,
+        _activity: Activity,
         payload: Payload,
         block: Hash,
     ) -> bool {
@@ -205,7 +205,7 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
             let _ = self
                 .progress
                 .send((
-                    self.application.participant.clone(),
+                    self.participant.clone(),
                     Progress::Notarized(*height, block),
                 ))
                 .await;
@@ -219,11 +219,11 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
             self.panic("invalid hash length");
         }
         if self.finalized.contains_key(&block) {
-            self.application.panic("block already finalized");
+            self.panic("block already finalized");
         }
         if let Some(height) = self.verified.get(&block) {
             if self.last_finalized + 1 != *height {
-                self.application.panic(&format!(
+                self.panic(&format!(
                     "invalid finalization height: {} != {}",
                     self.last_finalized + 1,
                     height
@@ -234,12 +234,12 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
             let _ = self
                 .progress
                 .send((
-                    self.application.participant.clone(),
+                    self.participant.clone(),
                     Progress::Finalized(*height, block),
                 ))
                 .await;
         } else {
-            self.application.panic("block not verified");
+            self.panic("block not verified");
         }
     }
 }

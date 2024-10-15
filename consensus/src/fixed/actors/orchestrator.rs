@@ -16,8 +16,11 @@ use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    marker::PhantomData,
+};
 use tracing::{debug, warn};
 
 pub enum Message {
@@ -101,7 +104,7 @@ enum Knowledge {
 
 pub struct Orchestrator<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
     runtime: E,
-    hasher: H,
+    hasher: PhantomData<H>,
     application: A,
 
     fetch_timeout: Duration,
@@ -140,7 +143,7 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
 impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Orchestrator<E, H, A> {
     pub fn new(
         runtime: E,
-        hasher: H,
+        _hasher: H,
         mut application: A,
         fetch_timeout: Duration,
         max_fetch_count: u64,
@@ -171,7 +174,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Orchestrator<E, H, A> 
         (
             Self {
                 runtime,
-                hasher,
+                hasher: PhantomData,
                 application,
 
                 fetch_timeout,
