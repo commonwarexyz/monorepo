@@ -32,8 +32,8 @@ type Hash = Bytes; // use fixed size bytes
 /// This is configurable because some hash functions are better suited for
 /// SNARK/STARK proofs than others.
 pub trait Hasher: Clone + Send + 'static {
-    /// Size of the hash in bytes.
-    fn size() -> usize;
+    /// Validate the hash.
+    fn validate(hash: &Hash) -> bool;
 
     /// Hash the given digest.
     fn hash(&mut self, digest: &[u8]) -> Hash;
