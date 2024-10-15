@@ -3,7 +3,7 @@
 //! Makes some assumptions about the consensus construction:
 //! * Cryptographic proof of participation
 
-pub mod fixed;
+pub mod authority;
 pub mod mocks;
 pub mod sha256;
 

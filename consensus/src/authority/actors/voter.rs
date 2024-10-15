@@ -1,6 +1,6 @@
 use super::orchestrator::{Mailbox, Proposal};
 use crate::{
-    fixed::{
+    authenticated::{
         encoding::{
             finalize_digest, proposal_digest, vote_digest, FINALIZE_SUFFIX, PROPOSAL_SUFFIX,
             VOTE_SUFFIX,
