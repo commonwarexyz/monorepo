@@ -4,6 +4,8 @@ pub mod fixed;
 pub mod mocks;
 
 use bytes::Bytes;
+use commonware_cryptography::PublicKey;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
 // TODO: add simulated dialect for applications to test their execution environments under (with arbitary orphans, etc.)
@@ -24,6 +26,14 @@ type Height = u64;
 type Hash = Bytes; // use fixed size bytes
 const HASH_LENGTH: usize = 32;
 type Payload = Bytes;
+
+pub struct Consensus {
+    pub proposer: PublicKey,
+
+    /// Votes for a canonical block at a given height.
+    pub votes: HashMap<Height, HashSet<PublicKey>>,
+    pub faults: HashSet<PublicKey>,
+}
 
 pub trait Parser: Clone + Send + 'static {
     /// Parse the payload and return the hash of the payload. We don't just hash
@@ -51,6 +61,7 @@ pub trait Processor: Send + 'static {
         &mut self,
         parent: Hash,
         height: Height,
+        consensus: Consensus,
     ) -> impl Future<Output = Option<Payload>> + Send;
 
     /// Verify the payload is valid.
@@ -60,6 +71,7 @@ pub trait Processor: Send + 'static {
         &mut self,
         parent: Hash,
         height: Height,
+        consensus: Consensus,
         payload: Payload,
         block: Hash,
     ) -> impl Future<Output = bool> + Send;

@@ -16,6 +16,8 @@
 //!
 //! * Block timeout in addition to notarization timeout
 //! * Backfill blocks from notarizing peers rather than passing along with notarization
+//! * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
+//!   more votes)
 
 mod actors;
 mod config;
