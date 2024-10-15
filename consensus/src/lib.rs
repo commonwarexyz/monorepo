@@ -5,6 +5,7 @@
 
 pub mod fixed;
 pub mod mocks;
+pub mod sha256;
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
@@ -35,7 +36,7 @@ pub trait Hasher: Clone + Send + 'static {
     fn size() -> usize;
 
     /// Hash the given digest.
-    fn hash(digest: &[u8]) -> Hash;
+    fn hash(&mut self, digest: &[u8]) -> Hash;
 }
 
 type View = u64;
