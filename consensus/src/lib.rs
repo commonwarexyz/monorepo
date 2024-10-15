@@ -35,7 +35,9 @@ type Payload = Bytes;
 type FaultType = u16;
 type Fault = (PublicKey, FaultType);
 
-/// Various consensus implementations may want to reward participation in different ways.
+/// Various consensus implementations may want to reward participation in different ways. For example,
+/// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
+/// both equally may better align incentives with desired behavior.
 type SupportType = u16;
 type Support = (PublicKey, SupportType);
 
@@ -47,7 +49,10 @@ pub struct Context {
 }
 
 /// Participation is a collection of information about consensus performance
-/// included in the block wrapper.
+/// included in the block wrapper (handled externally).
+///
+/// It is up to the application to determine how to act on this information (attributing
+/// rewards, removing validators, etc.).
 pub struct Participation {
     pub proposer: PublicKey,
 

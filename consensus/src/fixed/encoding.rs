@@ -5,6 +5,7 @@ pub const PROPOSAL_SUFFIX: &[u8] = b"_PROPOSAL";
 pub const VOTE_SUFFIX: &[u8] = b"_VOTE";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
+// TODO: hash all external context, union with payload_hash, and then hash that for block hash
 pub fn proposal_digest(view: View, height: Height, parent: &Hash, payload_hash: &Hash) -> Bytes {
     let mut msg = Vec::new();
     msg.extend_from_slice(&view.to_be_bytes());
