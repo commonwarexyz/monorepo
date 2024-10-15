@@ -47,10 +47,13 @@ pub struct Participation {
 
     /// Votes for a canonical block at a given height.
     ///
+    ///
     /// Height is exposed such that rewards can be scaled by
     /// timeliness.
     // TODO: ensure a validator can only support if active at a given
     // view
+    //
+    // TODO: How to deliniate between votes/finalizations?
     pub support: HashMap<Height, Vec<PublicKey>>,
     pub faults: HashMap<PublicKey, Fault>,
 }
@@ -93,7 +96,9 @@ pub trait Processor: Send + 'static {
         payload: Payload,
         block: Hash,
     ) -> impl Future<Output = bool> + Send;
+}
 
+pub trait Handler: Send + 'static {
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
@@ -101,14 +106,6 @@ pub trait Processor: Send + 'static {
 
     /// Event that the payload has been finalized.
     fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
-}
-
-/// Oracle is a trait that allows the application to update the participants
-/// in consensus at a given view.
-pub trait Oracle {
-    /// It is up to the developer to ensure that any updates cannot cause a halt (if some validators
-    /// apply the change and others do not, often as a result of delayed finality at a previous view).
-    fn participants(&mut self, view: View, validators: Vec<PublicKey>);
 }
 
 // TODO: break apart into smaller traits?
