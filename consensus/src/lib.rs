@@ -72,7 +72,7 @@ pub struct Participation {
     pub support: HashMap<Height, Vec<Support>>,
     /// Faults are not gossiped through the network and are only
     /// posted once locally observed (as this would create a DoS vector).
-    pub faults: Vec<Fault>,
+    pub faults: HashMap<View, Vec<Fault>>,
 }
 
 pub trait Parser: Clone + Send + 'static {
