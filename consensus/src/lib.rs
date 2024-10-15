@@ -24,12 +24,29 @@ use std::future::Future;
 // - 33% double-voting
 // - block sent to one honest party different than block sent to all others, does it drop at notarization and fetch actual?
 
-type Epoch = u64;
+type Hash = Bytes; // use fixed size bytes
+
+/// Hasher is provided by the application for hashing.
+///
+/// This is configurable because some hash functions are better suited for
+/// SNARK/STARK proofs than others.
+pub trait Hasher: Clone + Send + 'static {
+    /// Size of the hash in bytes.
+    fn size() -> usize;
+
+    /// Hash the given digest.
+    fn hash(digest: &[u8]) -> Hash;
+}
+
 type View = u64;
 type Height = u64;
-type Hash = Bytes; // use fixed size bytes
-const HASH_LENGTH: usize = 32; // TODO: up to consensus to define hasher?
-type Payload = Bytes;
+
+/// Context is a collection of information about the context in which a block is built.
+pub struct Context {
+    pub view: View,
+    pub parent: Hash,
+    pub height: Height,
+}
 
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not
 /// interpreting just means all faults would be treated equally).
@@ -39,27 +56,18 @@ type Fault = (PublicKey, FaultType);
 /// Various consensus implementations may want to reward participation in different ways. For example,
 /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
 /// both equally may better align incentives with desired behavior.
-type SupportType = u16;
-type Support = (PublicKey, SupportType);
+type ContributionType = u16;
+type Contribution = (PublicKey, ContributionType);
 
-/// Context is a collection of information about the context in which a block is built.
-pub struct Context {
-    pub epoch: Option<Epoch>,
-    pub view: Option<View>,
-
-    pub parent: Hash,
-    pub height: Height,
-}
-
-/// Participation is a collection of information about consensus performance
+/// Activity is a collection of information about consensus performance
 /// included in the block wrapper (handled externally).
 ///
 /// It is up to the application to determine how to act on this information (attributing
 /// rewards, removing validators, etc.).
-pub struct Participation {
+pub struct Activity {
     pub proposer: PublicKey,
 
-    /// Votes for a canonical block at a given height.
+    /// Contributions at a given height.
     ///
     ///
     /// Height is exposed such that rewards can be scaled by
@@ -71,20 +79,14 @@ pub struct Participation {
     // view
     //
     // TODO: How to deliniate between votes/finalizations?
-    pub support: HashMap<Height, Vec<Support>>,
+    pub contributions: HashMap<Height, Vec<Contribution>>,
+
     /// Faults are not gossiped through the network and are only
     /// posted once locally observed (as this would create a DoS vector).
     pub faults: HashMap<View, Vec<Fault>>,
 }
 
-/// Hasher is provided by the application for hashing.
-///
-/// This is configurable because some hash functions are better suited for
-/// SNARK/STARK proofs than others.
-pub trait Hasher: Clone + Send + 'static {
-    fn size() -> usize;
-    fn hash(data: &[u8]) -> Hash;
-}
+type Payload = Bytes;
 
 /// Application is the interface for the consensus engine to inform of progress.
 ///
@@ -98,7 +100,12 @@ pub trait Application: Clone + Send + 'static {
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.
     ///
     /// It is up to the developer to ensure changes to this list are synchronized across nodes in the network
-    /// at a given view. If care is not taken to do this, the chain could fork/halt.
+    /// at a given view. If care is not taken to do this, the chain could fork/halt. If using an underlying
+    /// consensus implementation that does not require finalization of a height before producing a block
+    /// at the next height (asynchronous finalization), a synchrony bound should be enforced around
+    /// changes to the set (i.e. participant joining in view 10 should only become active in view 20, where
+    /// we assume all other participants have finalized view 10).
+    // TODO: when syncing, we might need to get creative on how to handle this
     fn participants(&self, view: View) -> Option<Vec<PublicKey>>;
 
     /// Generate a new payload for the given parent hash.
@@ -109,7 +116,7 @@ pub trait Application: Clone + Send + 'static {
     fn propose(
         &mut self,
         context: Context,
-        participation: Participation,
+        activity: Activity,
     ) -> impl Future<Output = Option<Payload>> + Send;
 
     /// Parse the payload and return the hash of the payload. We don't just hash
@@ -125,7 +132,7 @@ pub trait Application: Clone + Send + 'static {
     fn verify(
         &mut self,
         context: Context,
-        participation: Participation,
+        activity: Activity,
         payload: Payload,
         block: Hash,
     ) -> impl Future<Output = bool> + Send;
@@ -137,6 +144,34 @@ pub trait Application: Clone + Send + 'static {
 
     /// Event that the payload has been finalized.
     fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
+}
+
+type Epoch = u64;
+pub struct EpochContext {
+    pub epoch: Epoch,
+    pub context: Context,
+}
+
+pub trait EpochApplication: Application {
+    fn participants(&self, epoch: Epoch, view: View) -> Option<Vec<PublicKey>>;
+
+    fn propose(
+        &mut self,
+        context: EpochContext,
+        activity: Activity,
+    ) -> impl Future<Output = Option<Payload>> + Send;
+
+    fn verify(
+        &mut self,
+        context: EpochContext,
+        activity: Activity,
+        payload: Payload,
+        block: Hash,
+    ) -> impl Future<Output = bool> + Send;
+
+    fn start_epoch(&mut self, epoch: Epoch, view: View) -> impl Future<Output = ()> + Send;
+
+    fn end_epoch(&mut self, epoch: Epoch, view: View) -> impl Future<Output = ()> + Send;
 }
 
 // TODO: break apart into smaller traits?
