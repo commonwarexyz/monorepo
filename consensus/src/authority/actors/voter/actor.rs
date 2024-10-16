@@ -34,7 +34,11 @@ struct Round {
 
     // Track one proposal per view
     requested_proposal: bool,
-    proposal: Option<(Hash /* proposal */, wire::Proposal)>,
+    proposal: Option<(
+        Hash, /* proposal */
+        Hash, /* payload */
+        wire::Proposal,
+    )>,
     verified_proposal: bool,
     broadcast_vote: bool,
     broadcast_finalize: bool,
@@ -147,7 +151,7 @@ impl Round {
 
             // Ensure we have the proposal we are going to broadcast a notarization for
             let height = match &self.proposal {
-                Some((hash, pro)) => {
+                Some((hash, _, pro)) => {
                     if hash != proposal {
                         debug!(
                             view = pro.view,
@@ -241,7 +245,7 @@ impl Round {
 
             // Ensure we have the proposal we are going to broadcast a finalization for
             let height = match &self.proposal {
-                Some((hash, pro)) => {
+                Some((hash, _, pro)) => {
                     if hash != proposal {
                         debug!(
                             proposal = hex(proposal),
@@ -287,6 +291,8 @@ pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> {
     view: View,
     views: BTreeMap<View, Round>,
 
+    faults: BTreeMap<View, HashMap<PublicKey, wire::Fault>>,
+
     current_view: Gauge,
     tracked_views: Gauge,
 }
@@ -329,6 +335,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 last_finalized: 0,
                 view: 0,
                 views: BTreeMap::new(),
+
+                faults: BTreeMap::new(),
 
                 current_view,
                 tracked_views,
@@ -446,7 +454,12 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         self.handle_vote(vote);
     }
 
-    async fn our_proposal(&mut self, proposal_hash: Hash, proposal: wire::Proposal) -> bool {
+    async fn our_proposal(
+        &mut self,
+        proposal_hash: Hash,
+        payload_hash: Hash,
+        proposal: wire::Proposal,
+    ) -> bool {
         // Store the proposal
         let view = self.views.get_mut(&proposal.view).expect("view missing");
 
@@ -469,7 +482,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             hash = hex(&proposal_hash),
             "stored our proposal"
         );
-        view.proposal = Some((proposal_hash, proposal));
+        view.proposal = Some((proposal_hash, payload_hash, proposal));
         view.verified_proposal = true;
         view.leader_deadline = None;
         true
@@ -522,29 +535,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             return;
         }
 
-        // Check to see if we have already received a proposal for this view (if exists)
-        if let Some(view) = self.views.get_mut(&proposal.view) {
-            if view.proposal.is_some() {
-                warn!(
-                    leader = hex(&expected_leader),
-                    view = proposal.view,
-                    reason = "already received proposal",
-                    "dropping proposal"
-                );
-                return;
-            }
-            if view.timeout_fired {
-                warn!(
-                    leader = hex(&expected_leader),
-                    view = proposal.view,
-                    reason = "view already timed out",
-                    "dropping proposal"
-                );
-                return;
-            }
-        }
-
-        // Verify the signature
+        // Compute hash
         let payload_hash = match self.application.parse(proposal.payload.clone()).await {
             Some(hash) => hash,
             None => {
@@ -556,25 +547,96 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             .hasher
             .hash(&header_digest(proposal.height, &proposal.parent));
         let proposal_digest = proposal_digest(proposal.view, &header_hash, &payload_hash);
+        let proposal_hash = self.hasher.hash(&proposal_digest);
+
+        // Check if duplicate or conflicting
+        let mut previous = None;
+        if let Some(view) = self.views.get_mut(&proposal.view) {
+            if view.timeout_fired {
+                warn!(
+                    leader = hex(&expected_leader),
+                    view = proposal.view,
+                    reason = "view already timed out",
+                    "dropping proposal"
+                );
+                return;
+            }
+            if view.proposal.is_some() {
+                let incoming_hash = &view.proposal.as_ref().unwrap().0;
+                if *incoming_hash == proposal_hash {
+                    debug!(
+                        leader = hex(&expected_leader),
+                        view = proposal.view,
+                        reason = "already received proposal",
+                        "dropping proposal"
+                    );
+                    return;
+                }
+                previous = view.proposal.as_ref();
+            }
+        }
+
+        // Verify the signature
+        let public_key = &signature.public_key;
         if !C::verify(
             &self.proposal_namespace,
             &proposal_digest,
-            &signature.public_key,
+            public_key,
             &signature.signature,
         ) {
             debug!(reason = "invalid signature", "dropping proposal");
             return;
         }
 
+        // Collect fault for leader
+        if let Some(previous) = previous {
+            // Gather info for first signature
+            let header_hash_1 = self
+                .hasher
+                .hash(&header_digest(proposal.height, &proposal.parent));
+
+            // Record fault
+            let conflicting_proposal = wire::ConflictingProposal {
+                view: proposal.view,
+
+                header_hash_1,
+                payload_hash_1: previous.1.clone(),
+                signature_1: previous.2.signature.clone(),
+
+                header_hash_2: header_hash,
+                payload_hash_2: payload_hash.clone(),
+                signature_2: proposal.signature.clone(),
+            };
+            let fault = wire::Fault {
+                payload: Some(wire::fault::Payload::ConflictingProposal(
+                    conflicting_proposal,
+                )),
+            };
+            self.faults
+                .entry(proposal.view)
+                .or_default()
+                .insert(public_key.clone(), fault);
+            warn!(
+                leader = hex(&expected_leader),
+                view = proposal.view,
+                reason = "conflicting proposal",
+                "recorded fault"
+            );
+            return;
+        }
+
         // Verify the proposal
         //
         // This will fail if we haven't notified the application of this parent.
-        let proposal_hash = self.hasher.hash(&proposal_digest);
         let view = self
             .views
             .entry(proposal.view)
             .or_insert_with(|| Round::new(expected_leader, None, None));
-        view.proposal = Some((proposal_hash.clone(), proposal.clone()));
+        view.proposal = Some((
+            proposal_hash.clone(),
+            payload_hash.clone(),
+            proposal.clone(),
+        ));
         resolver
             .verify(proposal_hash.clone(), proposal.clone())
             .await;
@@ -901,7 +963,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         // Inform resolver of notarization if not null vote
         if let Some(notarization_hash) = notarization.hash {
             let proposal = match view.proposal.as_ref() {
-                Some((hash, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
+                Some((hash, _, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
                 None => {
                     Proposal::Reference(notarization.view, notarization.height, notarization_hash)
                 }
@@ -1130,7 +1192,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
 
         // Inform resolver of finalization
         let proposal = match view.proposal.as_ref() {
-            Some((hash, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
+            Some((hash, _, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
             None => Proposal::Reference(
                 finalization.view,
                 finalization.height,
@@ -1160,7 +1222,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             return None;
         }
         let (hash, proposal) = match &view_obj.proposal {
-            Some((hash, proposal)) => (hash, proposal),
+            Some((hash, _, proposal)) => (hash, proposal),
             None => {
                 return None;
             }
@@ -1242,7 +1304,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             return None;
         }
         let (hash, proposal) = match &view_obj.proposal {
-            Some((hash, proposal)) => (hash, proposal),
+            Some((hash, _, proposal)) => (hash, proposal),
             None => {
                 return None;
             }
@@ -1443,7 +1505,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
 
                             // Handle our proposal
                             let proposal_hash = self.hasher.hash(&proposal_digest);
-                            if !self.our_proposal(proposal_hash, proposal.clone()).await {
+                            if !self.our_proposal(proposal_hash, payload_hash, proposal.clone()).await {
                                 continue;
                             }
                             view = proposal_view;

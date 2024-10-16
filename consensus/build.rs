@@ -13,6 +13,10 @@ fn main() -> Result<()> {
         "Finalization.hash",
         "Request.hash",
         "Missing.hash",
+        "ConflictingProposal.header_hash_1",
+        "ConflictingProposal.payload_hash_1",
+        "ConflictingProposal.header_hash_2",
+        "ConflictingProposal.payload_hash_2",
     ]);
     config.compile_protos(&["src/authority/wire.proto"], &["src/authority/"])?;
     Ok(())

@@ -80,14 +80,14 @@ message Missing {
 // TODO: only store one fault per public key per view to avoid DoS
 message Fault {
     oneof payload {
-        ConflictingBlock conflicting_block = 1;
+        ConflictingProposal conflicting_proposal = 1;
         ConflictingVote conflicting_vote = 2;
         ConflictingFinalize conflicting_finalize = 3;
         NullFinalize null_finalize = 4;
     }
 }
 
-message ConflictingBlock {
+message ConflictingProposal {
     uint64 view = 1;
 
     bytes header_hash_1 = 2;
