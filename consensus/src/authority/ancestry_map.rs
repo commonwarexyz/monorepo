@@ -13,8 +13,9 @@ pub struct AncestryMap<K: Eq + StdHash + Clone, V: Clone> {
 }
 
 impl<K: Eq + StdHash + Clone, V: Clone> AncestryMap<K, V> {
-    // TODO: track votes by both container and index? Well, faults don't need this
-    pub fn add(&mut self, container: Hash, index: u64, key: K, value: V) {
+    // TODO: track votes by both container and index? Faults don't need this
+    // but included votes/finalizes need to be?
+    pub fn add(&mut self, index: u64, key: K, value: V) {
         self.pending.entry(index).or_default().insert(key, value);
     }
 
