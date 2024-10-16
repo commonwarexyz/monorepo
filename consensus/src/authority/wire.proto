@@ -77,6 +77,7 @@ message Missing {
     bytes hash = 1;
 }
 
+// TODO: only store one fault per public key per view to avoid DoS
 message Fault {
     oneof payload {
         ConflictingBlock conflicting_block = 1;
