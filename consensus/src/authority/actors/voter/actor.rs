@@ -3,8 +3,8 @@ use crate::{
     authority::{
         actors::{resolver, Proposal},
         encoding::{
-            finalize_digest, proposal_digest, vote_digest, FINALIZE_SUFFIX, PROPOSAL_SUFFIX,
-            VOTE_SUFFIX,
+            finalize_digest, header_digest, proposal_digest, vote_digest, FINALIZE_SUFFIX,
+            PROPOSAL_SUFFIX, VOTE_SUFFIX,
         },
         wire,
     },
@@ -552,12 +552,13 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 return;
             }
         };
-        let proposal_digest = proposal_digest(proposal.view, proposal.height, &proposal.parent);
-        let proposal_hash = self.hasher.hash(&proposal_digest);
-        let proposal_hash = self.hasher.hash(&union(&proposal_hash, &payload_hash));
+        let header_hash = self
+            .hasher
+            .hash(&header_digest(proposal.height, &proposal.parent));
+        let proposal_digest = proposal_digest(proposal.view, &header_hash, &payload_hash);
         if !C::verify(
             &self.proposal_namespace,
-            &proposal_hash,
+            &proposal_digest,
             &signature.public_key,
             &signature.signature,
         ) {
@@ -568,6 +569,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         // Verify the proposal
         //
         // This will fail if we haven't notified the application of this parent.
+        let proposal_hash = self.hasher.hash(&proposal_digest);
         let view = self
             .views
             .entry(proposal.view)
@@ -718,7 +720,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         }
 
         // Verify the signature
-        let vote_digest = vote_digest(vote.view, vote.height, vote.hash.clone());
+        let vote_digest = vote_digest(vote.view, vote.height, vote.hash.as_ref());
         if !C::verify(
             &self.vote_namespace,
             &vote_digest,
@@ -854,7 +856,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 &vote_digest(
                     notarization.view,
                     notarization.height,
-                    notarization.hash.clone(),
+                    notarization.hash.as_ref(),
                 ),
                 &signature.public_key,
                 &signature.signature,
@@ -1172,7 +1174,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
                     &self.vote_namespace,
-                    &vote_digest(view, proposal.height, Some(hash.clone())),
+                    &vote_digest(view, proposal.height, Some(hash)),
                 ),
             }),
         })
@@ -1426,9 +1428,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                             }
 
                             // Construct proposal
-                            let proposal_digest = proposal_digest(self.view, height, &parent);
-                            let proposal_hash = self.hasher.hash(&proposal_digest);
-                            let proposal_hash = self.hasher.hash(&union(&proposal_hash, &payload_hash));
+                            let header_hash = self.hasher.hash(&header_digest(height, &parent));
+                            let proposal_digest = proposal_digest(self.view, &header_hash, &payload_hash);
                             let proposal = wire::Proposal {
                                 view: self.view,
                                 height,
@@ -1436,11 +1437,12 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                                 payload,
                                 signature: Some(wire::Signature {
                                     public_key: self.crypto.public_key(),
-                                    signature: self.crypto.sign(&self.proposal_namespace, &proposal_hash),
+                                    signature: self.crypto.sign(&self.proposal_namespace, &proposal_digest),
                                 }),
                             };
 
                             // Handle our proposal
+                            let proposal_hash = self.hasher.hash(&proposal_digest);
                             if !self.our_proposal(proposal_hash, proposal.clone()).await {
                                 continue;
                             }

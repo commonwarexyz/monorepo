@@ -4,7 +4,7 @@ use super::{Mailbox, Message};
 use crate::{
     authority::{
         actors::{voter, Proposal},
-        encoding::proposal_digest,
+        encoding::{header_digest, proposal_digest},
         wire,
     },
     Activity, Application, Context, Hash, Hasher, Height, Payload, View,
@@ -13,7 +13,7 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::{hex, union};
+use commonware_utils::hex;
 use core::panic;
 use futures::{channel::mpsc, future::Either};
 use futures::{SinkExt, StreamExt};
@@ -928,13 +928,16 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                                         break;
                                     }
                                 };
-                                let proposal_digest = proposal_digest(
-                                    proposal.view,
+                                let header_hash = self.hasher.hash(&header_digest(
                                     proposal.height,
                                     &proposal.parent,
+                                ));
+                                let proposal_digest = proposal_digest(
+                                    proposal.height,
+                                    &header_hash,
+                                    &payload_hash,
                                 );
                                 let proposal_hash = self.hasher.hash(&proposal_digest);
-                                let proposal_hash = self.hasher.hash(&union(&proposal_hash, &payload_hash));
 
                                 // Ensure this is the block we want
                                 if let Some((height, ref hash)) = next {
