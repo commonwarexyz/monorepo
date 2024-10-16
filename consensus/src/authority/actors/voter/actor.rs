@@ -237,29 +237,73 @@ impl Round {
         Some((None, None, &self.null_votes))
     }
 
-    fn add_verified_finalize(&mut self, skip_invalid: bool, finalize: wire::Finalize) {
+    fn add_verified_finalize(&mut self, finalize: wire::Finalize) -> Option<wire::Fault> {
         // Check if also issued null vote
         let public_key = &finalize.signature.as_ref().unwrap().public_key;
-        if self.null_votes.contains_key(public_key) && !skip_invalid {
+        let null_vote = self.null_votes.get(public_key);
+        if let Some(null_vote) = null_vote {
+            // Create fault
+            let null_finalize = wire::NullFinalize {
+                view: finalize.view,
+
+                height: finalize.height,
+                hash: finalize.hash.clone(),
+                signature_finalize: finalize.signature.clone(),
+
+                signature_null: null_vote.signature.clone(),
+            };
+            let fault = wire::Fault {
+                payload: Some(wire::fault::Payload::NullFinalize(null_finalize)),
+            };
             warn!(
                 view = finalize.view,
                 signer = hex(public_key),
-                "already voted null",
+                "recorded fault"
             );
-            return;
+            return Some(fault);
         }
 
         // Check if already finalized
-        if !skip_invalid {
-            if let Some(previous_finalize) = self.finalizers.get(public_key) {
-                warn!(
+        if let Some(previous_finalize) = self.finalizers.get(public_key) {
+            if previous_finalize == &finalize.hash {
+                debug!(
                     view = finalize.view,
                     signer = hex(public_key),
                     previous_finalize = hex(previous_finalize),
-                    "already voted finalize"
+                    "already finalize"
                 );
-                return;
+                return None;
             }
+
+            // Create fault
+            let previous_finalize = self
+                .finalizes
+                .get(previous_finalize)
+                .unwrap()
+                .get(public_key)
+                .unwrap();
+            let conflicting_finalize = wire::ConflictingFinalize {
+                view: finalize.view,
+
+                height_1: previous_finalize.height,
+                hash_1: previous_finalize.hash.clone(),
+                signature_1: previous_finalize.signature.clone(),
+
+                height_2: finalize.height,
+                hash_2: finalize.hash.clone(),
+                signature_2: finalize.signature.clone(),
+            };
+            let fault = wire::Fault {
+                payload: Some(wire::fault::Payload::ConflictingFinalize(
+                    conflicting_finalize,
+                )),
+            };
+            warn!(
+                view = finalize.view,
+                signer = hex(public_key),
+                "recorded fault"
+            );
+            return Some(fault);
         }
 
         // Store the finalize
@@ -267,6 +311,7 @@ impl Round {
             .insert(public_key.clone(), finalize.hash.clone());
         let entry = self.finalizes.entry(finalize.hash.clone()).or_default();
         entry.insert(public_key.clone(), finalize);
+        None
     }
 
     fn finalizable_proposal(
@@ -1111,7 +1156,14 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             .or_insert_with(|| Round::new(leader, None, None));
 
         // Handle finalize
-        view.add_verified_finalize(false, finalize);
+        let finalize_view = finalize.view;
+        let public_key = finalize.signature.as_ref().unwrap().public_key.clone();
+        if let Some(fault) = view.add_verified_finalize(finalize) {
+            self.faults
+                .entry(finalize_view)
+                .or_default()
+                .insert(public_key, fault);
+        }
     }
 
     async fn finalization(
@@ -1231,13 +1283,19 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             .entry(finalization.view)
             .or_insert_with(|| Round::new(leader, None, None));
         for signature in finalization.signatures.iter() {
+            let public_key = signature.public_key.clone();
             let finalize = wire::Finalize {
                 view: finalization.view,
                 height: finalization.height,
                 hash: finalization.hash.clone(),
                 signature: Some(signature.clone()),
             };
-            view.add_verified_finalize(true, finalize);
+            if let Some(fault) = view.add_verified_finalize(finalize) {
+                self.faults
+                    .entry(finalization.view)
+                    .or_default()
+                    .insert(public_key, fault);
+            }
         }
 
         // Track view finalized
