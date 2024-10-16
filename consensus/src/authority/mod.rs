@@ -25,6 +25,7 @@
 mod actors;
 mod config;
 mod encoding;
+mod trie_set;
 
 pub mod engine;
 
