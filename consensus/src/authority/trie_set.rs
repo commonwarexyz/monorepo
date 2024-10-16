@@ -4,13 +4,13 @@ use std::{
     hash::Hash as StdHash,
 };
 
-pub struct TrieSet<K: PartialEq + PartialOrd + Eq + StdHash + Clone> {
+pub struct TrieSet<K: Eq + StdHash + Clone> {
     index: BTreeMap<u64, Hash>,
     stored: HashMap<Hash, (Hash, HashSet<K>)>,
     pending: BTreeMap<u64, HashSet<K>>,
 }
 
-impl<K: PartialEq + PartialOrd + Eq + StdHash + Clone> TrieSet<K> {
+impl<K: Eq + StdHash + Clone> TrieSet<K> {
     /// Prune clears all entries less than a given index.
     pub fn prune(&mut self, min: u64) {
         // Clean container index
