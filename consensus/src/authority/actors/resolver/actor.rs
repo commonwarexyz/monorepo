@@ -681,7 +681,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         );
         let entry = self.verified.entry(proposal.height).or_default();
         entry.insert(hash);
-        return true;
+        true
     }
 
     pub async fn notarized(&mut self, proposal: Proposal) {
