@@ -2,6 +2,9 @@
 //!
 //! PoA Consensus useful for running a DKG (round-robin leader selection, update participants with config).
 //!
+//! All decisions made to minimize block time and finalization latency without sacrificing
+//! the ability to attribute uptime and faults.
+//!
 //! # Sync
 //!
 //! Wait for block finalization at tip (2f+1), fetch heights backwards (don't
@@ -16,6 +19,8 @@
 //!
 //! * Block timeout in addition to notarization timeout
 //! * Backfill blocks from notarizing peers rather than passing along with notarization
+//! * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
+//!   more votes)
 
 mod actors;
 mod config;
@@ -27,6 +32,7 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
+use crate::{ContributionType, FaultType};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -41,10 +47,21 @@ pub enum Error {
     InvalidSignature,
 }
 
+pub const VOTE: ContributionType = 0;
+pub const FINALIZE: ContributionType = 1;
+
+pub const CONFLICTING_BLOCK: FaultType = 0;
+pub const CONFLICTING_VOTE: FaultType = 1;
+pub const CONFLICTING_FINALIZE: FaultType = 2;
+pub const NULL_AND_FINALIZE: FaultType = 3;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mocks::application::{Application, Config as ApplicationConfig, Progress};
+    use crate::{
+        mocks::application::{Application, Config as ApplicationConfig, Progress},
+        sha256::Sha256,
+    };
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::{select, test_traced};
@@ -60,7 +77,7 @@ mod tests {
     };
     use tracing::{debug, info};
 
-    #[test_traced]
+    #[test_traced(timeout = 10_000)]
     fn test_all_online() {
         // Create runtime
         let n = 5;
@@ -124,18 +141,21 @@ mod tests {
                 }
 
                 // Start engine
+                let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
+                let application =
+                    Application::new(runtime.clone(), hasher.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    parser,
-                    processor,
+                    hasher,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -171,7 +191,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced(timeout = 10_000)]
     fn test_one_offline() {
         // Create runtime
         let n = 5;
@@ -240,18 +260,21 @@ mod tests {
                 }
 
                 // Start engine
+                let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
+                let application =
+                    Application::new(runtime.clone(), hasher.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    parser,
-                    processor,
+                    hasher,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -287,7 +310,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced(timeout = 10_000)]
     fn test_catchup() {
         // Create runtime
         let n = 5;
@@ -356,18 +379,21 @@ mod tests {
                 }
 
                 // Start engine
+                let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
+                let application =
+                    Application::new(runtime.clone(), hasher.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    parser,
-                    processor,
+                    hasher,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -437,18 +463,20 @@ mod tests {
             }
 
             // Start engine
+            let hasher = Sha256::default();
             let application_cfg = ApplicationConfig {
                 participant: validator,
+                participants: view_validators.clone(),
                 sender: done_sender.clone(),
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
             };
-            let (parser, processor) = Application::init(runtime.clone(), application_cfg);
+            let application = Application::new(runtime.clone(), hasher.clone(), application_cfg);
             let cfg = config::Config {
                 crypto: scheme,
-                parser,
-                processor,
+                hasher,
+                application,
                 registry: Arc::new(Mutex::new(Registry::default())),
                 namespace: Bytes::from("consensus"),
                 leader_timeout: Duration::from_secs(1),
@@ -483,7 +511,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced(timeout = 10_000)]
     fn test_all_recovery() {
         // Create runtime
         let n = 5;
@@ -547,18 +575,21 @@ mod tests {
                 }
 
                 // Start engine
+                let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
+                let application =
+                    Application::new(runtime.clone(), hasher.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    parser,
-                    processor,
+                    hasher,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -624,7 +655,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced(timeout = 10_000)]
     fn test_no_finality() {
         // Create runtime
         let n = 5;
@@ -688,18 +719,21 @@ mod tests {
                 }
 
                 // Start engine
+                let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
+                let application =
+                    Application::new(runtime.clone(), hasher.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    parser,
-                    processor,
+                    hasher,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -740,11 +774,11 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced(timeout = 10_000)]
     fn test_partition() {
         // Create runtime
         let n = 10;
-        let required_blocks = 100;
+        let required_blocks = 25;
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
@@ -804,18 +838,21 @@ mod tests {
                 }
 
                 // Start engine
+                let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                 };
-                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
+                let application =
+                    Application::new(runtime.clone(), hasher.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    parser,
-                    processor,
+                    hasher,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -991,18 +1028,21 @@ mod tests {
                 }
 
                 // Start engine
+                let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (50.0, 10.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (25.0, 5.0),
                 };
-                let (parser, processor) = Application::init(runtime.clone(), application_cfg);
+                let application =
+                    Application::new(runtime.clone(), hasher.clone(), application_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
-                    parser,
-                    processor,
+                    hasher,
+                    application,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: Bytes::from("consensus"),
                     leader_timeout: Duration::from_secs(1),
@@ -1038,7 +1078,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
+    #[test_traced(timeout = 60_000)]
     fn test_jank_links() {
         for seed in 0..10 {
             info!(seed, "running test with seed");

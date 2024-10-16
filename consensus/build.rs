@@ -13,7 +13,16 @@ fn main() -> Result<()> {
         "Finalization.hash",
         "Request.hash",
         "Missing.hash",
+        "ConflictingProposal.header_hash_1",
+        "ConflictingProposal.payload_hash_1",
+        "ConflictingProposal.header_hash_2",
+        "ConflictingProposal.payload_hash_2",
+        "ConflictingVote.hash_1",
+        "ConflictingVote.hash_2",
+        "ConflictingFinalize.hash_1",
+        "ConflictingFinalize.hash_2",
+        "NullFinalize.hash",
     ]);
-    config.compile_protos(&["src/fixed/wire.proto"], &["src/fixed/"])?;
+    config.compile_protos(&["src/authority/wire.proto"], &["src/authority/"])?;
     Ok(())
 }
