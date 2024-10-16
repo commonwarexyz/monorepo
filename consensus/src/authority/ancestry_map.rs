@@ -15,6 +15,10 @@ pub struct AncestryMap<K: Eq + StdHash + Clone, V: Clone> {
 impl<K: Eq + StdHash + Clone, V: Clone> AncestryMap<K, V> {
     // TODO: track votes by both container and index? Faults don't need this
     // but included votes/finalizes need to be?
+    // TODO: could alternatively store view number and require any referenced items
+    // to be in the view hierarchy (can then translate to height to prune). ->
+    // this doesn't solve the problem that faults behave slightly differently (just don't want any repeats
+    // in the ancestry, not additionally that must only include items that reference blocks in view)
     pub fn add(&mut self, index: u64, key: K, value: V) {
         self.pending.entry(index).or_default().insert(key, value);
     }
