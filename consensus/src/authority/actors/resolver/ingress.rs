@@ -1,3 +1,9 @@
+use crate::{
+    authority::{actors::Proposal, wire},
+    Hash, PublicKey, View,
+};
+use futures::{channel::mpsc, SinkExt};
+
 pub enum Message {
     Propose {
         view: View,

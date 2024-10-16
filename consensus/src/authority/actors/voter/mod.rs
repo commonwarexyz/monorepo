@@ -1,6 +1,8 @@
-pub mod actor;
-pub mod ingress;
-pub mod round;
+mod actor;
+mod ingress;
+
+pub use actor::Actor;
+pub use ingress::{Mailbox, Message};
 
 use bytes::Bytes;
 use prometheus_client::registry::Registry;

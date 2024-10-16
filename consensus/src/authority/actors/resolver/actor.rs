@@ -1,8 +1,12 @@
-//! Backfill missing proposals seen in consensus.
+//! Resolve actions requested by consensus.
 
-use super::voter::VoterMailbox;
+use super::{Mailbox, Message};
 use crate::{
-    authenticated::{encoding::proposal_digest, wire},
+    authority::{
+        actors::{voter, Proposal},
+        encoding::proposal_digest,
+        wire,
+    },
     Activity, Application, Context, Hash, Hasher, Height, Payload, View,
 };
 use commonware_cryptography::PublicKey;
@@ -24,18 +28,12 @@ use std::{
 use tracing::{debug, warn};
 
 #[derive(Clone)]
-pub enum Proposal {
-    Reference(View, Height, Hash),
-    Populated(Hash, wire::Proposal),
-}
-
-#[derive(Clone)]
 enum Knowledge {
     Notarized(BTreeMap<View, Hash>), // priotize building off of earliest view (avoid wasting work)
     Finalized(Hash),
 }
 
-pub struct Orchestrator<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
+pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
     runtime: E,
     hasher: PhantomData<H>,
     application: A,
@@ -73,7 +71,7 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Orchestrator<E, H, A> {
+impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
     pub fn new(
         runtime: E,
         _hasher: H,
@@ -724,7 +722,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Orchestrator<E, H, A> 
 
     pub async fn run(
         mut self,
-        voter: &mut VoterMailbox,
+        voter: &mut voter::Mailbox,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {

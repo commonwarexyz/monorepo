@@ -1,8 +1,5 @@
 use super::{
-    actors::{
-        orchestrator::{self, Mailbox},
-        voter::{self, Voter, VoterMailbox},
-    },
+    actors::{resolver, voter},
     config::Config,
 };
 use crate::{Application, Hasher};
@@ -16,11 +13,11 @@ use tracing::debug;
 pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> {
     runtime: E,
 
-    orchestrator: orchestrator::Orchestrator<E, H, A>,
-    orchestrator_mailbox: Mailbox,
+    resolver: resolver::Actor<E, H, A>,
+    resolver_mailbox: resolver::Mailbox,
 
-    voter: Voter<E, C, H, A>,
-    voter_mailbox: VoterMailbox,
+    voter: voter::Actor<E, C, H, A>,
+    voter_mailbox: voter::Mailbox,
 }
 
 impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> Engine<E, C, H, A> {
@@ -36,8 +33,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> Engine<E, C
             validators.sort();
         }
 
-        // Create orchestrator
-        let (orchestrator, orchestrator_mailbox) = orchestrator::Orchestrator::new(
+        // Create resolver
+        let (resolver, resolver_mailbox) = resolver::Actor::new(
             runtime.clone(),
             cfg.hasher.clone(),
             cfg.application.clone(),
@@ -47,7 +44,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> Engine<E, C
         );
 
         // Create voter
-        let (voter, voter_mailbox) = Voter::new(
+        let (voter, voter_mailbox) = voter::Actor::new(
             runtime.clone(),
             cfg.crypto,
             cfg.hasher,
@@ -65,8 +62,8 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> Engine<E, C
         Self {
             runtime,
 
-            orchestrator,
-            orchestrator_mailbox,
+            resolver,
+            resolver_mailbox,
 
             voter,
             voter_mailbox,
@@ -75,36 +72,34 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> Engine<E, C
 
     pub async fn run(
         mut self,
-        orchestrator_network: (impl Sender, impl Receiver),
+        resolver_network: (impl Sender, impl Receiver),
         voter_network: (impl Sender, impl Receiver),
     ) {
-        // Start the orchestrator
-        let (orchestrator_sender, orchestrator_receiver) = orchestrator_network;
-        let orchestrator = self.runtime.spawn("orchestrator", async move {
-            self.orchestrator
-                .run(
-                    &mut self.voter_mailbox,
-                    orchestrator_sender,
-                    orchestrator_receiver,
-                )
+        // Start the resolver
+        let (resolver_sender, resolver_receiver) = resolver_network;
+        let mut resolver = self.runtime.spawn("resolver", async move {
+            self.resolver
+                .run(&mut self.voter_mailbox, resolver_sender, resolver_receiver)
                 .await;
         });
 
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
-        let voter = self.runtime.spawn("voter", async move {
+        let mut voter = self.runtime.spawn("voter", async move {
             self.voter
-                .run(&mut self.orchestrator_mailbox, voter_sender, voter_receiver)
+                .run(&mut self.resolver_mailbox, voter_sender, voter_receiver)
                 .await;
         });
 
-        // Wait for the orchestrator or voter to finish
+        // Wait for the resolver or voter to finish
         select! {
-            _ = orchestrator => {
-                debug!("orchestrator finished");
+            _ = &mut resolver => {
+                debug!("resolver finished");
+                voter.abort();
             },
-            _ = voter => {
+            _ = &mut voter => {
                 debug!("voter finished");
+                resolver.abort();
             },
         }
     }
