@@ -6,8 +6,8 @@ use crate::{
         actors::{voter, Proposal},
         ancestry_set::AncestrySet,
         encoding::{header_digest, proposal_digest},
-        wire, CONFLICTING_BLOCK, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE,
-        FINALIZE, NULL_AND_FINALIZE, VOTE,
+        wire, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE,
+        NULL_AND_FINALIZE, VOTE,
     },
     Activity, Application, Context, Contribution, Fault, Hash, Hasher, Height, Payload, View,
 };
@@ -354,10 +354,31 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
             }
         };
 
-        // TODO: how to communicate to voter what we already know about activity (to
-        // ensure they don't stuff block with duplicate votes/finalizes/faults)?
-
-        // TODO: add hasher that allows for incremental computation (not just entire payload)
+        // Generate activity section
+        let mut contributions: HashMap<Height, Vec<Contribution>> = HashMap::new();
+        let mut faults: HashMap<View, Vec<Fault>> = HashMap::new();
+        let simple_votes = self.activity_votes.pending(&parent.0);
+        for (height, public_key) in simple_votes {
+            contributions
+                .entry(height)
+                .or_default()
+                .push((public_key.clone(), VOTE));
+        }
+        let simple_finalizes = self.activity_finalizes.pending(&parent.0);
+        for (height, public_key) in simple_finalizes {
+            contributions
+                .entry(height)
+                .or_default()
+                .push((public_key.clone(), FINALIZE));
+        }
+        let simple_faults = self.activity_faults.pending(&parent.0);
+        for (view, public_key) in simple_faults {
+            // TODO: add correct type here
+            faults
+                .entry(view)
+                .or_default()
+                .push((public_key.clone(), CONFLICTING_PROPOSAL));
+        }
 
         // Propose block
         let context = Context {
@@ -367,8 +388,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         };
         let activity = Activity {
             proposer,
-            contributions: HashMap::new(),
-            faults: HashMap::new(),
+            contributions,
+            faults,
         };
         let height = parent.1 + 1;
         let payload = match self.application.propose(context, activity).await {
