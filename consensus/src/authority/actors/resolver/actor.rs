@@ -91,6 +91,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                 view: 0,
                 height: 0,
                 parent: Hash::new(),
+                activity: None,
                 payload: genesis.1,
                 signature: None,
             },
@@ -342,6 +343,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
             }
         };
 
+        // TODO: how to communicate to voter what we already know about activity?
+
         // Propose block
         let context = Context {
             view,
@@ -458,6 +461,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
             return false;
         }
 
+        // TODO: verify activity (over ancestry)
+
         // Verify payload
         let context = Context {
             view: proposal.view,
@@ -469,22 +474,23 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
             contributions: HashMap::new(),
             faults: HashMap::new(),
         };
-        if self
+        if !self
             .application
             .verify(context, activity, proposal.payload.clone(), hash.clone())
             .await
         {
-            debug!(
-                height = proposal.height,
-                hash = hex(&hash),
-                "verified proposal"
-            );
-            // Record verification
-            let entry = self.verified.entry(proposal.height).or_default();
-            entry.insert(hash);
-            return true;
+            return false;
         }
-        false
+
+        // Record verification
+        debug!(
+            height = proposal.height,
+            hash = hex(&hash),
+            "verified proposal"
+        );
+        let entry = self.verified.entry(proposal.height).or_default();
+        entry.insert(hash);
+        return true;
     }
 
     pub async fn notarized(&mut self, proposal: Proposal) {

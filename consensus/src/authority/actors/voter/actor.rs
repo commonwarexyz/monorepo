@@ -46,6 +46,8 @@ struct Round {
         wire::Proposal,
     )>,
     verified_proposal: bool,
+
+    // Track broadcast
     broadcast_vote: bool,
     broadcast_finalize: bool,
 
@@ -79,6 +81,10 @@ impl Round {
             requested_proposal: false,
             proposal: None,
             verified_proposal: false,
+            activity_votes: HashSet::new(),
+            activity_finalizes: HashSet::new(),
+            activity_faults: HashSet::new(),
+
             broadcast_vote: false,
             broadcast_finalize: false,
 
@@ -759,6 +765,31 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         // Mark proposal as verified
         view_obj.leader_deadline = None;
         view_obj.verified_proposal = true;
+
+        // Store all verified votes, finalizes, and faults
+        let activity = view_obj
+            .proposal
+            .as_ref()
+            .unwrap()
+            .2
+            .activity
+            .as_ref()
+            .unwrap();
+        for vote in activity.votes.iter() {
+            view_obj.add_verified_vote(vote.clone());
+        }
+        for finalize in activity.finalizes.iter() {
+            view_obj.add_verified_finalize(finalize.clone());
+        }
+        for fault in activity.faults.iter() {
+            self.faults
+                .entry(view)
+                .or_default()
+                .entry(fault.signature.public_key.clone())
+                .or_insert(fault.clone());
+        }
+
+        // Indicate that verification is done
         debug!(view, "verified peer proposal");
         true
     }

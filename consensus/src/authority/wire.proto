@@ -11,6 +11,11 @@ message Consensus {
     }
 }
 
+// All of these items must not have been previously included in ancestry
+// for a proposal to be considered valid.
+//
+// Such activity must also not be past the timeout allowed for including
+// these proofs.
 message Activity {
     repeated Vote votes = 1;
     repeated Finalize finalizes = 2;
@@ -23,7 +28,7 @@ message Proposal {
     // Header
     uint64 height = 2;
     bytes parent = 3;
-    optional Activity activity = 4;
+    Activity activity = 4;
 
     // Application
     bytes payload = 5;
