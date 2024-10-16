@@ -1058,20 +1058,20 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         view.leader_deadline = None;
         view.advance_deadline = None;
 
-        // Inform resolver of notarization if not null vote
-        if let Some(notarization_hash) = notarization.hash {
-            let proposal = match view.proposal.as_ref() {
+        // Notify resolver of notarization
+        let proposal = if let Some(notarization_hash) = notarization.hash {
+            match view.proposal.as_ref() {
                 Some((hash, _, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
                 None => Proposal::Reference(
                     notarization.view,
                     notarization.height.unwrap(),
                     notarization_hash,
                 ),
-            };
-            resolver.notarized(proposal).await;
+            }
         } else {
-            resolver.notarized(Proposal::Null(notarization.view)).await;
-        }
+            Proposal::Null(notarization.view)
+        };
+        resolver.notarized(proposal).await;
 
         // Enter next view
         self.enter_view(notarization.view + 1);
