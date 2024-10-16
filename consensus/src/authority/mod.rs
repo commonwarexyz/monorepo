@@ -23,9 +23,9 @@
 //!   more votes)
 
 mod actors;
+mod ancestry_set;
 mod config;
 mod encoding;
-mod trie_set;
 
 pub mod engine;
 
