@@ -20,11 +20,11 @@ pub fn proposal_digest(view: View, header: &Hash, payload: &Hash) -> Bytes {
     msg.into()
 }
 
-pub fn vote_digest(view: View, height: Height, proposal_hash: Option<&Hash>) -> Bytes {
-    let mut msg = Vec::with_capacity(8 + 8 + proposal_hash.map_or(0, |hash| hash.len()));
+pub fn vote_digest(view: View, height: Option<Height>, hash: Option<&Hash>) -> Bytes {
+    let mut msg = Vec::with_capacity(8 + hash.map_or(0, |hash| 8 + hash.len()));
     msg.extend_from_slice(&view.to_be_bytes());
-    msg.extend_from_slice(&height.to_be_bytes());
-    if let Some(hash) = proposal_hash {
+    if let Some(hash) = hash {
+        msg.extend_from_slice(&height.unwrap().to_be_bytes());
         msg.extend_from_slice(hash);
     }
     msg.into()

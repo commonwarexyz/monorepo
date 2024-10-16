@@ -17,6 +17,11 @@ fn main() -> Result<()> {
         "ConflictingProposal.payload_hash_1",
         "ConflictingProposal.header_hash_2",
         "ConflictingProposal.payload_hash_2",
+        "ConflictingVote.hash_1",
+        "ConflictingVote.hash_2",
+        "ConflictingFinalize.hash_1",
+        "ConflictingFinalize.hash_2",
+        "NullFinalize.hash",
     ]);
     config.compile_protos(&["src/authority/wire.proto"], &["src/authority/"])?;
     Ok(())

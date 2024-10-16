@@ -26,6 +26,12 @@ use std::{
 };
 use tracing::{debug, info, trace, warn};
 
+type Notarizable<'a> = Option<(
+    Option<Hash>,
+    Option<Height>,
+    &'a HashMap<PublicKey, wire::Vote>,
+)>;
+
 struct Round {
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
@@ -90,37 +96,78 @@ impl Round {
         }
     }
 
-    fn add_verified_vote(&mut self, skip_invalid: bool, vote: wire::Vote) {
+    fn add_verified_vote(&mut self, vote: wire::Vote) -> Option<wire::Fault> {
         // Determine whether or not this is a null vote
         let public_key = &vote.signature.as_ref().unwrap().public_key;
         if vote.hash.is_none() {
             // Check if already issued finalize
-            if self.finalizers.contains_key(public_key) && !skip_invalid {
-                warn!(
-                    view = vote.view,
-                    signer = hex(public_key),
-                    "already voted finalize",
-                );
-                return;
+            let finalize = self.finalizers.get(public_key);
+            if finalize.is_none() {
+                // Store the null vote
+                self.null_votes.insert(public_key.clone(), vote);
+                return None;
             }
+            let finalize = finalize.unwrap();
 
-            // Store the null vote
-            self.null_votes.insert(public_key.clone(), vote);
-            return;
+            // Create fault
+            let finalize = self
+                .finalizes
+                .get(finalize)
+                .unwrap()
+                .get(public_key)
+                .unwrap();
+            let null_finalize = wire::NullFinalize {
+                view: vote.view,
+
+                height: finalize.height,
+                hash: finalize.hash.clone(),
+                signature_finalize: finalize.signature.clone(),
+
+                signature_null: vote.signature.clone(),
+            };
+            let fault = wire::Fault {
+                payload: Some(wire::fault::Payload::NullFinalize(null_finalize)),
+            };
+            warn!(view = vote.view, signer = hex(public_key), "recorded fault");
+            return Some(fault);
         }
         let hash = vote.hash.clone().unwrap();
 
         // Check if already voted
-        if !skip_invalid {
-            if let Some(previous_vote) = self.proposal_voters.get(public_key) {
-                warn!(
+        if let Some(previous_vote) = self.proposal_voters.get(public_key) {
+            if previous_vote == &hash {
+                debug!(
                     view = vote.view,
                     signer = hex(public_key),
                     previous_vote = hex(previous_vote),
                     "already voted"
                 );
-                return;
+                return None;
             }
+
+            // Create fault
+            let previous_vote = self
+                .proposal_votes
+                .get(previous_vote)
+                .unwrap()
+                .get(public_key)
+                .unwrap();
+            let conflicting_vote = wire::ConflictingVote {
+                view: vote.view,
+
+                height_1: previous_vote.height.unwrap(),
+                hash_1: previous_vote.hash.clone().unwrap(),
+                signature_1: previous_vote.signature.clone(),
+
+                height_2: vote.height.unwrap(),
+                hash_2: vote.hash.clone().unwrap(),
+                signature_2: vote.signature.clone(),
+            };
+            let fault = wire::Fault {
+                payload: Some(wire::fault::Payload::ConflictingVote(conflicting_vote)),
+            };
+            warn!(view = vote.view, signer = hex(public_key), "recorded fault");
+            return Some(fault);
         }
 
         // Store the vote
@@ -128,13 +175,10 @@ impl Round {
             .insert(public_key.clone(), hash.clone());
         let entry = self.proposal_votes.entry(hash).or_default();
         entry.insert(public_key.clone(), vote);
+        None
     }
 
-    fn notarizable_proposal(
-        &mut self,
-        threshold: u32,
-        force: bool,
-    ) -> Option<(Option<Hash>, Height, &HashMap<PublicKey, wire::Vote>)> {
+    fn notarizable_proposal(&mut self, threshold: u32, force: bool) -> Notarizable {
         if !force
             && (self.broadcast_proposal_notarization
                 || self.broadcast_null_notarization
@@ -177,16 +221,12 @@ impl Round {
             // There should never exist enough votes for multiple proposals, so it doesn't
             // matter which one we choose.
             self.broadcast_proposal_notarization = true;
-            return Some((Some(proposal.clone()), height, votes));
+            return Some((Some(proposal.clone()), Some(height), votes));
         }
         None
     }
 
-    fn notarizable_null(
-        &mut self,
-        threshold: u32,
-        force: bool,
-    ) -> Option<(Option<Hash>, Height, &HashMap<PublicKey, wire::Vote>)> {
+    fn notarizable_null(&mut self, threshold: u32, force: bool) -> Notarizable {
         if !force && (self.broadcast_null_notarization || self.broadcast_proposal_notarization) {
             return None;
         }
@@ -194,7 +234,7 @@ impl Round {
             return None;
         }
         self.broadcast_null_notarization = true;
-        Some((None, 0, &self.null_votes))
+        Some((None, None, &self.null_votes))
     }
 
     fn add_verified_finalize(&mut self, skip_invalid: bool, finalize: wire::Finalize) {
@@ -432,10 +472,10 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         }
 
         // Construct null vote
-        let digest = vote_digest(self.view, 0, None);
+        let digest = vote_digest(self.view, None, None);
         let vote = wire::Vote {
             view: self.view,
-            height: 0,
+            height: None,
             hash: None,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
@@ -816,7 +856,14 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             .or_insert_with(|| Round::new(leader, None, None));
 
         // Handle vote
-        view.add_verified_vote(false, vote);
+        let vote_view = vote.view;
+        let public_key = vote.signature.as_ref().unwrap().public_key.clone();
+        if let Some(fault) = view.add_verified_vote(vote) {
+            self.faults
+                .entry(vote_view)
+                .or_default()
+                .insert(public_key, fault);
+        }
     }
 
     async fn notarization(
@@ -947,13 +994,19 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             .entry(notarization.view)
             .or_insert_with(|| Round::new(leader, None, None));
         for signature in notarization.signatures {
+            let public_key = signature.public_key.clone();
             let vote = wire::Vote {
                 view: notarization.view,
                 height: notarization.height,
                 hash: notarization.hash.clone(),
                 signature: Some(signature),
             };
-            view.add_verified_vote(true, vote);
+            if let Some(fault) = view.add_verified_vote(vote) {
+                self.faults
+                    .entry(notarization.view)
+                    .or_default()
+                    .insert(public_key, fault);
+            }
         }
 
         // Clear leader and advance deadlines (if they exist)
@@ -964,9 +1017,11 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         if let Some(notarization_hash) = notarization.hash {
             let proposal = match view.proposal.as_ref() {
                 Some((hash, _, proposal)) => Proposal::Populated(hash.clone(), proposal.clone()),
-                None => {
-                    Proposal::Reference(notarization.view, notarization.height, notarization_hash)
-                }
+                None => Proposal::Reference(
+                    notarization.view,
+                    notarization.height.unwrap(),
+                    notarization_hash,
+                ),
             };
             resolver.notarized(proposal).await;
         } else {
@@ -1230,13 +1285,13 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         view_obj.broadcast_vote = true;
         Some(wire::Vote {
             view,
-            height: proposal.height,
+            height: Some(proposal.height),
             hash: Some(hash.clone()),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
                     &self.vote_namespace,
-                    &vote_digest(view, proposal.height, Some(hash)),
+                    &vote_digest(view, Some(proposal.height), Some(hash)),
                 ),
             }),
         })
@@ -1562,24 +1617,34 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                             self.peer_proposal(resolver, proposal).await;
                         }
                         wire::consensus::Payload::Vote(vote) => {
-                            if vote.hash.is_none() && vote.height != 0 {
+                            if let Some(vote_hash) = vote.hash.as_ref() {
+                                if !H::validate(vote_hash) {
+                                    debug!(sender = hex(&s), "invalid vote hash size");
+                                    continue;
+                                }
+                                if vote.height.is_none() {
+                                    debug!(sender = hex(&s), "missing vote height");
+                                    continue;
+                                }
+                            } else if vote.height.is_some() {
                                 debug!(sender = hex(&s), "invalid vote height for null block");
-                                continue;
-                            }
-                            if vote.hash.is_some() && !H::validate(vote.hash.as_ref().unwrap()) {
-                                debug!(sender = hex(&s), "invalid vote hash size");
                                 continue;
                             }
                             view = vote.view;
                             self.vote(vote);
                         }
                         wire::consensus::Payload::Notarization(notarization) => {
-                            if notarization.hash.is_none() && notarization.height != 0 {
+                            if let Some(notarization_hash) = notarization.hash.as_ref() {
+                                if !H::validate(notarization_hash) {
+                                    debug!(sender = hex(&s), "invalid notarization hash size");
+                                    continue;
+                                }
+                                if notarization.height.is_none() {
+                                    debug!(sender = hex(&s), "missing notarization height");
+                                    continue;
+                                }
+                            } else if notarization.height.is_some() {
                                 debug!(sender = hex(&s), "invalid notarization height for null block");
-                                continue;
-                            }
-                            if notarization.hash.is_some() && !H::validate(notarization.hash.as_ref().unwrap()) {
-                                debug!(sender = hex(&s), "invalid notarization hash size");
                                 continue;
                             }
                             view = notarization.view;
