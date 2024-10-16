@@ -680,7 +680,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 .hasher
                 .hash(&header_digest(proposal.height, &proposal.parent));
 
-            // Record fault
+            // Build fault
             let conflicting_proposal = wire::ConflictingProposal {
                 view: proposal.view,
 
@@ -697,10 +697,13 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                     conflicting_proposal,
                 )),
             };
+
+            // Record fault
             self.faults
                 .entry(proposal.view)
                 .or_default()
-                .insert(public_key.clone(), fault);
+                .entry(public_key.clone())
+                .or_insert(fault);
             warn!(
                 leader = hex(&expected_leader),
                 view = proposal.view,
@@ -907,7 +910,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             self.faults
                 .entry(vote_view)
                 .or_default()
-                .insert(public_key, fault);
+                .entry(public_key)
+                .or_insert(fault);
         }
     }
 
@@ -1050,7 +1054,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 self.faults
                     .entry(notarization.view)
                     .or_default()
-                    .insert(public_key, fault);
+                    .entry(public_key)
+                    .or_insert(fault);
             }
         }
 
@@ -1162,7 +1167,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             self.faults
                 .entry(finalize_view)
                 .or_default()
-                .insert(public_key, fault);
+                .entry(public_key)
+                .or_insert(fault);
         }
     }
 
@@ -1294,7 +1300,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 self.faults
                     .entry(finalization.view)
                     .or_default()
-                    .insert(public_key, fault);
+                    .entry(public_key)
+                    .or_insert(fault);
             }
         }
 
