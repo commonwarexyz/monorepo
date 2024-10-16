@@ -327,7 +327,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 mailbox_receiver,
 
                 last_finalized: 0,
-                view: 1,
+                view: 0,
                 views: BTreeMap::new(),
 
                 current_view,
