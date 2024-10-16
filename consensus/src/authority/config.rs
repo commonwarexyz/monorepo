@@ -32,5 +32,9 @@ pub struct Config<C: Scheme, H: Hasher, A: Application> {
 
     /// Validators to use for each range of views. Any view without
     /// an explicit view will use the next smallest view.
+    ///
+    /// # Warning
+    ///
+    /// Any disagreement on this list could result in a halt or a fork.
     pub validators: BTreeMap<View, Vec<PublicKey>>,
 }
