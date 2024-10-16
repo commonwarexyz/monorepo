@@ -69,6 +69,8 @@ pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
     last_notified: Height,
 
     // Track activity
+    //
+    // Collect activities that are unique to the ancestry
     activity_votes: AncestryMap<(Height, PublicKey), wire::Vote>,
     activity_finalizes: AncestryMap<(Height, PublicKey), wire::Finalize>,
     activity_faults: AncestryMap<(View, PublicKey), wire::Fault>,

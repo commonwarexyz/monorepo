@@ -6,13 +6,15 @@ use std::{
 
 #[derive(Default)]
 pub struct AncestryMap<K: Eq + StdHash + Clone, V: Clone> {
-    index: BTreeMap<u64, HashSet<Hash>>,
+    container_index: BTreeMap<u64, HashSet<Hash>>,
     containers: HashMap<Hash, (Hash, HashSet<K>)>,
+
     pending: BTreeMap<u64, HashMap<K, V>>,
 }
 
 impl<K: Eq + StdHash + Clone, V: Clone> AncestryMap<K, V> {
-    pub fn add(&mut self, index: u64, key: K, value: V) {
+    // TODO: track votes by both container and index? Well, faults don't need this
+    pub fn add(&mut self, container: Hash, index: u64, key: K, value: V) {
         self.pending.entry(index).or_default().insert(key, value);
     }
 
@@ -54,14 +56,17 @@ impl<K: Eq + StdHash + Clone, V: Clone> AncestryMap<K, V> {
         // Insert into set
         let keys = keys.into_iter().collect();
         self.containers.insert(container.clone(), (parent, keys));
-        self.index.entry(index).or_default().insert(container);
+        self.container_index
+            .entry(index)
+            .or_default()
+            .insert(container);
         true
     }
 
     /// Prune clears all entries less than a given index.
     pub fn prune(&mut self, min: u64) {
         // Clean container index
-        self.index.retain(|&key, hashes| {
+        self.container_index.retain(|&key, hashes| {
             if key >= min {
                 return true;
             }
