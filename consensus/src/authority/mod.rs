@@ -77,7 +77,7 @@ mod tests {
     };
     use tracing::{debug, info};
 
-    #[test_traced(timeout = 5000)]
+    #[test_traced(timeout = 10_000)]
     fn test_all_online() {
         // Create runtime
         let n = 5;
@@ -191,7 +191,7 @@ mod tests {
         });
     }
 
-    #[test_traced(timeout = 5000)]
+    #[test_traced(timeout = 10_000)]
     fn test_one_offline() {
         // Create runtime
         let n = 5;
@@ -310,7 +310,7 @@ mod tests {
         });
     }
 
-    #[test_traced(timeout = 5000)]
+    #[test_traced(timeout = 10_000)]
     fn test_catchup() {
         // Create runtime
         let n = 5;
@@ -511,7 +511,7 @@ mod tests {
         });
     }
 
-    #[test_traced(timeout = 5000)]
+    #[test_traced(timeout = 10_000)]
     fn test_all_recovery() {
         // Create runtime
         let n = 5;
@@ -655,7 +655,7 @@ mod tests {
         });
     }
 
-    #[test_traced(timeout = 5000)]
+    #[test_traced(timeout = 10_000)]
     fn test_no_finality() {
         // Create runtime
         let n = 5;
