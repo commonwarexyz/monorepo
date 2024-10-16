@@ -101,28 +101,33 @@ message ConflictingBlock {
 message ConflictingVote {
     uint64 view = 1;
 
-    bytes hash_1 = 2;
-    Signature signature_1 = 3;
+    uint64 height_1 = 2;
+    bytes hash_1 = 3;
+    Signature signature_1 = 4;
 
-    bytes hash_2 = 4;
-    Signature signature_2 = 5;
+    uint64 height_2 = 5;
+    bytes hash_2 = 6;
+    Signature signature_2 = 7;
 }
 
 message ConflictingFinalize {
     uint64 view = 1;
 
-    bytes hash_1 = 2;
-    Signature signature_1 = 3;
+    uint64 height_1 = 2;
+    bytes hash_1 = 3;
+    Signature signature_1 = 4;
 
-    bytes hash_2 = 4;
-    Signature signature_2 = 5;
+    uint64 height_2 = 5;
+    bytes hash_2 = 6;
+    Signature signature_2 = 7;
 }
 
 message NullFinalize {
     uint64 view = 1;
 
-    bytes hash = 2;
-    Signature signature_hash = 3;
+    uint64 height = 2;
+    bytes hash = 3;
+    Signature signature_finalize = 4;
 
-    Signature signature_null = 4;
+    Signature signature_null = 5;
 }
