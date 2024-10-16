@@ -4,7 +4,7 @@ use super::{Mailbox, Message};
 use crate::{
     authority::{
         actors::{voter, Proposal},
-        ancestry_map::AncestrySet,
+        ancestry_map::AncestryMap,
         encoding::{header_digest, proposal_digest},
         wire, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE,
         NULL_AND_FINALIZE, VOTE,
@@ -69,9 +69,9 @@ pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
     last_notified: Height,
 
     // Track activity
-    activity_votes: AncestrySet<(Height, PublicKey)>,
-    activity_finalizes: AncestrySet<(Height, PublicKey)>,
-    activity_faults: AncestrySet<(View, PublicKey)>,
+    activity_votes: AncestryMap<(Height, PublicKey), wire::Vote>,
+    activity_finalizes: AncestryMap<(Height, PublicKey), wire::Finalize>,
+    activity_faults: AncestryMap<(View, PublicKey), wire::Fault>,
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
@@ -135,9 +135,9 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                 notarizations_sent: HashMap::new(),
                 last_notified: 0,
 
-                activity_votes: AncestrySet::default(),
-                activity_finalizes: AncestrySet::default(),
-                activity_faults: AncestrySet::default(),
+                activity_votes: AncestryMap::default(),
+                activity_finalizes: AncestryMap::default(),
+                activity_faults: AncestryMap::default(),
             },
             Mailbox::new(mailbox_sender),
         )
@@ -350,8 +350,9 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         Height,
         Hash,
         Payload,
-        HashMap<Height, Vec<Contribution>>,
-        HashMap<View, Vec<Fault>>,
+        Vec<wire::Vote>,
+        Vec<wire::Finalize>,
+        Vec<wire::Fault>,
     )> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
@@ -364,27 +365,42 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         // Generate activity section
         let mut contributions: HashMap<Height, Vec<Contribution>> = HashMap::new();
         let mut faults: HashMap<View, Vec<Fault>> = HashMap::new();
-        let simple_votes = self.activity_votes.pending(&parent.0);
-        for (height, public_key) in simple_votes {
+        let simple_votes = self.activity_votes.unassigned(&parent.0, 10);
+        let mut complex_votes = Vec::with_capacity(simple_votes.len());
+        for ((height, public_key), vote) in simple_votes {
             contributions
                 .entry(height)
                 .or_default()
                 .push((public_key.clone(), VOTE));
+            complex_votes.push(vote);
         }
-        let simple_finalizes = self.activity_finalizes.pending(&parent.0);
-        for (height, public_key) in simple_finalizes {
+        let simple_finalizes = self.activity_finalizes.unassigned(&parent.0, 10);
+        let mut complex_finalizes = Vec::with_capacity(simple_finalizes.len());
+        for ((height, public_key), finalize) in simple_finalizes {
             contributions
                 .entry(height)
                 .or_default()
                 .push((public_key.clone(), FINALIZE));
+            complex_finalizes.push(finalize);
         }
-        let simple_faults = self.activity_faults.pending(&parent.0);
-        for (view, public_key) in simple_faults {
-            // TODO: add correct type here
+        let simple_faults = self.activity_faults.unassigned(&parent.0, 10_000);
+        let mut complex_faults = Vec::with_capacity(simple_faults.len());
+        for ((view, public_key), fault) in simple_faults {
+            let fault_type = match fault.payload {
+                Some(wire::fault::Payload::ConflictingProposal(_)) => CONFLICTING_PROPOSAL,
+                Some(wire::fault::Payload::ConflictingVote(_)) => CONFLICTING_VOTE,
+                Some(wire::fault::Payload::ConflictingFinalize(_)) => CONFLICTING_FINALIZE,
+                Some(wire::fault::Payload::NullFinalize(_)) => NULL_AND_FINALIZE,
+                None => {
+                    debug!(height = parent.1 + 1, "missing fault payload");
+                    return None;
+                }
+            };
             faults
                 .entry(view)
                 .or_default()
-                .push((public_key.clone(), CONFLICTING_PROPOSAL));
+                .push((public_key.clone(), fault_type));
+            complex_faults.push(fault);
         }
 
         // Propose block
@@ -420,8 +436,9 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
             height,
             payload,
             payload_hash,
-            contributions,
-            faults,
+            complex_votes,
+            complex_finalizes,
+            complex_faults,
         ))
     }
 
@@ -556,7 +573,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                 .or_default()
                 .push((public_key, VOTE));
         }
-        if !self.activity_votes.track(
+        if !self.activity_votes.assign(
             hash.clone(),
             proposal.height,
             proposal.parent.clone(),
@@ -590,7 +607,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                 .or_default()
                 .push((public_key, FINALIZE));
         }
-        if !self.activity_finalizes.track(
+        if !self.activity_finalizes.assign(
             hash.clone(),
             proposal.height,
             proposal.parent.clone(),
@@ -627,7 +644,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                 .or_default()
                 .push((fault.public_key, fault_type));
         }
-        if !self.activity_faults.track(
+        if !self.activity_faults.assign(
             hash.clone(),
             proposal.view,
             proposal.parent.clone(),
@@ -968,13 +985,13 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Propose { view, proposer } => {
-                            let (parent, height, payload, payload_hash, contributions, faults)= match self.propose(view, proposer).await{
+                            let (parent, height, payload, payload_hash, votes, finalizes, faults)= match self.propose(view, proposer).await{
                                 Some(proposal) => proposal,
                                 None => {
                                     continue;
                                 }
                             };
-                            voter.proposal(view, parent, height, payload, payload_hash).await;
+                            voter.proposal(view, parent, height, payload, payload_hash, votes, finalizes, faults).await;
                         }
                         Message::Verify { hash, proposal } => {
                             // If proposal height is already finalized, fail
