@@ -120,15 +120,15 @@ impl Round {
                 .get(public_key)
                 .unwrap();
             let null_finalize = wire::NullFinalize {
-                view: vote.view,
-
                 height: finalize.height,
                 hash: finalize.hash.clone(),
-                signature_finalize: finalize.signature.clone(),
+                signature_finalize: finalize.signature.clone().unwrap().signature,
 
-                signature_null: vote.signature.clone(),
+                signature_null: vote.signature.clone().unwrap().signature,
             };
             let fault = wire::Fault {
+                view: vote.view,
+                public_key: public_key.clone(),
                 payload: Some(wire::fault::Payload::NullFinalize(null_finalize)),
             };
             warn!(view = vote.view, signer = hex(public_key), "recorded fault");
@@ -156,17 +156,17 @@ impl Round {
                 .get(public_key)
                 .unwrap();
             let conflicting_vote = wire::ConflictingVote {
-                view: vote.view,
-
                 height_1: previous_vote.height.unwrap(),
                 hash_1: previous_vote.hash.clone().unwrap(),
-                signature_1: previous_vote.signature.clone(),
+                signature_1: previous_vote.signature.clone().unwrap().signature,
 
                 height_2: vote.height.unwrap(),
                 hash_2: vote.hash.clone().unwrap(),
-                signature_2: vote.signature.clone(),
+                signature_2: vote.signature.clone().unwrap().signature,
             };
             let fault = wire::Fault {
+                view: vote.view,
+                public_key: public_key.clone(),
                 payload: Some(wire::fault::Payload::ConflictingVote(conflicting_vote)),
             };
             warn!(view = vote.view, signer = hex(public_key), "recorded fault");
@@ -247,15 +247,15 @@ impl Round {
         if let Some(null_vote) = null_vote {
             // Create fault
             let null_finalize = wire::NullFinalize {
-                view: finalize.view,
-
                 height: finalize.height,
                 hash: finalize.hash.clone(),
-                signature_finalize: finalize.signature.clone(),
+                signature_finalize: finalize.signature.clone().unwrap().signature,
 
-                signature_null: null_vote.signature.clone(),
+                signature_null: null_vote.signature.clone().unwrap().signature,
             };
             let fault = wire::Fault {
+                view: finalize.view,
+                public_key: public_key.clone(),
                 payload: Some(wire::fault::Payload::NullFinalize(null_finalize)),
             };
             warn!(
@@ -286,17 +286,17 @@ impl Round {
                 .get(public_key)
                 .unwrap();
             let conflicting_finalize = wire::ConflictingFinalize {
-                view: finalize.view,
-
                 height_1: previous_finalize.height,
                 hash_1: previous_finalize.hash.clone(),
-                signature_1: previous_finalize.signature.clone(),
+                signature_1: previous_finalize.signature.clone().unwrap().signature,
 
                 height_2: finalize.height,
                 hash_2: finalize.hash.clone(),
-                signature_2: finalize.signature.clone(),
+                signature_2: finalize.signature.clone().unwrap().signature,
             };
             let fault = wire::Fault {
+                view: finalize.view,
+                public_key: public_key.clone(),
                 payload: Some(wire::fault::Payload::ConflictingFinalize(
                     conflicting_finalize,
                 )),
@@ -684,18 +684,20 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 .hash(&header_digest(proposal.height, &proposal.parent));
 
             // Build fault
+            let signature_1 = previous.2.signature.clone().unwrap();
+            let signature_2 = proposal.signature.clone().unwrap();
             let conflicting_proposal = wire::ConflictingProposal {
-                view: proposal.view,
-
                 header_hash_1,
                 payload_hash_1: previous.1.clone(),
-                signature_1: previous.2.signature.clone(),
+                signature_1: signature_1.signature,
 
                 header_hash_2: header_hash,
                 payload_hash_2: payload_hash.clone(),
-                signature_2: proposal.signature.clone(),
+                signature_2: signature_2.signature,
             };
             let fault = wire::Fault {
+                view: proposal.view,
+                public_key: signature_1.public_key.clone(),
                 payload: Some(wire::fault::Payload::ConflictingProposal(
                     conflicting_proposal,
                 )),
@@ -1604,7 +1606,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Proposal{ view: proposal_view, parent, height, payload, payload_hash} => {
+                        Message::Proposal{ view: proposal_view, parent, height, payload, payload_hash, votes, finalizes, faults} => {
                             debug!(view = proposal_view, our_view = self.view, "received proposal");
 
                             // If we have already moved to another view, drop the response as we will
@@ -1615,13 +1617,19 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                             }
 
                             // Construct proposal
+                            //
+                            // TODO: still need to update proposal digest
                             let header_hash = self.hasher.hash(&header_digest(height, &parent));
                             let proposal_digest = proposal_digest(self.view, &header_hash, &payload_hash);
                             let proposal = wire::Proposal {
                                 view: self.view,
                                 height,
                                 parent,
-                                activity: None,
+                                activity: Some(wire::Activity{
+                                    votes,
+                                    finalizes,
+                                    faults,
+                                }),
                                 payload,
                                 signature: Some(wire::Signature {
                                     public_key: self.crypto.public_key(),
