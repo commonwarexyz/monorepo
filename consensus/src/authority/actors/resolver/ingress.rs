@@ -16,10 +16,6 @@ pub enum Message {
     Notarized {
         proposal: Proposal,
     },
-    NullNotarized {
-        // TODO: unify with `Notarized`?
-        view: View,
-    },
     Finalized {
         proposal: Proposal,
     },
@@ -52,13 +48,6 @@ impl Mailbox {
     pub async fn notarized(&mut self, proposal: Proposal) {
         self.sender
             .send(Message::Notarized { proposal })
-            .await
-            .unwrap();
-    }
-
-    pub async fn null_notarized(&mut self, view: View) {
-        self.sender
-            .send(Message::NullNotarized { view })
             .await
             .unwrap();
     }

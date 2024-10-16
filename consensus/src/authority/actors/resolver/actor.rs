@@ -158,6 +158,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                 return Some((height, hash));
             }
             Proposal::Populated(hash, proposal) => (hash, proposal),
+            Proposal::Null(_) => panic!("null proposal cannot be resolved"),
         };
 
         // If already resolved, do nothing.
@@ -486,17 +487,17 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         false
     }
 
-    pub async fn null_notarized(&mut self, view: View) {
-        // TODO: write up explanation for why we don't set last_notarized here (which
-        // is really just used to select the best parent for building)
-        self.null_notarizations.insert(view);
-    }
-
     pub async fn notarized(&mut self, proposal: Proposal) {
         // Extract height and hash
         let (view, height, hash) = match &proposal {
             Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
             Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
+            Proposal::Null(view) => {
+                // TODO: write up explanation for why we don't set last_notarized here (which
+                // is really just used to select the best parent for building)
+                self.null_notarizations.insert(*view);
+                return;
+            }
         };
 
         // Set last notarized
@@ -604,6 +605,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         let (view, height, hash) = match &proposal {
             Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
             Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
+            Proposal::Null(_) => panic!("null proposal cannot be finalized"),
         };
 
         // Set last finalized
@@ -815,7 +817,6 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                             voter.verified(proposal_view).await;
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,
-                        Message::NullNotarized { view } => self.null_notarized(view).await,
                         Message::Finalized { proposal } => self.finalized(proposal).await,
                     };
                 },

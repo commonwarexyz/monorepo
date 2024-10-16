@@ -7,4 +7,5 @@ use crate::{authority::wire, Hash, Height, View};
 pub(crate) enum Proposal {
     Reference(View, Height, Hash),
     Populated(Hash, wire::Proposal),
+    Null(View),
 }

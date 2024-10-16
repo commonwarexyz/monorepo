@@ -1070,7 +1070,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             };
             resolver.notarized(proposal).await;
         } else {
-            resolver.null_notarized(notarization.view).await;
+            resolver.notarized(Proposal::Null(notarization.view)).await;
         }
 
         // Enter next view
