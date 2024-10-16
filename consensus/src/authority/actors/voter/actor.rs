@@ -712,6 +712,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             Some(is) => is,
             None => {
                 debug!(
+                    view = vote.view,
+                    our_view = self.view,
                     signer = hex(&signature.public_key),
                     reason = "unable to compute participants for view",
                     "dropping vote"

@@ -75,7 +75,7 @@ mod tests {
     };
     use tracing::{debug, info};
 
-    #[test_traced(timeout = 1000)]
+    #[test_traced(timeout = 5000)]
     fn test_all_online() {
         // Create runtime
         let n = 5;

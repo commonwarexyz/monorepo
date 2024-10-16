@@ -124,9 +124,13 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
     }
 
     fn is_participant(&self, view: View, candidate: &PublicKey) -> Option<bool> {
-        self.parsed_participants
-            .get(&view)
-            .map(|(set, _)| set.contains(candidate))
+        let closest = match self.parsed_participants.range(..=view).next_back() {
+            Some((_, p)) => p,
+            None => {
+                self.panic("no participants in required range");
+            }
+        };
+        Some(closest.0.contains(candidate))
     }
 
     async fn propose(&mut self, context: Context, _activity: Activity) -> Option<Payload> {
