@@ -11,13 +11,24 @@ message Consensus {
     }
 }
 
+message Activity {
+    repeated Vote votes = 1;
+    repeated Finalize finalizes = 2;
+    repeated Fault faults = 3;
+}
+
 message Proposal {
     uint64 view = 1;
+
+    // Header
     uint64 height = 2;
     bytes parent = 3;
-    bytes payload = 4;
+    optional Activity activity = 4;
 
-    Signature signature = 5;
+    // Application
+    bytes payload = 5;
+
+    Signature signature = 6;
 }
 
 message Vote {
