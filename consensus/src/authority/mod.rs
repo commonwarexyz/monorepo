@@ -2,6 +2,9 @@
 //!
 //! PoA Consensus useful for running a DKG (round-robin leader selection, update participants with config).
 //!
+//! All decisions made to minimize block time and finalization latency without sacrificing
+//! the ability to attribute uptime and faults.
+//!
 //! # Sync
 //!
 //! Wait for block finalization at tip (2f+1), fetch heights backwards (don't
