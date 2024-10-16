@@ -112,4 +112,46 @@ mod tests {
         unused.sort();
         assert_eq!(unused, vec![10]);
     }
+
+    #[test]
+    fn test_multiple_tracking() {
+        let mut set = AncestrySet::default();
+
+        // Discover some keys
+        set.discover(vec![(0, 1), (0, 2), (0, 3), (4, 10)]);
+
+        // Track some containers
+        set.track("container".into(), 1, "parent".into(), vec![1, 3]);
+        set.track("container2".into(), 2, "container".into(), vec![2, 4]);
+        set.track("container3".into(), 3, "container2".into(), vec![10]);
+        set.track("container4".into(), 3, "container2".into(), vec![5, 7]);
+
+        // Gather pending
+        let unused = set.pending(&"container3".into());
+        assert!(unused.is_empty());
+
+        // Gather pending on top of other container
+        let mut unused = set.pending(&"container4".into());
+        unused.sort();
+        assert_eq!(unused, vec![10]);
+
+        // Check for overlapping keys
+        assert!(set.check(&"container3".into(), vec![&10]));
+        assert!(!set.check(&"container4".into(), vec![&10]));
+
+        // Prune
+        set.prune(3);
+
+        // Gather pending
+        let mut unused = set.pending(&"container4".into());
+        unused.sort();
+        assert_eq!(unused, vec![10]);
+
+        // Prune
+        set.prune(5);
+
+        // Gather pending
+        let unused = set.pending(&"container4".into());
+        assert!(unused.is_empty());
+    }
 }
