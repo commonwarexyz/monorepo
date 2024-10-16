@@ -345,7 +345,14 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         &mut self,
         view: View,
         proposer: PublicKey,
-    ) -> Option<(Hash, Height, Hash, Payload)> {
+    ) -> Option<(
+        Hash,
+        Height,
+        Hash,
+        Payload,
+        HashMap<Height, Vec<Contribution>>,
+        HashMap<View, Vec<Fault>>,
+    )> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
@@ -388,8 +395,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         };
         let activity = Activity {
             proposer,
-            contributions,
-            faults,
+            contributions: contributions.clone(),
+            faults: faults.clone(),
         };
         let height = parent.1 + 1;
         let payload = match self.application.propose(context, activity).await {
@@ -408,7 +415,14 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         };
 
         // Generate proposal
-        Some((parent.0, height, payload, payload_hash))
+        Some((
+            parent.0,
+            height,
+            payload,
+            payload_hash,
+            contributions,
+            faults,
+        ))
     }
 
     fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
@@ -954,7 +968,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Propose { view, proposer } => {
-                            let (parent, height, payload, payload_hash)= match self.propose(view, proposer).await{
+                            let (parent, height, payload, payload_hash, contributions, faults)= match self.propose(view, proposer).await{
                                 Some(proposal) => proposal,
                                 None => {
                                     continue;
