@@ -72,7 +72,6 @@ pub struct Activity {
 
     /// Contributions at a given height.
     ///
-    ///
     /// Height is exposed such that rewards can be scaled by
     /// timeliness.
     ///
