@@ -4,7 +4,7 @@ use super::{Mailbox, Message};
 use crate::{
     authority::{
         actors::{voter, Proposal},
-        ancestry_set::AncestrySet,
+        ancestry_map::AncestrySet,
         encoding::{header_digest, proposal_digest},
         wire, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE,
         NULL_AND_FINALIZE, VOTE,

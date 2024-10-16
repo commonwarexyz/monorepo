@@ -23,7 +23,7 @@
 //!   more votes)
 
 mod actors;
-pub mod ancestry_set;
+pub mod ancestry_map;
 mod config;
 mod encoding;
 
