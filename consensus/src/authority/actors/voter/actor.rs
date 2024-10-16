@@ -446,7 +446,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         self.handle_vote(vote);
     }
 
-    async fn our_proposal(&mut self, payload_hash: Hash, proposal: wire::Proposal) -> bool {
+    async fn our_proposal(&mut self, proposal_hash: Hash, proposal: wire::Proposal) -> bool {
         // Store the proposal
         let view = self.views.get_mut(&proposal.view).expect("view missing");
 
@@ -460,27 +460,18 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             return false;
         }
 
-        // Construct hash
-        let proposal_digest = proposal_digest(
-            proposal.view,
-            proposal.height,
-            &proposal.parent,
-            &payload_hash,
-        );
-        let proposal_hash = self.hasher.hash(&proposal_digest);
-
         // Store the proposal
         let proposal_view = proposal.view;
         let proposal_height = proposal.height;
-        view.proposal = Some((proposal_hash.clone(), proposal));
-        view.verified_proposal = true;
-        view.leader_deadline = None;
         debug!(
             view = proposal_view,
             height = proposal_height,
             hash = hex(&proposal_hash),
             "stored our proposal"
         );
+        view.proposal = Some((proposal_hash, proposal));
+        view.verified_proposal = true;
+        view.leader_deadline = None;
         true
     }
 
@@ -561,22 +552,18 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 return;
             }
         };
-        let proposal_digest = proposal_digest(
-            proposal.view,
-            proposal.height,
-            &proposal.parent,
-            &payload_hash,
-        );
+        let proposal_digest = proposal_digest(proposal.view, proposal.height, &proposal.parent);
+        let proposal_hash = self.hasher.hash(&proposal_digest);
+        let proposal_hash = self.hasher.hash(&union(&proposal_hash, &payload_hash));
         if !C::verify(
             &self.proposal_namespace,
-            &proposal_digest,
+            &proposal_hash,
             &signature.public_key,
             &signature.signature,
         ) {
             debug!(reason = "invalid signature", "dropping proposal");
             return;
         }
-        let proposal_hash = self.hasher.hash(&proposal_digest);
 
         // Verify the proposal
         //
@@ -1439,7 +1426,9 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                             }
 
                             // Construct proposal
-                            let digest = proposal_digest(self.view, height, &parent, &payload_hash);
+                            let proposal_digest = proposal_digest(self.view, height, &parent);
+                            let proposal_hash = self.hasher.hash(&proposal_digest);
+                            let proposal_hash = self.hasher.hash(&union(&proposal_hash, &payload_hash));
                             let proposal = wire::Proposal {
                                 view: self.view,
                                 height,
@@ -1447,12 +1436,12 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                                 payload,
                                 signature: Some(wire::Signature {
                                     public_key: self.crypto.public_key(),
-                                    signature: self.crypto.sign(&self.proposal_namespace, &digest),
+                                    signature: self.crypto.sign(&self.proposal_namespace, &proposal_hash),
                                 }),
                             };
 
                             // Handle our proposal
-                            if !self.our_proposal(payload_hash, proposal.clone()).await {
+                            if !self.our_proposal(proposal_hash, proposal.clone()).await {
                                 continue;
                             }
                             view = proposal_view;

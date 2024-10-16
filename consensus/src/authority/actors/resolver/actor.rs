@@ -13,18 +13,15 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::{hash, hex};
+use commonware_utils::{hex, union};
 use core::panic;
 use futures::{channel::mpsc, future::Either};
 use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    marker::PhantomData,
-};
 use tracing::{debug, warn};
 
 #[derive(Clone)]
@@ -35,7 +32,7 @@ enum Knowledge {
 
 pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
     runtime: E,
-    hasher: PhantomData<H>,
+    hasher: H,
     application: A,
 
     fetch_timeout: Duration,
@@ -74,7 +71,7 @@ pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
 impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
     pub fn new(
         runtime: E,
-        _hasher: H,
+        hasher: H,
         mut application: A,
         fetch_timeout: Duration,
         max_fetch_count: u64,
@@ -105,7 +102,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         (
             Self {
                 runtime,
-                hasher: PhantomData,
+                hasher,
                 application,
 
                 fetch_timeout,
@@ -931,16 +928,17 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                                         break;
                                     }
                                 };
-                                let incoming_hash = hash(&proposal_digest(
+                                let proposal_digest = proposal_digest(
                                     proposal.view,
                                     proposal.height,
                                     &proposal.parent,
-                                    &payload_hash,
-                                ));
+                                );
+                                let proposal_hash = self.hasher.hash(&proposal_digest);
+                                let proposal_hash = self.hasher.hash(&union(&proposal_hash, &payload_hash));
 
                                 // Ensure this is the block we want
                                 if let Some((height, ref hash)) = next {
-                                    if proposal.height != height || incoming_hash != hash {
+                                    if proposal.height != height || proposal_hash != hash {
                                         warn!(sender = hex(&s), "received invalid batch proposal");
                                         break;
                                     }
@@ -948,8 +946,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
 
                                 // Record the proposal
                                 let height = proposal.height;
-                                debug!(height, hash = hex(&incoming_hash), peer = hex(&s), "received proposal via backfill");
-                                let proposal = Proposal::Populated(incoming_hash.clone(), proposal.clone());
+                                debug!(height, hash = hex(&proposal_hash), peer = hex(&s), "received proposal via backfill");
+                                let proposal = Proposal::Populated(proposal_hash.clone(), proposal.clone());
                                 next = self.resolve(proposal);
 
                                 // Remove outstanding task if we were waiting on this
@@ -957,8 +955,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                                 // Note, we don't care if we are sent the proposal from someone unexpected (although
                                 // this is unexpected).
                                 if let Some(ref outstanding) = outstanding_task {
-                                    if outstanding.2 == incoming_hash {
-                                        debug!(height = outstanding.1, hash = hex(&incoming_hash), peer = hex(&s), "resolved missing proposal via backfill");
+                                    if outstanding.2 == proposal_hash {
+                                        debug!(height = outstanding.1, hash = hex(&proposal_hash), peer = hex(&s), "resolved missing proposal via backfill");
                                         outstanding_task = None;
                                     }
                                 }
