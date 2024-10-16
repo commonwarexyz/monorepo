@@ -22,7 +22,7 @@ pub struct Config {
     /// It is common to use multiple instances of an application in a single simulation, this
     /// helps to identify the source of both progress and errors.
     pub participant: PublicKey,
-    pub participants: HashMap<View, Vec<PublicKey>>,
+    pub participants: BTreeMap<View, Vec<PublicKey>>,
 
     pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
@@ -46,7 +46,6 @@ struct State {
     finalized: HashMap<Hash, Height>,
 }
 
-// TODO: add arc/mutex to support copying of state
 #[derive(Clone)]
 pub struct Application<E: Clock + RngCore, H: Hasher> {
     runtime: E,
@@ -299,7 +298,7 @@ mod tests {
             let (sender, mut receiver) = mpsc::unbounded();
             let cfg = Config {
                 participant: participant.clone(),
-                participants: HashMap::from([(1, vec![participant.clone()])]),
+                participants: BTreeMap::from([(1, vec![participant.clone()])]),
                 sender,
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),

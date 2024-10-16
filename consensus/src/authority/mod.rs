@@ -56,9 +56,8 @@ pub const NULL_AND_FINALIZE: FaultType = 3;
 mod tests {
     use super::*;
     use crate::{
-        mocks::application::{self, Application, Config as ApplicationConfig, Progress},
+        mocks::application::{Application, Config as ApplicationConfig, Progress},
         sha256::Sha256,
-        Hasher,
     };
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
@@ -69,7 +68,7 @@ mod tests {
     use futures::{channel::mpsc, StreamExt};
     use prometheus_client::registry::Registry;
     use std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::{BTreeMap, HashSet},
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -142,7 +141,7 @@ mod tests {
                 let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
-                    participants: HashMap::from([(0, validators.clone())]),
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
@@ -261,7 +260,7 @@ mod tests {
                 let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
-                    participants: HashMap::from([(0, validators.clone())]),
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
@@ -380,7 +379,7 @@ mod tests {
                 let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
-                    participants: HashMap::from([(0, validators.clone())]),
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
@@ -464,7 +463,7 @@ mod tests {
             let hasher = Sha256::default();
             let application_cfg = ApplicationConfig {
                 participant: validator,
-                participants: HashMap::from([(0, validators.clone())]),
+                participants: view_validators.clone(),
                 sender: done_sender.clone(),
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
@@ -576,7 +575,7 @@ mod tests {
                 let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
-                    participants: HashMap::from([(0, validators.clone())]),
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
@@ -720,7 +719,7 @@ mod tests {
                 let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
-                    participants: HashMap::from([(0, validators.clone())]),
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
@@ -839,7 +838,7 @@ mod tests {
                 let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
-                    participants: HashMap::from([(0, validators.clone())]),
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
@@ -1029,7 +1028,7 @@ mod tests {
                 let hasher = Sha256::default();
                 let application_cfg = ApplicationConfig {
                     participant: validator,
-                    participants: HashMap::from([(0, validators.clone())]),
+                    participants: view_validators.clone(),
                     sender: done_sender.clone(),
                     propose_latency: (50.0, 10.0),
                     parse_latency: (10.0, 5.0),
