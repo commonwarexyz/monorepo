@@ -51,24 +51,21 @@ impl<K: Eq + StdHash + Clone> AncestrySet<K> {
     }
 
     /// Track a new container in the set.
-    ///
-    /// It is safe to add a duplicate container, it is a no-op.
-    pub fn track(&mut self, container: Hash, index: u64, parent: Hash, keys: Vec<K>) {
-        let keys = keys.into_iter().collect();
-        self.containers.insert(container.clone(), (parent, keys));
-        self.index.entry(index).or_default().insert(container);
-    }
-
-    /// Check all ancestors for an overlapping key in a particular ancestry.
-    pub fn check(&self, parent: &Hash, keys: Vec<&K>) -> bool {
-        let mut next = parent;
+    pub fn track(&mut self, container: Hash, index: u64, parent: Hash, keys: Vec<K>) -> bool {
+        // Check that none of the keys are already in the ancestry.
+        let mut next = &parent;
         while let Some((hash, set)) = self.containers.get(next) {
-            if keys.iter().any(|key| set.contains(*key)) {
-                return true;
+            if keys.iter().any(|key| set.contains(key)) {
+                return false;
             }
             next = hash;
         }
-        false
+
+        // Insert into set
+        let keys = keys.into_iter().collect();
+        self.containers.insert(container.clone(), (parent, keys));
+        self.index.entry(index).or_default().insert(container);
+        true
     }
 }
 
@@ -84,10 +81,10 @@ mod tests {
         set.discover(vec![(0, 1), (0, 2), (0, 3), (4, 10)]);
 
         // Track a container
-        set.track("container".into(), 1, "parent".into(), vec![1, 3]);
+        assert!(set.track("container".into(), 1, "parent".into(), vec![1, 3]));
 
         // Track another container at the same index
-        set.track("container2".into(), 1, "parent".into(), vec![2, 3]);
+        assert!(set.track("container2".into(), 1, "parent".into(), vec![2, 3]));
 
         // Gather pending
         let mut unused = set.pending(&"container".into());
@@ -99,10 +96,8 @@ mod tests {
         unused.sort();
         assert_eq!(unused, vec![1, 10]);
 
-        // Check for overlapping keys
-        assert!(set.check(&"container".into(), vec![&1]));
-        assert!(set.check(&"container".into(), vec![&3]));
-        assert!(!set.check(&"container".into(), vec![&2]));
+        // Try to add with overlapping keys
+        assert!(!set.track("container3".into(), 1, "container2".into(), vec![3]));
 
         // Prune
         set.prune(1);
@@ -121,10 +116,10 @@ mod tests {
         set.discover(vec![(0, 1), (0, 2), (0, 3), (4, 10)]);
 
         // Track some containers
-        set.track("container".into(), 1, "parent".into(), vec![1, 3]);
-        set.track("container2".into(), 2, "container".into(), vec![2, 4]);
-        set.track("container3".into(), 3, "container2".into(), vec![10]);
-        set.track("container4".into(), 3, "container2".into(), vec![5, 7]);
+        assert!(set.track("container".into(), 1, "parent".into(), vec![1, 3]));
+        assert!(set.track("container2".into(), 2, "container".into(), vec![2, 4]));
+        assert!(set.track("container3".into(), 3, "container2".into(), vec![10]));
+        assert!(set.track("container4".into(), 3, "container2".into(), vec![5, 7]));
 
         // Gather pending
         let unused = set.pending(&"container3".into());
@@ -135,9 +130,8 @@ mod tests {
         unused.sort();
         assert_eq!(unused, vec![10]);
 
-        // Check for overlapping keys
-        assert!(set.check(&"container3".into(), vec![&10]));
-        assert!(!set.check(&"container4".into(), vec![&10]));
+        // Try to add with overlapping keys
+        assert!(!set.track("container5".into(), 4, "container3".into(), vec![10]));
 
         // Prune
         set.prune(3);

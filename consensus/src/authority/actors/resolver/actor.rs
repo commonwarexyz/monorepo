@@ -4,10 +4,12 @@ use super::{Mailbox, Message};
 use crate::{
     authority::{
         actors::{voter, Proposal},
+        ancestry_set::AncestrySet,
         encoding::{header_digest, proposal_digest},
-        wire,
+        wire, CONFLICTING_BLOCK, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE,
+        FINALIZE, NULL_AND_FINALIZE, VOTE,
     },
-    Activity, Application, Context, Hash, Hasher, Height, Payload, View,
+    Activity, Application, Context, Contribution, Fault, Hash, Hasher, Height, Payload, View,
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
@@ -65,6 +67,11 @@ pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
     // It is not guaranteed that we will notify every notarization (may just be finalizes).
     notarizations_sent: HashMap<Height, HashSet<Hash>>,
     last_notified: Height,
+
+    // Track activity
+    activity_votes: AncestrySet<(Height, PublicKey)>,
+    activity_finalizes: AncestrySet<(Height, PublicKey)>,
+    activity_faults: AncestrySet<(View, PublicKey)>,
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
@@ -127,6 +134,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
 
                 notarizations_sent: HashMap::new(),
                 last_notified: 0,
+
+                activity_votes: AncestrySet::default(),
+                activity_finalizes: AncestrySet::default(),
+                activity_faults: AncestrySet::default(),
             },
             Mailbox::new(mailbox_sender),
         )
@@ -465,6 +476,131 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         }
 
         // TODO: verify activity (over ancestry)
+        let mut contributions: HashMap<Height, Vec<Contribution>> = HashMap::new();
+        let mut faults: HashMap<View, Vec<Fault>> = HashMap::new();
+        let activity = match proposal.activity.clone() {
+            Some(activity) => activity,
+            None => {
+                debug!(
+                    height = proposal.height,
+                    hash = hex(&hash),
+                    "missing activity"
+                );
+                return false;
+            }
+        };
+
+        // Store votes
+        let mut simple_votes = Vec::new();
+        for vote in activity.votes {
+            let public_key = match vote.signature {
+                Some(signature) => signature.public_key,
+                None => {
+                    debug!(
+                        height = proposal.height,
+                        hash = hex(&hash),
+                        "missing public key"
+                    );
+                    return false;
+                }
+            };
+            let height = match vote.height {
+                Some(height) => height,
+                None => {
+                    debug!(
+                        height = proposal.height,
+                        hash = hex(&hash),
+                        "missing height"
+                    );
+                    return false;
+                }
+            };
+            simple_votes.push((vote.view, public_key.clone()));
+            contributions
+                .entry(height)
+                .or_default()
+                .push((public_key, VOTE));
+        }
+        if !self.activity_votes.track(
+            hash.clone(),
+            proposal.height,
+            proposal.parent.clone(),
+            simple_votes,
+        ) {
+            debug!(
+                height = proposal.height,
+                hash = hex(&hash),
+                "duplicate votes"
+            );
+            return false;
+        }
+
+        // Store finalizes
+        let mut simple_finalizes = Vec::new();
+        for finalize in activity.finalizes {
+            let public_key = match finalize.signature {
+                Some(signature) => signature.public_key,
+                None => {
+                    debug!(
+                        height = proposal.height,
+                        hash = hex(&hash),
+                        "missing public key"
+                    );
+                    return false;
+                }
+            };
+            simple_finalizes.push((finalize.view, public_key.clone()));
+            contributions
+                .entry(finalize.height)
+                .or_default()
+                .push((public_key, FINALIZE));
+        }
+        if !self.activity_finalizes.track(
+            hash.clone(),
+            proposal.height,
+            proposal.parent.clone(),
+            simple_finalizes,
+        ) {
+            debug!(
+                height = proposal.height,
+                hash = hex(&hash),
+                "duplicate finalizes"
+            );
+            return false;
+        }
+
+        // Store faults
+        let mut simple_faults = Vec::new();
+        for fault in activity.faults {
+            simple_faults.push((fault.view, fault.public_key.clone()));
+            let fault_type = match fault.payload {
+                Some(wire::fault::Payload::ConflictingProposal(_)) => CONFLICTING_PROPOSAL,
+                Some(wire::fault::Payload::ConflictingVote(_)) => CONFLICTING_VOTE,
+                Some(wire::fault::Payload::ConflictingFinalize(_)) => CONFLICTING_FINALIZE,
+                Some(wire::fault::Payload::NullFinalize(_)) => NULL_AND_FINALIZE,
+                None => {
+                    debug!(
+                        height = proposal.height,
+                        hash = hex(&hash),
+                        "missing fault payload"
+                    );
+                    return false;
+                }
+            };
+            faults
+                .entry(fault.view)
+                .or_default()
+                .push((fault.public_key, fault_type));
+        }
+        if !self.activity_faults.track(
+            hash.clone(),
+            proposal.view,
+            proposal.parent.clone(),
+            simple_faults,
+        ) {
+            debug!(view = proposal.view, hash = hex(&hash), "duplicate faults");
+            return false;
+        }
 
         // Verify payload
         let context = Context {
@@ -474,8 +610,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
         };
         let activity = Activity {
             proposer: proposal.signature.unwrap().public_key.clone(),
-            contributions: HashMap::new(),
-            faults: HashMap::new(),
+            contributions,
+            faults,
         };
         if !self
             .application

@@ -23,7 +23,7 @@
 //!   more votes)
 
 mod actors;
-mod ancestry_set;
+pub mod ancestry_set;
 mod config;
 mod encoding;
 
@@ -51,7 +51,7 @@ pub enum Error {
 pub const VOTE: ContributionType = 0;
 pub const FINALIZE: ContributionType = 1;
 
-pub const CONFLICTING_BLOCK: FaultType = 0;
+pub const CONFLICTING_PROPOSAL: FaultType = 0;
 pub const CONFLICTING_VOTE: FaultType = 1;
 pub const CONFLICTING_FINALIZE: FaultType = 2;
 pub const NULL_AND_FINALIZE: FaultType = 3;
