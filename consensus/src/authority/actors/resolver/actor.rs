@@ -343,7 +343,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
             }
         };
 
-        // TODO: how to communicate to voter what we already know about activity?
+        // TODO: how to communicate to voter what we already know about activity (to
+        // ensure they don't stuff block with duplicate votes/finalizes/faults)?
+
+        // TODO: add hasher that allows for incremental computation (not just entire payload)
 
         // Propose block
         let context = Context {
