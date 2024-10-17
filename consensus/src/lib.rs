@@ -48,43 +48,20 @@ pub struct Context {
     pub view: View,
     pub parent: Hash,
     pub height: Height,
+    pub proposer: PublicKey,
 }
 
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not
 /// interpreting just means all faults would be treated equally).
-type FaultType = u16;
-type Fault = (PublicKey, FaultType);
+type Fault = u16;
 
 /// Various consensus implementations may want to reward participation in different ways. For example,
 /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
 /// both equally may better align incentives with desired behavior.
-type ContributionType = u16;
-type Contribution = (PublicKey, ContributionType);
-
-/// Activity is a collection of information about consensus performance
-/// included in the block wrapper (handled externally).
-///
-/// It is up to the application to determine how to act on this information (attributing
-/// rewards, removing validators, etc.).
-#[derive(Clone)]
-pub struct Activity {
-    pub proposer: PublicKey,
-
-    /// Contributions at a given height.
-    ///
-    /// Height is exposed such that rewards can be scaled by
-    /// timeliness.
-    ///
-    /// Inactivity (no posted support) can be inferred from the
-    /// contents of `support`.
-    pub contributions: HashMap<Height, Vec<Contribution>>,
-
-    /// Faults are not gossiped through the network and are only
-    /// posted once locally observed (as this would create a DoS vector).
-    pub faults: HashMap<View, Vec<Fault>>,
-}
+type Contribution = u16;
 
 type Payload = Bytes;
+type Proof = Bytes;
 
 /// Application is the interface for the consensus engine to inform of progress.
 ///
@@ -108,14 +85,33 @@ pub trait Application: Clone + Send + 'static {
     // Indicate whether a PublicKey is a participant at the given view.
     fn is_participant(&self, view: View, candidate: &PublicKey) -> Option<bool>;
 
+    /// Report a contribution to the application that can be externally proven.
+    ///
+    /// The consensus instance may report a duplicate contribution.
+    fn report_contribution(
+        &mut self,
+        public_key: PublicKey,
+        view: View,
+        block: Hash,
+        contribution: Contribution,
+        proof: Proof,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// Report a fault to the application that can be externally proven.
+    ///
+    /// The consensus instance may report a duplicate fault.
+    fn report_fault(
+        &mut self,
+        public_key: PublicKey,
+        view: View,
+        fault: Fault,
+        proof: Proof,
+    ) -> impl Future<Output = ()> + Send;
+
     /// Generate a new payload for the given parent hash.
     ///
     /// If state is not yet ready, this will return None.
-    fn propose(
-        &mut self,
-        context: Context,
-        activity: Activity,
-    ) -> impl Future<Output = Option<Payload>> + Send;
+    fn propose(&mut self, context: Context) -> impl Future<Output = Option<Payload>> + Send;
 
     /// Parse the payload and return the hash of the payload. We don't just hash
     /// the payload because it may be more efficient to prove against a hash
@@ -130,7 +126,6 @@ pub trait Application: Clone + Send + 'static {
     fn verify(
         &mut self,
         context: Context,
-        activity: Activity,
         payload: Payload,
         block: Hash,
     ) -> impl Future<Output = bool> + Send;
@@ -143,51 +138,3 @@ pub trait Application: Clone + Send + 'static {
     /// Event that the payload has been finalized.
     fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
 }
-
-type Epoch = u64;
-
-#[derive(Clone)]
-pub struct EpochContext {
-    pub epoch: Epoch,
-    pub context: Context,
-}
-
-pub trait EpochApplication: Application {
-    fn participants(&self, epoch: Epoch, view: View) -> Option<Vec<PublicKey>>;
-
-    fn propose(
-        &mut self,
-        context: EpochContext,
-        activity: Activity,
-    ) -> impl Future<Output = Option<Payload>> + Send;
-
-    fn verify(
-        &mut self,
-        context: EpochContext,
-        activity: Activity,
-        payload: Payload,
-        block: Hash,
-    ) -> impl Future<Output = bool> + Send;
-
-    fn start_epoch(&mut self, epoch: Epoch, view: View) -> impl Future<Output = ()> + Send;
-
-    fn end_epoch(&mut self, epoch: Epoch, view: View) -> impl Future<Output = ()> + Send;
-}
-
-// TODO: break apart into smaller traits?
-// TODO: how to layer traits (want to call propose different ways depending
-// on whether we are including uptime info/faults)?
-
-// Example Payload (Transfers):
-// - Vec<Tx> => hashed as balanced binary trie by hash
-//
-// Context:
-// -> Builder, View (gauge of time elapsed), Height, Timestamp, Parent_Payload (used to track inner trie)
-// .   -> If previously proposed block at a height that is not yet canonicalized, should re-propose?
-// -> (Optional) Signers in previous round (reward uptime)
-// -> (Optional) Faults (at any round)
-//
-// Expectations:
-// * Application tracks a trie of pending blocks (with pending state diffs to that trie)
-//   * If we only execute committed blocks, this isn't required? Still need to build proposals on a tree of blocks (can't wait for finality
-// .   to build). Also would mean data proveable from a block may not be correct (would need to rely on child block to indicate what was successful).
