@@ -928,7 +928,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalize
                                     &proposal.parent,
                                     &payload_hash,
                                 );
-                                let proposal_hash = self.hasher.hash(&proposal_digest);
+                                self.hasher.update(&proposal_digest);
+                                let proposal_hash = self.hasher.finalize();
 
                                 // Ensure this is the block we want
                                 if let Some((height, ref hash)) = next {

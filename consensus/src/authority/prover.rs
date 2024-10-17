@@ -92,7 +92,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         }
 
         // Compute hash
-        Some((public_key, view, height, self.hasher.hash(&proposal_digest)))
+        self.hasher.update(&proposal_digest);
+        Some((public_key, view, height, self.hasher.finalize()))
     }
 
     pub(crate) fn serialize_vote(vote: wire::Vote) -> Proof {

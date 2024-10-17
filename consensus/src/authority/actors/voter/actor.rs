@@ -647,7 +647,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
             &proposal.parent,
             &payload_hash,
         );
-        let proposal_hash = self.hasher.hash(&proposal_digest);
+        self.hasher.update(&proposal_digest);
+        let proposal_hash = self.hasher.finalize();
 
         // Check if duplicate or conflicting
         let mut previous = None;
@@ -1612,7 +1613,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
                             };
 
                             // Handle our proposal
-                            let proposal_hash = self.hasher.hash(&proposal_digest);
+                            self.hasher.update(&proposal_digest);
+                            let proposal_hash = self.hasher.finalize();
                             if !self.our_proposal(proposal_hash, payload_hash, proposal.clone()).await {
                                 continue;
                             }
