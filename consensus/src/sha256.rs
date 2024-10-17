@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256 as ISha256};
 
 const HASH_LENGTH: usize = 32;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Sha256 {
     hasher: Option<ISha256>,
 }
@@ -13,6 +13,12 @@ impl Sha256 {
         Self {
             hasher: Some(ISha256::new()),
         }
+    }
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
