@@ -1,6 +1,6 @@
 use super::{
     encoding::{finalize_digest, proposal_digest, vote_digest},
-    wire, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE, VOTE,
+    wire, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE, VOTE,
 };
 use crate::{Activity, Hash, Hasher, Height, Proof, View};
 use bytes::{Buf, BufMut};
@@ -19,7 +19,7 @@ pub struct Encoder<C: Scheme, H: Hasher> {
 }
 
 impl<C: Scheme, H: Hasher> Encoder<C, H> {
-    pub fn encode_vote(vote: wire::Vote) -> Proof {
+    pub fn serialize_vote(vote: wire::Vote) -> Proof {
         // Setup proof
         let (public_key_size, signature_size) = C::size();
         let size = 1 + 8 + 8 + H::size() + public_key_size + signature_size;
@@ -36,7 +36,7 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         proof.into()
     }
 
-    pub fn verify_vote(&self, mut proof: Proof) -> Option<(PublicKey, View, Height, Hash)> {
+    pub fn deserialize_vote(&self, mut proof: Proof) -> Option<(PublicKey, View, Height, Hash)> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
@@ -66,7 +66,7 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         Some((public_key, view, height, hash))
     }
 
-    pub fn encode_finalize(finalize: wire::Finalize) -> Proof {
+    pub fn serialize_finalize(finalize: wire::Finalize) -> Proof {
         // Setup proof
         let (public_key_size, signature_size) = C::size();
         let size = 1 + 8 + 8 + H::size() + public_key_size + signature_size;
@@ -83,7 +83,10 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         proof.into()
     }
 
-    pub fn verify_finalize(&self, mut proof: Proof) -> Option<(PublicKey, View, Height, Hash)> {
+    pub fn deserialize_finalize(
+        &self,
+        mut proof: Proof,
+    ) -> Option<(PublicKey, View, Height, Hash)> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
@@ -118,7 +121,7 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         Some((public_key, view, height, hash))
     }
 
-    pub fn encode_conflicting_proposal(
+    pub fn serialize_conflicting_proposal(
         view: View,
         header_hash_1: Hash,
         payload_hash_1: Hash,
@@ -160,7 +163,7 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         proof.into()
     }
 
-    pub fn verify_conflicting_proposal(&self, mut proof: Proof) -> Option<(PublicKey, View)> {
+    pub fn deserialize_conflicting_proposal(&self, mut proof: Proof) -> Option<(PublicKey, View)> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
@@ -213,7 +216,7 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         Some((public_key, view))
     }
 
-    pub fn encode_conflicting_vote(
+    pub fn serialize_conflicting_vote(
         view: View,
         height_1: Height,
         hash_1: Hash,
@@ -255,7 +258,7 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         proof.into()
     }
 
-    pub fn verify_conflicting_vote(&self, mut proof: Proof) -> Option<(PublicKey, View)> {
+    pub fn deserialize_conflicting_vote(&self, mut proof: Proof) -> Option<(PublicKey, View)> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
@@ -300,6 +303,100 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         ) || !C::verify(
             &self.vote_namespace,
             &vote_digest_2,
+            &public_key,
+            &signature_2,
+        ) {
+            return None;
+        }
+        Some((public_key, view))
+    }
+
+    pub fn serialize_conflicting_finalize(
+        view: View,
+        height_1: Height,
+        hash_1: Hash,
+        signature_1: wire::Signature,
+        height_2: Height,
+        hash_2: Hash,
+        signature_2: wire::Signature,
+    ) -> Proof {
+        // Setup proof
+        let hash_size = H::size();
+        let (public_key_size, signature_size) = C::size();
+        let size = 1
+            + 8
+            + public_key_size
+            + 8
+            + hash_size
+            + signature_size
+            + 8
+            + hash_size
+            + signature_size;
+
+        // Ensure proof can be generated correctly
+        if signature_1.public_key != signature_2.public_key {
+            panic!("public keys do not match");
+        }
+        let public_key = signature_1.public_key;
+
+        // Encode proof
+        let mut proof = Vec::with_capacity(size);
+        proof.put_u8(CONFLICTING_FINALIZE);
+        proof.put_u64(view);
+        proof.put(public_key);
+        proof.put_u64(height_1);
+        proof.put(hash_1);
+        proof.put(signature_1.signature);
+        proof.put_u64(height_2);
+        proof.put(hash_2);
+        proof.put(signature_2.signature);
+        proof.into()
+    }
+
+    pub fn deserialize_conflicting_finalize(&self, mut proof: Proof) -> Option<(PublicKey, View)> {
+        let hash_size = H::size();
+        let (public_key_size, signature_size) = C::size();
+        let size = 1
+            + 8
+            + public_key_size
+            + 8
+            + hash_size
+            + signature_size
+            + 8
+            + hash_size
+            + signature_size;
+        if proof.len() != size {
+            return None;
+        }
+
+        // Decode proof
+        let activity_type: Activity = proof.get_u8();
+        if activity_type != CONFLICTING_FINALIZE {
+            return None;
+        }
+        let view = proof.get_u64();
+        let public_key = proof.copy_to_bytes(public_key_size);
+        let height_1 = proof.get_u64();
+        let hash_1 = proof.copy_to_bytes(hash_size);
+        let signature_1 = proof.copy_to_bytes(signature_size);
+        let height_2 = proof.get_u64();
+        let hash_2 = proof.copy_to_bytes(hash_size);
+        let signature_2 = proof.copy_to_bytes(signature_size);
+
+        // Verify signatures
+        if !C::validate(&public_key) {
+            return None;
+        }
+        let finalize_digest_1 = finalize_digest(view, height_1, &hash_1);
+        let finalize_digest_2 = finalize_digest(view, height_2, &hash_2);
+        if !C::verify(
+            &self.finalize_namespace,
+            &finalize_digest_1,
+            &public_key,
+            &signature_1,
+        ) || !C::verify(
+            &self.finalize_namespace,
+            &finalize_digest_2,
             &public_key,
             &signature_2,
         ) {
