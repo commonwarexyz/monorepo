@@ -1,10 +1,11 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
+        activity::Encoder,
         actors::{resolver, Proposal},
         encoding::{
-            finalize_digest, header_digest, proposal_digest, vote_digest, FINALIZE_SUFFIX,
-            PROPOSAL_SUFFIX, VOTE_SUFFIX,
+            finalize_digest, proposal_digest, vote_digest, FINALIZE_SUFFIX, PROPOSAL_SUFFIX,
+            VOTE_SUFFIX,
         },
         wire,
     },
@@ -32,7 +33,10 @@ type Notarizable<'a> = Option<(
     &'a HashMap<PublicKey, wire::Vote>,
 )>;
 
-struct Round {
+struct Round<C: Scheme, H: Hasher, A: Application> {
+    application: A,
+    encoder: Encoder<C, H>,
+
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -66,13 +70,18 @@ struct Round {
     broadcast_finalization: bool,
 }
 
-impl Round {
+impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
     pub fn new(
+        application: A,
+        encoder: Encoder<C, H>,
         leader: PublicKey,
         leader_deadline: Option<SystemTime>,
         advance_deadline: Option<SystemTime>,
     ) -> Self {
         Self {
+            application,
+            encoder,
+
             leader,
             leader_deadline,
             advance_deadline,
@@ -99,7 +108,7 @@ impl Round {
         }
     }
 
-    fn add_verified_vote(&mut self, vote: wire::Vote) -> Option<wire::Fault> {
+    fn add_verified_vote(&mut self, vote: wire::Vote) {
         // Determine whether or not this is a null vote
         let public_key = &vote.signature.as_ref().unwrap().public_key;
         if vote.hash.is_none() {
@@ -108,7 +117,7 @@ impl Round {
             if finalize.is_none() {
                 // Store the null vote
                 self.null_votes.insert(public_key.clone(), vote);
-                return None;
+                return;
             }
             let finalize = finalize.unwrap();
 
@@ -119,20 +128,16 @@ impl Round {
                 .unwrap()
                 .get(public_key)
                 .unwrap();
-            let null_finalize = wire::NullFinalize {
-                height: finalize.height,
-                hash: finalize.hash.clone(),
-                signature_finalize: finalize.signature.clone().unwrap().signature,
-
-                signature_null: vote.signature.clone().unwrap().signature,
-            };
-            let fault = wire::Fault {
-                view: vote.view,
-                public_key: public_key.clone(),
-                payload: Some(wire::fault::Payload::NullFinalize(null_finalize)),
-            };
+            let proof = Encoder::<C, H>::serialize_null_finalize(
+                vote.view,
+                finalize.height,
+                finalize.hash.clone(),
+                finalize.signature.clone().unwrap(),
+                vote.signature.clone().unwrap(),
+            );
+            self.application.report(proof);
             warn!(view = vote.view, signer = hex(public_key), "recorded fault");
-            return Some(fault);
+            return;
         }
         let hash = vote.hash.clone().unwrap();
 
@@ -145,7 +150,7 @@ impl Round {
                     previous_vote = hex(previous_vote),
                     "already voted"
                 );
-                return None;
+                return;
             }
 
             // Create fault
@@ -155,22 +160,18 @@ impl Round {
                 .unwrap()
                 .get(public_key)
                 .unwrap();
-            let conflicting_vote = wire::ConflictingVote {
-                height_1: previous_vote.height.unwrap(),
-                hash_1: previous_vote.hash.clone().unwrap(),
-                signature_1: previous_vote.signature.clone().unwrap().signature,
-
-                height_2: vote.height.unwrap(),
-                hash_2: vote.hash.clone().unwrap(),
-                signature_2: vote.signature.clone().unwrap().signature,
-            };
-            let fault = wire::Fault {
-                view: vote.view,
-                public_key: public_key.clone(),
-                payload: Some(wire::fault::Payload::ConflictingVote(conflicting_vote)),
-            };
+            let proof = Encoder::<C, H>::serialize_conflicting_vote(
+                vote.view,
+                previous_vote.height.unwrap(),
+                previous_vote.hash.clone().unwrap(),
+                previous_vote.signature.clone().unwrap(),
+                vote.height.unwrap(),
+                hash.clone(),
+                vote.signature.clone().unwrap(),
+            );
+            self.application.report(proof);
             warn!(view = vote.view, signer = hex(public_key), "recorded fault");
-            return Some(fault);
+            return;
         }
 
         // Store the vote
@@ -178,7 +179,6 @@ impl Round {
             .insert(public_key.clone(), hash.clone());
         let entry = self.proposal_votes.entry(hash).or_default();
         entry.insert(public_key.clone(), vote);
-        None
     }
 
     fn notarizable_proposal(&mut self, threshold: u32, force: bool) -> Notarizable {

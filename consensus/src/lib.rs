@@ -91,12 +91,7 @@ pub trait Application: Clone + Send + 'static {
     /// To get more information about the contribution, the proof can be decoded.
     ///
     /// The consensus instance may report a duplicate contribution.
-    fn report(
-        &mut self,
-        public_key: PublicKey,
-        activity: Activity,
-        proof: Proof,
-    ) -> impl Future<Output = ()> + Send;
+    fn report(&mut self, proof: Proof) -> impl Future<Output = ()> + Send;
 
     /// Generate a new payload for the given parent hash.
     ///
