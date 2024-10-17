@@ -22,12 +22,8 @@ pub struct Config<C: Scheme, H: Hasher, A: Application> {
     pub null_vote_retry: Duration,
 
     /// Number of heights behind notarized tip to track
-    /// contributions submitted by validators.
-    pub contribution_timeout: Height,
-
-    /// Number of views behind notarized tip to track
-    /// faults committed by validators.
-    pub fault_timeout: View,
+    /// activity derived from validator messages.
+    pub activity_timeout: Height,
 
     /// Timeout to wait for a peer to respond to a fetch request.
     pub fetch_timeout: Duration,

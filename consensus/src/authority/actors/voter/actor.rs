@@ -721,10 +721,15 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         // Verify the proposal
         //
         // This will fail if we haven't notified the application of this parent.
-        let view = self
-            .views
-            .entry(proposal.view)
-            .or_insert_with(|| Round::new(expected_leader, None, None));
+        let view = self.views.entry(proposal.view).or_insert_with(|| {
+            Round::new(
+                self.application.clone(),
+                self.encoder.clone(),
+                expected_leader,
+                None,
+                None,
+            )
+        });
         view.proposal = Some((
             proposal_hash.clone(),
             payload_hash.clone(),
@@ -794,10 +799,15 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
 
         // Setup new view
         let leader = self.leader(view).expect("unable to get leader");
-        let entry = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(leader, None, None));
+        let entry = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.application.clone(),
+                self.encoder.clone(),
+                leader,
+                None,
+                None,
+            )
+        });
         entry.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
         entry.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         self.view = view;
@@ -916,21 +926,18 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 return;
             }
         };
-        let view = self
-            .views
-            .entry(vote.view)
-            .or_insert_with(|| Round::new(leader, None, None));
+        let view = self.views.entry(vote.view).or_insert_with(|| {
+            Round::new(
+                self.application.clone(),
+                self.encoder.clone(),
+                leader,
+                None,
+                None,
+            )
+        });
 
         // Handle vote
-        let vote_view = vote.view;
-        let public_key = vote.signature.as_ref().unwrap().public_key.clone();
-        if let Some(fault) = view.add_verified_vote(vote) {
-            self.faults
-                .entry(vote_view)
-                .or_default()
-                .entry(public_key)
-                .or_insert(fault);
-        }
+        view.add_verified_vote(vote);
     }
 
     async fn notarization(
@@ -1056,25 +1063,23 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         let leader = self
             .leader(notarization.view)
             .expect("unable to get leader");
-        let view = self
-            .views
-            .entry(notarization.view)
-            .or_insert_with(|| Round::new(leader, None, None));
+        let view = self.views.entry(notarization.view).or_insert_with(|| {
+            Round::new(
+                self.application.clone(),
+                self.encoder.clone(),
+                leader,
+                None,
+                None,
+            )
+        });
         for signature in notarization.signatures {
-            let public_key = signature.public_key.clone();
             let vote = wire::Vote {
                 view: notarization.view,
                 height: notarization.height,
                 hash: notarization.hash.clone(),
                 signature: Some(signature),
             };
-            if let Some(fault) = view.add_verified_vote(vote) {
-                self.faults
-                    .entry(notarization.view)
-                    .or_default()
-                    .entry(public_key)
-                    .or_insert(fault);
-            }
+            view.add_verified_vote(vote)
         }
 
         // Clear leader and advance deadlines (if they exist)
@@ -1173,21 +1178,18 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
     fn handle_finalize(&mut self, finalize: wire::Finalize) {
         // Get view for finalize
         let leader = self.leader(finalize.view).expect("unable to get leader");
-        let view = self
-            .views
-            .entry(finalize.view)
-            .or_insert_with(|| Round::new(leader, None, None));
+        let view = self.views.entry(finalize.view).or_insert_with(|| {
+            Round::new(
+                self.application.clone(),
+                self.encoder.clone(),
+                leader,
+                None,
+                None,
+            )
+        });
 
         // Handle finalize
-        let finalize_view = finalize.view;
-        let public_key = finalize.signature.as_ref().unwrap().public_key.clone();
-        if let Some(fault) = view.add_verified_finalize(finalize) {
-            self.faults
-                .entry(finalize_view)
-                .or_default()
-                .entry(public_key)
-                .or_insert(fault);
-        }
+        view.add_verified_finalize(finalize);
     }
 
     async fn finalization(
@@ -1302,25 +1304,23 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         let leader = self
             .leader(finalization.view)
             .expect("unable to get leader");
-        let view = self
-            .views
-            .entry(finalization.view)
-            .or_insert_with(|| Round::new(leader, None, None));
+        let view = self.views.entry(finalization.view).or_insert_with(|| {
+            Round::new(
+                self.application.clone(),
+                self.encoder.clone(),
+                leader,
+                None,
+                None,
+            )
+        });
         for signature in finalization.signatures.iter() {
-            let public_key = signature.public_key.clone();
             let finalize = wire::Finalize {
                 view: finalization.view,
                 height: finalization.height,
                 hash: finalization.hash.clone(),
                 signature: Some(signature.clone()),
             };
-            if let Some(fault) = view.add_verified_finalize(finalize) {
-                self.faults
-                    .entry(finalization.view)
-                    .or_default()
-                    .entry(public_key)
-                    .or_insert(fault);
-            }
+            view.add_verified_finalize(finalize);
         }
 
         // Track view finalized
@@ -1617,7 +1617,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Proposal{ view: proposal_view, parent, height, payload, payload_hash, votes, finalizes, faults} => {
+                        Message::Proposal{ view: proposal_view, parent, height, payload, payload_hash} => {
                             debug!(view = proposal_view, our_view = self.view, "received proposal");
 
                             // If we have already moved to another view, drop the response as we will
@@ -1628,19 +1628,11 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                             }
 
                             // Construct proposal
-                            //
-                            // TODO: still need to update proposal digest
-                            let header_hash = self.hasher.hash(&header_digest(height, &parent));
-                            let proposal_digest = proposal_digest(self.view, &header_hash, &payload_hash);
+                            let proposal_digest = proposal_digest(self.view, height, &parent, &payload_hash);
                             let proposal = wire::Proposal {
                                 view: self.view,
                                 height,
                                 parent,
-                                activity: Some(wire::Activity{
-                                    votes,
-                                    finalizes,
-                                    faults,
-                                }),
                                 payload,
                                 signature: Some(wire::Signature {
                                     public_key: self.crypto.public_key(),

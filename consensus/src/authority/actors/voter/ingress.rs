@@ -1,4 +1,4 @@
-use crate::{authority::wire, Hash, Height, View};
+use crate::{Hash, Height, View};
 use bytes::Bytes;
 use futures::{channel::mpsc, SinkExt};
 
@@ -10,9 +10,6 @@ pub enum Message {
         height: Height,
         payload: Bytes,
         payload_hash: Hash,
-        votes: Vec<wire::Vote>,
-        finalizes: Vec<wire::Finalize>,
-        faults: Vec<wire::Fault>,
     },
     Verified {
         view: View,
@@ -36,9 +33,6 @@ impl Mailbox {
         height: Height,
         payload: Bytes,
         payload_hash: Hash,
-        votes: Vec<wire::Vote>,
-        finalizes: Vec<wire::Finalize>,
-        faults: Vec<wire::Fault>,
     ) {
         self.sender
             .send(Message::Proposal {
@@ -47,9 +41,6 @@ impl Mailbox {
                 height,
                 payload,
                 payload_hash,
-                votes,
-                finalizes,
-                faults,
             })
             .await
             .unwrap();
