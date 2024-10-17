@@ -138,6 +138,7 @@ mod tests {
         }
 
         async fn report(&mut self, activity: Activity, proof: Proof) {
+            // TODO: verify sig for all items
             let mut faults = self.faults.lock().unwrap();
             match activity {
                 CONFLICTING_PROPOSAL => {
