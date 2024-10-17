@@ -1,6 +1,6 @@
 use super::{
     encoding::{finalize_digest, proposal_digest, vote_digest},
-    wire, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE, VOTE,
+    wire, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE, PROPOSAL, VOTE,
 };
 use crate::{Activity, Hash, Hasher, Height, Proof, View};
 use bytes::{Buf, BufMut};
@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 #[derive(Clone)]
 pub struct Encoder<C: Scheme, H: Hasher> {
     crypto: PhantomData<C>,
-    hasher: PhantomData<H>,
+    hasher: H,
 
     proposal_namespace: Vec<u8>,
     vote_namespace: Vec<u8>,
@@ -19,6 +19,74 @@ pub struct Encoder<C: Scheme, H: Hasher> {
 }
 
 impl<C: Scheme, H: Hasher> Encoder<C, H> {
+    pub fn serialize_proposal(
+        view: View,
+        height: Height,
+        parent: Hash,
+        payload: Hash,
+        signature: wire::Signature,
+    ) -> Proof {
+        // Setup proof
+        let hash_size = H::size();
+        let (public_key_size, signature_size) = C::size();
+        let size = 1 + 8 + 8 + hash_size + hash_size + public_key_size + signature_size;
+        let mut proof = Vec::with_capacity(size);
+
+        // Encode proof
+        proof.put_u8(PROPOSAL);
+        proof.put_u64(view);
+        proof.put_u64(height);
+        proof.put(parent);
+        proof.put(payload);
+        proof.put(signature.public_key);
+        proof.put(signature.signature);
+        proof.into()
+    }
+
+    pub fn deserialize_proposal(
+        &mut self,
+        mut proof: Proof,
+        check_sig: bool,
+    ) -> Option<(PublicKey, View, Height, Hash)> {
+        // Ensure proof is big enough
+        let hash_size = H::size();
+        let (public_key_size, signature_size) = C::size();
+        if proof.len() != 1 + 8 + 8 + hash_size + hash_size + public_key_size + signature_size {
+            return None;
+        }
+
+        // Decode proof
+        let activity_type: Activity = proof.get_u8();
+        if activity_type != PROPOSAL {
+            return None;
+        }
+        let view = proof.get_u64();
+        let height = proof.get_u64();
+        let parent = proof.copy_to_bytes(hash_size);
+        let payload = proof.copy_to_bytes(hash_size);
+        let public_key = proof.copy_to_bytes(public_key_size);
+        let signature = proof.copy_to_bytes(signature_size);
+
+        // Verify signature
+        let proposal_digest = proposal_digest(view, height, &parent, &payload);
+        if check_sig {
+            if !C::validate(&public_key) {
+                return None;
+            }
+            if !C::verify(
+                &self.proposal_namespace,
+                &proposal_digest,
+                &public_key,
+                &signature,
+            ) {
+                return None;
+            }
+        }
+
+        // Compute hash
+        Some((public_key, view, height, self.hasher.hash(&proposal_digest)))
+    }
+
     pub fn serialize_vote(vote: wire::Vote) -> Proof {
         // Setup proof
         let (public_key_size, signature_size) = C::size();
@@ -132,11 +200,13 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
 
     pub fn serialize_conflicting_proposal(
         view: View,
-        header_hash_1: Hash,
-        payload_hash_1: Hash,
+        height_1: Height,
+        parent_1: Hash,
+        payload_1: Hash,
         signature_1: wire::Signature,
-        header_hash_2: Hash,
-        payload_hash_2: Hash,
+        height_2: Height,
+        parent_2: Hash,
+        payload_2: Hash,
         signature_2: wire::Signature,
     ) -> Proof {
         // Setup proof
@@ -145,9 +215,11 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         let size = 1
             + 8
             + public_key_size
+            + 8
             + hash_size
             + hash_size
             + signature_size
+            + 8
             + hash_size
             + hash_size
             + signature_size;
@@ -163,11 +235,13 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         proof.put_u8(CONFLICTING_PROPOSAL);
         proof.put_u64(view);
         proof.put(public_key);
-        proof.put(header_hash_1);
-        proof.put(payload_hash_1);
+        proof.put_u64(height_1);
+        proof.put(parent_1);
+        proof.put(payload_1);
         proof.put(signature_1.signature);
-        proof.put(header_hash_2);
-        proof.put(payload_hash_2);
+        proof.put_u64(height_2);
+        proof.put(parent_2);
+        proof.put(payload_2);
         proof.put(signature_2.signature);
         proof.into()
     }
@@ -183,9 +257,11 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         let size = 1
             + 8
             + public_key_size
+            + 8
             + hash_size
             + hash_size
             + signature_size
+            + 8
             + hash_size
             + hash_size
             + signature_size;
@@ -200,11 +276,13 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         }
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_size);
-        let header_hash_1 = proof.copy_to_bytes(hash_size);
-        let payload_hash_1 = proof.copy_to_bytes(hash_size);
+        let height_1 = proof.get_u64();
+        let parent_1 = proof.copy_to_bytes(hash_size);
+        let payload_1 = proof.copy_to_bytes(hash_size);
         let signature_1 = proof.copy_to_bytes(signature_size);
-        let header_hash_2 = proof.copy_to_bytes(hash_size);
-        let payload_hash_2 = proof.copy_to_bytes(hash_size);
+        let height_2 = proof.get_u64();
+        let parent_2 = proof.copy_to_bytes(hash_size);
+        let payload_2 = proof.copy_to_bytes(hash_size);
         let signature_2 = proof.copy_to_bytes(signature_size);
 
         // Verify signatures
@@ -212,8 +290,8 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let proposal_digest_1 = proposal_digest(view, &header_hash_1, &payload_hash_1);
-            let proposal_digest_2 = proposal_digest(view, &header_hash_2, &payload_hash_2);
+            let proposal_digest_1 = proposal_digest(view, height_1, &parent_1, &payload_1);
+            let proposal_digest_2 = proposal_digest(view, height_2, &parent_2, &payload_2);
             if !C::verify(
                 &self.proposal_namespace,
                 &proposal_digest_1,
