@@ -93,6 +93,7 @@ mod tests {
         participants: BTreeMap<View, (HashSet<PublicKey>, Vec<PublicKey>)>,
 
         prover: Prover<C, H>,
+        // TODO: add proposals/votes/finalizes
         faults: Arc<Mutex<HashMap<PublicKey, HashSet<View>>>>,
     }
 
