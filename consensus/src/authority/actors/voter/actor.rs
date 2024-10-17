@@ -370,6 +370,7 @@ pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> {
     leader_timeout: Duration,
     notarization_timeout: Duration,
     null_vote_retry: Duration,
+    activity_timeout: View,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -421,6 +422,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 null_vote_retry: cfg.null_vote_retry,
+                activity_timeout: cfg.activity_timeout,
 
                 mailbox_receiver,
 
@@ -814,6 +816,16 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         info!(view, "entered view");
     }
 
+    fn interesting(&self, view: View, allow_future: bool) -> bool {
+        if view + self.activity_timeout < self.last_finalized {
+            return false;
+        }
+        if !allow_future && view > self.view + 1 {
+            return false;
+        }
+        true
+    }
+
     fn prune_views(&mut self) {
         loop {
             // Get next key
@@ -823,7 +835,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             };
 
             // Compare to last finalized
-            if next < self.last_finalized {
+            if !self.interesting(next, false) {
                 self.views.remove(&next);
                 debug!(
                     view = next,
@@ -848,13 +860,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
 
     fn vote(&mut self, vote: wire::Vote) {
         // Ensure we are in the right view to process this message
-        if vote.view != self.view && vote.view != self.view + 1 {
-            debug!(
-                vote_view = vote.view,
-                our_view = self.view,
-                reason = "incorrect view",
-                "dropping vote"
-            );
+        if !self.interesting(vote.view, false) {
+            debug!(vote_view = vote.view, our_view = self.view, "dropping vote");
             return;
         }
 
@@ -946,7 +953,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         notarization: wire::Notarization,
     ) {
         // Check if we are still in a view where this notarization could help
-        if notarization.view <= self.last_finalized {
+        if !self.interesting(notarization.view, true) {
             trace!(
                 notarization_view = notarization.view,
                 our_view = self.view,
@@ -1107,7 +1114,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
 
     fn finalize(&mut self, finalize: wire::Finalize) {
         // Ensure we are in the right view to process this message
-        if finalize.view <= self.last_finalized || finalize.view > self.view + 1 {
+        if !self.interesting(finalize.view, false) {
             debug!(
                 finalize_view = finalize.view,
                 our_view = self.view,
@@ -1198,7 +1205,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         finalization: wire::Finalization,
     ) {
         // Check if we are still in a view where this finalization could help
-        if finalization.view <= self.last_finalized {
+        if !self.interesting(finalization.view, true) {
             trace!(
                 finalization_view = finalization.view,
                 our_view = self.view,
