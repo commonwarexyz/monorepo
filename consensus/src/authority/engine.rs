@@ -2,7 +2,7 @@ use super::{
     actors::{resolver, voter},
     config::Config,
 };
-use crate::{Application, Hasher};
+use crate::{Application, Finalizer, Hasher, Supervisor};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -10,7 +10,12 @@ use commonware_runtime::{Clock, Spawner};
 use rand::Rng;
 use tracing::debug;
 
-pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> {
+pub struct Engine<
+    E: Clock + Rng + Spawner,
+    C: Scheme,
+    H: Hasher,
+    A: Application + Supervisor + Finalizer,
+> {
     runtime: E,
 
     resolver: resolver::Actor<E, H, A>,
@@ -20,7 +25,9 @@ pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application
     voter_mailbox: voter::Mailbox,
 }
 
-impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> Engine<E, C, H, A> {
+impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
+    Engine<E, C, H, A>
+{
     pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> Self {
         // Sort the validators at each view
         if cfg.validators.is_empty() {

@@ -7,7 +7,7 @@ use crate::{
         encoder::proposal_digest,
         wire,
     },
-    Application, Context, Hash, Hasher, Height, Payload, View,
+    Application, Context, Finalizer, Hash, Hasher, Height, Payload, Supervisor, View,
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
@@ -30,7 +30,7 @@ enum Knowledge {
     Finalized(Hash),
 }
 
-pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
+pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalizer> {
     runtime: E,
     hasher: H,
     application: A,
@@ -68,7 +68,7 @@ pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
+impl<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalizer> Actor<E, H, A> {
     pub fn new(
         runtime: E,
         hasher: H,

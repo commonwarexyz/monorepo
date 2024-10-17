@@ -6,9 +6,10 @@ use crate::{
             finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
             vote_namespace,
         },
-        wire, Prover,
+        wire, Prover, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE,
+        NULL_AND_FINALIZE, PROPOSAL, VOTE,
     },
-    Application, Hash, Hasher, Height, View,
+    Application, Finalizer, Hash, Hasher, Height, Supervisor, View,
 };
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
@@ -32,7 +33,7 @@ type Notarizable<'a> = Option<(
     &'a HashMap<PublicKey, wire::Vote>,
 )>;
 
-struct Round<C: Scheme, H: Hasher, A: Application> {
+struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     application: A,
     _crypto: PhantomData<C>,
     _hasher: PhantomData<H>,
@@ -70,7 +71,7 @@ struct Round<C: Scheme, H: Hasher, A: Application> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
+impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
     pub fn new(
         application: A,
         leader: PublicKey,
@@ -135,7 +136,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
                 finalize.signature.clone().unwrap(),
                 vote.signature.clone().unwrap(),
             );
-            self.application.report(proof).await;
+            self.application.report(NULL_AND_FINALIZE, proof).await;
             warn!(view = vote.view, signer = hex(public_key), "recorded fault");
             return;
         }
@@ -169,7 +170,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
                 hash.clone(),
                 vote.signature.clone().unwrap(),
             );
-            self.application.report(proof).await;
+            self.application.report(CONFLICTING_VOTE, proof).await;
             warn!(view = vote.view, signer = hex(public_key), "recorded fault");
             return;
         }
@@ -182,7 +183,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
 
         // Report the vote
         let proof = Prover::<C, H>::serialize_vote(vote);
-        self.application.report(proof).await;
+        self.application.report(VOTE, proof).await;
     }
 
     fn notarizable_proposal(&mut self, threshold: u32, force: bool) -> Notarizable {
@@ -257,7 +258,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
                 finalize.signature.clone().unwrap(),
                 null_vote.signature.clone().unwrap(),
             );
-            self.application.report(proof).await;
+            self.application.report(NULL_AND_FINALIZE, proof).await;
             warn!(
                 view = finalize.view,
                 signer = hex(public_key),
@@ -294,7 +295,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
                 finalize.hash.clone(),
                 finalize.signature.clone().unwrap(),
             );
-            self.application.report(proof).await;
+            self.application.report(CONFLICTING_FINALIZE, proof).await;
             warn!(
                 view = finalize.view,
                 signer = hex(public_key),
@@ -311,7 +312,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
 
         // Report the finalize
         let proof = Prover::<C, H>::serialize_finalize(finalize);
-        self.application.report(proof).await;
+        self.application.report(FINALIZE, proof).await;
     }
 
     fn finalizable_proposal(
@@ -356,7 +357,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
     }
 }
 
-pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> {
+pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer> {
     runtime: E,
     crypto: C,
     hasher: H,
@@ -381,7 +382,9 @@ pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> {
     tracked_views: Gauge,
 }
 
-impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
+impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
+    Actor<E, C, H, A>
+{
     pub fn new(runtime: E, crypto: C, hasher: H, application: A, cfg: Config) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
@@ -579,7 +582,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             payload_hash,
             proposal_signature,
         );
-        self.application.report(proof).await;
+        self.application.report(PROPOSAL, proof).await;
         true
     }
 
@@ -701,7 +704,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 payload_hash.clone(),
                 signature_2,
             );
-            self.application.report(proof).await;
+            self.application.report(CONFLICTING_PROPOSAL, proof).await;
             warn!(
                 leader = hex(&expected_leader),
                 view = proposal.view,
@@ -767,7 +770,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             proposal.1.clone(),
             proposal.2.signature.clone().unwrap(),
         );
-        self.application.report(proof).await;
+        self.application.report(PROPOSAL, proof).await;
 
         // Indicate that verification is done
         debug!(view, "verified peer proposal");

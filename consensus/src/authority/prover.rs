@@ -3,10 +3,9 @@ use super::{
         finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
         vote_namespace,
     },
-    wire, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE,
-    NULL_AND_FINALIZE, PROPOSAL, VOTE,
+    wire,
 };
-use crate::{Activity, Hash, Hasher, Height, Proof, View};
+use crate::{Hash, Hasher, Height, Proof, View};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{PublicKey, Scheme};
 use core::panic;
@@ -33,10 +32,6 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         }
     }
 
-    pub fn activity(mut proof: Proof) -> Activity {
-        proof.get_u8()
-    }
-
     pub(crate) fn serialize_proposal(
         view: View,
         height: Height,
@@ -47,11 +42,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Setup proof
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
-        let size = 1 + 8 + 8 + hash_size + hash_size + public_key_size + signature_size;
+        let size = 8 + 8 + hash_size + hash_size + public_key_size + signature_size;
         let mut proof = Vec::with_capacity(size);
 
         // Encode proof
-        proof.put_u8(PROPOSAL);
         proof.put_u64(view);
         proof.put_u64(height);
         proof.put(parent);
@@ -69,15 +63,11 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
-        if proof.len() != 1 + 8 + 8 + hash_size + hash_size + public_key_size + signature_size {
+        if proof.len() != 8 + 8 + hash_size + hash_size + public_key_size + signature_size {
             return None;
         }
 
         // Decode proof
-        let activity_type: Activity = proof.get_u8();
-        if activity_type != PROPOSAL {
-            return None;
-        }
         let view = proof.get_u64();
         let height = proof.get_u64();
         let parent = proof.copy_to_bytes(hash_size);
@@ -108,11 +98,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_vote(vote: wire::Vote) -> Proof {
         // Setup proof
         let (public_key_size, signature_size) = C::size();
-        let size = 1 + 8 + 8 + H::size() + public_key_size + signature_size;
+        let size = 8 + 8 + H::size() + public_key_size + signature_size;
         let mut proof = Vec::with_capacity(size);
 
         // Encode proofs
-        proof.put_u8(VOTE);
         proof.put_u64(vote.view);
         proof.put_u64(vote.height.expect("height not populated"));
         proof.put(vote.hash.expect("hash not populated"));
@@ -130,15 +119,11 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
-        if proof.len() != 1 + 8 + 8 + hash_size + public_key_size + signature_size {
+        if proof.len() != 8 + 8 + hash_size + public_key_size + signature_size {
             return None;
         }
 
         // Decode proof
-        let activity_type: Activity = proof.get_u8();
-        if activity_type != VOTE {
-            return None;
-        }
         let view = proof.get_u64();
         let height = proof.get_u64();
         let hash = proof.copy_to_bytes(hash_size);
@@ -161,11 +146,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_finalize(finalize: wire::Finalize) -> Proof {
         // Setup proof
         let (public_key_size, signature_size) = C::size();
-        let size = 1 + 8 + 8 + H::size() + public_key_size + signature_size;
+        let size = 8 + 8 + H::size() + public_key_size + signature_size;
         let mut proof = Vec::with_capacity(size);
 
         // Encode proof
-        proof.put_u8(FINALIZE);
         proof.put_u64(finalize.view);
         proof.put_u64(finalize.height);
         proof.put(finalize.hash);
@@ -183,15 +167,11 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
-        if proof.len() != 1 + 8 + 8 + hash_size + public_key_size + signature_size {
+        if proof.len() != 8 + 8 + hash_size + public_key_size + signature_size {
             return None;
         }
 
         // Decode proof
-        let activity_type: Activity = proof.get_u8();
-        if activity_type != FINALIZE {
-            return None;
-        }
         let view = proof.get_u64();
         let height = proof.get_u64();
         let hash = proof.copy_to_bytes(hash_size);
@@ -231,8 +211,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Setup proof
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
-        let size = 1
-            + 8
+        let size = 8
             + public_key_size
             + 8
             + hash_size
@@ -251,7 +230,6 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
         // Encode proof
         let mut proof = Vec::with_capacity(size);
-        proof.put_u8(CONFLICTING_PROPOSAL);
         proof.put_u64(view);
         proof.put(public_key);
         proof.put_u64(height_1);
@@ -289,10 +267,6 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         }
 
         // Decode proof
-        let activity_type: Activity = proof.get_u8();
-        if activity_type != CONFLICTING_PROPOSAL {
-            return None;
-        }
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_size);
         let height_1 = proof.get_u64();
@@ -340,15 +314,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Setup proof
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
-        let size = 1
-            + 8
-            + public_key_size
-            + 8
-            + hash_size
-            + signature_size
-            + 8
-            + hash_size
-            + signature_size;
+        let size =
+            8 + public_key_size + 8 + hash_size + signature_size + 8 + hash_size + signature_size;
 
         // Ensure proof can be generated correctly
         if signature_1.public_key != signature_2.public_key {
@@ -358,7 +325,6 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
         // Encode proof
         let mut proof = Vec::with_capacity(size);
-        proof.put_u8(CONFLICTING_VOTE);
         proof.put_u64(view);
         proof.put(public_key);
         proof.put_u64(height_1);
@@ -378,24 +344,13 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
-        let size = 1
-            + 8
-            + public_key_size
-            + 8
-            + hash_size
-            + signature_size
-            + 8
-            + hash_size
-            + signature_size;
+        let size =
+            8 + public_key_size + 8 + hash_size + signature_size + 8 + hash_size + signature_size;
         if proof.len() != size {
             return None;
         }
 
         // Decode proof
-        let activity_type: Activity = proof.get_u8();
-        if activity_type != CONFLICTING_VOTE {
-            return None;
-        }
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_size);
         let height_1 = proof.get_u64();
@@ -441,15 +396,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Setup proof
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
-        let size = 1
-            + 8
-            + public_key_size
-            + 8
-            + hash_size
-            + signature_size
-            + 8
-            + hash_size
-            + signature_size;
+        let size =
+            8 + public_key_size + 8 + hash_size + signature_size + 8 + hash_size + signature_size;
 
         // Ensure proof can be generated correctly
         if signature_1.public_key != signature_2.public_key {
@@ -459,7 +407,6 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
         // Encode proof
         let mut proof = Vec::with_capacity(size);
-        proof.put_u8(CONFLICTING_FINALIZE);
         proof.put_u64(view);
         proof.put(public_key);
         proof.put_u64(height_1);
@@ -478,24 +425,13 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     ) -> Option<(PublicKey, View)> {
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
-        let size = 1
-            + 8
-            + public_key_size
-            + 8
-            + hash_size
-            + signature_size
-            + 8
-            + hash_size
-            + signature_size;
+        let size =
+            8 + public_key_size + 8 + hash_size + signature_size + 8 + hash_size + signature_size;
         if proof.len() != size {
             return None;
         }
 
         // Decode proof
-        let activity_type: Activity = proof.get_u8();
-        if activity_type != CONFLICTING_FINALIZE {
-            return None;
-        }
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_size);
         let height_1 = proof.get_u64();
@@ -538,7 +474,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     ) -> Proof {
         // Setup proof
         let (public_key_size, signature_size) = C::size();
-        let size = 1 + 8 + public_key_size + 8 + H::size() + signature_size + signature_size;
+        let size = 8 + public_key_size + 8 + H::size() + signature_size + signature_size;
 
         // Ensure proof can be generated correctly
         if signature_finalize.public_key != signature_null.public_key {
@@ -548,7 +484,6 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
         // Encode proof
         let mut proof = Vec::with_capacity(size);
-        proof.put_u8(NULL_AND_FINALIZE);
         proof.put_u64(view);
         proof.put(public_key);
         proof.put_u64(height);
@@ -565,16 +500,12 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     ) -> Option<(PublicKey, View)> {
         // Ensure proof is big enough
         let (public_key_size, signature_size) = C::size();
-        let size = 1 + 8 + public_key_size + 8 + H::size() + signature_size + signature_size;
+        let size = 8 + public_key_size + 8 + H::size() + signature_size + signature_size;
         if proof.len() != size {
             return None;
         }
 
         // Decode proof
-        let activity_type: Activity = proof.get_u8();
-        if activity_type != NULL_AND_FINALIZE {
-            return None;
-        }
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_size);
         let height = proof.get_u64();
