@@ -1,4 +1,3 @@
-use super::encoder::Encoder;
 use crate::{Application, Hasher, View};
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};

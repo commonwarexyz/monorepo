@@ -30,10 +30,13 @@
 
 mod actors;
 mod config;
-mod payloads;
+mod encoder;
+mod engine;
+mod prover;
 
-pub mod encoder;
-pub mod engine;
+pub use config::Config;
+pub use engine::Engine;
+pub use prover::Prover;
 
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));

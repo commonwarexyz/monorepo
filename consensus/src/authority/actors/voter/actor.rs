@@ -2,12 +2,11 @@ use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
         actors::{resolver, Proposal},
-        encoder::Encoder,
-        payloads::{
+        encoder::{
             finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
             vote_namespace,
         },
-        wire,
+        wire, Prover,
     },
     Application, Hash, Hasher, Height, View,
 };
@@ -129,7 +128,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
                 .unwrap()
                 .get(public_key)
                 .unwrap();
-            let proof = Encoder::<C, H>::serialize_null_finalize(
+            let proof = Prover::<C, H>::serialize_null_finalize(
                 vote.view,
                 finalize.height,
                 finalize.hash.clone(),
@@ -161,7 +160,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
                 .unwrap()
                 .get(public_key)
                 .unwrap();
-            let proof = Encoder::<C, H>::serialize_conflicting_vote(
+            let proof = Prover::<C, H>::serialize_conflicting_vote(
                 vote.view,
                 previous_vote.height.unwrap(),
                 previous_vote.hash.clone().unwrap(),
@@ -182,7 +181,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
         entry.insert(public_key.clone(), vote.clone());
 
         // Report the vote
-        let proof = Encoder::<C, H>::serialize_vote(vote);
+        let proof = Prover::<C, H>::serialize_vote(vote);
         self.application.report(proof).await;
     }
 
@@ -251,7 +250,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
         let null_vote = self.null_votes.get(public_key);
         if let Some(null_vote) = null_vote {
             // Create fault
-            let proof = Encoder::<C, H>::serialize_null_finalize(
+            let proof = Prover::<C, H>::serialize_null_finalize(
                 finalize.view,
                 finalize.height,
                 finalize.hash.clone(),
@@ -286,7 +285,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
                 .unwrap()
                 .get(public_key)
                 .unwrap();
-            let proof = Encoder::<C, H>::serialize_conflicting_finalize(
+            let proof = Prover::<C, H>::serialize_conflicting_finalize(
                 finalize.view,
                 previous_finalize.height,
                 previous_finalize.hash.clone(),
@@ -311,7 +310,7 @@ impl<C: Scheme, H: Hasher, A: Application> Round<C, H, A> {
         entry.insert(public_key.clone(), finalize.clone());
 
         // Report the finalize
-        let proof = Encoder::<C, H>::serialize_finalize(finalize);
+        let proof = Prover::<C, H>::serialize_finalize(finalize);
         self.application.report(proof).await;
     }
 
@@ -573,7 +572,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         view.leader_deadline = None;
 
         // Report the proposal
-        let proof = Encoder::<C, H>::serialize_proposal(
+        let proof = Prover::<C, H>::serialize_proposal(
             proposal_view,
             proposal_height,
             proposal_parent,
@@ -691,7 +690,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             // Record fault
             let signature_1 = previous.2.signature.clone().unwrap();
             let signature_2 = proposal.signature.clone().unwrap();
-            let proof = Encoder::<C, H>::serialize_conflicting_proposal(
+            let proof = Prover::<C, H>::serialize_conflicting_proposal(
                 proposal.view,
                 previous.2.height,
                 previous.2.parent.clone(),
@@ -761,7 +760,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
 
         // Report the proposal
         let proposal = view_obj.proposal.as_ref().unwrap();
-        let proof = Encoder::<C, H>::serialize_proposal(
+        let proof = Prover::<C, H>::serialize_proposal(
             view,
             proposal.2.height,
             proposal.2.parent.clone(),
