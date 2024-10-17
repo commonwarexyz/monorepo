@@ -161,12 +161,10 @@ mod tests {
                 };
                 let application =
                     Application::new(runtime.clone(), hasher.clone(), application_cfg);
-                let encoder = Encoder::new(hasher.clone(), namespace.clone());
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher,
                     application,
-                    encoder,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -284,12 +282,10 @@ mod tests {
                 };
                 let application =
                     Application::new(runtime.clone(), hasher.clone(), application_cfg);
-                let encoder = Encoder::new(hasher.clone(), namespace.clone());
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher,
                     application,
-                    encoder,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -407,12 +403,10 @@ mod tests {
                 };
                 let application =
                     Application::new(runtime.clone(), hasher.clone(), application_cfg);
-                let encoder = Encoder::new(hasher.clone(), namespace.clone());
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher,
                     application,
-                    encoder,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -493,12 +487,10 @@ mod tests {
                 verify_latency: (10.0, 5.0),
             };
             let application = Application::new(runtime.clone(), hasher.clone(), application_cfg);
-            let encoder = Encoder::new(hasher.clone(), namespace.clone());
             let cfg = config::Config {
                 crypto: scheme,
                 hasher,
                 application,
-                encoder,
                 registry: Arc::new(Mutex::new(Registry::default())),
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),

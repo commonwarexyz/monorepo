@@ -13,7 +13,6 @@ pub struct Config<C: Scheme, H: Hasher, A: Application> {
     pub crypto: C,
     pub hasher: H,
     pub application: A,
-    pub encoder: Encoder<C, H>,
 
     pub registry: Arc<Mutex<Registry>>,
 
