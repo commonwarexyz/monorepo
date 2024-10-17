@@ -1,4 +1,4 @@
-use crate::{Application, Hasher, Height, View};
+use crate::{Application, Hasher, View};
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use prometheus_client::registry::Registry;
@@ -24,9 +24,9 @@ pub struct Config<C: Scheme, H: Hasher, A: Application> {
     pub notarization_timeout: Duration,
     pub null_vote_retry: Duration,
 
-    /// Number of heights behind notarized tip to track
+    /// Number of views behind finalized tip to track
     /// activity derived from validator messages.
-    pub activity_timeout: Height,
+    pub activity_timeout: View,
 
     /// Timeout to wait for a peer to respond to a fetch request.
     pub fetch_timeout: Duration,
