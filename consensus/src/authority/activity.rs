@@ -36,7 +36,11 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         proof.into()
     }
 
-    pub fn deserialize_vote(&self, mut proof: Proof) -> Option<(PublicKey, View, Height, Hash)> {
+    pub fn deserialize_vote(
+        &self,
+        mut proof: Proof,
+        check_sig: bool,
+    ) -> Option<(PublicKey, View, Height, Hash)> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
@@ -56,12 +60,14 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         let signature = proof.copy_to_bytes(signature_size);
 
         // Verify signature
-        if !C::validate(&public_key) {
-            return None;
-        }
-        let vote_digest = vote_digest(view, Some(height), Some(&hash));
-        if !C::verify(&self.vote_namespace, &vote_digest, &public_key, &signature) {
-            return None;
+        if check_sig {
+            if !C::validate(&public_key) {
+                return None;
+            }
+            let vote_digest = vote_digest(view, Some(height), Some(&hash));
+            if !C::verify(&self.vote_namespace, &vote_digest, &public_key, &signature) {
+                return None;
+            }
         }
         Some((public_key, view, height, hash))
     }
@@ -86,6 +92,7 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
     pub fn deserialize_finalize(
         &self,
         mut proof: Proof,
+        check_sig: bool,
     ) -> Option<(PublicKey, View, Height, Hash)> {
         // Ensure proof is big enough
         let hash_size = H::size();
@@ -106,17 +113,19 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         let signature = proof.copy_to_bytes(signature_size);
 
         // Verify signature
-        if !C::validate(&public_key) {
-            return None;
-        }
-        let finalize_digest = finalize_digest(view, height, &hash);
-        if !C::verify(
-            &self.finalize_namespace,
-            &finalize_digest,
-            &public_key,
-            &signature,
-        ) {
-            return None;
+        if check_sig {
+            if !C::validate(&public_key) {
+                return None;
+            }
+            let finalize_digest = finalize_digest(view, height, &hash);
+            if !C::verify(
+                &self.finalize_namespace,
+                &finalize_digest,
+                &public_key,
+                &signature,
+            ) {
+                return None;
+            }
         }
         Some((public_key, view, height, hash))
     }
@@ -163,7 +172,11 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         proof.into()
     }
 
-    pub fn deserialize_conflicting_proposal(&self, mut proof: Proof) -> Option<(PublicKey, View)> {
+    pub fn deserialize_conflicting_proposal(
+        &self,
+        mut proof: Proof,
+        check_sig: bool,
+    ) -> Option<(PublicKey, View)> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
@@ -195,23 +208,25 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         let signature_2 = proof.copy_to_bytes(signature_size);
 
         // Verify signatures
-        if !C::validate(&public_key) {
-            return None;
-        }
-        let proposal_digest_1 = proposal_digest(view, &header_hash_1, &payload_hash_1);
-        let proposal_digest_2 = proposal_digest(view, &header_hash_2, &payload_hash_2);
-        if !C::verify(
-            &self.proposal_namespace,
-            &proposal_digest_1,
-            &public_key,
-            &signature_1,
-        ) || !C::verify(
-            &self.proposal_namespace,
-            &proposal_digest_2,
-            &public_key,
-            &signature_2,
-        ) {
-            return None;
+        if check_sig {
+            if !C::validate(&public_key) {
+                return None;
+            }
+            let proposal_digest_1 = proposal_digest(view, &header_hash_1, &payload_hash_1);
+            let proposal_digest_2 = proposal_digest(view, &header_hash_2, &payload_hash_2);
+            if !C::verify(
+                &self.proposal_namespace,
+                &proposal_digest_1,
+                &public_key,
+                &signature_1,
+            ) || !C::verify(
+                &self.proposal_namespace,
+                &proposal_digest_2,
+                &public_key,
+                &signature_2,
+            ) {
+                return None;
+            }
         }
         Some((public_key, view))
     }
@@ -258,7 +273,11 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         proof.into()
     }
 
-    pub fn deserialize_conflicting_vote(&self, mut proof: Proof) -> Option<(PublicKey, View)> {
+    pub fn deserialize_conflicting_vote(
+        &self,
+        mut proof: Proof,
+        check_sig: bool,
+    ) -> Option<(PublicKey, View)> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
@@ -290,23 +309,25 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         let signature_2 = proof.copy_to_bytes(signature_size);
 
         // Verify signatures
-        if !C::validate(&public_key) {
-            return None;
-        }
-        let vote_digest_1 = vote_digest(view, Some(height_1), Some(&hash_1));
-        let vote_digest_2 = vote_digest(view, Some(height_2), Some(&hash_2));
-        if !C::verify(
-            &self.vote_namespace,
-            &vote_digest_1,
-            &public_key,
-            &signature_1,
-        ) || !C::verify(
-            &self.vote_namespace,
-            &vote_digest_2,
-            &public_key,
-            &signature_2,
-        ) {
-            return None;
+        if check_sig {
+            if !C::validate(&public_key) {
+                return None;
+            }
+            let vote_digest_1 = vote_digest(view, Some(height_1), Some(&hash_1));
+            let vote_digest_2 = vote_digest(view, Some(height_2), Some(&hash_2));
+            if !C::verify(
+                &self.vote_namespace,
+                &vote_digest_1,
+                &public_key,
+                &signature_1,
+            ) || !C::verify(
+                &self.vote_namespace,
+                &vote_digest_2,
+                &public_key,
+                &signature_2,
+            ) {
+                return None;
+            }
         }
         Some((public_key, view))
     }
@@ -353,7 +374,11 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         proof.into()
     }
 
-    pub fn deserialize_conflicting_finalize(&self, mut proof: Proof) -> Option<(PublicKey, View)> {
+    pub fn deserialize_conflicting_finalize(
+        &self,
+        mut proof: Proof,
+        check_sig: bool,
+    ) -> Option<(PublicKey, View)> {
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
         let size = 1
@@ -384,23 +409,25 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         let signature_2 = proof.copy_to_bytes(signature_size);
 
         // Verify signatures
-        if !C::validate(&public_key) {
-            return None;
-        }
-        let finalize_digest_1 = finalize_digest(view, height_1, &hash_1);
-        let finalize_digest_2 = finalize_digest(view, height_2, &hash_2);
-        if !C::verify(
-            &self.finalize_namespace,
-            &finalize_digest_1,
-            &public_key,
-            &signature_1,
-        ) || !C::verify(
-            &self.finalize_namespace,
-            &finalize_digest_2,
-            &public_key,
-            &signature_2,
-        ) {
-            return None;
+        if check_sig {
+            if !C::validate(&public_key) {
+                return None;
+            }
+            let finalize_digest_1 = finalize_digest(view, height_1, &hash_1);
+            let finalize_digest_2 = finalize_digest(view, height_2, &hash_2);
+            if !C::verify(
+                &self.finalize_namespace,
+                &finalize_digest_1,
+                &public_key,
+                &signature_1,
+            ) || !C::verify(
+                &self.finalize_namespace,
+                &finalize_digest_2,
+                &public_key,
+                &signature_2,
+            ) {
+                return None;
+            }
         }
         Some((public_key, view))
     }
