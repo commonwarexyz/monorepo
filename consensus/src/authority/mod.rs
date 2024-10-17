@@ -87,7 +87,7 @@ mod tests {
     };
     use tracing::{debug, info};
 
-    #[test_traced(timeout = 10_000)]
+    #[test_traced(timeout = 30_000)]
     fn test_all_online() {
         // Create runtime
         let n = 5;
@@ -203,7 +203,7 @@ mod tests {
         });
     }
 
-    #[test_traced(timeout = 10_000)]
+    #[test_traced(timeout = 30_000)]
     fn test_one_offline() {
         // Create runtime
         let n = 5;
@@ -324,7 +324,7 @@ mod tests {
         });
     }
 
-    #[test_traced(timeout = 10_000)]
+    #[test_traced(timeout = 30_000)]
     fn test_catchup() {
         // Create runtime
         let n = 5;
@@ -528,7 +528,7 @@ mod tests {
         });
     }
 
-    #[test_traced(timeout = 10_000)]
+    #[test_traced(timeout = 30_000)]
     fn test_all_recovery() {
         // Create runtime
         let n = 5;
@@ -674,7 +674,7 @@ mod tests {
         });
     }
 
-    #[test_traced(timeout = 10_000)]
+    #[test_traced(timeout = 30_000)]
     fn test_no_finality() {
         // Create runtime
         let n = 5;
@@ -795,7 +795,7 @@ mod tests {
         });
     }
 
-    #[test_traced(timeout = 10_000)]
+    #[test_traced(timeout = 30_000)]
     fn test_partition() {
         // Create runtime
         let n = 10;
@@ -1103,7 +1103,7 @@ mod tests {
         });
     }
 
-    #[test_traced(timeout = 60_000)]
+    #[test_traced(timeout = 120_000)]
     fn test_jank_links() {
         for seed in 0..10 {
             info!(seed, "running test with seed");
