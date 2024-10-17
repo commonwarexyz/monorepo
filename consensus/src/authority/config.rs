@@ -1,3 +1,4 @@
+use super::encoder::Encoder;
 use crate::{Application, Hasher, View};
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
@@ -7,8 +8,6 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-
-use super::activity::Encoder;
 
 pub struct Config<C: Scheme, H: Hasher, A: Application> {
     pub crypto: C,

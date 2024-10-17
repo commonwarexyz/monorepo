@@ -32,7 +32,7 @@ mod actors;
 mod config;
 mod payloads;
 
-pub mod activity;
+pub mod encoder;
 pub mod engine;
 
 mod wire {
