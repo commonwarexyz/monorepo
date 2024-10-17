@@ -24,6 +24,10 @@ impl Hasher for Sha256 {
         hasher.update(data);
         hasher.finalize().to_vec().into()
     }
+
+    fn size() -> usize {
+        HASH_LENGTH
+    }
 }
 
 #[cfg(test)]

@@ -29,17 +29,17 @@
 //! * Immediately vote Null if observed no participation for n views or committed a fault.
 
 mod actors;
-pub mod ancestry_map;
 mod config;
 mod encoding;
 
+pub mod activity;
 pub mod engine;
 
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
-use crate::{ContributionType, FaultType};
+use crate::Activity;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -54,13 +54,12 @@ pub enum Error {
     InvalidSignature,
 }
 
-pub const VOTE: ContributionType = 0;
-pub const FINALIZE: ContributionType = 1;
-
-pub const CONFLICTING_PROPOSAL: FaultType = 0;
-pub const CONFLICTING_VOTE: FaultType = 1;
-pub const CONFLICTING_FINALIZE: FaultType = 2;
-pub const NULL_AND_FINALIZE: FaultType = 3;
+pub const VOTE: Activity = 0;
+pub const FINALIZE: Activity = 1;
+pub const CONFLICTING_PROPOSAL: Activity = 2;
+pub const CONFLICTING_VOTE: Activity = 3;
+pub const CONFLICTING_FINALIZE: Activity = 4;
+pub const NULL_AND_FINALIZE: Activity = 5;
 
 #[cfg(test)]
 mod tests {

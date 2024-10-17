@@ -9,7 +9,6 @@ pub mod sha256;
 
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
-use std::collections::HashMap;
 use std::future::Future;
 
 // TODO: add simulated dialect for applications to test their execution environments under (with arbitary orphans, etc.)
@@ -37,6 +36,9 @@ pub trait Hasher: Clone + Send + 'static {
 
     /// Hash the given digest.
     fn hash(&mut self, digest: &[u8]) -> Hash;
+
+    /// Size of the hash in bytes.
+    fn size() -> usize;
 }
 
 type View = u64;
@@ -53,12 +55,11 @@ pub struct Context {
 
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not
 /// interpreting just means all faults would be treated equally).
-type Fault = u16;
-
+///
 /// Various consensus implementations may want to reward participation in different ways. For example,
 /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
 /// both equally may better align incentives with desired behavior.
-type Contribution = u16;
+type Activity = u8;
 
 type Payload = Bytes;
 type Proof = Bytes;
@@ -87,24 +88,13 @@ pub trait Application: Clone + Send + 'static {
 
     /// Report a contribution to the application that can be externally proven.
     ///
-    /// The consensus instance may report a duplicate contribution.
-    fn report_contribution(
-        &mut self,
-        public_key: PublicKey,
-        view: View,
-        block: Hash,
-        contribution: Contribution,
-        proof: Proof,
-    ) -> impl Future<Output = ()> + Send;
-
-    /// Report a fault to the application that can be externally proven.
+    /// To get more information about the contribution, the proof can be decoded.
     ///
-    /// The consensus instance may report a duplicate fault.
-    fn report_fault(
+    /// The consensus instance may report a duplicate contribution.
+    fn report(
         &mut self,
         public_key: PublicKey,
-        view: View,
-        fault: Fault,
+        activity: Activity,
         proof: Proof,
     ) -> impl Future<Output = ()> + Send;
 
