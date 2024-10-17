@@ -86,7 +86,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::{debug, info};
+    use tracing::{debug, field::Field, info};
 
     #[derive(Clone)]
     struct TestSupervisor<C: Scheme, H: Hasher> {
@@ -138,36 +138,50 @@ mod tests {
         }
 
         async fn report(&mut self, activity: Activity, proof: Proof) {
-            // TODO: verify sig for all items
             let mut faults = self.faults.lock().unwrap();
+
+            // We check signatures for all messages to ensure that the prover is working correctly
+            // but in production this isn't necessary (as signatures are already verified in
+            // consensus).
             match activity {
+                PROPOSAL => {
+                    let _ = self.prover.deserialize_proposal(proof, true).unwrap();
+                }
+                VOTE => {
+                    let _ = self.prover.deserialize_vote(proof, true).unwrap();
+                }
+                FINALIZE => {
+                    let _ = self.prover.deserialize_finalize(proof, true).unwrap();
+                }
                 CONFLICTING_PROPOSAL => {
                     let (public_key, view) = self
                         .prover
-                        .deserialize_conflicting_proposal(proof, false)
+                        .deserialize_conflicting_proposal(proof, true)
                         .unwrap();
                     faults.entry(public_key).or_default().insert(view);
                 }
                 CONFLICTING_VOTE => {
                     let (public_key, view) = self
                         .prover
-                        .deserialize_conflicting_vote(proof, false)
+                        .deserialize_conflicting_vote(proof, true)
                         .unwrap();
                     faults.entry(public_key).or_default().insert(view);
                 }
                 CONFLICTING_FINALIZE => {
                     let (public_key, view) = self
                         .prover
-                        .deserialize_conflicting_finalize(proof, false)
+                        .deserialize_conflicting_finalize(proof, true)
                         .unwrap();
                     faults.entry(public_key).or_default().insert(view);
                 }
                 NULL_AND_FINALIZE => {
                     let (public_key, view) =
-                        self.prover.deserialize_null_finalize(proof, false).unwrap();
+                        self.prover.deserialize_null_finalize(proof, true).unwrap();
                     faults.entry(public_key).or_default().insert(view);
                 }
-                _ => {}
+                a => {
+                    panic!("unexpected activity: {}", a);
+                }
             }
         }
     }
