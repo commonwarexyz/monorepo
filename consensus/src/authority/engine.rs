@@ -49,12 +49,14 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> Engine<E, C
             cfg.crypto,
             cfg.hasher,
             cfg.application,
+            cfg.encoder,
             voter::Config {
                 registry: cfg.registry,
                 namespace: cfg.namespace,
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 null_vote_retry: cfg.null_vote_retry,
+                activity_timeout: cfg.activity_timeout,
             },
         );
 
