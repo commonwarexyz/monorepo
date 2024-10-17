@@ -1,9 +1,14 @@
-//! Fixed
+//! Authority
 //!
 //! PoA Consensus useful for running a DKG (round-robin leader selection, update participants with config).
 //!
 //! All decisions made to minimize block time and finalization latency without sacrificing
 //! the ability to attribute uptime and faults.
+//!
+//! # Externalizable Uptime and Faults
+//!
+//! Instead of handling uptime and fault tracking internally, the application is notified of all
+//! activity and can incorportate such information as needed (into the payload or otherwise).
 //!
 //! # Sync
 //!
@@ -21,6 +26,7 @@
 //! * Backfill blocks from notarizing peers rather than passing along with notarization
 //! * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
 //!   more votes)
+//! * Immediately vote Null if observed no participation for n views or committed a fault.
 
 mod actors;
 pub mod ancestry_map;
