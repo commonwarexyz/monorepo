@@ -1,6 +1,7 @@
 use super::{
     encoding::{finalize_digest, proposal_digest, vote_digest},
-    wire, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE, PROPOSAL, VOTE,
+    wire, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE,
+    NULL_AND_FINALIZE, PROPOSAL, VOTE,
 };
 use crate::{Activity, Hash, Hasher, Height, Proof, View};
 use bytes::{Buf, BufMut};
@@ -503,6 +504,83 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
                 &finalize_digest_2,
                 &public_key,
                 &signature_2,
+            ) {
+                return None;
+            }
+        }
+        Some((public_key, view))
+    }
+
+    pub fn serialize_null_finalize(
+        view: View,
+        height: Height,
+        hash: Hash,
+        signature_finalize: wire::Signature,
+        signature_null: wire::Signature,
+    ) -> Proof {
+        // Setup proof
+        let (public_key_size, signature_size) = C::size();
+        let size = 1 + 8 + public_key_size + 8 + H::size() + signature_size + signature_size;
+
+        // Ensure proof can be generated correctly
+        if signature_finalize.public_key != signature_null.public_key {
+            panic!("public keys do not match");
+        }
+        let public_key = signature_finalize.public_key;
+
+        // Encode proof
+        let mut proof = Vec::with_capacity(size);
+        proof.put_u8(NULL_AND_FINALIZE);
+        proof.put_u64(view);
+        proof.put(public_key);
+        proof.put_u64(height);
+        proof.put(hash);
+        proof.put(signature_finalize.signature);
+        proof.put(signature_null.signature);
+        proof.into()
+    }
+
+    pub fn deserialize_null_finalize(
+        &self,
+        mut proof: Proof,
+        check_sig: bool,
+    ) -> Option<(PublicKey, View)> {
+        // Ensure proof is big enough
+        let (public_key_size, signature_size) = C::size();
+        let size = 1 + 8 + public_key_size + 8 + H::size() + signature_size + signature_size;
+        if proof.len() != size {
+            return None;
+        }
+
+        // Decode proof
+        let activity_type: Activity = proof.get_u8();
+        if activity_type != NULL_AND_FINALIZE {
+            return None;
+        }
+        let view = proof.get_u64();
+        let public_key = proof.copy_to_bytes(public_key_size);
+        let height = proof.get_u64();
+        let hash = proof.copy_to_bytes(H::size());
+        let signature_finalize = proof.copy_to_bytes(signature_size);
+        let signature_null = proof.copy_to_bytes(signature_size);
+
+        // Verify signatures
+        if check_sig {
+            if !C::validate(&public_key) {
+                return None;
+            }
+            let finalize_digest = finalize_digest(view, height, &hash);
+            let null_digest = vote_digest(view, None, None);
+            if !C::verify(
+                &self.finalize_namespace,
+                &finalize_digest,
+                &public_key,
+                &signature_finalize,
+            ) || !C::verify(
+                &self.vote_namespace,
+                &null_digest,
+                &public_key,
+                &signature_null,
             ) {
                 return None;
             }
