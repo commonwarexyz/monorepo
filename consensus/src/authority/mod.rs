@@ -71,9 +71,10 @@ mod tests {
     use crate::{
         mocks::application::{Application, Config as ApplicationConfig, Progress},
         sha256::Sha256,
+        Proof, Supervisor, View,
     };
     use bytes::Bytes;
-    use commonware_cryptography::{Ed25519, Scheme};
+    use commonware_cryptography::{Ed25519, PublicKey, Scheme};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
@@ -86,6 +87,52 @@ mod tests {
         time::Duration,
     };
     use tracing::{debug, info};
+
+    #[derive(Clone)]
+    struct TestSupervisor {
+        participants: BTreeMap<View, (HashSet<PublicKey>, Vec<PublicKey>)>,
+    }
+
+    impl TestSupervisor {
+        fn new(participants: BTreeMap<View, Vec<PublicKey>>) -> Self {
+            let mut parsed_participants = BTreeMap::new();
+            for (view, mut validators) in participants.into_iter() {
+                let mut set = HashSet::new();
+                for validator in validators.iter() {
+                    set.insert(validator.clone());
+                }
+                validators.sort();
+                parsed_participants.insert(view, (set.clone(), validators));
+            }
+            Self {
+                participants: parsed_participants,
+            }
+        }
+    }
+
+    impl Supervisor for TestSupervisor {
+        fn participants(&self, view: View) -> Option<&Vec<PublicKey>> {
+            let closest = match self.participants.range(..=view).next_back() {
+                Some((_, p)) => p,
+                None => {
+                    panic!("no participants in required range");
+                }
+            };
+            Some(&closest.1)
+        }
+
+        fn is_participant(&self, view: View, candidate: &PublicKey) -> Option<bool> {
+            let closest = match self.participants.range(..=view).next_back() {
+                Some((_, p)) => p,
+                None => {
+                    panic!("no participants in required range");
+                }
+            };
+            Some(closest.0.contains(candidate))
+        }
+
+        async fn report(&mut self, _activity: Activity, _proof: Proof) {}
+    }
 
     #[test_traced(timeout = 30_000)]
     fn test_all_online() {

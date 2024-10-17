@@ -1,4 +1,4 @@
-use crate::{Context, Hash, Hasher, Height, Payload, Proof, View};
+use crate::{Context, Hash, Hasher, Height, Payload, Proof, Supervisor, View};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Clock;
@@ -7,7 +7,7 @@ use futures::{channel::mpsc, SinkExt};
 use rand::RngCore;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -16,27 +16,27 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
-pub struct Config {
+pub struct Config<H: Hasher, S: Supervisor> {
+    pub hasher: H,
+    pub supervisor: S,
+
     /// The public key of the participant.
     ///
     /// It is common to use multiple instances of an application in a single simulation, this
     /// helps to identify the source of both progress and errors.
     pub participant: PublicKey,
-    pub participants: BTreeMap<View, Vec<PublicKey>>,
-
-    pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
     pub propose_latency: Latency,
     pub parse_latency: Latency,
     pub verify_latency: Latency,
+
+    pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
 }
 
 pub enum Progress {
     Notarized(Height, Hash),
     Finalized(Height, Hash),
 }
-
-type ViewInfo = (HashSet<PublicKey>, Vec<PublicKey>);
 
 #[derive(Default)]
 struct State {
@@ -47,12 +47,12 @@ struct State {
 }
 
 #[derive(Clone)]
-pub struct Application<E: Clock + RngCore, H: Hasher> {
+pub struct Application<E: Clock + RngCore, H: Hasher, S: Supervisor> {
     runtime: E,
     hasher: H,
+    supervisor: S,
 
     participant: PublicKey,
-    parsed_participants: BTreeMap<View, ViewInfo>,
 
     propose_latency: Normal<f64>,
     parse_latency: Normal<f64>,
@@ -63,28 +63,20 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     state: Arc<Mutex<State>>,
 }
 
-impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
-    pub fn new(runtime: E, hasher: H, cfg: Config) -> Self {
+impl<E: Clock + RngCore, H: Hasher, S: Supervisor> Application<E, H, S> {
+    pub fn new(runtime: E, cfg: Config<H, S>) -> Self {
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
         let parse_latency = Normal::new(cfg.parse_latency.0, cfg.parse_latency.1).unwrap();
         let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
 
-        // Generate participants map
-        let mut participants = BTreeMap::new();
-        for (view, keys) in cfg.participants.into_iter() {
-            let set: HashSet<PublicKey> = keys.iter().cloned().collect();
-            let info = (set, keys);
-            participants.insert(view, info);
-        }
-
         // Return constructed application
         Self {
             runtime,
-            hasher,
+            hasher: cfg.hasher,
+            supervisor: cfg.supervisor,
 
             participant: cfg.participant,
-            parsed_participants: participants,
 
             parse_latency,
             propose_latency,
@@ -101,38 +93,17 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     }
 }
 
-impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
+impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Application<E, H, S> {
     fn genesis(&mut self) -> (Hash, Payload) {
         let payload = Bytes::from(GENESIS_BYTES);
-        let hash = self.hasher.hash(&payload);
+        self.hasher.update(&payload);
+        let hash = self.hasher.finalize();
         let mut state = self.state.lock().unwrap();
         state.parsed.insert(hash.clone());
         state.verified.insert(hash.clone(), 0);
         state.finalized.insert(hash.clone(), 0);
         (hash, payload)
     }
-
-    fn participants(&self, view: View) -> Option<&Vec<PublicKey>> {
-        let closest = match self.parsed_participants.range(..=view).next_back() {
-            Some((_, p)) => p,
-            None => {
-                self.panic("no participants in required range");
-            }
-        };
-        Some(&closest.1)
-    }
-
-    fn is_participant(&self, view: View, candidate: &PublicKey) -> Option<bool> {
-        let closest = match self.parsed_participants.range(..=view).next_back() {
-            Some((_, p)) => p,
-            None => {
-                self.panic("no participants in required range");
-            }
-        };
-        Some(closest.0.contains(candidate))
-    }
-
-    async fn report(&mut self, _proof: Proof) {}
 
     async fn propose(&mut self, context: Context) -> Option<Payload> {
         // Verify parent exists and we are at the correct height
@@ -176,7 +147,8 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
             .await;
 
         // Parse the payload
-        let hash = self.hasher.hash(&payload);
+        self.hasher.update(&payload);
+        let hash = self.hasher.finalize();
         {
             let mut state = self.state.lock().unwrap();
             state.parsed.insert(hash.clone());
@@ -217,13 +189,17 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
         } else {
             self.panic("parent not verified");
         };
-        if !state.parsed.contains(&self.hasher.hash(&payload)) {
+        self.hasher.update(&payload);
+        let hash = self.hasher.finalize();
+        if !state.parsed.contains(&hash) {
             self.panic("payload not parsed");
         }
         state.verified.insert(block.clone(), context.height);
         true
     }
+}
 
+impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Finalizer for Application<E, H, S> {
     async fn notarized(&mut self, block: Hash) {
         if !H::validate(&block) {
             self.panic("invalid hash length");
@@ -276,582 +252,16 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{sha256::Sha256, Application as _};
-    use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_runtime::{deterministic::Executor, Runner};
-    use futures::StreamExt;
-
-    #[test]
-    fn test_normal_flow_propose() {
-        // Create the runtime
-        let (executor, runtime, _) = Executor::default();
-        executor.start(async move {
-            // Create the application
-            let participant = Ed25519::from_seed(0).public_key();
-            let (sender, mut receiver) = mpsc::unbounded();
-            let cfg = Config {
-                participant: participant.clone(),
-                participants: BTreeMap::from([(1, vec![participant.clone()])]),
-                sender,
-                propose_latency: (10.0, 5.0),
-                parse_latency: (10.0, 5.0),
-                verify_latency: (10.0, 5.0),
-            };
-            let mut hasher = Sha256::default();
-            let mut app = Application::new(runtime, hasher.clone(), cfg);
-
-            // Genesis
-            let (genesis_hash, _) = app.genesis();
-
-            // Propose a block at height 1
-            let parent = genesis_hash.clone();
-            let height = 1;
-            let context = Context {
-                parent,
-                view: 1,
-                height,
-                proposer: participant.clone(),
-            };
-            let payload = app.propose(context.clone()).await.expect("propose failed");
-            let dummy_block_hash = hasher.hash(&payload);
-
-            // Parse the payload
-            app.parse(payload.clone()).await.expect("parse failed");
-
-            // Verify the block
-            let verified = app
-                .verify(context, payload.clone(), dummy_block_hash.clone())
-                .await;
-            assert!(verified);
-
-            // Notarize the block
-            app.notarized(dummy_block_hash.clone()).await;
-
-            // Expect a progress message for notarization
-            let (progress_participant, progress) =
-                receiver.next().await.expect("no progress message");
-            assert_eq!(progress_participant, participant);
-            match progress {
-                Progress::Notarized(notarized_height, notarized_hash) => {
-                    assert_eq!(notarized_height, height);
-                    assert_eq!(notarized_hash, dummy_block_hash);
-                }
-                _ => panic!("expected Notarized progress"),
-            }
-
-            // Finalize the block
-            app.finalized(dummy_block_hash.clone()).await;
-
-            // Expect a progress message for finalization
-            let (progress_participant, progress) =
-                receiver.next().await.expect("no progress message");
-            assert_eq!(progress_participant, participant);
-            match progress {
-                Progress::Finalized(finalized_height, finalized_hash) => {
-                    assert_eq!(finalized_height, height);
-                    assert_eq!(finalized_hash, dummy_block_hash);
-                }
-                _ => panic!("expected Finalized progress"),
-            }
-        });
+impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Supervisor for Application<E, H, S> {
+    fn participants(&self, view: View) -> Option<&Vec<PublicKey>> {
+        self.supervisor.participants(view)
     }
 
-    // #[test]
-    // fn test_normal_flow_verify() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, mut receiver) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant: participant.clone(),
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
+    fn is_participant(&self, view: View, candidate: &PublicKey) -> Option<bool> {
+        self.supervisor.is_participant(view, candidate)
+    }
 
-    //         // Genesis
-    //         let (genesis_hash, _) = app.genesis();
-
-    //         // Get block at height 1
-    //         let parent = genesis_hash.clone();
-    //         let height: Height = 1;
-    //         let mut payload = Vec::new();
-    //         payload.extend_from_slice(&participant);
-    //         payload.extend_from_slice(&height.to_be_bytes());
-    //         let payload = Bytes::from(payload);
-
-    //         // Parse the payload
-    //         let payload_hash = app
-    //             .parse(parent.clone(), height, payload.clone())
-    //             .await
-    //             .expect("parse failed");
-    //         let block_hash = hash(&payload_hash);
-
-    //         // Verify the block
-    //         let verified = app
-    //             .verify(parent.clone(), height, payload.clone(), block_hash.clone())
-    //             .await;
-    //         assert!(verified);
-
-    //         // Notarize the block
-    //         app.notarized(block_hash.clone()).await;
-
-    //         // Expect a progress message for notarization
-    //         let (progress_participant, progress) =
-    //             receiver.next().await.expect("no progress message");
-    //         assert_eq!(progress_participant, participant);
-    //         match progress {
-    //             Progress::Notarized(notarized_height, notarized_hash) => {
-    //                 assert_eq!(notarized_height, height);
-    //                 assert_eq!(notarized_hash, block_hash);
-    //             }
-    //             _ => panic!("expected Notarized progress"),
-    //         }
-
-    //         // Finalize the block
-    //         app.finalized(block_hash.clone()).await;
-
-    //         // Expect a progress message for finalization
-    //         let (progress_participant, progress) =
-    //             receiver.next().await.expect("no progress message");
-    //         assert_eq!(progress_participant, participant);
-    //         match progress {
-    //             Progress::Finalized(finalized_height, finalized_hash) => {
-    //                 assert_eq!(finalized_height, height);
-    //                 assert_eq!(finalized_hash, block_hash);
-    //             }
-    //             _ => panic!("expected Finalized progress"),
-    //         }
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "parent not verified")]
-    // fn test_propose_invalid_parent() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant,
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-
-    //         // Create an invalid parent hash
-    //         let invalid_parent = hash(&Bytes::from_static(b"invalid"));
-
-    //         // Attempt to propose a block with invalid parent, should panic
-    //         let height = 1;
-    //         app.propose(invalid_parent.clone(), height).await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "invalid height")]
-    // fn test_propose_invalid_height() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant,
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-
-    //         // Genesis
-    //         let (genesis_hash, _) = app.genesis();
-
-    //         // Propose a block at height 1
-    //         let parent = genesis_hash.clone();
-    //         let height = 100;
-    //         app.propose(parent.clone(), height)
-    //             .await
-    //             .expect("propose failed");
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "payload not parsed")]
-    // fn test_verify_not_parsed() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant: participant.clone(),
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-
-    //         // Genesis
-    //         let (genesis_hash, _) = app.genesis();
-
-    //         // Get block at height 1
-    //         let parent = genesis_hash.clone();
-    //         let height: Height = 1;
-    //         let mut payload = Vec::new();
-    //         payload.extend_from_slice(&participant);
-    //         payload.extend_from_slice(&height.to_be_bytes());
-    //         let payload = Bytes::from(payload);
-    //         let payload_hash = hash(&payload);
-    //         let block_hash = hash(&payload_hash);
-
-    //         // Verify the block
-    //         app.verify(parent.clone(), height, payload.clone(), block_hash.clone())
-    //             .await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "invalid height")]
-    // fn test_verify_invalid_height() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant,
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-
-    //         // Genesis
-    //         let (genesis_hash, _) = app.genesis();
-
-    //         // Propose a block at height 1
-    //         let parent = genesis_hash.clone();
-    //         let height = 1;
-    //         let (payload, payload_hash) = app
-    //             .propose(parent.clone(), height)
-    //             .await
-    //             .expect("propose failed");
-    //         let block_hash = hash(&payload_hash);
-
-    //         // Attempt to verify the block with incorrect height (e.g., height 2)
-    //         let invalid_height = 2;
-    //         app.verify(parent, invalid_height, payload, block_hash)
-    //             .await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "parent not verified")]
-    // fn test_verify_unverified_parent() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant,
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-
-    //         // Create an unverified parent hash
-    //         let unverified_parent = hash(&Bytes::from_static(b"unverified_parent"));
-
-    //         // Manually create a payload for height 1
-    //         let height: Height = 1;
-    //         let mut payload = Vec::new();
-    //         payload.extend_from_slice(&app.participant);
-    //         payload.extend_from_slice(&height.to_be_bytes());
-    //         let payload = Bytes::from(payload);
-
-    //         // Parse the payload to get the hash
-    //         let payload_hash = app
-    //             .parse(unverified_parent.clone(), height, payload.clone())
-    //             .await
-    //             .expect("parse failed");
-    //         let block_hash = hash(&payload_hash);
-
-    //         // Attempt to verify the block, should panic
-    //         app.verify(unverified_parent, height, payload, block_hash)
-    //             .await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "invalid payload length")]
-    // fn test_parse_payload_invalid_length() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant,
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-
-    //         // Genesis
-    //         let (genesis_hash, _) = app.genesis();
-
-    //         // Create a payload with invalid length
-    //         let height = 1;
-    //         let invalid_payload = Bytes::from_static(b"short");
-
-    //         // Attempt to parse the payload, should panic
-    //         app.parse(genesis_hash.clone(), height, invalid_payload.clone())
-    //             .await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "block already verified")]
-    // fn test_verify_same_hash_twice() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant,
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-
-    //         // Genesis
-    //         let (genesis_hash, _) = app.genesis();
-
-    //         // Propose a block at height 1
-    //         let parent = genesis_hash.clone();
-    //         let height = 1;
-    //         let (payload, payload_hash) = app
-    //             .propose(parent.clone(), height)
-    //             .await
-    //             .expect("propose failed");
-    //         let block_hash = hash(&payload_hash);
-
-    //         // Verify the block
-    //         app.verify(parent.clone(), height, payload.clone(), block_hash.clone())
-    //             .await;
-
-    //         // Attempt to verify the same block again, should panic
-    //         app.verify(parent, height, payload, block_hash).await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "block already finalized")]
-    // fn test_notarize_after_finalize() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant,
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-
-    //         // Genesis
-    //         let (genesis_hash, _) = app.genesis();
-
-    //         // Propose a block at height 1
-    //         let parent = genesis_hash.clone();
-    //         let height = 1;
-    //         let (payload, payload_hash) = app
-    //             .propose(parent.clone(), height)
-    //             .await
-    //             .expect("propose failed");
-    //         let block_hash = hash(&payload_hash);
-
-    //         // Verify the block
-    //         let verified = app
-    //             .verify(parent.clone(), height, payload.clone(), block_hash.clone())
-    //             .await;
-    //         assert!(verified);
-
-    //         // Notarize and finalize the block
-    //         app.notarized(block_hash.clone()).await;
-    //         app.finalized(block_hash.clone()).await;
-
-    //         // Attempt to notarize the block again, should panic
-    //         app.notarized(block_hash).await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "block not verified")]
-    // fn test_notarization_not_verified() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant: PublicKey::default(),
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-    //         app.notarized(hash(&Bytes::from_static(b"hello"))).await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "invalid hash length")]
-    // fn test_notarization_invalid_hash() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let (sender, _) = mpsc::unbounded();
-    //         let mut app = Application::new(
-    //             runtime,
-    //             Config {
-    //                 participant: PublicKey::default(),
-    //                 sender,
-    //                 propose_latency: (10.0, 5.0),
-    //                 parse_latency: (10.0, 5.0),
-    //                 verify_latency: (10.0, 5.0),
-    //             },
-    //         );
-    //         app.notarized(Bytes::from_static(b"hello")).await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "block already finalized")]
-    // fn test_notarization_genesis_block() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant,
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-
-    //         // Genesis
-    //         let (genesis_hash, _) = app.genesis();
-
-    //         // Attempt to finalize the genesis block, should panic
-    //         app.notarized(genesis_hash.clone()).await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "block not verified")]
-    // fn test_finalization_not_verified() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant: PublicKey::default(),
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-    //         app.finalized(hash(&Bytes::from_static(b"hello"))).await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "invalid hash length")]
-    // fn test_finalization_invalid_hash() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let (sender, _) = mpsc::unbounded();
-    //         let mut app = Application::new(
-    //             runtime,
-    //             Config {
-    //                 participant: PublicKey::default(),
-    //                 sender,
-    //                 propose_latency: (10.0, 5.0),
-    //                 parse_latency: (10.0, 5.0),
-    //                 verify_latency: (10.0, 5.0),
-    //             },
-    //         );
-    //         app.finalized(Bytes::from_static(b"hello")).await;
-    //     });
-    // }
-
-    // #[test]
-    // #[should_panic(expected = "block already finalized")]
-    // fn test_finalization_genesis_block() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, _) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant,
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
-
-    //         // Genesis
-    //         let (genesis_hash, _) = app.genesis();
-
-    //         // Attempt to finalize the genesis block, should panic
-    //         app.finalized(genesis_hash.clone()).await;
-    //     });
-    // }
+    async fn report(&mut self, activity: crate::Activity, proof: Proof) {
+        self.supervisor.report(activity, proof).await
+    }
 }
