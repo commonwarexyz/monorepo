@@ -1,17 +1,20 @@
 use super::{
-    encoding::{finalize_digest, proposal_digest, vote_digest},
+    payloads::{
+        finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
+        vote_namespace,
+    },
     wire, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE,
     NULL_AND_FINALIZE, PROPOSAL, VOTE,
 };
 use crate::{Activity, Hash, Hasher, Height, Proof, View};
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{PublicKey, Scheme};
 use core::panic;
 use std::marker::PhantomData;
 
 #[derive(Clone)]
 pub struct Encoder<C: Scheme, H: Hasher> {
-    crypto: PhantomData<C>,
+    _crypto: PhantomData<C>,
     hasher: H,
 
     proposal_namespace: Vec<u8>,
@@ -20,6 +23,16 @@ pub struct Encoder<C: Scheme, H: Hasher> {
 }
 
 impl<C: Scheme, H: Hasher> Encoder<C, H> {
+    pub fn new(hasher: H, namespace: Bytes) -> Self {
+        Self {
+            _crypto: PhantomData,
+            hasher,
+            proposal_namespace: proposal_namespace(&namespace),
+            vote_namespace: vote_namespace(&namespace),
+            finalize_namespace: finalize_namespace(&namespace),
+        }
+    }
+
     pub fn serialize_proposal(
         view: View,
         height: Height,

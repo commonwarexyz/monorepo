@@ -4,7 +4,7 @@ use super::{Mailbox, Message};
 use crate::{
     authority::{
         actors::{voter, Proposal},
-        encoding::proposal_digest,
+        payloads::proposal_digest,
         wire,
     },
     Application, Context, Hash, Hasher, Height, Payload, View,

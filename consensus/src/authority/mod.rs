@@ -30,7 +30,7 @@
 
 mod actors;
 mod config;
-mod encoding;
+mod payloads;
 
 pub mod activity;
 pub mod engine;

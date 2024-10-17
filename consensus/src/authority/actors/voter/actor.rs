@@ -3,7 +3,7 @@ use crate::{
     authority::{
         activity::Encoder,
         actors::{resolver, Proposal},
-        encoding::{
+        payloads::{
             finalize_digest, proposal_digest, vote_digest, FINALIZE_SUFFIX, PROPOSAL_SUFFIX,
             VOTE_SUFFIX,
         },
