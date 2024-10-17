@@ -74,6 +74,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
+    use encoder::Encoder;
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use prometheus_client::registry::Registry;
@@ -89,6 +90,7 @@ mod tests {
         // Create runtime
         let n = 5;
         let required_blocks = 100;
+        let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
@@ -159,16 +161,19 @@ mod tests {
                 };
                 let application =
                     Application::new(runtime.clone(), hasher.clone(), application_cfg);
+                let encoder = Encoder::new(hasher.clone(), namespace.clone());
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher,
                     application,
+                    encoder,
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    namespace: Bytes::from("consensus"),
+                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     null_vote_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),
@@ -203,6 +208,7 @@ mod tests {
         // Create runtime
         let n = 5;
         let required_blocks = 100;
+        let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
@@ -278,16 +284,19 @@ mod tests {
                 };
                 let application =
                     Application::new(runtime.clone(), hasher.clone(), application_cfg);
+                let encoder = Encoder::new(hasher.clone(), namespace.clone());
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher,
                     application,
+                    encoder,
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    namespace: Bytes::from("consensus"),
+                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     null_vote_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),
@@ -322,6 +331,7 @@ mod tests {
         // Create runtime
         let n = 5;
         let required_blocks = 100;
+        let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
@@ -397,16 +407,19 @@ mod tests {
                 };
                 let application =
                     Application::new(runtime.clone(), hasher.clone(), application_cfg);
+                let encoder = Encoder::new(hasher.clone(), namespace.clone());
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher,
                     application,
+                    encoder,
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    namespace: Bytes::from("consensus"),
+                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     null_vote_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
                     max_fetch_count: 32,
                     max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),
@@ -480,16 +493,19 @@ mod tests {
                 verify_latency: (10.0, 5.0),
             };
             let application = Application::new(runtime.clone(), hasher.clone(), application_cfg);
+            let encoder = Encoder::new(hasher.clone(), namespace.clone());
             let cfg = config::Config {
                 crypto: scheme,
                 hasher,
                 application,
+                encoder,
                 registry: Arc::new(Mutex::new(Registry::default())),
-                namespace: Bytes::from("consensus"),
+                namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 null_vote_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
+                activity_timeout: 10,
                 max_fetch_count: 32,
                 max_fetch_size: 1024 * 512,
                 validators: view_validators.clone(),
@@ -523,6 +539,7 @@ mod tests {
         // Create runtime
         let n = 5;
         let required_blocks = 100;
+        let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
@@ -593,16 +610,19 @@ mod tests {
                 };
                 let application =
                     Application::new(runtime.clone(), hasher.clone(), application_cfg);
+                let encoder = Encoder::new(hasher.clone(), namespace.clone());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     hasher,
                     application,
+                    encoder,
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    namespace: Bytes::from("consensus"),
+                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     null_vote_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),
@@ -667,6 +687,7 @@ mod tests {
         // Create runtime
         let n = 5;
         let required_blocks = 100;
+        let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
@@ -737,16 +758,19 @@ mod tests {
                 };
                 let application =
                     Application::new(runtime.clone(), hasher.clone(), application_cfg);
+                let encoder = Encoder::new(hasher.clone(), namespace.clone());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     hasher,
                     application,
+                    encoder,
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    namespace: Bytes::from("consensus"),
+                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(1),
                     null_vote_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),
@@ -786,6 +810,7 @@ mod tests {
         // Create runtime
         let n = 10;
         let required_blocks = 25;
+        let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Create simulated network
@@ -856,16 +881,19 @@ mod tests {
                 };
                 let application =
                     Application::new(runtime.clone(), hasher.clone(), application_cfg);
+                let encoder = Encoder::new(hasher.clone(), namespace.clone());
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     hasher,
                     application,
+                    encoder,
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    namespace: Bytes::from("consensus"),
+                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     null_vote_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),
@@ -976,6 +1004,7 @@ mod tests {
         // Create runtime
         let n = 10;
         let required_blocks = 20;
+        let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::seeded(seed);
         executor.start(async move {
             // Create simulated network
@@ -1046,16 +1075,19 @@ mod tests {
                 };
                 let application =
                     Application::new(runtime.clone(), hasher.clone(), application_cfg);
+                let encoder = Encoder::new(hasher.clone(), namespace.clone());
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher,
                     application,
+                    encoder,
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    namespace: Bytes::from("consensus"),
+                    namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     null_vote_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),

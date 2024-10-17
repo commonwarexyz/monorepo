@@ -1,4 +1,4 @@
-use crate::{Activity, Context, Hash, Hasher, Height, Payload, View};
+use crate::{Context, Hash, Hasher, Height, Payload, Proof, View};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::Clock;
@@ -132,7 +132,9 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
         Some(closest.0.contains(candidate))
     }
 
-    async fn propose(&mut self, context: Context, _activity: Activity) -> Option<Payload> {
+    async fn report(&mut self, _proof: Proof) {}
+
+    async fn propose(&mut self, context: Context) -> Option<Payload> {
         // Verify parent exists and we are at the correct height
         if !H::validate(&context.parent) {
             self.panic("invalid parent hash length");
@@ -182,13 +184,7 @@ impl<E: Clock + RngCore, H: Hasher> crate::Application for Application<E, H> {
         Some(hash)
     }
 
-    async fn verify(
-        &mut self,
-        context: Context,
-        _activity: Activity,
-        payload: Payload,
-        block: Hash,
-    ) -> bool {
+    async fn verify(&mut self, context: Context, payload: Payload, block: Hash) -> bool {
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
         self.runtime
@@ -317,16 +313,9 @@ mod tests {
                 parent,
                 view: 1,
                 height,
-            };
-            let activity = Activity {
                 proposer: participant.clone(),
-                contributions: HashMap::new(),
-                faults: HashMap::new(),
             };
-            let payload = app
-                .propose(context.clone(), activity.clone())
-                .await
-                .expect("propose failed");
+            let payload = app.propose(context.clone()).await.expect("propose failed");
             let dummy_block_hash = hasher.hash(&payload);
 
             // Parse the payload
@@ -334,7 +323,7 @@ mod tests {
 
             // Verify the block
             let verified = app
-                .verify(context, activity, payload.clone(), dummy_block_hash.clone())
+                .verify(context, payload.clone(), dummy_block_hash.clone())
                 .await;
             assert!(verified);
 

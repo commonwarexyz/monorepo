@@ -33,6 +33,10 @@ impl<C: Scheme, H: Hasher> Encoder<C, H> {
         }
     }
 
+    pub fn activity(mut proof: Proof) -> Activity {
+        proof.get_u8()
+    }
+
     pub fn serialize_proposal(
         view: View,
         height: Height,
