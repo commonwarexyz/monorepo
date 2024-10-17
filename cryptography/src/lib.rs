@@ -71,6 +71,9 @@ pub trait Scheme: Send + Sync + Clone + 'static {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool;
+
+    /// Returns the size of a public key and signature in bytes.
+    fn size() -> (usize, usize);
 }
 
 #[cfg(test)]

@@ -111,4 +111,8 @@ impl Scheme for Ed25519 {
         let payload = union(namespace, message);
         public_key.verify(&signature, &payload).is_ok()
     }
+
+    fn size() -> (usize, usize) {
+        (PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH)
+    }
 }

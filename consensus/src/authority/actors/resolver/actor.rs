@@ -4,10 +4,10 @@ use super::{Mailbox, Message};
 use crate::{
     authority::{
         actors::{voter, Proposal},
-        encoding::{header_digest, proposal_digest},
+        encoder::proposal_digest,
         wire,
     },
-    Activity, Application, Context, Hash, Hasher, Height, Payload, View,
+    Application, Context, Finalizer, Hash, Hasher, Height, Payload, Supervisor, View,
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
@@ -30,7 +30,7 @@ enum Knowledge {
     Finalized(Hash),
 }
 
-pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
+pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalizer> {
     runtime: E,
     hasher: H,
     application: A,
@@ -68,7 +68,7 @@ pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application> {
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
+impl<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalizer> Actor<E, H, A> {
     pub fn new(
         runtime: E,
         hasher: H,
@@ -347,14 +347,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
             view,
             parent: parent.0.clone(),
             height: parent.1 + 1,
-        };
-        let activity = Activity {
             proposer,
-            contributions: HashMap::new(),
-            faults: HashMap::new(),
         };
         let height = parent.1 + 1;
-        let payload = match self.application.propose(context, activity).await {
+        let payload = match self.application.propose(context).await {
             Some(payload) => payload,
             None => {
                 return None;
@@ -463,28 +459,25 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
             view: proposal.view,
             parent: proposal.parent.clone(),
             height: proposal.height,
+            proposer: proposal.signature.clone().unwrap().public_key.clone(),
         };
-        let activity = Activity {
-            proposer: proposal.signature.unwrap().public_key.clone(),
-            contributions: HashMap::new(),
-            faults: HashMap::new(),
-        };
-        if self
+        if !self
             .application
-            .verify(context, activity, proposal.payload.clone(), hash.clone())
+            .verify(context, proposal.payload.clone(), hash.clone())
             .await
         {
-            debug!(
-                height = proposal.height,
-                hash = hex(&hash),
-                "verified proposal"
-            );
-            // Record verification
-            let entry = self.verified.entry(proposal.height).or_default();
-            entry.insert(hash);
-            return true;
+            return false;
         }
-        false
+
+        // Record verification
+        debug!(
+            height = proposal.height,
+            hash = hex(&hash),
+            "verified proposal"
+        );
+        let entry = self.verified.entry(proposal.height).or_default();
+        entry.insert(hash);
+        true
     }
 
     pub async fn notarized(&mut self, proposal: Proposal) {
@@ -929,16 +922,14 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application> Actor<E, H, A> {
                                         break;
                                     }
                                 };
-                                let header_hash = self.hasher.hash(&header_digest(
+                                let proposal_digest = proposal_digest(
+                                    proposal.view,
                                     proposal.height,
                                     &proposal.parent,
-                                ));
-                                let proposal_digest = proposal_digest(
-                                    proposal.height,
-                                    &header_hash,
                                     &payload_hash,
                                 );
-                                let proposal_hash = self.hasher.hash(&proposal_digest);
+                                self.hasher.update(&proposal_digest);
+                                let proposal_hash = self.hasher.finalize();
 
                                 // Ensure this is the block we want
                                 if let Some((height, ref hash)) = next {
