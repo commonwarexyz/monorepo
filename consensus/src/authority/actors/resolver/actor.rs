@@ -260,7 +260,17 @@ impl<
             // Send event
             match knowledge {
                 Knowledge::Notarized(hashes) => {
-                    trace!(height = next, "notified application notarization");
+                    // Only send notarization if greater than our latest knowledge
+                    // of the finalizaed tip
+                    if self.last_finalized >= next {
+                        trace!(
+                            height = next,
+                            last_finalized = self.last_finalized,
+                            "skipping notarization notification because behind finalization"
+                        );
+                        return;
+                    }
+
                     // Send fulfilled unsent notarizations
                     for (_, hash) in hashes {
                         let already_notified = self
@@ -290,9 +300,10 @@ impl<
                             .insert(hash.clone());
                         self.application.notarized(hash.clone()).await;
                     }
+                    trace!(height = next, "notified application notarization");
                 }
                 Knowledge::Finalized(hash) => {
-                    trace!(height = next, "notified application finalization");
+                    // Send finalized proposal
                     let proposal = match self.blocks.get(&hash) {
                         Some(proposal) => proposal,
                         None => {
@@ -316,6 +327,7 @@ impl<
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
                     self.application.finalized(hash.clone()).await;
+                    trace!(height = next, "notified application finalization");
                 }
             }
 
@@ -553,7 +565,7 @@ impl<
     }
 
     fn backfill_finalization(&mut self, height: Height, mut block: Hash) {
-        debug!(height, hash = hex(&block), "backfilling finalizations");
+        trace!(height, hash = hex(&block), "backfilling finalizations");
         let mut next = height;
         loop {
             let previous = self.knowledge.get_mut(&next);
@@ -580,6 +592,12 @@ impl<
                         block = parent.parent.clone();
                     } else {
                         // If we don't know the parent, we can't finalize any ancestors
+                        trace!(
+                            next = height - 1,
+                            hash = hex(&block),
+                            reason = "missing parent",
+                            "exiting backfill"
+                        );
                         break;
                     }
                 }
@@ -602,6 +620,12 @@ impl<
                     if let Some(parent) = self.blocks.get(&block) {
                         block = parent.parent.clone();
                     } else {
+                        trace!(
+                            next = height - 1,
+                            hash = hex(&block),
+                            reason = "missing parent",
+                            "exiting backfill"
+                        );
                         break;
                     }
                 }

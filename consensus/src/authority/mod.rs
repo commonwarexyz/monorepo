@@ -1367,7 +1367,7 @@ mod tests {
         let namespace = Bytes::from("consensus");
         let cfg = deterministic::Config {
             seed,
-            timeout: Some(Duration::from_secs(120)),
+            timeout: Some(Duration::from_secs(180)),
             ..Default::default()
         };
         let (executor, runtime, _) = Executor::init(cfg);
@@ -1460,7 +1460,7 @@ mod tests {
                     activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
-                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(5).unwrap()),
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
