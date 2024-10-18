@@ -252,8 +252,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
-        let size = 1
-            + 8
+        let size = 8
             + public_key_size
             + 8
             + hash_size

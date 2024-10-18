@@ -1633,8 +1633,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
                             // Broadcast the proposal
                             let msg = wire::Consensus {
                                 payload: Some(wire::consensus::Payload::Proposal(proposal.clone())),
-                            };
-                            let msg = msg.encode_to_vec();
+                            }.encode_to_vec();
                             sender
                                 .send(Recipients::All, msg.into(), true)
                                 .await

@@ -29,6 +29,7 @@ pub struct Config<H: Hasher, S: Supervisor> {
     pub propose_latency: Latency,
     pub parse_latency: Latency,
     pub verify_latency: Latency,
+    pub allow_invalid_payload: bool,
 
     pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
 }
@@ -57,6 +58,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher, S: Supervisor> {
     propose_latency: Normal<f64>,
     parse_latency: Normal<f64>,
     verify_latency: Normal<f64>,
+    allow_invalid_payload: bool,
 
     progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
@@ -81,6 +83,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> Application<E, H, S> {
             parse_latency,
             propose_latency,
             verify_latency,
+            allow_invalid_payload: cfg.allow_invalid_payload,
 
             progress: cfg.sender,
 
@@ -136,7 +139,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
 
     async fn parse(&mut self, payload: Payload) -> Option<Hash> {
         // Verify the payload is well-formed
-        if payload.len() != 40 {
+        if !self.allow_invalid_payload && payload.len() != 40 {
             self.panic("invalid payload length");
         }
 
@@ -172,9 +175,14 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
         }
 
         // Verify the payload
-        let parsed_height = Height::from_be_bytes(payload[32..].try_into().unwrap());
-        if parsed_height != context.height {
-            self.panic("invalid height");
+        if !self.allow_invalid_payload {
+            if payload.len() != 40 {
+                self.panic("invalid payload length");
+            }
+            let parsed_height = Height::from_be_bytes(payload[32..].try_into().unwrap());
+            if parsed_height != context.height {
+                self.panic("invalid height");
+            }
         }
 
         // Ensure not duplicate check
@@ -315,6 +323,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -392,6 +401,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -473,6 +483,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -510,6 +521,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -546,6 +558,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -593,6 +606,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -644,6 +658,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -692,6 +707,37 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
+            };
+            let mut app = Application::new(runtime, cfg);
+
+            // Genesis
+            let _ = app.genesis();
+
+            // Attempt to parse the payload, should panic
+            app.parse(Bytes::from_static(b"short")).await;
+        });
+    }
+
+    #[test]
+    fn test_parse_payload_invalid_length_allowed() {
+        // Create the runtime
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create the application
+            let participant = Ed25519::from_seed(0).public_key();
+            let hasher = Sha256::default();
+            let supervisor = NoReportSupervisor::new(vec![participant.clone()]);
+            let (sender, _) = mpsc::unbounded();
+            let cfg = Config {
+                hasher,
+                supervisor,
+                participant: participant.clone(),
+                sender,
+                propose_latency: (10.0, 5.0),
+                parse_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+                allow_invalid_payload: true,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -722,6 +768,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -771,6 +818,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -826,6 +874,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -854,6 +903,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -881,6 +931,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -911,6 +962,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -939,6 +991,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 
@@ -966,6 +1019,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let mut app = Application::new(runtime, cfg);
 

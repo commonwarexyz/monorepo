@@ -337,6 +337,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    allow_invalid_payload: false,
                 };
                 let application = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
@@ -542,6 +543,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    allow_invalid_payload: false,
                 };
                 let application = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
@@ -711,6 +713,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    allow_invalid_payload: false,
                 };
                 let application = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
@@ -801,6 +804,7 @@ mod tests {
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
                 verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
             };
             let application = Application::new(runtime.clone(), application_cfg);
             let cfg = config::Config {
@@ -928,6 +932,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    allow_invalid_payload: false,
                 };
                 let application = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
@@ -1086,6 +1091,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    allow_invalid_payload: false,
                 };
                 let application = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
@@ -1219,6 +1225,7 @@ mod tests {
                     propose_latency: (10.0, 5.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
+                    allow_invalid_payload: false,
                 };
                 let application = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
@@ -1428,6 +1435,7 @@ mod tests {
                     propose_latency: (50.0, 10.0),
                     parse_latency: (10.0, 5.0),
                     verify_latency: (25.0, 5.0),
+                    allow_invalid_payload: false,
                 };
                 let application = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
@@ -1579,6 +1587,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         parse_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        allow_invalid_payload: true,
                     };
                     let application = Application::new(runtime.clone(), application_cfg);
                     let cfg = config::Config {
@@ -1634,6 +1643,7 @@ mod tests {
                     for (_, faults) in faulter.iter() {
                         for fault in faults.iter() {
                             match *fault {
+                                CONFLICTING_PROPOSAL => {}
                                 CONFLICTING_VOTE => {}
                                 CONFLICTING_FINALIZE => {}
                                 _ => panic!("unexpected fault: {:?}", fault),
@@ -1784,6 +1794,7 @@ mod tests {
                         propose_latency: (10.0, 5.0),
                         parse_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
+                        allow_invalid_payload: false,
                     };
                     let application = Application::new(runtime.clone(), application_cfg);
                     let cfg = config::Config {

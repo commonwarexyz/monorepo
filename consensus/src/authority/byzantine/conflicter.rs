@@ -1,6 +1,9 @@
 use crate::{
     authority::{
-        encoder::{finalize_digest, finalize_namespace, vote_digest, vote_namespace},
+        encoder::{
+            finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
+            vote_namespace,
+        },
         wire,
     },
     Hash, Hasher,
@@ -23,8 +26,9 @@ pub struct Config<C: Scheme, H: Hasher> {
 pub struct Conflicter<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> {
     runtime: E,
     crypto: C,
-    _hasher: H,
+    hasher: H,
 
+    proposal_namespace: Vec<u8>,
     vote_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 }
@@ -34,8 +38,9 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C, H> {
         Self {
             runtime,
             crypto: cfg.crypto,
-            _hasher: cfg.hasher,
+            hasher: cfg.hasher,
 
+            proposal_namespace: proposal_namespace(&cfg.namespace),
             vote_namespace: vote_namespace(&cfg.namespace),
             finalize_namespace: finalize_namespace(&cfg.namespace),
         }
@@ -74,15 +79,12 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C, H> {
             // Process message
             match payload {
                 wire::consensus::Payload::Vote(vote) => {
-                    // Skip null votes
-                    let height = match vote.height {
-                        Some(height) => height,
-                        None => continue,
-                    };
-                    let hash = match vote.hash {
-                        Some(hash) => hash,
-                        None => continue,
-                    };
+                    // If null vote, skip
+                    if vote.height.is_none() || vote.hash.is_none() {
+                        continue;
+                    }
+                    let height = vote.height.unwrap();
+                    let hash = vote.hash.unwrap();
 
                     // Vote for received hash
                     let vo = wire::Vote {
@@ -174,6 +176,40 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C, H> {
                         .send(Recipients::All, msg.into(), true)
                         .await
                         .unwrap();
+
+                    // Send conflicting proposals for next height and view
+                    let view = finalize.view + 1;
+                    let height = finalize.height + 1;
+                    let parent = finalize.hash;
+                    for _ in 0..2 {
+                        // Generate random payload
+                        let payload = self.random_hash();
+                        self.hasher.update(&payload);
+                        let payload_hash = self.hasher.finalize();
+
+                        // Construct proposal
+                        let proposal_digest = proposal_digest(view, height, &parent, &payload_hash);
+                        let proposal = wire::Proposal {
+                            view,
+                            height,
+                            parent: parent.clone(),
+                            payload,
+                            signature: Some(wire::Signature {
+                                public_key: self.crypto.public_key(),
+                                signature: self
+                                    .crypto
+                                    .sign(&self.proposal_namespace, &proposal_digest),
+                            }),
+                        };
+                        let msg = wire::Consensus {
+                            payload: Some(wire::consensus::Payload::Proposal(proposal)),
+                        }
+                        .encode_to_vec();
+                        sender
+                            .send(Recipients::All, msg.into(), true)
+                            .await
+                            .unwrap();
+                    }
                 }
                 _ => continue,
             }
