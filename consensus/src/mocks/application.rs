@@ -374,78 +374,85 @@ mod tests {
         });
     }
 
-    // #[test]
-    // fn test_normal_flow_verify() {
-    //     // Create the runtime
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create the application
-    //         let participant = Ed25519::from_seed(0).public_key();
-    //         let (sender, mut receiver) = mpsc::unbounded();
-    //         let cfg = Config {
-    //             participant: participant.clone(),
-    //             sender,
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let mut app = Application::new(runtime, cfg);
+    #[test]
+    fn test_normal_flow_verify() {
+        // Create the runtime
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create the application
+            let participant = Ed25519::from_seed(0).public_key();
+            let mut hasher = Sha256::default();
+            let supervisor = NoReportSupervisor::new(vec![participant.clone()]);
+            let (sender, mut receiver) = mpsc::unbounded();
+            let cfg = Config {
+                hasher: hasher.clone(),
+                supervisor,
+                participant: participant.clone(),
+                sender,
+                propose_latency: (10.0, 5.0),
+                parse_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let mut app = Application::new(runtime, cfg);
 
-    //         // Genesis
-    //         let (genesis_hash, _) = app.genesis();
+            // Genesis
+            let (genesis_hash, _) = app.genesis();
 
-    //         // Get block at height 1
-    //         let parent = genesis_hash.clone();
-    //         let height: Height = 1;
-    //         let mut payload = Vec::new();
-    //         payload.extend_from_slice(&participant);
-    //         payload.extend_from_slice(&height.to_be_bytes());
-    //         let payload = Bytes::from(payload);
+            // Get block at height 1
+            let height = 1;
+            let context = Context {
+                parent: genesis_hash.clone(),
+                height,
+                view: 1,
+                proposer: participant.clone(),
+            };
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&context.proposer);
+            payload.extend_from_slice(&context.height.to_be_bytes());
+            let payload = Bytes::from(payload);
 
-    //         // Parse the payload
-    //         let payload_hash = app
-    //             .parse(parent.clone(), height, payload.clone())
-    //             .await
-    //             .expect("parse failed");
-    //         let block_hash = hash(&payload_hash);
+            // Parse the payload
+            let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
+            hasher.update(&payload_hash);
+            let block_hash = hasher.finalize();
 
-    //         // Verify the block
-    //         let verified = app
-    //             .verify(parent.clone(), height, payload.clone(), block_hash.clone())
-    //             .await;
-    //         assert!(verified);
+            // Verify the block
+            let verified = app
+                .verify(context, payload.clone(), block_hash.clone())
+                .await;
+            assert!(verified);
 
-    //         // Notarize the block
-    //         app.notarized(block_hash.clone()).await;
+            // Notarize the block
+            app.notarized(block_hash.clone()).await;
 
-    //         // Expect a progress message for notarization
-    //         let (progress_participant, progress) =
-    //             receiver.next().await.expect("no progress message");
-    //         assert_eq!(progress_participant, participant);
-    //         match progress {
-    //             Progress::Notarized(notarized_height, notarized_hash) => {
-    //                 assert_eq!(notarized_height, height);
-    //                 assert_eq!(notarized_hash, block_hash);
-    //             }
-    //             _ => panic!("expected Notarized progress"),
-    //         }
+            // Expect a progress message for notarization
+            let (progress_participant, progress) =
+                receiver.next().await.expect("no progress message");
+            assert_eq!(progress_participant, participant);
+            match progress {
+                Progress::Notarized(notarized_height, notarized_hash) => {
+                    assert_eq!(notarized_height, height);
+                    assert_eq!(notarized_hash, block_hash);
+                }
+                _ => panic!("expected Notarized progress"),
+            }
 
-    //         // Finalize the block
-    //         app.finalized(block_hash.clone()).await;
+            // Finalize the block
+            app.finalized(block_hash.clone()).await;
 
-    //         // Expect a progress message for finalization
-    //         let (progress_participant, progress) =
-    //             receiver.next().await.expect("no progress message");
-    //         assert_eq!(progress_participant, participant);
-    //         match progress {
-    //             Progress::Finalized(finalized_height, finalized_hash) => {
-    //                 assert_eq!(finalized_height, height);
-    //                 assert_eq!(finalized_hash, block_hash);
-    //             }
-    //             _ => panic!("expected Finalized progress"),
-    //         }
-    //     });
-    // }
+            // Expect a progress message for finalization
+            let (progress_participant, progress) =
+                receiver.next().await.expect("no progress message");
+            assert_eq!(progress_participant, participant);
+            match progress {
+                Progress::Finalized(finalized_height, finalized_hash) => {
+                    assert_eq!(finalized_height, height);
+                    assert_eq!(finalized_hash, block_hash);
+                }
+                _ => panic!("expected Finalized progress"),
+            }
+        });
+    }
 
     // #[test]
     // #[should_panic(expected = "parent not verified")]
