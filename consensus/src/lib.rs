@@ -134,8 +134,8 @@ pub trait Finalizer: Clone + Send + 'static {
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
+    fn notarized(&mut self, view: View, block: Hash) -> impl Future<Output = ()> + Send;
 
     /// Event that the payload has been finalized.
-    fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
+    fn finalized(&mut self, view: View, block: Hash) -> impl Future<Output = ()> + Send;
 }

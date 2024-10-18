@@ -6,10 +6,11 @@ use commonware_consensus::{
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::UNIX_EPOCH;
 use tracing::debug;
-use tracing_subscriber::field::debug;
+
+const SYNCHRONY_BOUND: u128 = 250;
 
 #[derive(Clone)]
 pub struct Application<E: Clock, C: Scheme, H: Hasher> {
@@ -20,7 +21,9 @@ pub struct Application<E: Clock, C: Scheme, H: Hasher> {
     validators_set: HashSet<PublicKey>,
     prover: Prover<C, H>,
 
-    last: u128,
+    best: Option<(View, Hash)>,
+    tracking: HashMap<Hash, u128>,
+    tracking_index: BTreeMap<View, Hash>,
 }
 
 impl<E: Clock, C: Scheme, H: Hasher> Application<E, C, H> {
@@ -34,7 +37,9 @@ impl<E: Clock, C: Scheme, H: Hasher> Application<E, C, H> {
             validators_set,
             prover: Prover::new(hasher, namespace),
 
-            last: 0,
+            best: None,
+            tracking: HashMap::new(),
+            tracking_index: BTreeMap::new(),
         }
     }
 }
@@ -58,10 +63,14 @@ impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Appli
             .as_millis();
 
         // Ensure equal or greater than last
-        let current_time = if current_time >= self.last {
+        let last = match &self.best {
+            Some((_, hash)) => *self.tracking.get(hash).unwrap(),
+            None => 0,
+        };
+        let current_time = if current_time >= last {
             current_time
         } else {
-            self.last
+            last
         };
         Some(current_time.to_be_bytes().to_vec().into())
     }
@@ -77,8 +86,32 @@ impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Appli
         Some(self.hasher.finalize())
     }
 
-    async fn verify(&mut self, _context: Context, _payload: Payload, _block: Hash) -> bool {
-        unimplemented!()
+    async fn verify(&mut self, context: Context, payload: Payload, block: Hash) -> bool {
+        // Check validity
+        let payload = payload.to_vec().try_into();
+        let candidate = match payload {
+            Ok(time) => u128::from_be_bytes(time),
+            Err(_) => return false,
+        };
+        let parent = match self.tracking.get(&context.parent) {
+            Some(parent) => *parent,
+            None => return false,
+        };
+        let current_time = self
+            .runtime
+            .current()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let valid = candidate >= parent && candidate <= current_time + SYNCHRONY_BOUND;
+        if !valid {
+            return false;
+        }
+
+        // Store result
+        self.tracking.insert(block.clone(), candidate);
+        self.tracking_index.insert(context.view, block);
+        true
     }
 }
 
@@ -132,11 +165,21 @@ impl<E: Clock, C: Scheme, H: Hasher> Supervisor for Application<E, C, H> {
 }
 
 impl<E: Clock, C: Scheme, H: Hasher> Finalizer for Application<E, C, H> {
-    async fn notarized(&mut self, _block: Hash) {
-        unimplemented!()
+    async fn notarized(&mut self, view: View, block: Hash) {
+        if let Some((best_view, _)) = self.best {
+            if view <= best_view {
+                return;
+            }
+        }
+        self.best = Some((view, block));
     }
 
-    async fn finalized(&mut self, _block: Hash) {
-        unimplemented!()
+    async fn finalized(&mut self, view: View, block: Hash) {
+        if let Some((best_view, _)) = self.best {
+            if view <= best_view {
+                return;
+            }
+        }
+        self.best = Some((view, block));
     }
 }

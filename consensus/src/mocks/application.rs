@@ -45,6 +45,9 @@ struct State {
     verified: HashMap<Hash, Height>,
     last_finalized: u64,
     finalized: HashMap<Hash, Height>,
+
+    notarized_views: HashSet<View>,
+    finalized_views: HashSet<View>,
 }
 
 #[derive(Clone)]
@@ -208,14 +211,17 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
 }
 
 impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Finalizer for Application<E, H, S> {
-    async fn notarized(&mut self, block: Hash) {
+    async fn notarized(&mut self, view: View, block: Hash) {
         if !H::validate(&block) {
             self.panic("invalid hash length");
         }
         let height = {
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
             if state.finalized.contains_key(&block) {
                 self.panic("block already finalized");
+            }
+            if !state.notarized_views.insert(view) {
+                self.panic("view already notarized");
             }
             if let Some(height) = state.verified.get(&block) {
                 *height
@@ -229,7 +235,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Finalizer for Applicat
             .await;
     }
 
-    async fn finalized(&mut self, block: Hash) {
+    async fn finalized(&mut self, view: View, block: Hash) {
         if !H::validate(&block) {
             self.panic("invalid hash length");
         }
@@ -237,6 +243,9 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Finalizer for Applicat
             let mut state = self.state.lock().unwrap();
             if state.finalized.contains_key(&block) {
                 self.panic("block already finalized");
+            }
+            if !state.finalized_views.insert(view) {
+                self.panic("view already finalized");
             }
             let height = match state.verified.get(&block) {
                 Some(height) => *height,
@@ -332,10 +341,11 @@ mod tests {
 
             // Propose a block at height 1
             let height = 1;
+            let view = 1;
             let context = Context {
                 parent: genesis_hash.clone(),
                 height,
-                view: 1,
+                view,
                 proposer: participant.clone(),
             };
             let payload = app.propose(context.clone()).await.expect("propose failed");
@@ -352,7 +362,7 @@ mod tests {
             assert!(verified);
 
             // Notarize the block
-            app.notarized(block_hash.clone()).await;
+            app.notarized(view, block_hash.clone()).await;
 
             // Expect a progress message for notarization
             let (progress_participant, progress) =
@@ -367,7 +377,7 @@ mod tests {
             }
 
             // Finalize the block
-            app.finalized(block_hash.clone()).await;
+            app.finalized(view, block_hash.clone()).await;
 
             // Expect a progress message for finalization
             let (progress_participant, progress) =
@@ -409,6 +419,7 @@ mod tests {
             let (genesis_hash, _) = app.genesis();
 
             // Get block at height 1
+            let view = 1;
             let height = 1;
             let context = Context {
                 parent: genesis_hash.clone(),
@@ -433,7 +444,7 @@ mod tests {
             assert!(verified);
 
             // Notarize the block
-            app.notarized(block_hash.clone()).await;
+            app.notarized(view, block_hash.clone()).await;
 
             // Expect a progress message for notarization
             let (progress_participant, progress) =
@@ -448,7 +459,7 @@ mod tests {
             }
 
             // Finalize the block
-            app.finalized(block_hash.clone()).await;
+            app.finalized(view, block_hash.clone()).await;
 
             // Expect a progress message for finalization
             let (progress_participant, progress) =
@@ -826,11 +837,12 @@ mod tests {
             let (genesis_hash, _) = app.genesis();
 
             // Propose a block at height 1
+            let view = 1;
             let height = 1;
             let context = Context {
                 parent: genesis_hash.clone(),
                 height,
-                view: 1,
+                view,
                 proposer: participant.clone(),
             };
             let payload = app.propose(context.clone()).await.expect("propose failed");
@@ -847,11 +859,11 @@ mod tests {
             assert!(verified);
 
             // Notarize and finalize the block
-            app.notarized(block_hash.clone()).await;
-            app.finalized(block_hash.clone()).await;
+            app.notarized(view, block_hash.clone()).await;
+            app.finalized(view, block_hash.clone()).await;
 
             // Attempt to notarize the block again, should panic
-            app.notarized(block_hash).await;
+            app.notarized(view, block_hash).await;
         });
     }
 
@@ -880,7 +892,7 @@ mod tests {
 
             // Attempt to notarize an unverified block, should panic
             hasher.update(&Bytes::from_static(b"hello"));
-            app.notarized(hasher.finalize()).await;
+            app.notarized(1, hasher.finalize()).await;
         });
     }
 
@@ -908,7 +920,7 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Attempt to notarize a block with invalid hash length, should panic
-            app.notarized(Bytes::from_static(b"hello")).await;
+            app.notarized(1, Bytes::from_static(b"hello")).await;
         });
     }
 
@@ -939,7 +951,7 @@ mod tests {
             let (genesis_hash, _) = app.genesis();
 
             // Attempt to notarize the genesis block, should panic
-            app.notarized(genesis_hash.clone()).await;
+            app.notarized(1, genesis_hash.clone()).await;
         });
     }
 
@@ -968,7 +980,7 @@ mod tests {
 
             // Attempt to finalize an unverified block, should panic
             hasher.update(&Bytes::from_static(b"hello"));
-            app.finalized(hasher.finalize()).await;
+            app.finalized(1, hasher.finalize()).await;
         });
     }
 
@@ -996,7 +1008,7 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Attempt to finalize a block with invalid hash length, should panic
-            app.finalized(Bytes::from_static(b"hello")).await;
+            app.finalized(1, Bytes::from_static(b"hello")).await;
         });
     }
 
@@ -1027,7 +1039,7 @@ mod tests {
             let (genesis_hash, _) = app.genesis();
 
             // Attempt to finalize the genesis block, should panic
-            app.finalized(genesis_hash.clone()).await;
+            app.finalized(1, genesis_hash.clone()).await;
         });
     }
 }

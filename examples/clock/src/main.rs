@@ -2,18 +2,19 @@
 
 mod application;
 
+use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::{
     authority::{Config, Engine},
     sha256::Sha256,
 };
-use commonware_cryptography::{bls12381::dkg::utils::max_reveals, Ed25519, Scheme};
+use commonware_cryptography::{Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
-    tokio::{self, Executor},
+    tokio::{self, Context, Executor},
     Runner, Spawner,
 };
-use commonware_utils::{hex, quorum};
+use commonware_utils::hex;
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
@@ -25,7 +26,6 @@ use std::{
     num::NonZeroU32,
 };
 use std::{str::FromStr, time::Duration};
-use tracing::info;
 
 fn main() {
     // Initialize runtime
@@ -145,9 +145,14 @@ fn main() {
         validators_map.insert(0, validators.clone());
 
         // Start validator
+        let namespace: Bytes = "clock".into();
         let hasher = Sha256::default();
-        let application =
-            application::Application::new(runtime.clone(), hasher.clone(), validators);
+        let application = application::Application::<Context, Ed25519, Sha256>::new(
+            runtime.clone(),
+            hasher.clone(),
+            namespace.clone(),
+            validators,
+        );
         let engine = Engine::new(
             runtime.clone(),
             Config {
@@ -155,7 +160,7 @@ fn main() {
                 hasher,
                 application,
                 registry: Arc::new(Mutex::new(Registry::default())),
-                namespace: "clock".into(),
+                namespace,
                 leader_timeout: Duration::from_secs(10),
                 notarization_timeout: Duration::from_secs(10),
                 null_vote_retry: Duration::from_secs(10),
