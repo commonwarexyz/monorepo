@@ -385,7 +385,7 @@ pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervis
 impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
     Actor<E, C, H, A>
 {
-    pub fn new(runtime: E, crypto: C, hasher: H, application: A, cfg: Config) -> (Self, Mailbox) {
+    pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -405,9 +405,9 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         (
             Self {
                 runtime,
-                crypto,
-                hasher,
-                application,
+                crypto: cfg.crypto,
+                hasher: cfg.hasher,
+                application: cfg.application,
 
                 proposal_namespace: proposal_namespace(&cfg.namespace),
                 vote_namespace: vote_namespace(&cfg.namespace),

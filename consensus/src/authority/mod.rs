@@ -435,209 +435,227 @@ mod tests {
     //     });
     // }
 
-    // #[test_traced(timeout = 30_000)]
-    // fn test_catchup() {
-    //     // Create runtime
-    //     let n = 5;
-    //     let required_blocks = 100;
-    //     let namespace = Bytes::from("consensus");
-    //     let (executor, runtime, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create simulated network
-    //         let (network, mut oracle) = Network::new(
-    //             runtime.clone(),
-    //             Config {
-    //                 registry: Arc::new(Mutex::new(Registry::default())),
-    //             },
-    //         );
+    #[test_traced(timeout = 30_000)]
+    fn test_catchup() {
+        // Create runtime
+        let n = 5;
+        let required_blocks = 100;
+        let namespace = Bytes::from("consensus");
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                },
+            );
 
-    //         // Start network
-    //         runtime.spawn("network", network.run());
+            // Start network
+            runtime.spawn("network", network.run());
 
-    //         // Register participants
-    //         let mut schemes = Vec::new();
-    //         let mut validators = Vec::new();
-    //         for i in 0..n {
-    //             let scheme = Ed25519::from_seed(i as u64);
-    //             let pk = scheme.public_key();
-    //             schemes.push(scheme);
-    //             validators.push(pk);
-    //         }
-    //         validators.sort();
-    //         let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
-    //         // Create engines
-    //         let (done_sender, mut done_receiver) = mpsc::unbounded();
-    //         for (idx, scheme) in schemes.into_iter().enumerate() {
-    //             // Skip first peer
-    //             if idx == 0 {
-    //                 continue;
-    //             }
+            // Create engines
+            let mut supervisors = Vec::new();
+            let (done_sender, mut done_receiver) = mpsc::unbounded();
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Skip first peer
+                if idx == 0 {
+                    continue;
+                }
 
-    //             // Register on network
-    //             let validator = scheme.public_key();
-    //             let (block_sender, block_receiver) = oracle
-    //                 .register(validator.clone(), 0, 1024 * 1024)
-    //                 .await
-    //                 .unwrap();
-    //             let (vote_sender, vote_receiver) = oracle
-    //                 .register(validator.clone(), 1, 1024 * 1024)
-    //                 .await
-    //                 .unwrap();
+                // Register on network
+                let validator = scheme.public_key();
+                let (block_sender, block_receiver) = oracle
+                    .register(validator.clone(), 0, 1024 * 1024)
+                    .await
+                    .unwrap();
+                let (vote_sender, vote_receiver) = oracle
+                    .register(validator.clone(), 1, 1024 * 1024)
+                    .await
+                    .unwrap();
 
-    //             // Link to all other validators
-    //             for other in validators.iter() {
-    //                 if other == &validator {
-    //                     continue;
-    //                 }
-    //                 oracle
-    //                     .add_link(
-    //                         validator.clone(),
-    //                         other.clone(),
-    //                         Link {
-    //                             latency: 10.0,
-    //                             jitter: 2.5,
-    //                             success_rate: 1.0,
-    //                         },
-    //                     )
-    //                     .await
-    //                     .unwrap();
-    //             }
+                // Link to all other validators
+                for other in validators.iter() {
+                    if other == &validator {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 2.5,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
 
-    //             // Start engine
-    //             let hasher = Sha256::default();
-    //             let application_cfg = ApplicationConfig {
-    //                 participant: validator,
-    //                 participants: view_validators.clone(),
-    //                 sender: done_sender.clone(),
-    //                 propose_latency: (10.0, 5.0),
-    //                 parse_latency: (10.0, 5.0),
-    //                 verify_latency: (10.0, 5.0),
-    //             };
-    //             let application =
-    //                 Application::new(runtime.clone(), hasher.clone(), application_cfg);
-    //             let cfg = config::Config {
-    //                 crypto: scheme,
-    //                 hasher,
-    //                 application,
-    //                 registry: Arc::new(Mutex::new(Registry::default())),
-    //                 namespace: namespace.clone(),
-    //                 leader_timeout: Duration::from_secs(1),
-    //                 notarization_timeout: Duration::from_secs(2),
-    //                 null_vote_retry: Duration::from_secs(10),
-    //                 fetch_timeout: Duration::from_secs(1),
-    //                 activity_timeout: 10,
-    //                 max_fetch_count: 32,
-    //                 max_fetch_size: 1024 * 512,
-    //                 validators: view_validators.clone(),
-    //             };
-    //             let engine = Engine::new(runtime.clone(), cfg);
-    //             runtime.spawn("engine", async move {
-    //                 engine
-    //                     .run((block_sender, block_receiver), (vote_sender, vote_receiver))
-    //                     .await;
-    //             });
-    //         }
+                // Start engine
+                let hasher = Sha256::default();
+                let supervisor = TestSupervisor::<Ed25519, Sha256>::new(
+                    Prover::new(hasher.clone(), namespace.clone()),
+                    view_validators.clone(),
+                );
+                supervisors.push(supervisor.clone());
+                let application_cfg = ApplicationConfig {
+                    hasher: hasher.clone(),
+                    supervisor,
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                };
+                let application = Application::new(runtime.clone(), application_cfg);
+                let cfg = config::Config {
+                    crypto: scheme,
+                    hasher,
+                    application,
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    null_vote_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
+                    max_fetch_count: 32,
+                    max_fetch_size: 1024 * 512,
+                    validators: view_validators.clone(),
+                };
+                let engine = Engine::new(runtime.clone(), cfg);
+                runtime.spawn("engine", async move {
+                    engine
+                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .await;
+                });
+            }
 
-    //         // Wait for all online engines to finish
-    //         let mut completed = HashSet::new();
-    //         let mut highest_finalized = 0;
-    //         loop {
-    //             let (validator, event) = done_receiver.next().await.unwrap();
-    //             if let Progress::Finalized(height, _) = event {
-    //                 if height > highest_finalized {
-    //                     highest_finalized = height;
-    //                 }
-    //                 if height < required_blocks {
-    //                     continue;
-    //                 }
-    //                 completed.insert(validator);
-    //             }
-    //             if completed.len() == n - 1 {
-    //                 break;
-    //             }
-    //         }
+            // Wait for all online engines to finish
+            let mut completed = HashSet::new();
+            let mut highest_finalized = 0;
+            loop {
+                let (validator, event) = done_receiver.next().await.unwrap();
+                if let Progress::Finalized(height, _) = event {
+                    if height > highest_finalized {
+                        highest_finalized = height;
+                    }
+                    if height < required_blocks {
+                        continue;
+                    }
+                    completed.insert(validator);
+                }
+                if completed.len() == n - 1 {
+                    break;
+                }
+            }
 
-    //         // Start engine for first peer
-    //         let scheme = Ed25519::from_seed(0);
-    //         let validator = scheme.public_key();
-    //         let (block_sender, block_receiver) = oracle
-    //             .register(validator.clone(), 0, 1024 * 1024)
-    //             .await
-    //             .unwrap();
-    //         let (vote_sender, vote_receiver) = oracle
-    //             .register(validator.clone(), 1, 1024 * 1024)
-    //             .await
-    //             .unwrap();
+            // Start engine for first peer
+            let scheme = Ed25519::from_seed(0);
+            let validator = scheme.public_key();
+            let (block_sender, block_receiver) = oracle
+                .register(validator.clone(), 0, 1024 * 1024)
+                .await
+                .unwrap();
+            let (vote_sender, vote_receiver) = oracle
+                .register(validator.clone(), 1, 1024 * 1024)
+                .await
+                .unwrap();
 
-    //         // Link to all other validators
-    //         for other in validators.iter() {
-    //             if other == &validator {
-    //                 continue;
-    //             }
-    //             oracle
-    //                 .add_link(
-    //                     validator.clone(),
-    //                     other.clone(),
-    //                     Link {
-    //                         latency: 10.0,
-    //                         jitter: 2.5,
-    //                         success_rate: 1.0,
-    //                     },
-    //                 )
-    //                 .await
-    //                 .unwrap();
-    //         }
+            // Link to all other validators
+            for other in validators.iter() {
+                if other == &validator {
+                    continue;
+                }
+                oracle
+                    .add_link(
+                        validator.clone(),
+                        other.clone(),
+                        Link {
+                            latency: 10.0,
+                            jitter: 2.5,
+                            success_rate: 1.0,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
 
-    //         // Start engine
-    //         let hasher = Sha256::default();
-    //         let application_cfg = ApplicationConfig {
-    //             participant: validator,
-    //             participants: view_validators.clone(),
-    //             sender: done_sender.clone(),
-    //             propose_latency: (10.0, 5.0),
-    //             parse_latency: (10.0, 5.0),
-    //             verify_latency: (10.0, 5.0),
-    //         };
-    //         let application = Application::new(runtime.clone(), hasher.clone(), application_cfg);
-    //         let cfg = config::Config {
-    //             crypto: scheme,
-    //             hasher,
-    //             application,
-    //             registry: Arc::new(Mutex::new(Registry::default())),
-    //             namespace: namespace.clone(),
-    //             leader_timeout: Duration::from_secs(1),
-    //             notarization_timeout: Duration::from_secs(2),
-    //             null_vote_retry: Duration::from_secs(10),
-    //             fetch_timeout: Duration::from_secs(1),
-    //             activity_timeout: 10,
-    //             max_fetch_count: 32,
-    //             max_fetch_size: 1024 * 512,
-    //             validators: view_validators.clone(),
-    //         };
-    //         let engine = Engine::new(runtime.clone(), cfg);
-    //         runtime.spawn("engine", async move {
-    //             engine
-    //                 .run((block_sender, block_receiver), (vote_sender, vote_receiver))
-    //                 .await;
-    //         });
+            // Start engine
+            let hasher = Sha256::default();
+            let supervisor = TestSupervisor::<Ed25519, Sha256>::new(
+                Prover::new(hasher.clone(), namespace.clone()),
+                view_validators.clone(),
+            );
+            supervisors.push(supervisor.clone());
+            let application_cfg = ApplicationConfig {
+                hasher: hasher.clone(),
+                supervisor,
+                participant: validator,
+                sender: done_sender.clone(),
+                propose_latency: (10.0, 5.0),
+                parse_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let application = Application::new(runtime.clone(), application_cfg);
+            let cfg = config::Config {
+                crypto: scheme,
+                hasher,
+                application,
+                registry: Arc::new(Mutex::new(Registry::default())),
+                namespace: namespace.clone(),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                null_vote_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout: 10,
+                max_fetch_count: 32,
+                max_fetch_size: 1024 * 512,
+                validators: view_validators.clone(),
+            };
+            let engine = Engine::new(runtime.clone(), cfg);
+            runtime.spawn("engine", async move {
+                engine
+                    .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                    .await;
+            });
 
-    //         // Wait for new engine to finish
-    //         loop {
-    //             let (validator, event) = done_receiver.next().await.unwrap();
-    //             if validator != validator {
-    //                 continue;
-    //             }
-    //             if let Progress::Finalized(height, _) = event {
-    //                 if height < highest_finalized + required_blocks {
-    //                     // We want to see `required_blocks` once we catch up
-    //                     continue;
-    //                 }
-    //                 return;
-    //             }
-    //         }
-    //     });
-    // }
+            // Wait for new engine to finish
+            loop {
+                let (validator, event) = done_receiver.next().await.unwrap();
+                if validator != validator {
+                    continue;
+                }
+                if let Progress::Finalized(height, _) = event {
+                    if height < highest_finalized + required_blocks {
+                        // We want to see `required_blocks` once we catch up
+                        continue;
+                    }
+                    break;
+                }
+            }
+
+            // Ensure no faults
+            for supervisor in supervisors.iter() {
+                let faults = supervisor.faults.lock().unwrap();
+                assert!(faults.is_empty());
+            }
+        });
+    }
 
     // #[test_traced(timeout = 30_000)]
     // fn test_all_recovery() {

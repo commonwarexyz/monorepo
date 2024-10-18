@@ -1,15 +1,16 @@
 //! Resolve actions requested by consensus.
 
-use super::{Mailbox, Message};
+use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
         actors::{voter, Proposal},
-        encoder::proposal_digest,
+        encoder::{proposal_digest, proposal_namespace},
         wire,
     },
     Application, Context, Finalizer, Hash, Hasher, Height, Payload, Supervisor, View,
 };
-use commonware_cryptography::PublicKey;
+use bytes::Bytes;
+use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
@@ -30,10 +31,18 @@ enum Knowledge {
     Finalized(Hash),
 }
 
-pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalizer> {
+pub struct Actor<
+    E: Clock + Rng + Spawner,
+    C: Scheme,
+    H: Hasher,
+    A: Application + Supervisor + Finalizer,
+> {
     runtime: E,
+    crypto: C,
     hasher: H,
     application: A,
+
+    proposal_namespace: Vec<u8>,
 
     fetch_timeout: Duration,
     max_fetch_count: u64,
@@ -68,20 +77,15 @@ pub struct Actor<E: Clock + Rng + Spawner, H: Hasher, A: Application + Superviso
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalizer> Actor<E, H, A> {
-    pub fn new(
-        runtime: E,
-        hasher: H,
-        mut application: A,
-        fetch_timeout: Duration,
-        max_fetch_count: u64,
-        max_fetch_size: usize,
-    ) -> (Self, Mailbox) {
+impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
+    Actor<E, C, H, A>
+{
+    pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> (Self, Mailbox) {
         // Create genesis block and store it
         let mut verified = HashMap::new();
         let mut knowledge = HashMap::new();
         let mut blocks = HashMap::new();
-        let genesis = application.genesis();
+        let genesis = cfg.application.genesis();
         verified.insert(0, HashSet::from([genesis.0.clone()]));
         knowledge.insert(0, Knowledge::Finalized(genesis.0.clone()));
 
@@ -102,12 +106,15 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalize
         (
             Self {
                 runtime,
-                hasher,
-                application,
+                crypto: cfg.crypto,
+                hasher: cfg.hasher,
+                application: cfg.application,
 
-                fetch_timeout,
-                max_fetch_count,
-                max_fetch_size,
+                proposal_namespace: proposal_namespace(&cfg.namespace),
+
+                fetch_timeout: cfg.fetch_timeout,
+                max_fetch_count: cfg.max_fetch_count,
+                max_fetch_size: cfg.max_fetch_size,
 
                 mailbox_receiver,
 
@@ -129,6 +136,15 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalize
             },
             Mailbox::new(mailbox_sender),
         )
+    }
+
+    // TODO: remove duplicatred code
+    fn leader(&self, view: View) -> Option<PublicKey> {
+        let validators = match self.application.participants(view) {
+            Some(validators) => validators,
+            None => return None,
+        };
+        Some(validators[view as usize % validators.len()].clone())
     }
 
     async fn register_missing(&mut self, height: Height, hash: Hash) {
@@ -651,12 +667,6 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalize
         hash: Hash,
         sender: &mut impl Sender,
     ) -> PublicKey {
-        // Get validators from highest view we know about
-        let validators = self.application.participants(self.last_notarized).unwrap();
-
-        // Select random validator to fetch from
-        let validator = validators.choose(&mut self.runtime).unwrap().clone();
-
         // Compute missing blocks from hash
         let mut parents = 0;
         loop {
@@ -687,29 +697,72 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalize
         }
 
         // Send the request
-        debug!(
-            height,
-            hash = hex(&hash),
-            peer = hex(&validator),
-            parents,
-            last_notarized = self.last_notarized,
-            "requesting missing proposal"
-        );
-        let msg = wire::Backfill {
+        let msg: Bytes = wire::Backfill {
             payload: Some(wire::backfill::Payload::Request(wire::Request {
-                hash,
+                hash: hash.clone(),
                 parents,
             })),
         }
         .encode_to_vec()
         .into();
 
-        // Send message
-        sender
-            .send(Recipients::One(validator.clone()), msg, true)
-            .await
-            .unwrap();
-        validator
+        // Get validators from highest view we know about
+        let validators = self.application.participants(self.last_notarized).unwrap();
+
+        // Generate a shuffle
+        let mut validator_indices = (0..validators.len()).collect::<Vec<_>>();
+        validator_indices.shuffle(&mut self.runtime);
+
+        // Loop until we send a message
+        let mut index = 0;
+        loop {
+            // Check if we have exhausted all validators
+            if index == validators.len() {
+                warn!(
+                    height,
+                    last_notarized = self.last_notarized,
+                    "failed to send request to any validator"
+                );
+
+                // Avoid busy looping when disconnected
+                self.runtime.sleep(self.fetch_timeout).await;
+                index = 0;
+            }
+
+            // Select random validator to fetch from
+            let validator = validators[validator_indices[index]].clone();
+            if validator == self.crypto.public_key() {
+                index += 1;
+                continue;
+            }
+
+            // Send message
+            if !sender
+                .send(Recipients::One(validator.clone()), msg.clone(), true)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                debug!(
+                    height,
+                    hash = hex(&hash),
+                    peer = hex(&validator),
+                    parents,
+                    last_notarized = self.last_notarized,
+                    "requested missing proposal"
+                );
+                return validator;
+            }
+
+            // Try again
+            debug!(
+                height,
+                hash = hex(&hash),
+                peer = hex(&validator),
+                "failed to send backfill request"
+            );
+            index += 1;
+        }
     }
 
     pub async fn run(
@@ -911,6 +964,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalize
                             // Parse proposals
                             let mut next = None;
                             for proposal in resolution.proposals {
+                                // Ensure this is the block we want
                                 if !H::validate(&proposal.parent) {
                                     warn!(sender = hex(&s), "invalid proposal parent hash size");
                                     break;
@@ -930,14 +984,57 @@ impl<E: Clock + Rng + Spawner, H: Hasher, A: Application + Supervisor + Finalize
                                 );
                                 self.hasher.update(&proposal_digest);
                                 let proposal_hash = self.hasher.finalize();
-
-                                // Ensure this is the block we want
                                 if let Some((height, ref hash)) = next {
                                     if proposal.height != height || proposal_hash != hash {
                                         warn!(sender = hex(&s), "received invalid batch proposal");
                                         break;
                                     }
                                 }
+
+                                // Verify leader signature
+                                //
+                                // TODO: remove duplicate code shared with voter
+                                let signature = match &proposal.signature {
+                                    Some(signature) => signature,
+                                    None => {
+                                        warn!(sender = hex(&s), "missing proposal signature");
+                                        break;
+                                    }
+                                };
+                                if !C::validate(&signature.public_key) {
+                                    warn!(sender = hex(&s), "invalid proposal public key");
+                                    break;
+                                }
+                                let expected_leader = match self.leader(proposal.view) {
+                                    Some(leader) => leader,
+                                    None => {
+                                        debug!(
+                                            proposal_leader = hex(&signature.public_key),
+                                            reason = "unable to compute leader",
+                                            "dropping proposal"
+                                        );
+                                        break;
+                                    }
+                                };
+                                if expected_leader != signature.public_key {
+                                    debug!(
+                                        proposal_leader = hex(&signature.public_key),
+                                        view_leader = hex(&expected_leader),
+                                        reason = "leader mismatch",
+                                        "dropping proposal"
+                                    );
+                                    break;
+                                }
+                                if !C::verify(
+                                    &self.proposal_namespace,
+                                    &proposal_digest,
+                                    &signature.public_key,
+                                    &signature.signature,
+                                ) {
+                                    warn!(sender = hex(&s), "invalid proposal signature");
+                                    break;
+                                }
+
 
                                 // Record the proposal
                                 let height = proposal.height;
