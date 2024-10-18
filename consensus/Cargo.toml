@@ -24,6 +24,7 @@ futures = { workspace = true }
 tracing = { workspace = true } 
 prost = { workspace = true }
 prometheus-client = { workspace = true } 
+sha2 = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true } 

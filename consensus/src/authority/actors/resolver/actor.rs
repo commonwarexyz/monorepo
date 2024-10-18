@@ -1,15 +1,20 @@
-//! Backfill missing proposals seen in consensus.
+//! Resolve actions requested by consensus.
 
-use super::voter::VoterMailbox;
+use super::{Config, Mailbox, Message};
 use crate::{
-    fixed::{encoding::proposal_digest, wire},
-    Hash, Height, Parser, Payload, Processor, View, HASH_LENGTH,
+    authority::{
+        actors::{voter, Proposal},
+        encoder::{proposal_digest, proposal_namespace},
+        wire,
+    },
+    Application, Context, Finalizer, Hash, Hasher, Height, Payload, Supervisor, View,
 };
-use commonware_cryptography::PublicKey;
+use bytes::Bytes;
+use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::{hash, hex};
+use commonware_utils::hex;
 use core::panic;
 use futures::{channel::mpsc, future::Either};
 use futures::{SinkExt, StreamExt};
@@ -18,76 +23,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
-use tracing::{debug, warn};
-
-pub enum Message {
-    Propose {
-        view: View,
-    },
-    Verify {
-        hash: Hash,
-        proposal: wire::Proposal,
-    },
-    Notarized {
-        proposal: Proposal,
-    },
-    NullNotarized {
-        // TODO: unify with `Notarized`?
-        view: View,
-    },
-    Finalized {
-        proposal: Proposal,
-    },
-}
-
-#[derive(Clone)]
-pub struct Mailbox {
-    sender: mpsc::Sender<Message>,
-}
-
-impl Mailbox {
-    pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
-        Self { sender }
-    }
-
-    pub async fn propose(&mut self, view: View) {
-        self.sender.send(Message::Propose { view }).await.unwrap();
-    }
-
-    pub async fn verify(&mut self, hash: Hash, proposal: wire::Proposal) {
-        self.sender
-            .send(Message::Verify { hash, proposal })
-            .await
-            .unwrap();
-    }
-
-    pub async fn notarized(&mut self, proposal: Proposal) {
-        self.sender
-            .send(Message::Notarized { proposal })
-            .await
-            .unwrap();
-    }
-
-    pub async fn null_notarized(&mut self, view: View) {
-        self.sender
-            .send(Message::NullNotarized { view })
-            .await
-            .unwrap();
-    }
-
-    pub async fn finalized(&mut self, proposal: Proposal) {
-        self.sender
-            .send(Message::Finalized { proposal })
-            .await
-            .unwrap();
-    }
-}
-
-#[derive(Clone)]
-pub enum Proposal {
-    Reference(View, Height, Hash),
-    Populated(Hash, wire::Proposal),
-}
+use tracing::{debug, trace, warn};
 
 #[derive(Clone)]
 enum Knowledge {
@@ -95,18 +31,24 @@ enum Knowledge {
     Finalized(Hash),
 }
 
-pub struct Orchestrator<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> {
+pub struct Actor<
+    E: Clock + Rng + Spawner,
+    C: Scheme,
+    H: Hasher,
+    A: Application + Supervisor + Finalizer,
+> {
     runtime: E,
-    parser: Pa,
-    processor: Pr,
+    crypto: C,
+    hasher: H,
+    application: A,
+
+    proposal_namespace: Vec<u8>,
 
     fetch_timeout: Duration,
     max_fetch_count: u64,
     max_fetch_size: usize,
 
     mailbox_receiver: mpsc::Receiver<Message>,
-
-    validators: BTreeMap<View, Vec<PublicKey>>,
 
     null_notarizations: BTreeSet<View>,
     knowledge: HashMap<Height, Knowledge>,
@@ -135,21 +77,15 @@ pub struct Orchestrator<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> {
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr> {
-    pub fn new(
-        runtime: E,
-        parser: Pa,
-        mut processor: Pr,
-        fetch_timeout: Duration,
-        max_fetch_count: u64,
-        max_fetch_size: usize,
-        validators: BTreeMap<View, Vec<PublicKey>>,
-    ) -> (Self, Mailbox) {
+impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
+    Actor<E, C, H, A>
+{
+    pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> (Self, Mailbox) {
         // Create genesis block and store it
         let mut verified = HashMap::new();
         let mut knowledge = HashMap::new();
         let mut blocks = HashMap::new();
-        let genesis = processor.genesis();
+        let genesis = cfg.application.genesis();
         verified.insert(0, HashSet::from([genesis.0.clone()]));
         knowledge.insert(0, Knowledge::Finalized(genesis.0.clone()));
 
@@ -170,16 +106,17 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         (
             Self {
                 runtime,
-                parser,
-                processor,
+                crypto: cfg.crypto,
+                hasher: cfg.hasher,
+                application: cfg.application,
 
-                fetch_timeout,
-                max_fetch_count,
-                max_fetch_size,
+                proposal_namespace: proposal_namespace(&cfg.namespace),
+
+                fetch_timeout: cfg.fetch_timeout,
+                max_fetch_count: cfg.max_fetch_count,
+                max_fetch_size: cfg.max_fetch_size,
 
                 mailbox_receiver,
-
-                validators,
 
                 null_notarizations: BTreeSet::new(),
                 knowledge,
@@ -199,6 +136,15 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
             },
             Mailbox::new(mailbox_sender),
         )
+    }
+
+    // TODO: remove duplicatred code
+    fn leader(&self, view: View) -> Option<PublicKey> {
+        let validators = match self.application.participants(view) {
+            Some(validators) => validators,
+            None => return None,
+        };
+        Some(validators[view as usize % validators.len()].clone())
     }
 
     async fn register_missing(&mut self, height: Height, hash: Hash) {
@@ -228,6 +174,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                 return Some((height, hash));
             }
             Proposal::Populated(hash, proposal) => (hash, proposal),
+            Proposal::Null(_) => panic!("null proposal cannot be resolved"),
         };
 
         // If already resolved, do nothing.
@@ -297,12 +244,12 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                     return;
                 }
             };
-            debug!(height = next, "notifying application");
+            trace!(height = next, "attempting application notification");
 
             // Send event
             match knowledge {
                 Knowledge::Notarized(hashes) => {
-                    debug!(height = next, "notarized");
+                    trace!(height = next, "notified application notarization");
                     // Send fulfilled unsent notarizations
                     for (_, hash) in hashes {
                         let already_notified = self
@@ -330,11 +277,11 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                             .entry(next)
                             .or_default()
                             .insert(hash.clone());
-                        self.processor.notarized(hash.clone()).await;
+                        self.application.notarized(hash.clone()).await;
                     }
                 }
                 Knowledge::Finalized(hash) => {
-                    debug!(height = next, "finalized");
+                    trace!(height = next, "notified application finalization");
                     let proposal = match self.blocks.get(&hash) {
                         Some(proposal) => proposal,
                         None => {
@@ -357,7 +304,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                     self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
-                    self.processor.finalized(hash.clone()).await;
+                    self.application.finalized(hash.clone()).await;
                 }
             }
 
@@ -398,7 +345,11 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         }
     }
 
-    pub async fn propose(&mut self) -> Option<(Hash, Height, Hash, Payload)> {
+    pub async fn propose(
+        &mut self,
+        view: View,
+        proposer: PublicKey,
+    ) -> Option<(Hash, Height, Hash, Payload)> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
@@ -408,8 +359,14 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         };
 
         // Propose block
+        let context = Context {
+            view,
+            parent: parent.0.clone(),
+            height: parent.1 + 1,
+            proposer,
+        };
         let height = parent.1 + 1;
-        let payload = match self.processor.propose(parent.0.clone(), height).await {
+        let payload = match self.application.propose(context).await {
             Some(payload) => payload,
             None => {
                 return None;
@@ -417,7 +374,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         };
 
         // Compute payload hash
-        let payload_hash = match self.parser.parse(payload.clone()).await {
+        let payload_hash = match self.application.parse(payload.clone()).await {
             Some(hash) => hash,
             None => {
                 return None;
@@ -460,7 +417,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                     );
                     return false;
                 } else {
-                    debug!(
+                    trace!(
                         height = proposal.height,
                         view,
                         proposal_view = proposal.view,
@@ -474,7 +431,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         // Check if parent has been verified
         if let Some(hashes) = self.verified.get(&parent.height) {
             if hashes.contains(&proposal.parent) {
-                debug!(
+                trace!(
                     height = proposal.height,
                     parent_hash = hex(&proposal.parent),
                     proposal_view = proposal.view,
@@ -505,7 +462,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         // If don't have ancestry yet, do nothing.
         if !self.valid_ancestry(&proposal) {
             // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
-            debug!(
+            trace!(
                 height = proposal.height,
                 parent_hash = hex(&proposal.parent),
                 "invalid ancestry"
@@ -514,33 +471,24 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         }
 
         // Verify payload
-        if self
-            .processor
-            .verify(
-                proposal.parent.clone(),
-                proposal.height,
-                proposal.payload.clone(),
-                hash.clone(),
-            )
+        let context = Context {
+            view: proposal.view,
+            parent: proposal.parent.clone(),
+            height: proposal.height,
+            proposer: proposal.signature.clone().unwrap().public_key.clone(),
+        };
+        if !self
+            .application
+            .verify(context, proposal.payload.clone(), hash.clone())
             .await
         {
-            debug!(
-                height = proposal.height,
-                hash = hex(&hash),
-                "verified proposal"
-            );
-            // Record verification
-            let entry = self.verified.entry(proposal.height).or_default();
-            entry.insert(hash);
-            return true;
+            return false;
         }
-        false
-    }
 
-    pub async fn null_notarized(&mut self, view: View) {
-        // TODO: write up explanation for why we don't set last_notarized here (which
-        // is really just used to select the best parent for building)
-        self.null_notarizations.insert(view);
+        // Record verification
+        let entry = self.verified.entry(proposal.height).or_default();
+        entry.insert(hash);
+        true
     }
 
     pub async fn notarized(&mut self, proposal: Proposal) {
@@ -548,6 +496,12 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         let (view, height, hash) = match &proposal {
             Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
             Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
+            Proposal::Null(view) => {
+                // TODO: write up explanation for why we don't set last_notarized here (which
+                // is really just used to select the best parent for building)
+                self.null_notarizations.insert(*view);
+                return;
+            }
         };
 
         // Set last notarized
@@ -655,6 +609,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         let (view, height, hash) = match &proposal {
             Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
             Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
+            Proposal::Null(_) => panic!("null proposal cannot be finalized"),
         };
 
         // Set last finalized
@@ -707,16 +662,6 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         hash: Hash,
         sender: &mut impl Sender,
     ) -> PublicKey {
-        // Get validators from highest view we know about
-        let (view, validators) = self
-            .validators
-            .range(..=self.last_notarized)
-            .next_back()
-            .expect("validators do not cover range of allowed views");
-
-        // Select random validator to fetch from
-        let validator = validators.choose(&mut self.runtime).unwrap().clone();
-
         // Compute missing blocks from hash
         let mut parents = 0;
         loop {
@@ -747,34 +692,77 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
         }
 
         // Send the request
-        debug!(
-            height,
-            hash = hex(&hash),
-            peer = hex(&validator),
-            parents,
-            validator_view = view,
-            "requesting missing proposal"
-        );
-        let msg = wire::Backfill {
+        let msg: Bytes = wire::Backfill {
             payload: Some(wire::backfill::Payload::Request(wire::Request {
-                hash,
+                hash: hash.clone(),
                 parents,
             })),
         }
         .encode_to_vec()
         .into();
 
-        // Send message
-        sender
-            .send(Recipients::One(validator.clone()), msg, true)
-            .await
-            .unwrap();
-        validator
+        // Get validators from highest view we know about
+        let validators = self.application.participants(self.last_notarized).unwrap();
+
+        // Generate a shuffle
+        let mut validator_indices = (0..validators.len()).collect::<Vec<_>>();
+        validator_indices.shuffle(&mut self.runtime);
+
+        // Loop until we send a message
+        let mut index = 0;
+        loop {
+            // Check if we have exhausted all validators
+            if index == validators.len() {
+                warn!(
+                    height,
+                    last_notarized = self.last_notarized,
+                    "failed to send request to any validator"
+                );
+
+                // Avoid busy looping when disconnected
+                self.runtime.sleep(self.fetch_timeout).await;
+                index = 0;
+            }
+
+            // Select random validator to fetch from
+            let validator = validators[validator_indices[index]].clone();
+            if validator == self.crypto.public_key() {
+                index += 1;
+                continue;
+            }
+
+            // Send message
+            if !sender
+                .send(Recipients::One(validator.clone()), msg.clone(), true)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                debug!(
+                    height,
+                    hash = hex(&hash),
+                    peer = hex(&validator),
+                    parents,
+                    last_notarized = self.last_notarized,
+                    "requested missing proposal"
+                );
+                return validator;
+            }
+
+            // Try again
+            debug!(
+                height,
+                hash = hex(&hash),
+                peer = hex(&validator),
+                "failed to send backfill request"
+            );
+            index += 1;
+        }
     }
 
     pub async fn run(
         mut self,
-        voter: &mut VoterMailbox,
+        voter: &mut voter::Mailbox,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
@@ -840,8 +828,8 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Propose { view } => {
-                            let (parent, height, payload, payload_hash)= match self.propose().await{
+                        Message::Propose { view, proposer } => {
+                            let (parent, height, payload, payload_hash)= match self.propose(view, proposer).await{
                                 Some(proposal) => proposal,
                                 None => {
                                     continue;
@@ -870,7 +858,6 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                             voter.verified(proposal_view).await;
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,
-                        Message::NullNotarized { view } => self.null_notarized(view).await,
                         Message::Finalized { proposal } => self.finalized(proposal).await,
                     };
                 },
@@ -893,7 +880,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                     match payload {
                         wire::backfill::Payload::Request(request) => {
                             // Confirm request is valid
-                            if request.hash.len() != HASH_LENGTH {
+                            if !H::validate(&request.hash) {
                                 warn!(sender = hex(&s), "invalid request hash size");
                                 continue;
                             }
@@ -951,7 +938,7 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                             sender.send(Recipients::One(s), msg.encode_to_vec().into(), false).await.unwrap();
                         }
                         wire::backfill::Payload::Missing(missing) => {
-                            if missing.hash.len() != HASH_LENGTH {
+                            if !H::validate(&missing.hash) {
                                 warn!(sender = hex(&s), "invalid missing hash size");
                                 continue;
                             }
@@ -972,36 +959,82 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                             // Parse proposals
                             let mut next = None;
                             for proposal in resolution.proposals {
-                                if proposal.parent.len() != HASH_LENGTH {
+                                // Ensure this is the block we want
+                                if !H::validate(&proposal.parent) {
                                     warn!(sender = hex(&s), "invalid proposal parent hash size");
                                     break;
                                 }
-                                let payload_hash = match self.parser.parse(proposal.payload.clone()).await {
+                                let payload_hash = match self.application.parse(proposal.payload.clone()).await {
                                     Some(payload_hash) => payload_hash,
                                     None => {
                                         warn!(sender = hex(&s), "unable to parse notarized/finalized payload");
                                         break;
                                     }
                                 };
-                                let incoming_hash = hash(&proposal_digest(
+                                let proposal_digest = proposal_digest(
                                     proposal.view,
                                     proposal.height,
                                     &proposal.parent,
                                     &payload_hash,
-                                ));
-
-                                // Ensure this is the block we want
+                                );
+                                self.hasher.update(&proposal_digest);
+                                let proposal_hash = self.hasher.finalize();
                                 if let Some((height, ref hash)) = next {
-                                    if proposal.height != height || incoming_hash != hash {
+                                    if proposal.height != height || proposal_hash != hash {
                                         warn!(sender = hex(&s), "received invalid batch proposal");
                                         break;
                                     }
                                 }
 
+                                // Verify leader signature
+                                //
+                                // TODO: remove duplicate code shared with voter
+                                let signature = match &proposal.signature {
+                                    Some(signature) => signature,
+                                    None => {
+                                        warn!(sender = hex(&s), "missing proposal signature");
+                                        break;
+                                    }
+                                };
+                                if !C::validate(&signature.public_key) {
+                                    warn!(sender = hex(&s), "invalid proposal public key");
+                                    break;
+                                }
+                                let expected_leader = match self.leader(proposal.view) {
+                                    Some(leader) => leader,
+                                    None => {
+                                        debug!(
+                                            proposal_leader = hex(&signature.public_key),
+                                            reason = "unable to compute leader",
+                                            "dropping proposal"
+                                        );
+                                        break;
+                                    }
+                                };
+                                if expected_leader != signature.public_key {
+                                    debug!(
+                                        proposal_leader = hex(&signature.public_key),
+                                        view_leader = hex(&expected_leader),
+                                        reason = "leader mismatch",
+                                        "dropping proposal"
+                                    );
+                                    break;
+                                }
+                                if !C::verify(
+                                    &self.proposal_namespace,
+                                    &proposal_digest,
+                                    &signature.public_key,
+                                    &signature.signature,
+                                ) {
+                                    warn!(sender = hex(&s), "invalid proposal signature");
+                                    break;
+                                }
+
+
                                 // Record the proposal
                                 let height = proposal.height;
-                                debug!(height, hash = hex(&incoming_hash), peer = hex(&s), "received proposal via backfill");
-                                let proposal = Proposal::Populated(incoming_hash.clone(), proposal.clone());
+                                debug!(height, hash = hex(&proposal_hash), peer = hex(&s), "received proposal via backfill");
+                                let proposal = Proposal::Populated(proposal_hash.clone(), proposal.clone());
                                 next = self.resolve(proposal);
 
                                 // Remove outstanding task if we were waiting on this
@@ -1009,8 +1042,8 @@ impl<E: Clock + Rng + Spawner, Pa: Parser, Pr: Processor> Orchestrator<E, Pa, Pr
                                 // Note, we don't care if we are sent the proposal from someone unexpected (although
                                 // this is unexpected).
                                 if let Some(ref outstanding) = outstanding_task {
-                                    if outstanding.2 == incoming_hash {
-                                        debug!(height = outstanding.1, hash = hex(&incoming_hash), peer = hex(&s), "resolved missing proposal via backfill");
+                                    if outstanding.2 == proposal_hash {
+                                        debug!(height = outstanding.1, hash = hex(&proposal_hash), peer = hex(&s), "resolved missing proposal via backfill");
                                         outstanding_task = None;
                                     }
                                 }
