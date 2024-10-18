@@ -75,7 +75,10 @@ mod tests {
         Hash, Hasher, Height, Proof, Supervisor, View,
     };
     use bytes::Bytes;
-    use byzantine::conflicter::{self, Conflicter};
+    use byzantine::{
+        conflicter::{self, Conflicter},
+        nuller::{self, Nuller},
+    };
     use commonware_cryptography::{Ed25519, PublicKey, Scheme};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network};
@@ -1482,7 +1485,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_conflicts() {
+    fn test_conflicter() {
         // Create runtime
         let n = 5;
         let required_blocks = 100;
@@ -1633,6 +1636,211 @@ mod tests {
                             match *fault {
                                 CONFLICTING_VOTE => {}
                                 CONFLICTING_FINALIZE => {}
+                                _ => panic!("unexpected fault: {:?}", fault),
+                            }
+                        }
+                    }
+                }
+
+                // Ensure other nodes are active as usual
+                {
+                    let votes = supervisor.votes.lock().unwrap();
+                    for (height, views) in votes.iter() {
+                        // Only check at views below timeout
+                        if *height > latest_complete {
+                            continue;
+                        }
+
+                        // Ensure everyone participating
+                        let hash = finalized.get(height).expect("missing finalized hash");
+                        let count = views.get(hash).expect("missing finalized view").len();
+                        if count < n - 1 {
+                            panic!(
+                                "incorrect votes at height: {} ({} < {})",
+                                height,
+                                count,
+                                n - 1
+                            );
+                        }
+                    }
+                }
+                {
+                    let finalizes = supervisor.finalizes.lock().unwrap();
+                    for (height, views) in finalizes.iter() {
+                        // Only check at views below timeout
+                        if *height > latest_complete {
+                            continue;
+                        }
+
+                        // Ensure everyone participating
+                        let hash = finalized.get(height).expect("missing finalized hash");
+                        let count = views.get(hash).expect("missing finalized view").len();
+                        if count < n - 1 {
+                            panic!(
+                                "incorrect finalizes at height: {} ({} < {})",
+                                height,
+                                count,
+                                n - 1
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_nuller() {
+        // Create runtime
+        let n = 5;
+        let required_blocks = 100;
+        let activity_timeout = 10;
+        let namespace = Bytes::from("consensus");
+        let (executor, runtime, _) = Executor::timed(Duration::from_secs(60));
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                },
+            );
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            schemes.sort_by_key(|s| s.public_key());
+            validators.sort();
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+
+            // Create engines
+            let mut supervisors = Vec::new();
+            let (done_sender, mut done_receiver) = mpsc::unbounded();
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Register on network
+                let validator = scheme.public_key();
+                let (block_sender, block_receiver) = oracle
+                    .register(validator.clone(), 0, 1024 * 1024)
+                    .await
+                    .unwrap();
+                let (vote_sender, vote_receiver) = oracle
+                    .register(validator.clone(), 1, 1024 * 1024)
+                    .await
+                    .unwrap();
+
+                // Link to all other validators
+                for other in validators.iter() {
+                    if other == &validator {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 1.0,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                // Start engine
+                let hasher = Sha256::default();
+                if idx == 0 {
+                    let cfg = nuller::Config {
+                        crypto: scheme,
+                        hasher,
+                        namespace: namespace.clone(),
+                    };
+                    let engine = Nuller::new(runtime.clone(), cfg);
+                    runtime.spawn("byzantine_engine", async move {
+                        engine
+                            .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                            .await;
+                    });
+                } else {
+                    let supervisor = TestSupervisor::<Ed25519, Sha256>::new(
+                        Prover::new(hasher.clone(), namespace.clone()),
+                        view_validators.clone(),
+                    );
+                    supervisors.push(supervisor.clone());
+                    let application_cfg = ApplicationConfig {
+                        hasher: hasher.clone(),
+                        supervisor,
+                        participant: validator,
+                        sender: done_sender.clone(),
+                        propose_latency: (10.0, 5.0),
+                        parse_latency: (10.0, 5.0),
+                        verify_latency: (10.0, 5.0),
+                    };
+                    let application = Application::new(runtime.clone(), application_cfg);
+                    let cfg = config::Config {
+                        crypto: scheme,
+                        hasher,
+                        application,
+                        registry: Arc::new(Mutex::new(Registry::default())),
+                        namespace: namespace.clone(),
+                        leader_timeout: Duration::from_secs(1),
+                        notarization_timeout: Duration::from_secs(2),
+                        null_vote_retry: Duration::from_secs(10),
+                        fetch_timeout: Duration::from_secs(1),
+                        activity_timeout,
+                        max_fetch_count: 1,
+                        max_fetch_size: 1024 * 512,
+                        validators: view_validators.clone(),
+                    };
+                    let engine = Engine::new(runtime.clone(), cfg);
+                    runtime.spawn("engine", async move {
+                        engine
+                            .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                            .await;
+                    });
+                }
+            }
+
+            // Wait for all online engines to finish
+            let mut completed = HashSet::new();
+            let mut finalized = HashMap::new();
+            loop {
+                let (validator, event) = done_receiver.next().await.unwrap();
+                if let Progress::Finalized(height, hash) = event {
+                    finalized.insert(height, hash);
+                    if height < required_blocks {
+                        continue;
+                    }
+                    completed.insert(validator);
+                }
+                if completed.len() == n - 1 {
+                    break;
+                }
+            }
+
+            // Check supervisors for correct activity
+            let offline = &validators[0];
+            let latest_complete = required_blocks - activity_timeout;
+            for supervisor in supervisors.iter() {
+                // Ensure only faults
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert_eq!(faults.len(), 1);
+                    let faulter = faults.get(offline).expect("byzantine party is not faulter");
+                    for (_, faults) in faulter.iter() {
+                        for fault in faults.iter() {
+                            match *fault {
+                                CONFLICTING_VOTE => {}
+                                NULL_AND_FINALIZE => {}
                                 _ => panic!("unexpected fault: {:?}", fault),
                             }
                         }
