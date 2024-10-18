@@ -85,12 +85,9 @@ mod tests {
     };
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
-    use prometheus_client::{metrics::counter, registry::Registry};
+    use prometheus_client::registry::Registry;
     use std::{
-        collections::{
-            hash_map::{Entry, OccupiedEntry},
-            BTreeMap, HashMap, HashSet,
-        },
+        collections::{BTreeMap, HashMap, HashSet},
         sync::{Arc, Mutex},
         time::Duration,
     };
