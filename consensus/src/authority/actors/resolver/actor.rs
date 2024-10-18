@@ -18,7 +18,10 @@ use commonware_utils::hex;
 use core::panic;
 use futures::{channel::mpsc, future::Either};
 use futures::{SinkExt, StreamExt};
-use governor::{middleware::NoOpMiddleware, state::keyed::HashMapStateStore, RateLimiter};
+use governor::{
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
+    RateLimiter,
+};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -33,7 +36,7 @@ enum Knowledge {
 }
 
 pub struct Actor<
-    E: Clock + Rng + Spawner + governor::clock::Clock,
+    E: Clock + GClock + Rng + Spawner,
     C: Scheme,
     H: Hasher,
     A: Application + Supervisor + Finalizer,
@@ -81,7 +84,7 @@ pub struct Actor<
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
 impl<
-        E: Clock + Rng + Spawner + governor::clock::Clock,
+        E: Clock + GClock + Rng + Spawner,
         C: Scheme,
         H: Hasher,
         A: Application + Supervisor + Finalizer,

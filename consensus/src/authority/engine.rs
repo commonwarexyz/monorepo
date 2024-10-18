@@ -7,11 +7,12 @@ use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Clock, Spawner};
+use governor::clock::Clock as GClock;
 use rand::Rng;
 use tracing::debug;
 
 pub struct Engine<
-    E: Clock + Rng + Spawner + governor::clock::Clock,
+    E: Clock + GClock + Rng + Spawner,
     C: Scheme,
     H: Hasher,
     A: Application + Supervisor + Finalizer,
@@ -26,7 +27,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + Rng + Spawner + governor::clock::Clock,
+        E: Clock + GClock + Rng + Spawner,
         C: Scheme,
         H: Hasher,
         A: Application + Supervisor + Finalizer,
