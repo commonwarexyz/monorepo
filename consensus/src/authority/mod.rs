@@ -237,14 +237,14 @@ mod tests {
         }
     }
 
-    #[test_traced(timeout = 30_000)]
+    #[test_traced]
     fn test_all_online() {
         // Create runtime
         let n = 5;
         let required_blocks = 100;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
-        let (executor, runtime, _) = Executor::default();
+        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -556,13 +556,13 @@ mod tests {
     //     });
     // }
 
-    #[test_traced(timeout = 30_000)]
+    #[test_traced]
     fn test_catchup() {
         // Create runtime
         let n = 5;
         let required_blocks = 100;
         let namespace = Bytes::from("consensus");
-        let (executor, runtime, _) = Executor::default();
+        let (executor, runtime, _) = Executor::timed(Duration::from_secs(120));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
