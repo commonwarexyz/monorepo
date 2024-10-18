@@ -71,7 +71,7 @@ mod tests {
     use crate::{
         mocks::application::{Application, Config as ApplicationConfig, Progress},
         sha256::Sha256,
-        Hasher, Proof, Supervisor, View,
+        Hasher, Height, Proof, Supervisor, View,
     };
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, PublicKey, Scheme};
@@ -93,7 +93,9 @@ mod tests {
         participants: BTreeMap<View, (HashSet<PublicKey>, Vec<PublicKey>)>,
 
         prover: Prover<C, H>,
-        // TODO: add proposals/votes/finalizes
+
+        votes: Arc<Mutex<HashMap<Height, HashMap<View, HashSet<PublicKey>>>>>,
+        finalizes: Arc<Mutex<HashMap<Height, HashMap<View, HashSet<PublicKey>>>>>,
         faults: Arc<Mutex<HashMap<PublicKey, HashSet<View>>>>,
     }
 
@@ -111,6 +113,8 @@ mod tests {
             Self {
                 participants: parsed_participants,
                 prover,
+                votes: Arc::new(Mutex::new(HashMap::new())),
+                finalizes: Arc::new(Mutex::new(HashMap::new())),
                 faults: Arc::new(Mutex::new(HashMap::new())),
             }
         }
@@ -138,46 +142,82 @@ mod tests {
         }
 
         async fn report(&mut self, activity: Activity, proof: Proof) {
-            let mut faults = self.faults.lock().unwrap();
-
             // We check signatures for all messages to ensure that the prover is working correctly
             // but in production this isn't necessary (as signatures are already verified in
             // consensus).
             match activity {
                 PROPOSAL => {
-                    let _ = self.prover.deserialize_proposal(proof, true).unwrap();
+                    self.prover.deserialize_proposal(proof, true).unwrap();
                 }
                 VOTE => {
-                    let _ = self.prover.deserialize_vote(proof, true).unwrap();
+                    let (public_key, view, height, _) =
+                        self.prover.deserialize_vote(proof, true).unwrap();
+                    self.votes
+                        .lock()
+                        .unwrap()
+                        .entry(height)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .insert(public_key);
                 }
                 FINALIZE => {
-                    let _ = self.prover.deserialize_finalize(proof, true).unwrap();
+                    let (public_key, view, height, _) =
+                        self.prover.deserialize_finalize(proof, true).unwrap();
+                    self.finalizes
+                        .lock()
+                        .unwrap()
+                        .entry(height)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .insert(public_key);
                 }
                 CONFLICTING_PROPOSAL => {
                     let (public_key, view) = self
                         .prover
                         .deserialize_conflicting_proposal(proof, true)
                         .unwrap();
-                    faults.entry(public_key).or_default().insert(view);
+                    self.faults
+                        .lock()
+                        .unwrap()
+                        .entry(public_key)
+                        .or_default()
+                        .insert(view);
                 }
                 CONFLICTING_VOTE => {
                     let (public_key, view) = self
                         .prover
                         .deserialize_conflicting_vote(proof, true)
                         .unwrap();
-                    faults.entry(public_key).or_default().insert(view);
+                    self.faults
+                        .lock()
+                        .unwrap()
+                        .entry(public_key)
+                        .or_default()
+                        .insert(view);
                 }
                 CONFLICTING_FINALIZE => {
                     let (public_key, view) = self
                         .prover
                         .deserialize_conflicting_finalize(proof, true)
                         .unwrap();
-                    faults.entry(public_key).or_default().insert(view);
+                    self.faults
+                        .lock()
+                        .unwrap()
+                        .entry(public_key)
+                        .or_default()
+                        .insert(view);
                 }
                 NULL_AND_FINALIZE => {
                     let (public_key, view) =
                         self.prover.deserialize_null_finalize(proof, true).unwrap();
-                    faults.entry(public_key).or_default().insert(view);
+                    self.faults
+                        .lock()
+                        .unwrap()
+                        .entry(public_key)
+                        .or_default()
+                        .insert(view);
                 }
                 a => {
                     panic!("unexpected activity: {}", a);
@@ -191,6 +231,7 @@ mod tests {
         // Create runtime
         let n = 5;
         let required_blocks = 100;
+        let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
@@ -278,7 +319,7 @@ mod tests {
                     notarization_timeout: Duration::from_secs(2),
                     null_vote_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    activity_timeout: 10,
+                    activity_timeout,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     validators: view_validators.clone(),
@@ -306,10 +347,52 @@ mod tests {
                 }
             }
 
-            // Ensure no faults
+            // Check supervisors for correct activity
+            let latest_complete = required_blocks - activity_timeout;
             for supervisor in supervisors.iter() {
+                // Ensure no faults
                 let faults = supervisor.faults.lock().unwrap();
                 assert!(faults.is_empty());
+
+                // Ensure no forks
+                let votes = supervisor.votes.lock().unwrap();
+                for (height, views) in votes.iter() {
+                    if views.len() > 1 {
+                        panic!("height: {}, views: {:?}", height, views);
+                    }
+
+                    // Ensure no skips (height == view)
+                    let voters = views.get(height).unwrap();
+
+                    // Only check at views below timeout
+                    if *height > latest_complete {
+                        continue;
+                    }
+
+                    // Ensure everyone participating
+                    if voters.len() != n {
+                        panic!("height: {}, voters: {:?}", height, voters);
+                    }
+                }
+                let finalizes = supervisor.finalizes.lock().unwrap();
+                for (height, views) in finalizes.iter() {
+                    if views.len() > 1 {
+                        panic!("height: {}, views: {:?}", height, views);
+                    }
+
+                    // Ensure no skips (height == view)
+                    let finalizers = views.get(height).unwrap();
+
+                    // Only check at views below timeout
+                    if *height > latest_complete {
+                        continue;
+                    }
+
+                    // Ensure everyone participating
+                    if finalizers.len() != n {
+                        panic!("height: {}, finalizers: {:?}", height, finalizers);
+                    }
+                }
             }
         });
     }
