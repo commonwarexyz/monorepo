@@ -275,7 +275,7 @@ mod tests {
     use crate::{Receiver, Recipients, Sender};
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_macros::test_with_logging;
+    use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic, tokio, Clock, Listener, Network as RNetwork, Runner, Sink, Spawner, Stream,
     };
@@ -484,28 +484,28 @@ mod tests {
         assert_eq!(state, auditor.state());
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_determinism_one() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::One);
         }
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_determinism_some() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::Some);
         }
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_determinism_all() {
         for i in 0..10 {
             run_deterministic_test(i, Mode::All);
         }
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_tokio_connectivity() {
         let cfg = tokio::Config::default();
         let (executor, runtime) = tokio::Executor::init(cfg.clone());
@@ -514,7 +514,7 @@ mod tests {
         });
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_multi_index_oracle() {
         // Configure test
         let base_port = 3000;
@@ -729,12 +729,12 @@ mod tests {
         });
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_chunking_no_compression() {
         test_chunking(None);
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_chunking_compression() {
         test_chunking(Some(3));
     }
@@ -792,12 +792,12 @@ mod tests {
         });
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_message_too_large_no_compression() {
         test_message_too_large(None);
     }
 
-    #[test_with_logging]
+    #[test_traced]
     fn test_message_too_large_compression() {
         test_message_too_large(Some(3));
     }

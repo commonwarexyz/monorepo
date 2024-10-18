@@ -9,18 +9,62 @@ use syn::{
     Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
 
-/// Capture logs (based on the provided log level) from a test run using
-/// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
-/// This macro defaults to a log level of `DEBUG` if no level is provided.
+/// Run a test function asynchronously.
 ///
-/// This macro is powered by the `tracing` and `tracing-subscriber` crates.
+/// This macro is powered by the [futures](https://docs.rs/futures) crate
+/// and is not bound to a particular executor or runtime.
 ///
 /// # Example
 /// ```rust
-/// use commonware_macros::test_with_logging;
+/// use commonware_macros::test_async;
+///
+/// #[test_async]
+/// async fn test_async_fn() {
+///    assert_eq!(2 + 2, 4);
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
+    // Parse the input tokens into a syntax tree
+    let input = parse_macro_input!(item as ItemFn);
+
+    // Extract function components
+    let attrs = input.attrs;
+    let vis = input.vis;
+    let mut sig = input.sig;
+    let block = input.block;
+
+    // Remove 'async' from the function signature (#[test] only
+    // accepts sync functions)
+    sig.asyncness
+        .take()
+        .expect("expected test function to be async");
+
+    // Generate output tokens
+    let expanded = quote! {
+        #[test]
+        #(#attrs)*
+        #vis #sig {
+            futures::executor::block_on(async #block);
+        }
+    };
+    TokenStream::from(expanded)
+}
+
+/// Capture logs (based on the provided log level) from a test run using
+/// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
+///
+/// This macro defaults to a log level of `DEBUG` if no level is provided.
+///
+/// This macro is powered by the [tracing](https://docs.rs/tracing) and
+/// [tracing-subscriber](https://docs.rs/tracing-subscriber) crates.
+///
+/// # Example
+/// ```rust
+/// use commonware_macros::test_traced;
 /// use tracing::{debug, info};
 ///
-/// #[test_with_logging("INFO")]
+/// #[test_traced("INFO")]
 /// fn test_info_level() {
 ///     info!("This is an info log");
 ///     debug!("This is a debug log (won't be shown)");
@@ -28,7 +72,7 @@ use syn::{
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn test_with_logging(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
     let input = parse_macro_input!(item as ItemFn);
 
@@ -126,8 +170,8 @@ impl Parse for SelectInput {
 
 /// Select the first future that completes (biased by order).
 ///
-/// This macro is powered by the `futures::select_biased!` macro
-/// and as such is not bound to a particular executor or runtime.
+/// This macro is powered by the [futures](https://docs.rs/futures) crate
+/// and is not bound to a particular executor or runtime.
 ///
 /// # Example
 ///
@@ -189,11 +233,10 @@ pub fn select(input: TokenStream) -> TokenStream {
     // Generate the final output code
     quote! {
         {
-            use futures::{FutureExt, select_biased};
-
+            use futures::FutureExt as _;
             #(#stmts)*
 
-            select_biased! {
+            futures::select_biased! {
                 #(#select_branches)*
             }
         }
