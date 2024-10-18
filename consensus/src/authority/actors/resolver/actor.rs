@@ -23,7 +23,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 #[derive(Clone)]
 enum Knowledge {
@@ -244,12 +244,12 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
                     return;
                 }
             };
-            debug!(height = next, "notifying application");
+            trace!(height = next, "attempting application notification");
 
             // Send event
             match knowledge {
                 Knowledge::Notarized(hashes) => {
-                    debug!(height = next, "notarized");
+                    trace!(height = next, "notified application notarization");
                     // Send fulfilled unsent notarizations
                     for (_, hash) in hashes {
                         let already_notified = self
@@ -281,7 +281,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
                     }
                 }
                 Knowledge::Finalized(hash) => {
-                    debug!(height = next, "finalized");
+                    trace!(height = next, "notified application finalization");
                     let proposal = match self.blocks.get(&hash) {
                         Some(proposal) => proposal,
                         None => {
@@ -431,7 +431,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
         // Check if parent has been verified
         if let Some(hashes) = self.verified.get(&parent.height) {
             if hashes.contains(&proposal.parent) {
-                debug!(
+                trace!(
                     height = proposal.height,
                     parent_hash = hex(&proposal.parent),
                     proposal_view = proposal.view,
@@ -462,7 +462,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
         // If don't have ancestry yet, do nothing.
         if !self.valid_ancestry(&proposal) {
             // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
-            debug!(
+            trace!(
                 height = proposal.height,
                 parent_hash = hex(&proposal.parent),
                 "invalid ancestry"
@@ -486,11 +486,6 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
         }
 
         // Record verification
-        debug!(
-            height = proposal.height,
-            hash = hex(&hash),
-            "verified proposal"
-        );
         let entry = self.verified.entry(proposal.height).or_default();
         entry.insert(hash);
         true

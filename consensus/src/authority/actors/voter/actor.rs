@@ -145,7 +145,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         // Check if already voted
         if let Some(previous_vote) = self.proposal_voters.get(public_key) {
             if previous_vote == &hash {
-                debug!(
+                trace!(
                     view = vote.view,
                     signer = hex(public_key),
                     previous_vote = hex(previous_vote),
@@ -568,7 +568,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
             view = proposal_view,
             height = proposal_height,
             hash = hex(&proposal_hash),
-            "stored our proposal"
+            "generated proposal"
         );
         view.proposal = Some((proposal_hash, payload_hash.clone(), proposal));
         view.verified_proposal = true;
@@ -730,7 +730,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         resolver
             .verify(proposal_hash.clone(), proposal.clone())
             .await;
-        debug!(
+        trace!(
             view = proposal.view,
             height = proposal.height,
             hash = hex(&proposal_hash),
@@ -774,7 +774,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         self.application.report(PROPOSAL, proof).await;
 
         // Indicate that verification is done
-        debug!(view, "verified peer proposal");
+        debug!(view, height = proposal.2.height, "verified proposal");
         true
     }
 
@@ -948,7 +948,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         let view = self.views.get_mut(&notarization.view);
         if let Some(ref view) = view {
             if notarization.hash.is_some() && view.broadcast_proposal_notarization {
-                debug!(
+                trace!(
                     view = notarization.view,
                     reason = "already broadcast notarization",
                     "dropping notarization"
@@ -956,7 +956,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
                 return;
             }
             if notarization.hash.is_none() && view.broadcast_null_notarization {
-                debug!(
+                trace!(
                     view = notarization.view,
                     reason = "already broadcast null notarization",
                     "dropping notarization"
@@ -1590,8 +1590,6 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Proposal{ view: proposal_view, parent, height, payload, payload_hash} => {
-                            debug!(view = proposal_view, our_view = self.view, "received proposal");
-
                             // If we have already moved to another view, drop the response as we will
                             // not broadcast it
                             if self.view != proposal_view {
@@ -1631,8 +1629,6 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
                                 .unwrap();
                         },
                         Message::Verified { view: verified_view } => {
-                            debug!(view = verified_view, "received verified proposal");
-
                             // Handle verified proposal
                             if !self.verified(verified_view).await {
                                 continue;
