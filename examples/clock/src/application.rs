@@ -1,38 +1,45 @@
+use bytes::Bytes;
 use commonware_consensus::{
+    authority::{Prover, FINALIZE, PROPOSAL, VOTE},
     Activity, Context, Finalizer, Hash, Hasher, Payload, Proof, Supervisor, View,
 };
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::Clock;
+use commonware_utils::hex;
+use std::collections::HashSet;
 use std::time::UNIX_EPOCH;
 use tracing::debug;
+use tracing_subscriber::field::debug;
 
 #[derive(Clone)]
-pub struct Application<E: Clock, H: Hasher> {
+pub struct Application<E: Clock, C: Scheme, H: Hasher> {
     runtime: E,
     hasher: H,
 
     validators: Vec<PublicKey>,
     validators_set: HashSet<PublicKey>,
+    prover: Prover<C, H>,
 
     last: u128,
 }
 
-impl<E: Clock, H: Hasher> Application<E, H> {
-    pub fn new(runtime: E, hasher: H, validators: Vec<PublicKey>) -> Self {
+impl<E: Clock, C: Scheme, H: Hasher> Application<E, C, H> {
+    pub fn new(runtime: E, hasher: H, namespace: Bytes, validators: Vec<PublicKey>) -> Self {
         let validators_set = validators.iter().cloned().collect();
         Self {
             runtime,
-            hasher,
+            hasher: hasher.clone(),
 
             validators,
             validators_set,
+            prover: Prover::new(hasher, namespace),
 
             last: 0,
         }
     }
 }
 
-impl<E: Clock, H: Hasher> commonware_consensus::Application for Application<E, H> {
+impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Application<E, C, H> {
     fn genesis(&mut self) -> (Hash, Payload) {
         let now: u128 = 0;
         let payload = now.to_be_bytes().to_vec();
@@ -75,7 +82,7 @@ impl<E: Clock, H: Hasher> commonware_consensus::Application for Application<E, H
     }
 }
 
-impl<E: Clock, H: Hasher> Supervisor for Application<E, H> {
+impl<E: Clock, C: Scheme, H: Hasher> Supervisor for Application<E, C, H> {
     fn participants(&self, _view: View) -> Option<&Vec<PublicKey>> {
         Some(&self.validators)
     }
@@ -84,12 +91,47 @@ impl<E: Clock, H: Hasher> Supervisor for Application<E, H> {
         Some(self.validators_set.contains(candidate))
     }
 
-    async fn report(&mut self, activity: Activity, _proof: Proof) {
-        debug!(activity, "observed activity");
+    async fn report(&mut self, activity: Activity, proof: Proof) {
+        match activity {
+            PROPOSAL => {
+                let (public_key, view, height, hash) =
+                    self.prover.deserialize_proposal(proof, false).unwrap();
+                debug!(
+                    public_key = hex(&public_key),
+                    view,
+                    height,
+                    hash = hex(&hash),
+                    "received proposal"
+                );
+            }
+            VOTE => {
+                let (public_key, view, height, hash) =
+                    self.prover.deserialize_vote(proof, false).unwrap();
+                debug!(
+                    public_key = hex(&public_key),
+                    view,
+                    height,
+                    hash = hex(&hash),
+                    "received vote"
+                );
+            }
+            FINALIZE => {
+                let (public_key, view, height, hash) =
+                    self.prover.deserialize_finalize(proof, false).unwrap();
+                debug!(
+                    public_key = hex(&public_key),
+                    view,
+                    height,
+                    hash = hex(&hash),
+                    "received finalize"
+                )
+            }
+            _ => {}
+        }
     }
 }
 
-impl<E: Clock, H: Hasher> Finalizer for Application<E, H> {
+impl<E: Clock, C: Scheme, H: Hasher> Finalizer for Application<E, C, H> {
     async fn notarized(&mut self, _block: Hash) {
         unimplemented!()
     }
