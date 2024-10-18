@@ -212,6 +212,9 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
 
 impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Finalizer for Application<E, H, S> {
     async fn notarized(&mut self, view: View, block: Hash) {
+        if view == 0 {
+            self.panic("cannot notarize genesis block");
+        }
         if !H::validate(&block) {
             self.panic("invalid hash length");
         }
@@ -236,6 +239,9 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Finalizer for Applicat
     }
 
     async fn finalized(&mut self, view: View, block: Hash) {
+        if view == 0 {
+            self.panic("cannot finalize genesis block");
+        }
         if !H::validate(&block) {
             self.panic("invalid hash length");
         }

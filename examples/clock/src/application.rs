@@ -8,7 +8,7 @@ use commonware_runtime::Clock;
 use commonware_utils::hex;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::UNIX_EPOCH;
-use tracing::debug;
+use tracing::{debug, info};
 
 const SYNCHRONY_BOUND: u128 = 250;
 
@@ -46,10 +46,18 @@ impl<E: Clock, C: Scheme, H: Hasher> Application<E, C, H> {
 
 impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Application<E, C, H> {
     fn genesis(&mut self) -> (Hash, Payload) {
+        // Generate genesis value
+        //
+        // TODO: in production this would be balances
         let now: u128 = 0;
         let payload = now.to_be_bytes().to_vec();
         self.hasher.update(&payload);
         let hash = self.hasher.finalize();
+
+        // Store genesis value so we can build off of it
+        self.tracking.insert(hash.clone(), now);
+        self.tracking_index.insert(0, hash.clone());
+        self.best = Some((0, hash.clone()));
         (hash, payload.into())
     }
 
@@ -72,6 +80,7 @@ impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Appli
         } else {
             last
         };
+        info!(time = current_time, "proposed");
         Some(current_time.to_be_bytes().to_vec().into())
     }
 
@@ -166,20 +175,34 @@ impl<E: Clock, C: Scheme, H: Hasher> Supervisor for Application<E, C, H> {
 
 impl<E: Clock, C: Scheme, H: Hasher> Finalizer for Application<E, C, H> {
     async fn notarized(&mut self, view: View, block: Hash) {
-        if let Some((best_view, _)) = self.best {
-            if view <= best_view {
-                return;
-            }
+        let (best_view, _) = self.best.as_ref().unwrap();
+        if view <= *best_view {
+            return;
         }
         self.best = Some((view, block));
     }
 
     async fn finalized(&mut self, view: View, block: Hash) {
-        if let Some((best_view, _)) = self.best {
-            if view <= best_view {
-                return;
+        // Discover minimum pruneable payload
+        let required_view = {
+            let (best_view, _) = self.best.as_ref().unwrap();
+            if view <= *best_view {
+                *best_view
+            } else {
+                self.best = Some((view, block));
+                view
             }
-        }
-        self.best = Some((view, block));
+        };
+
+        // Prune old payloads
+        self.tracking_index.retain(|&old_view, old_block| {
+            if old_view < required_view {
+                self.tracking.remove(old_block);
+                debug!(view, "pruned payload");
+                false
+            } else {
+                true
+            }
+        });
     }
 }
