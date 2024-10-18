@@ -270,6 +270,9 @@ pub struct Config {
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
     pub cycle: Duration,
+
+    /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
+    pub timeout: Option<Duration>,
 }
 
 impl Default for Config {
@@ -278,6 +281,7 @@ impl Default for Config {
             registry: Arc::new(Mutex::new(Registry::default())),
             seed: 42,
             cycle: Duration::from_millis(1),
+            timeout: None,
         }
     }
 }
@@ -285,6 +289,7 @@ impl Default for Config {
 /// Deterministic runtime that randomly selects tasks to run based on a seed.
 pub struct Executor {
     cycle: Duration,
+    deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Mutex<StdRng>,
@@ -297,15 +302,28 @@ pub struct Executor {
 impl Executor {
     /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
     pub fn init(cfg: Config) -> (Runner, Context, Arc<Auditor>) {
+        // Ensure config is valid
+        if let (Some(_), cycle) = (cfg.timeout, cfg.cycle) {
+            if cycle == Duration::default() {
+                panic!("cycle duration must be non-zero when timeout is set");
+            }
+        }
+
+        // Initialize runtime
         let metrics = Arc::new(Metrics::init(cfg.registry));
         let auditor = Arc::new(Auditor::new());
+        let start_time = UNIX_EPOCH;
+        let deadline = cfg
+            .timeout
+            .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
         let executor = Arc::new(Self {
             cycle: cfg.cycle,
+            deadline,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
             rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
             prefix: Mutex::new(String::new()),
-            time: Mutex::new(UNIX_EPOCH),
+            time: Mutex::new(start_time),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
                 counter: Mutex::new(0),
@@ -329,6 +347,16 @@ impl Executor {
     pub fn seeded(seed: u64) -> (Runner, Context, Arc<Auditor>) {
         let cfg = Config {
             seed,
+            ..Config::default()
+        };
+        Self::init(cfg)
+    }
+
+    /// Initialize a new `deterministic` runtime with the default configuration
+    /// but exit after the given timeout.
+    pub fn timed(timeout: Duration) -> (Runner, Context, Arc<Auditor>) {
+        let cfg = Config {
+            timeout: Some(timeout),
             ..Config::default()
         };
         Self::init(cfg)
@@ -370,6 +398,16 @@ impl crate::Runner for Runner {
         // Process tasks until root task completes or progress stalls
         let mut iter = 0;
         loop {
+            // Ensure we have not exceeded our deadline
+            {
+                let current = self.executor.time.lock().unwrap();
+                if let Some(deadline) = self.executor.deadline {
+                    if *current >= deadline {
+                        panic!("runtime timeout");
+                    }
+                }
+            }
+
             // Snapshot available tasks
             let mut tasks = self.executor.tasks.drain();
 
@@ -848,7 +886,7 @@ impl CryptoRng for Context {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::run_tasks;
+    use crate::{utils::run_tasks, Runner};
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
@@ -921,5 +959,16 @@ mod tests {
                 now + Duration::new(15, 0),
             ]
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "runtime timeout")]
+    fn test_timeout() {
+        let (executor, runtime, _) = Executor::timed(Duration::from_secs(10));
+        executor.start(async move {
+            loop {
+                runtime.sleep(Duration::from_secs(1)).await;
+            }
+        });
     }
 }

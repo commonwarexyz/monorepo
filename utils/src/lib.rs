@@ -28,6 +28,14 @@ pub fn hash(bytes: &Bytes) -> Bytes {
     hasher.finalize().to_vec().into()
 }
 
+/// Computes the union of two byte slices.
+pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut union = Vec::with_capacity(a.len() + b.len());
+    union.extend_from_slice(a);
+    union.extend_from_slice(b);
+    union
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +88,21 @@ mod tests {
         assert_eq!(
             hex(&multiple),
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+        );
+    }
+
+    #[test]
+    fn test_union() {
+        // Test case 0: empty slices
+        assert_eq!(union(&[], &[]), []);
+
+        // Test case 1: empty and non-empty slices
+        assert_eq!(union(&[], &[0x01, 0x02, 0x03]), [0x01, 0x02, 0x03]);
+
+        // Test case 2: non-empty and non-empty slices
+        assert_eq!(
+            union(&[0x01, 0x02, 0x03], &[0x04, 0x05, 0x06]),
+            [0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
         );
     }
 }

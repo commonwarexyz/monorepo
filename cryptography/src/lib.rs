@@ -12,7 +12,6 @@ pub mod bls12381;
 pub use bls12381::Bls12381;
 pub mod ed25519;
 pub use ed25519::Ed25519;
-pub mod utils;
 
 /// Byte array representing an arbitrary private key.
 pub type PrivateKey = Bytes;
@@ -72,6 +71,9 @@ pub trait Scheme: Send + Sync + Clone + 'static {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool;
+
+    /// Returns the size of a public key and signature in bytes.
+    fn size() -> (usize, usize);
 }
 
 #[cfg(test)]
@@ -201,6 +203,11 @@ mod tests {
     }
 
     #[test]
+    fn test_ed25519_size() {
+        assert_eq!(Ed25519::size(), (32, 64));
+    }
+
+    #[test]
     fn test_bls12381_validate() {
         test_validate::<Bls12381>();
     }
@@ -238,5 +245,10 @@ mod tests {
     #[test]
     fn test_bls12381_invalid_signature_length() {
         test_invalid_signature_length::<Bls12381>();
+    }
+
+    #[test]
+    fn test_bls12381_size() {
+        assert_eq!(Bls12381::size(), (48, 96));
     }
 }

@@ -53,6 +53,7 @@ pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Capture logs (based on the provided log level) from a test run using
 /// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
+///
 /// This macro defaults to a log level of `DEBUG` if no level is provided.
 ///
 /// This macro is powered by the [tracing](https://docs.rs/tracing) and

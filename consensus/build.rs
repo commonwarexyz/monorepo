@@ -14,6 +14,6 @@ fn main() -> Result<()> {
         "Request.hash",
         "Missing.hash",
     ]);
-    config.compile_protos(&["src/fixed/wire.proto"], &["src/fixed/"])?;
+    config.compile_protos(&["src/authority/wire.proto"], &["src/authority/"])?;
     Ok(())
 }
