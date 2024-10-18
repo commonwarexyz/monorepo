@@ -88,9 +88,11 @@ mod tests {
     };
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
+    use governor::Quota;
     use prometheus_client::registry::Registry;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
+        num::NonZeroU32,
         sync::{Arc, Mutex},
         time::Duration,
     };
@@ -353,6 +355,7 @@ mod tests {
                     activity_timeout,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
@@ -559,6 +562,7 @@ mod tests {
                     activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
@@ -729,6 +733,7 @@ mod tests {
                     activity_timeout: 10,
                     max_fetch_count: 32,
                     max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
@@ -820,6 +825,7 @@ mod tests {
                 activity_timeout: 10,
                 max_fetch_count: 32,
                 max_fetch_size: 1024 * 512,
+                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                 validators: view_validators.clone(),
             };
             let engine = Engine::new(runtime.clone(), cfg);
@@ -948,6 +954,7 @@ mod tests {
                     activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
@@ -1107,6 +1114,7 @@ mod tests {
                     activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
@@ -1241,6 +1249,7 @@ mod tests {
                     activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
@@ -1451,6 +1460,7 @@ mod tests {
                     activity_timeout: 10,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
@@ -1603,6 +1613,7 @@ mod tests {
                         activity_timeout,
                         max_fetch_count: 1,
                         max_fetch_size: 1024 * 512,
+                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                         validators: view_validators.clone(),
                     };
                     let engine = Engine::new(runtime.clone(), cfg);
@@ -1810,6 +1821,7 @@ mod tests {
                         activity_timeout,
                         max_fetch_count: 1,
                         max_fetch_size: 1024 * 512,
+                        fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                         validators: view_validators.clone(),
                     };
                     let engine = Engine::new(runtime.clone(), cfg);

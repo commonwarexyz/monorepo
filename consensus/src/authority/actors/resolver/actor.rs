@@ -18,6 +18,7 @@ use commonware_utils::hex;
 use core::panic;
 use futures::{channel::mpsc, future::Either};
 use futures::{SinkExt, StreamExt};
+use governor::{middleware::NoOpMiddleware, state::keyed::HashMapStateStore, RateLimiter};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -32,7 +33,7 @@ enum Knowledge {
 }
 
 pub struct Actor<
-    E: Clock + Rng + Spawner,
+    E: Clock + Rng + Spawner + governor::clock::Clock,
     C: Scheme,
     H: Hasher,
     A: Application + Supervisor + Finalizer,
@@ -47,6 +48,8 @@ pub struct Actor<
     fetch_timeout: Duration,
     max_fetch_count: u64,
     max_fetch_size: usize,
+    fetch_rate_limiter:
+        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -77,8 +80,12 @@ pub struct Actor<
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
-    Actor<E, C, H, A>
+impl<
+        E: Clock + Rng + Spawner + governor::clock::Clock,
+        C: Scheme,
+        H: Hasher,
+        A: Application + Supervisor + Finalizer,
+    > Actor<E, C, H, A>
 {
     pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> (Self, Mailbox) {
         // Create genesis block and store it
@@ -100,6 +107,9 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
             },
         );
 
+        // Initialize rate limiter
+        let fetch_rate_limiter = RateLimiter::hashmap_with_clock(cfg.fetch_rate_per_peer, &runtime);
+
         // Initialize mailbox
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
@@ -115,6 +125,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
                 fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
+                fetch_rate_limiter,
 
                 mailbox_receiver,
 
@@ -708,6 +719,9 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
         let mut validator_indices = (0..validators.len()).collect::<Vec<_>>();
         validator_indices.shuffle(&mut self.runtime);
 
+        // Minimize footprint of rate limiter
+        self.fetch_rate_limiter.shrink_to_fit();
+
         // Loop until we send a message
         let mut index = 0;
         loop {
@@ -727,6 +741,18 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
             // Select random validator to fetch from
             let validator = validators[validator_indices[index]].clone();
             if validator == self.crypto.public_key() {
+                index += 1;
+                continue;
+            }
+
+            // Check if rate limit is exceeded
+            if self.fetch_rate_limiter.check_key(&validator).is_err() {
+                debug!(
+                    height,
+                    hash = hex(&hash),
+                    peer = hex(&validator),
+                    "skipping request because rate limited"
+                );
                 index += 1;
                 continue;
             }

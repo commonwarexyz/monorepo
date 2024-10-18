@@ -242,11 +242,11 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Finalizer for Applicat
                 Some(height) => *height,
                 None => self.panic("block not verified"),
             };
-            if state.last_finalized + 1 != height {
+            let expected = state.last_finalized + 1;
+            if expected != height {
                 self.panic(&format!(
                     "invalid finalization height: {} != {}",
-                    state.last_finalized + 1,
-                    height
+                    expected, height
                 ));
             }
             state.last_finalized = height;
