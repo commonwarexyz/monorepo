@@ -270,7 +270,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(public_key) {
             if previous_finalize == &finalize.hash {
-                debug!(
+                trace!(
                     view = finalize.view,
                     signer = hex(public_key),
                     previous_finalize = hex(previous_finalize),
@@ -781,7 +781,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
     fn enter_view(&mut self, view: u64) {
         // Ensure view is valid
         if view <= self.view {
-            debug!(
+            trace!(
                 view = view,
                 our_view = self.view,
                 "skipping useless view change"
@@ -1190,7 +1190,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         let view = self.views.get_mut(&finalization.view);
         if let Some(ref view) = view {
             if view.broadcast_finalization {
-                debug!(
+                trace!(
                     view = finalization.view,
                     height = finalization.height,
                     reason = "already broadcast finalization",

@@ -417,7 +417,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
                     );
                     return false;
                 } else {
-                    debug!(
+                    trace!(
                         height = proposal.height,
                         view,
                         proposal_view = proposal.view,
