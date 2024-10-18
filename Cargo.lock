@@ -410,6 +410,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "futures",
+ "governor",
  "prometheus-client",
  "prost",
  "prost-build",

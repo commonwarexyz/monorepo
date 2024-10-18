@@ -7,11 +7,12 @@ use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Clock, Spawner};
+use governor::clock::Clock as GClock;
 use rand::Rng;
 use tracing::debug;
 
 pub struct Engine<
-    E: Clock + Rng + Spawner,
+    E: Clock + GClock + Rng + Spawner,
     C: Scheme,
     H: Hasher,
     A: Application + Supervisor + Finalizer,
@@ -25,8 +26,12 @@ pub struct Engine<
     voter_mailbox: voter::Mailbox,
 }
 
-impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
-    Engine<E, C, H, A>
+impl<
+        E: Clock + GClock + Rng + Spawner,
+        C: Scheme,
+        H: Hasher,
+        A: Application + Supervisor + Finalizer,
+    > Engine<E, C, H, A>
 {
     pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> Self {
         // Sort the validators at each view
@@ -51,6 +56,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
                 fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
+                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
             },
         );
 

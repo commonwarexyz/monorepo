@@ -1,6 +1,7 @@
 use crate::{Application, Hasher, View};
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
+use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
     collections::BTreeMap,
@@ -33,6 +34,9 @@ pub struct Config<C: Scheme, H: Hasher, A: Application> {
 
     /// Maximum number of bytes to respond with in a single fetch.
     pub max_fetch_size: usize,
+
+    /// Maximum rate of fetch requests per peer (to prevent rate limiting).
+    pub fetch_rate_per_peer: Quota,
 
     /// Validators to use for each range of views. Any view without
     /// an explicit view will use the next smallest view.

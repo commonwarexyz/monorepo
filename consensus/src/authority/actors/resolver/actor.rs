@@ -18,6 +18,10 @@ use commonware_utils::hex;
 use core::panic;
 use futures::{channel::mpsc, future::Either};
 use futures::{SinkExt, StreamExt};
+use governor::{
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
+    RateLimiter,
+};
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -32,7 +36,7 @@ enum Knowledge {
 }
 
 pub struct Actor<
-    E: Clock + Rng + Spawner,
+    E: Clock + GClock + Rng + Spawner,
     C: Scheme,
     H: Hasher,
     A: Application + Supervisor + Finalizer,
@@ -47,6 +51,8 @@ pub struct Actor<
     fetch_timeout: Duration,
     max_fetch_count: u64,
     max_fetch_size: usize,
+    fetch_rate_limiter:
+        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -77,8 +83,12 @@ pub struct Actor<
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
-impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
-    Actor<E, C, H, A>
+impl<
+        E: Clock + GClock + Rng + Spawner,
+        C: Scheme,
+        H: Hasher,
+        A: Application + Supervisor + Finalizer,
+    > Actor<E, C, H, A>
 {
     pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> (Self, Mailbox) {
         // Create genesis block and store it
@@ -100,6 +110,9 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
             },
         );
 
+        // Initialize rate limiter
+        let fetch_rate_limiter = RateLimiter::hashmap_with_clock(cfg.fetch_rate_per_peer, &runtime);
+
         // Initialize mailbox
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
@@ -115,6 +128,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
                 fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
+                fetch_rate_limiter,
 
                 mailbox_receiver,
 
@@ -249,7 +263,21 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
             // Send event
             match knowledge {
                 Knowledge::Notarized(hashes) => {
-                    trace!(height = next, "notified application notarization");
+                    // Only send notarization if greater than our latest knowledge
+                    // of the finalizaed tip
+                    //
+                    // We may still only have notarization knowledge at this height because
+                    // we have not been able to resolve blocks from the accepted tip
+                    // to this height yet.
+                    if self.last_finalized >= next {
+                        trace!(
+                            height = next,
+                            last_finalized = self.last_finalized,
+                            "skipping notarization notification because behind finalization"
+                        );
+                        return;
+                    }
+
                     // Send fulfilled unsent notarizations
                     for (_, hash) in hashes {
                         let already_notified = self
@@ -279,9 +307,10 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
                             .insert(hash.clone());
                         self.application.notarized(hash.clone()).await;
                     }
+                    trace!(height = next, "notified application notarization");
                 }
                 Knowledge::Finalized(hash) => {
-                    trace!(height = next, "notified application finalization");
+                    // Send finalized proposal
                     let proposal = match self.blocks.get(&hash) {
                         Some(proposal) => proposal,
                         None => {
@@ -305,6 +334,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
                     self.application.finalized(hash.clone()).await;
+                    trace!(height = next, "notified application finalization");
                 }
             }
 
@@ -542,7 +572,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
     }
 
     fn backfill_finalization(&mut self, height: Height, mut block: Hash) {
-        debug!(height, hash = hex(&block), "backfilling finalizations");
+        trace!(height, hash = hex(&block), "backfilling finalizations");
         let mut next = height;
         loop {
             let previous = self.knowledge.get_mut(&next);
@@ -569,6 +599,12 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
                         block = parent.parent.clone();
                     } else {
                         // If we don't know the parent, we can't finalize any ancestors
+                        trace!(
+                            next = height - 1,
+                            hash = hex(&block),
+                            reason = "missing parent",
+                            "exiting backfill"
+                        );
                         break;
                     }
                 }
@@ -591,6 +627,12 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
                     if let Some(parent) = self.blocks.get(&block) {
                         block = parent.parent.clone();
                     } else {
+                        trace!(
+                            next = height - 1,
+                            hash = hex(&block),
+                            reason = "missing parent",
+                            "exiting backfill"
+                        );
                         break;
                     }
                 }
@@ -675,7 +717,20 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
             if let Some(knowledge) = self.knowledge.get(&target) {
                 match knowledge {
                     Knowledge::Notarized(_) => {
-                        // We only want to batch fill finalized data
+                        // If this height is less than the finalized
+                        // tip but it is still a notarization, we should
+                        // fetch it.
+                        if target <= self.last_finalized {
+                            trace!(
+                                height,
+                                target,
+                                last_finalized = self.last_finalized,
+                                "requesting gap block"
+                            );
+                            continue;
+                        }
+
+                        // We only want to batch fill finalized data.
                         break;
                     }
                     Knowledge::Finalized(hash) => {
@@ -708,6 +763,9 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
         let mut validator_indices = (0..validators.len()).collect::<Vec<_>>();
         validator_indices.shuffle(&mut self.runtime);
 
+        // Minimize footprint of rate limiter
+        self.fetch_rate_limiter.shrink_to_fit();
+
         // Loop until we send a message
         let mut index = 0;
         loop {
@@ -727,6 +785,18 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor
             // Select random validator to fetch from
             let validator = validators[validator_indices[index]].clone();
             if validator == self.crypto.public_key() {
+                index += 1;
+                continue;
+            }
+
+            // Check if rate limit is exceeded
+            if self.fetch_rate_limiter.check_key(&validator).is_err() {
+                debug!(
+                    height,
+                    hash = hex(&hash),
+                    peer = hex(&validator),
+                    "skipping request because rate limited"
+                );
                 index += 1;
                 continue;
             }
