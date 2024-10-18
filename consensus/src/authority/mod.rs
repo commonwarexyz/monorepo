@@ -94,6 +94,7 @@ mod tests {
 
         prover: Prover<C, H>,
 
+        proposals: Arc<Mutex<HashMap<Height, HashMap<View, HashSet<PublicKey>>>>>,
         votes: Arc<Mutex<HashMap<Height, HashMap<View, HashSet<PublicKey>>>>>,
         finalizes: Arc<Mutex<HashMap<Height, HashMap<View, HashSet<PublicKey>>>>>,
         faults: Arc<Mutex<HashMap<PublicKey, HashSet<View>>>>,
@@ -113,6 +114,7 @@ mod tests {
             Self {
                 participants: parsed_participants,
                 prover,
+                proposals: Arc::new(Mutex::new(HashMap::new())),
                 votes: Arc::new(Mutex::new(HashMap::new())),
                 finalizes: Arc::new(Mutex::new(HashMap::new())),
                 faults: Arc::new(Mutex::new(HashMap::new())),
@@ -147,7 +149,16 @@ mod tests {
             // consensus).
             match activity {
                 PROPOSAL => {
-                    self.prover.deserialize_proposal(proof, true).unwrap();
+                    let (public_key, view, height, _) =
+                        self.prover.deserialize_proposal(proof, true).unwrap();
+                    self.proposals
+                        .lock()
+                        .unwrap()
+                        .entry(height)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .insert(public_key);
                 }
                 VOTE => {
                     let (public_key, view, height, _) =
@@ -351,46 +362,73 @@ mod tests {
             let latest_complete = required_blocks - activity_timeout;
             for supervisor in supervisors.iter() {
                 // Ensure no faults
-                let faults = supervisor.faults.lock().unwrap();
-                assert!(faults.is_empty());
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
 
                 // Ensure no forks
-                let votes = supervisor.votes.lock().unwrap();
-                for (height, views) in votes.iter() {
-                    if views.len() > 1 {
-                        panic!("height: {}, views: {:?}", height, views);
-                    }
+                {
+                    let proposals = supervisor.proposals.lock().unwrap();
+                    for (height, views) in proposals.iter() {
+                        if views.len() > 1 {
+                            panic!("height: {}, views: {:?}", height, views);
+                        }
 
-                    // Ensure no skips (height == view)
-                    let voters = views.get(height).unwrap();
+                        // Ensure no skips (height == view)
+                        let proposers = views.get(height).unwrap();
 
-                    // Only check at views below timeout
-                    if *height > latest_complete {
-                        continue;
-                    }
+                        // Only check at views below timeout
+                        if *height > latest_complete {
+                            continue;
+                        }
 
-                    // Ensure everyone participating
-                    if voters.len() != n {
-                        panic!("height: {}, voters: {:?}", height, voters);
+                        // Ensure everyone participating
+                        if proposers.len() != 1 {
+                            panic!("height: {}, proposers: {:?}", height, proposers);
+                        }
                     }
                 }
-                let finalizes = supervisor.finalizes.lock().unwrap();
-                for (height, views) in finalizes.iter() {
-                    if views.len() > 1 {
-                        panic!("height: {}, views: {:?}", height, views);
+                {
+                    let votes = supervisor.votes.lock().unwrap();
+                    for (height, views) in votes.iter() {
+                        if views.len() > 1 {
+                            panic!("height: {}, views: {:?}", height, views);
+                        }
+
+                        // Ensure no skips (height == view)
+                        let voters = views.get(height).unwrap();
+
+                        // Only check at views below timeout
+                        if *height > latest_complete {
+                            continue;
+                        }
+
+                        // Ensure everyone participating
+                        if voters.len() != n {
+                            panic!("height: {}, voters: {:?}", height, voters);
+                        }
                     }
+                }
+                {
+                    let finalizes = supervisor.finalizes.lock().unwrap();
+                    for (height, views) in finalizes.iter() {
+                        if views.len() > 1 {
+                            panic!("height: {}, views: {:?}", height, views);
+                        }
 
-                    // Ensure no skips (height == view)
-                    let finalizers = views.get(height).unwrap();
+                        // Ensure no skips (height == view)
+                        let finalizers = views.get(height).unwrap();
 
-                    // Only check at views below timeout
-                    if *height > latest_complete {
-                        continue;
-                    }
+                        // Only check at views below timeout
+                        if *height > latest_complete {
+                            continue;
+                        }
 
-                    // Ensure everyone participating
-                    if finalizers.len() != n {
-                        panic!("height: {}, finalizers: {:?}", height, finalizers);
+                        // Ensure everyone participating
+                        if finalizers.len() != n {
+                            panic!("height: {}, finalizers: {:?}", height, finalizers);
+                        }
                     }
                 }
             }
