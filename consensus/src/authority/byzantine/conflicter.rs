@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use crate::{
     authority::{
         encoder::{finalize_digest, finalize_namespace, vote_digest, vote_namespace},
@@ -16,26 +14,27 @@ use prost::Message;
 use rand::Rng;
 use tracing::debug;
 
-pub struct Config<C: Scheme> {
+pub struct Config<C: Scheme, H: Hasher> {
     pub crypto: C,
+    pub hasher: H,
     pub namespace: Bytes,
 }
 
 pub struct Conflicter<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> {
     runtime: E,
     crypto: C,
-    _hasher: PhantomData<H>,
+    _hasher: H,
 
     vote_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 }
 
 impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C, H> {
-    pub fn new(runtime: E, cfg: Config<C>) -> Self {
+    pub fn new(runtime: E, cfg: Config<C, H>) -> Self {
         Self {
             runtime,
             crypto: cfg.crypto,
-            _hasher: PhantomData,
+            _hasher: cfg.hasher,
 
             vote_namespace: vote_namespace(&cfg.namespace),
             finalize_namespace: finalize_namespace(&cfg.namespace),

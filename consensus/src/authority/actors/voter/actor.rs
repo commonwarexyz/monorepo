@@ -137,7 +137,12 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 vote.signature.clone().unwrap(),
             );
             self.application.report(NULL_AND_FINALIZE, proof).await;
-            warn!(view = vote.view, signer = hex(public_key), "recorded fault");
+            warn!(
+                view = vote.view,
+                signer = hex(public_key),
+                activity = NULL_AND_FINALIZE,
+                "recorded fault"
+            );
             return;
         }
         let hash = vote.hash.clone().unwrap();
@@ -171,7 +176,12 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 vote.signature.clone().unwrap(),
             );
             self.application.report(CONFLICTING_VOTE, proof).await;
-            warn!(view = vote.view, signer = hex(public_key), "recorded fault");
+            warn!(
+                view = vote.view,
+                signer = hex(public_key),
+                activity = CONFLICTING_VOTE,
+                "recorded fault"
+            );
             return;
         }
 
@@ -262,6 +272,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             warn!(
                 view = finalize.view,
                 signer = hex(public_key),
+                activity = NULL_AND_FINALIZE,
                 "recorded fault"
             );
             return;
@@ -299,6 +310,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             warn!(
                 view = finalize.view,
                 signer = hex(public_key),
+                activity = CONFLICTING_FINALIZE,
                 "recorded fault"
             );
             return;
@@ -709,7 +721,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
             warn!(
                 leader = hex(&expected_leader),
                 view = proposal.view,
-                reason = "conflicting proposal",
+                activity = CONFLICTING_PROPOSAL,
                 "recorded fault"
             );
             return;
