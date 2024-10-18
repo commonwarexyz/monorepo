@@ -6,7 +6,7 @@ use syn::{
     parse::{Parse, ParseStream, Result},
     parse_macro_input,
     spanned::Spanned,
-    AttributeArgs, Block, Error, Expr, Ident, ItemFn, Lit, Meta, NestedMeta, Pat, Token,
+    Block, Error, Expr, Ident, ItemFn, LitStr, Pat, Token,
 };
 
 /// Run a test function asynchronously.
@@ -53,9 +53,8 @@ pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Capture logs (based on the provided log level) from a test run using
 /// [libtest's output capture functionality](https://doc.rust-lang.org/book/ch11-02-running-tests.html#showing-function-output).
-/// Optionally, enforce a timeout (in milliseconds) for a test to complete.
 ///
-/// This macro defaults to a log level of `DEBUG` and not enforcing a timeout.
+/// This macro defaults to a log level of `DEBUG` if no level is provided.
 ///
 /// This macro is powered by the [tracing](https://docs.rs/tracing) and
 /// [tracing-subscriber](https://docs.rs/tracing-subscriber) crates.
@@ -65,19 +64,11 @@ pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
 /// use commonware_macros::test_traced;
 /// use tracing::{debug, info};
 ///
-/// #[test_traced(level = "INFO")]
+/// #[test_traced("INFO")]
 /// fn test_info_level() {
 ///     info!("This is an info log");
 ///     debug!("This is a debug log (won't be shown)");
 ///     assert_eq!(2 + 2, 4);
-/// }
-///
-/// #[test_traced(timeout = 1)]
-/// #[should_panic(expected = "timed out")]
-/// fn test_timeout() {
-///     info!("This test will take 5 seconds");
-///     std::thread::sleep(std::time::Duration::from_secs(5));
-///     assert_eq!(7 + 7, 21);
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -85,89 +76,29 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
     let input = parse_macro_input!(item as ItemFn);
 
-    // Parse the attribute arguments
-    let args = parse_macro_input!(attr as AttributeArgs);
-
-    // Initialize default values
-    let mut level = None;
-    let mut timeout_duration = None;
-
-    for arg in args {
-        match arg {
-            NestedMeta::Meta(Meta::NameValue(mnv)) => {
-                let ident = mnv
-                    .path
-                    .get_ident()
-                    .expect("Expected identifier")
-                    .to_string();
-                match ident.as_str() {
-                    "level" => {
-                        if level.is_some() {
-                            return Error::new_spanned(mnv.path, "Only one level can be specified")
-                                .to_compile_error()
-                                .into();
-                        }
-                        if let Lit::Str(lit_str) = mnv.lit {
-                            level = Some(lit_str.value());
-                        } else {
-                            return Error::new_spanned(
-                                mnv.lit,
-                                "Expected string literal for log level",
-                            )
-                            .to_compile_error()
-                            .into();
-                        }
-                    }
-                    "timeout" => {
-                        if timeout_duration.is_some() {
-                            return Error::new_spanned(
-                                mnv.path,
-                                "Only one timeout can be specified",
-                            )
-                            .to_compile_error()
-                            .into();
-                        }
-                        if let Lit::Int(lit_int) = mnv.lit {
-                            timeout_duration = Some(lit_int.base10_parse::<u64>().unwrap());
-                        } else {
-                            return Error::new_spanned(
-                                mnv.lit,
-                                "Expected integer literal for timeout",
-                            )
-                            .to_compile_error()
-                            .into();
-                        }
-                    }
-                    _ => {
-                        return Error::new_spanned(mnv.path, "Unknown attribute parameter")
-                            .to_compile_error()
-                            .into();
-                    }
-                }
-            }
+    // Parse the attribute argument for log level
+    let log_level = if attr.is_empty() {
+        // Default log level is DEBUG
+        quote! { tracing::Level::DEBUG }
+    } else {
+        // Parse the attribute as a string literal
+        let level_str = parse_macro_input!(attr as LitStr);
+        let level_ident = level_str.value().to_uppercase();
+        match level_ident.as_str() {
+            "TRACE" => quote! { tracing::Level::TRACE },
+            "DEBUG" => quote! { tracing::Level::DEBUG },
+            "INFO" => quote! { tracing::Level::INFO },
+            "WARN" => quote! { tracing::Level::WARN },
+            "ERROR" => quote! { tracing::Level::ERROR },
             _ => {
-                return Error::new_spanned(arg, "Unsupported attribute argument format")
-                    .to_compile_error()
-                    .into();
+                // Return a compile error for invalid log levels
+                return Error::new_spanned(
+                    level_str,
+                    "Invalid log level. Expected one of: TRACE, DEBUG, INFO, WARN, ERROR.",
+                )
+                .to_compile_error()
+                .into();
             }
-        }
-    }
-
-    // Map level to tracing::Level
-    let level = level.unwrap_or("DEBUG".to_string());
-    let log_level = match level.to_uppercase().as_str() {
-        "TRACE" => quote! { tracing::Level::TRACE },
-        "DEBUG" => quote! { tracing::Level::DEBUG },
-        "INFO" => quote! { tracing::Level::INFO },
-        "WARN" => quote! { tracing::Level::WARN },
-        "ERROR" => quote! { tracing::Level::ERROR },
-        _ => {
-            return Error::new(
-                input.sig.ident.span(),
-                "Invalid log level. Expected one of: TRACE, DEBUG, INFO, WARN, ERROR.",
-            )
-            .to_compile_error()
-            .into();
         }
     };
 
@@ -178,51 +109,24 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
     let block = input.block;
 
     // Generate output tokens
-    let expanded = {
-        let test_body = if let Some(timeout_duration) = timeout_duration {
-            quote! {
-                // Spawn a thread to run the test function
-                let (sender, receiver) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    // Set the subscriber for the scope of the test
-                    tracing::dispatcher::with_default(&dispatcher, || {
-                        #block
-                        sender.send(()).unwrap();
-                    });
-                });
+    let expanded = quote! {
+        #[test]
+        #(#attrs)*
+        #vis #sig {
+            // Create a subscriber and dispatcher with the specified log level
+            let subscriber = tracing_subscriber::fmt()
+                .with_test_writer()
+                .with_max_level(#log_level)
+                .with_line_number(true)
+                .finish();
+            let dispatcher = tracing::Dispatch::new(subscriber);
 
-                // Wait for the test to complete or timeout
-                let timeout = std::time::Duration::from_millis(#timeout_duration);
-                if receiver.recv_timeout(timeout).is_err() {
-                    panic!("timed out");
-                }
-            }
-        } else {
-            quote! {
-                // Set the subscriber for the scope of the test
-                tracing::dispatcher::with_default(&dispatcher, || {
-                    #block
-                });
-            }
-        };
-
-        quote! {
-            #[test]
-            #(#attrs)*
-            #vis #sig {
-                // Create a subscriber and dispatcher with the specified log level
-                let subscriber = tracing_subscriber::fmt()
-                    .with_test_writer()
-                    .with_max_level(#log_level)
-                    .with_line_number(true)
-                    .finish();
-                let dispatcher = tracing::Dispatch::new(subscriber);
-
-                #test_body
-            }
+            // Set the subcriber for the scope of the test
+            tracing::dispatcher::with_default(&dispatcher, || {
+                #block
+            });
         }
     };
-
     TokenStream::from(expanded)
 }
 

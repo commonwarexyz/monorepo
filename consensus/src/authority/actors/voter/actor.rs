@@ -2,28 +2,29 @@ use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
         actors::{resolver, Proposal},
-        encoding::{
-            finalize_digest, header_digest, proposal_digest, vote_digest, FINALIZE_SUFFIX,
-            PROPOSAL_SUFFIX, VOTE_SUFFIX,
+        encoder::{
+            finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
+            vote_namespace,
         },
-        wire,
+        wire, Prover, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE,
+        NULL_AND_FINALIZE, PROPOSAL, VOTE,
     },
-    Application, Hash, Hasher, Height, View,
+    Application, Finalizer, Hash, Hasher, Height, Supervisor, View,
 };
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::{hex, quorum, union};
+use commonware_utils::{hex, quorum};
 use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::gauge::Gauge;
 use prost::Message as _;
 use rand::Rng;
-use std::sync::atomic::AtomicI64;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     time::{Duration, SystemTime},
 };
+use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
 type Notarizable<'a> = Option<(
@@ -32,7 +33,11 @@ type Notarizable<'a> = Option<(
     &'a HashMap<PublicKey, wire::Vote>,
 )>;
 
-struct Round {
+struct Round<C: Scheme, H: Hasher, A: Supervisor> {
+    application: A,
+    _crypto: PhantomData<C>,
+    _hasher: PhantomData<H>,
+
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -46,6 +51,8 @@ struct Round {
         wire::Proposal,
     )>,
     verified_proposal: bool,
+
+    // Track broadcast
     broadcast_vote: bool,
     broadcast_finalize: bool,
 
@@ -64,13 +71,18 @@ struct Round {
     broadcast_finalization: bool,
 }
 
-impl Round {
+impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
     pub fn new(
+        application: A,
         leader: PublicKey,
         leader_deadline: Option<SystemTime>,
         advance_deadline: Option<SystemTime>,
     ) -> Self {
         Self {
+            application,
+            _crypto: PhantomData,
+            _hasher: PhantomData,
+
             leader,
             leader_deadline,
             advance_deadline,
@@ -79,6 +91,7 @@ impl Round {
             requested_proposal: false,
             proposal: None,
             verified_proposal: false,
+
             broadcast_vote: false,
             broadcast_finalize: false,
 
@@ -96,7 +109,7 @@ impl Round {
         }
     }
 
-    fn add_verified_vote(&mut self, vote: wire::Vote) -> Option<wire::Fault> {
+    async fn add_verified_vote(&mut self, vote: wire::Vote) {
         // Determine whether or not this is a null vote
         let public_key = &vote.signature.as_ref().unwrap().public_key;
         if vote.hash.is_none() {
@@ -105,7 +118,7 @@ impl Round {
             if finalize.is_none() {
                 // Store the null vote
                 self.null_votes.insert(public_key.clone(), vote);
-                return None;
+                return;
             }
             let finalize = finalize.unwrap();
 
@@ -116,33 +129,29 @@ impl Round {
                 .unwrap()
                 .get(public_key)
                 .unwrap();
-            let null_finalize = wire::NullFinalize {
-                view: vote.view,
-
-                height: finalize.height,
-                hash: finalize.hash.clone(),
-                signature_finalize: finalize.signature.clone(),
-
-                signature_null: vote.signature.clone(),
-            };
-            let fault = wire::Fault {
-                payload: Some(wire::fault::Payload::NullFinalize(null_finalize)),
-            };
+            let proof = Prover::<C, H>::serialize_null_finalize(
+                vote.view,
+                finalize.height,
+                finalize.hash.clone(),
+                finalize.signature.clone().unwrap(),
+                vote.signature.clone().unwrap(),
+            );
+            self.application.report(NULL_AND_FINALIZE, proof).await;
             warn!(view = vote.view, signer = hex(public_key), "recorded fault");
-            return Some(fault);
+            return;
         }
         let hash = vote.hash.clone().unwrap();
 
         // Check if already voted
         if let Some(previous_vote) = self.proposal_voters.get(public_key) {
             if previous_vote == &hash {
-                debug!(
+                trace!(
                     view = vote.view,
                     signer = hex(public_key),
                     previous_vote = hex(previous_vote),
                     "already voted"
                 );
-                return None;
+                return;
             }
 
             // Create fault
@@ -152,30 +161,29 @@ impl Round {
                 .unwrap()
                 .get(public_key)
                 .unwrap();
-            let conflicting_vote = wire::ConflictingVote {
-                view: vote.view,
-
-                height_1: previous_vote.height.unwrap(),
-                hash_1: previous_vote.hash.clone().unwrap(),
-                signature_1: previous_vote.signature.clone(),
-
-                height_2: vote.height.unwrap(),
-                hash_2: vote.hash.clone().unwrap(),
-                signature_2: vote.signature.clone(),
-            };
-            let fault = wire::Fault {
-                payload: Some(wire::fault::Payload::ConflictingVote(conflicting_vote)),
-            };
+            let proof = Prover::<C, H>::serialize_conflicting_vote(
+                vote.view,
+                previous_vote.height.unwrap(),
+                previous_vote.hash.clone().unwrap(),
+                previous_vote.signature.clone().unwrap(),
+                vote.height.unwrap(),
+                hash.clone(),
+                vote.signature.clone().unwrap(),
+            );
+            self.application.report(CONFLICTING_VOTE, proof).await;
             warn!(view = vote.view, signer = hex(public_key), "recorded fault");
-            return Some(fault);
+            return;
         }
 
         // Store the vote
         self.proposal_voters
             .insert(public_key.clone(), hash.clone());
         let entry = self.proposal_votes.entry(hash).or_default();
-        entry.insert(public_key.clone(), vote);
-        None
+        entry.insert(public_key.clone(), vote.clone());
+
+        // Report the vote
+        let proof = Prover::<C, H>::serialize_vote(vote);
+        self.application.report(VOTE, proof).await;
     }
 
     fn notarizable_proposal(&mut self, threshold: u32, force: bool) -> Notarizable {
@@ -237,42 +245,38 @@ impl Round {
         Some((None, None, &self.null_votes))
     }
 
-    fn add_verified_finalize(&mut self, finalize: wire::Finalize) -> Option<wire::Fault> {
+    async fn add_verified_finalize(&mut self, finalize: wire::Finalize) {
         // Check if also issued null vote
         let public_key = &finalize.signature.as_ref().unwrap().public_key;
         let null_vote = self.null_votes.get(public_key);
         if let Some(null_vote) = null_vote {
             // Create fault
-            let null_finalize = wire::NullFinalize {
-                view: finalize.view,
-
-                height: finalize.height,
-                hash: finalize.hash.clone(),
-                signature_finalize: finalize.signature.clone(),
-
-                signature_null: null_vote.signature.clone(),
-            };
-            let fault = wire::Fault {
-                payload: Some(wire::fault::Payload::NullFinalize(null_finalize)),
-            };
+            let proof = Prover::<C, H>::serialize_null_finalize(
+                finalize.view,
+                finalize.height,
+                finalize.hash.clone(),
+                finalize.signature.clone().unwrap(),
+                null_vote.signature.clone().unwrap(),
+            );
+            self.application.report(NULL_AND_FINALIZE, proof).await;
             warn!(
                 view = finalize.view,
                 signer = hex(public_key),
                 "recorded fault"
             );
-            return Some(fault);
+            return;
         }
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(public_key) {
             if previous_finalize == &finalize.hash {
-                debug!(
+                trace!(
                     view = finalize.view,
                     signer = hex(public_key),
                     previous_finalize = hex(previous_finalize),
                     "already finalize"
                 );
-                return None;
+                return;
             }
 
             // Create fault
@@ -282,36 +286,33 @@ impl Round {
                 .unwrap()
                 .get(public_key)
                 .unwrap();
-            let conflicting_finalize = wire::ConflictingFinalize {
-                view: finalize.view,
-
-                height_1: previous_finalize.height,
-                hash_1: previous_finalize.hash.clone(),
-                signature_1: previous_finalize.signature.clone(),
-
-                height_2: finalize.height,
-                hash_2: finalize.hash.clone(),
-                signature_2: finalize.signature.clone(),
-            };
-            let fault = wire::Fault {
-                payload: Some(wire::fault::Payload::ConflictingFinalize(
-                    conflicting_finalize,
-                )),
-            };
+            let proof = Prover::<C, H>::serialize_conflicting_finalize(
+                finalize.view,
+                previous_finalize.height,
+                previous_finalize.hash.clone(),
+                previous_finalize.signature.clone().unwrap(),
+                finalize.height,
+                finalize.hash.clone(),
+                finalize.signature.clone().unwrap(),
+            );
+            self.application.report(CONFLICTING_FINALIZE, proof).await;
             warn!(
                 view = finalize.view,
                 signer = hex(public_key),
                 "recorded fault"
             );
-            return Some(fault);
+            return;
         }
 
         // Store the finalize
         self.finalizers
             .insert(public_key.clone(), finalize.hash.clone());
         let entry = self.finalizes.entry(finalize.hash.clone()).or_default();
-        entry.insert(public_key.clone(), finalize);
-        None
+        entry.insert(public_key.clone(), finalize.clone());
+
+        // Report the finalize
+        let proof = Prover::<C, H>::serialize_finalize(finalize);
+        self.application.report(FINALIZE, proof).await;
     }
 
     fn finalizable_proposal(
@@ -356,7 +357,7 @@ impl Round {
     }
 }
 
-pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> {
+pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer> {
     runtime: E,
     crypto: C,
     hasher: H,
@@ -369,21 +370,22 @@ pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> {
     leader_timeout: Duration,
     notarization_timeout: Duration,
     null_vote_retry: Duration,
+    activity_timeout: View,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round>,
-
-    faults: BTreeMap<View, HashMap<PublicKey, wire::Fault>>,
+    views: BTreeMap<View, Round<C, H, A>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
 }
 
-impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
-    pub fn new(runtime: E, crypto: C, hasher: H, application: A, cfg: Config) -> (Self, Mailbox) {
+impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
+    Actor<E, C, H, A>
+{
+    pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -403,25 +405,24 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         (
             Self {
                 runtime,
-                crypto,
-                hasher,
-                application,
+                crypto: cfg.crypto,
+                hasher: cfg.hasher,
+                application: cfg.application,
 
-                proposal_namespace: union(&cfg.namespace, PROPOSAL_SUFFIX),
-                vote_namespace: union(&cfg.namespace, VOTE_SUFFIX),
-                finalize_namespace: union(&cfg.namespace, FINALIZE_SUFFIX),
+                proposal_namespace: proposal_namespace(&cfg.namespace),
+                vote_namespace: vote_namespace(&cfg.namespace),
+                finalize_namespace: finalize_namespace(&cfg.namespace),
 
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 null_vote_retry: cfg.null_vote_retry,
+                activity_timeout: cfg.activity_timeout,
 
                 mailbox_receiver,
 
                 last_finalized: 0,
                 view: 0,
                 views: BTreeMap::new(),
-
-                faults: BTreeMap::new(),
 
                 current_view,
                 tracked_views,
@@ -536,7 +537,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
 
         // Handle the vote
         debug!(view = self.view, "broadcasted null vote");
-        self.handle_vote(vote);
+        self.handle_vote(vote).await;
     }
 
     async fn our_proposal(
@@ -561,15 +562,27 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         // Store the proposal
         let proposal_view = proposal.view;
         let proposal_height = proposal.height;
+        let proposal_parent = proposal.parent.clone();
+        let proposal_signature = proposal.signature.clone().unwrap();
         debug!(
             view = proposal_view,
             height = proposal_height,
             hash = hex(&proposal_hash),
-            "stored our proposal"
+            "generated proposal"
         );
-        view.proposal = Some((proposal_hash, payload_hash, proposal));
+        view.proposal = Some((proposal_hash, payload_hash.clone(), proposal));
         view.verified_proposal = true;
         view.leader_deadline = None;
+
+        // Report the proposal
+        let proof = Prover::<C, H>::serialize_proposal(
+            proposal_view,
+            proposal_height,
+            proposal_parent,
+            payload_hash,
+            proposal_signature,
+        );
+        self.application.report(PROPOSAL, proof).await;
         true
     }
 
@@ -628,11 +641,14 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 return;
             }
         };
-        let header_hash = self
-            .hasher
-            .hash(&header_digest(proposal.height, &proposal.parent));
-        let proposal_digest = proposal_digest(proposal.view, &header_hash, &payload_hash);
-        let proposal_hash = self.hasher.hash(&proposal_digest);
+        let proposal_digest = proposal_digest(
+            proposal.view,
+            proposal.height,
+            &proposal.parent,
+            &payload_hash,
+        );
+        self.hasher.update(&proposal_digest);
+        let proposal_hash = self.hasher.finalize();
 
         // Check if duplicate or conflicting
         let mut previous = None;
@@ -675,35 +691,21 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
 
         // Collect fault for leader
         if let Some(previous) = previous {
-            // Gather info for first signature
-            let header_hash_1 = self
-                .hasher
-                .hash(&header_digest(proposal.height, &proposal.parent));
-
-            // Build fault
-            let conflicting_proposal = wire::ConflictingProposal {
-                view: proposal.view,
-
-                header_hash_1,
-                payload_hash_1: previous.1.clone(),
-                signature_1: previous.2.signature.clone(),
-
-                header_hash_2: header_hash,
-                payload_hash_2: payload_hash.clone(),
-                signature_2: proposal.signature.clone(),
-            };
-            let fault = wire::Fault {
-                payload: Some(wire::fault::Payload::ConflictingProposal(
-                    conflicting_proposal,
-                )),
-            };
-
             // Record fault
-            self.faults
-                .entry(proposal.view)
-                .or_default()
-                .entry(public_key.clone())
-                .or_insert(fault);
+            let signature_1 = previous.2.signature.clone().unwrap();
+            let signature_2 = proposal.signature.clone().unwrap();
+            let proof = Prover::<C, H>::serialize_conflicting_proposal(
+                proposal.view,
+                previous.2.height,
+                previous.2.parent.clone(),
+                previous.1.clone(),
+                signature_1,
+                proposal.height,
+                proposal.parent.clone(),
+                payload_hash.clone(),
+                signature_2,
+            );
+            self.application.report(CONFLICTING_PROPOSAL, proof).await;
             warn!(
                 leader = hex(&expected_leader),
                 view = proposal.view,
@@ -719,7 +721,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         let view = self
             .views
             .entry(proposal.view)
-            .or_insert_with(|| Round::new(expected_leader, None, None));
+            .or_insert_with(|| Round::new(self.application.clone(), expected_leader, None, None));
         view.proposal = Some((
             proposal_hash.clone(),
             payload_hash.clone(),
@@ -728,7 +730,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         resolver
             .verify(proposal_hash.clone(), proposal.clone())
             .await;
-        debug!(
+        trace!(
             view = proposal.view,
             height = proposal.height,
             hash = hex(&proposal_hash),
@@ -736,7 +738,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         );
     }
 
-    fn verified(&mut self, view: View) -> bool {
+    async fn verified(&mut self, view: View) -> bool {
         // Check if view still relevant
         let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -759,14 +761,27 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         // Mark proposal as verified
         view_obj.leader_deadline = None;
         view_obj.verified_proposal = true;
-        debug!(view, "verified peer proposal");
+
+        // Report the proposal
+        let proposal = view_obj.proposal.as_ref().unwrap();
+        let proof = Prover::<C, H>::serialize_proposal(
+            view,
+            proposal.2.height,
+            proposal.2.parent.clone(),
+            proposal.1.clone(),
+            proposal.2.signature.clone().unwrap(),
+        );
+        self.application.report(PROPOSAL, proof).await;
+
+        // Indicate that verification is done
+        debug!(view, height = proposal.2.height, "verified proposal");
         true
     }
 
     fn enter_view(&mut self, view: u64) {
         // Ensure view is valid
         if view <= self.view {
-            debug!(
+            trace!(
                 view = view,
                 our_view = self.view,
                 "skipping useless view change"
@@ -779,11 +794,21 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         let entry = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(leader, None, None));
+            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
         entry.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
         entry.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         self.view = view;
         info!(view, "entered view");
+    }
+
+    fn interesting(&self, view: View, allow_future: bool) -> bool {
+        if view + self.activity_timeout < self.last_finalized {
+            return false;
+        }
+        if !allow_future && view > self.view + 1 {
+            return false;
+        }
+        true
     }
 
     fn prune_views(&mut self) {
@@ -795,7 +820,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             };
 
             // Compare to last finalized
-            if next < self.last_finalized {
+            if !self.interesting(next, false) {
                 self.views.remove(&next);
                 debug!(
                     view = next,
@@ -818,15 +843,10 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         Some((threshold, len))
     }
 
-    fn vote(&mut self, vote: wire::Vote) {
+    async fn vote(&mut self, vote: wire::Vote) {
         // Ensure we are in the right view to process this message
-        if vote.view != self.view && vote.view != self.view + 1 {
-            debug!(
-                vote_view = vote.view,
-                our_view = self.view,
-                reason = "incorrect view",
-                "dropping vote"
-            );
+        if !self.interesting(vote.view, false) {
+            debug!(vote_view = vote.view, our_view = self.view, "dropping vote");
             return;
         }
 
@@ -882,10 +902,10 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         }
 
         // Handle vote
-        self.handle_vote(vote);
+        self.handle_vote(vote).await;
     }
 
-    fn handle_vote(&mut self, vote: wire::Vote) {
+    async fn handle_vote(&mut self, vote: wire::Vote) {
         // Check to see if vote is for proposal in view
         let leader = match self.leader(vote.view) {
             Some(leader) => leader,
@@ -901,18 +921,10 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         let view = self
             .views
             .entry(vote.view)
-            .or_insert_with(|| Round::new(leader, None, None));
+            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
 
         // Handle vote
-        let vote_view = vote.view;
-        let public_key = vote.signature.as_ref().unwrap().public_key.clone();
-        if let Some(fault) = view.add_verified_vote(vote) {
-            self.faults
-                .entry(vote_view)
-                .or_default()
-                .entry(public_key)
-                .or_insert(fault);
-        }
+        view.add_verified_vote(vote).await;
     }
 
     async fn notarization(
@@ -921,7 +933,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         notarization: wire::Notarization,
     ) {
         // Check if we are still in a view where this notarization could help
-        if notarization.view <= self.last_finalized {
+        if !self.interesting(notarization.view, true) {
             trace!(
                 notarization_view = notarization.view,
                 our_view = self.view,
@@ -936,7 +948,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         let view = self.views.get_mut(&notarization.view);
         if let Some(ref view) = view {
             if notarization.hash.is_some() && view.broadcast_proposal_notarization {
-                debug!(
+                trace!(
                     view = notarization.view,
                     reason = "already broadcast notarization",
                     "dropping notarization"
@@ -944,7 +956,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 return;
             }
             if notarization.hash.is_none() && view.broadcast_null_notarization {
-                debug!(
+                trace!(
                     view = notarization.view,
                     reason = "already broadcast null notarization",
                     "dropping notarization"
@@ -1041,22 +1053,15 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         let view = self
             .views
             .entry(notarization.view)
-            .or_insert_with(|| Round::new(leader, None, None));
+            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
         for signature in notarization.signatures {
-            let public_key = signature.public_key.clone();
             let vote = wire::Vote {
                 view: notarization.view,
                 height: notarization.height,
                 hash: notarization.hash.clone(),
                 signature: Some(signature),
             };
-            if let Some(fault) = view.add_verified_vote(vote) {
-                self.faults
-                    .entry(notarization.view)
-                    .or_default()
-                    .entry(public_key)
-                    .or_insert(fault);
-            }
+            view.add_verified_vote(vote).await
         }
 
         // Clear leader and advance deadlines (if they exist)
@@ -1082,9 +1087,9 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         self.enter_view(notarization.view + 1);
     }
 
-    fn finalize(&mut self, finalize: wire::Finalize) {
+    async fn finalize(&mut self, finalize: wire::Finalize) {
         // Ensure we are in the right view to process this message
-        if finalize.view <= self.last_finalized || finalize.view > self.view + 1 {
+        if !self.interesting(finalize.view, false) {
             debug!(
                 finalize_view = finalize.view,
                 our_view = self.view,
@@ -1149,27 +1154,19 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         }
 
         // Handle finalize
-        self.handle_finalize(finalize);
+        self.handle_finalize(finalize).await;
     }
 
-    fn handle_finalize(&mut self, finalize: wire::Finalize) {
+    async fn handle_finalize(&mut self, finalize: wire::Finalize) {
         // Get view for finalize
         let leader = self.leader(finalize.view).expect("unable to get leader");
         let view = self
             .views
             .entry(finalize.view)
-            .or_insert_with(|| Round::new(leader, None, None));
+            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
 
         // Handle finalize
-        let finalize_view = finalize.view;
-        let public_key = finalize.signature.as_ref().unwrap().public_key.clone();
-        if let Some(fault) = view.add_verified_finalize(finalize) {
-            self.faults
-                .entry(finalize_view)
-                .or_default()
-                .entry(public_key)
-                .or_insert(fault);
-        }
+        view.add_verified_finalize(finalize).await;
     }
 
     async fn finalization(
@@ -1178,7 +1175,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         finalization: wire::Finalization,
     ) {
         // Check if we are still in a view where this finalization could help
-        if finalization.view <= self.last_finalized {
+        if !self.interesting(finalization.view, true) {
             trace!(
                 finalization_view = finalization.view,
                 our_view = self.view,
@@ -1193,7 +1190,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         let view = self.views.get_mut(&finalization.view);
         if let Some(ref view) = view {
             if view.broadcast_finalization {
-                debug!(
+                trace!(
                     view = finalization.view,
                     height = finalization.height,
                     reason = "already broadcast finalization",
@@ -1287,22 +1284,15 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
         let view = self
             .views
             .entry(finalization.view)
-            .or_insert_with(|| Round::new(leader, None, None));
+            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
         for signature in finalization.signatures.iter() {
-            let public_key = signature.public_key.clone();
             let finalize = wire::Finalize {
                 view: finalization.view,
                 height: finalization.height,
                 hash: finalization.hash.clone(),
                 signature: Some(signature.clone()),
             };
-            if let Some(fault) = view.add_verified_finalize(finalize) {
-                self.faults
-                    .entry(finalization.view)
-                    .or_default()
-                    .entry(public_key)
-                    .or_insert(fault);
-            }
+            view.add_verified_finalize(finalize).await;
         }
 
         // Track view finalized
@@ -1500,7 +1490,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
             // Handle the vote
             let hash = vote.hash.clone().unwrap();
             debug!(view = vote.view, hash = hex(&hash), "broadcast vote");
-            self.handle_vote(vote);
+            self.handle_vote(vote).await;
         };
 
         // Attempt to notarize
@@ -1542,7 +1532,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                 height = finalize.height,
                 "broadcast finalize"
             );
-            self.handle_finalize(finalize);
+            self.handle_finalize(finalize).await;
         };
 
         // Attempt to finalization
@@ -1600,8 +1590,6 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Proposal{ view: proposal_view, parent, height, payload, payload_hash} => {
-                            debug!(view = proposal_view, our_view = self.view, "received proposal");
-
                             // If we have already moved to another view, drop the response as we will
                             // not broadcast it
                             if self.view != proposal_view {
@@ -1610,8 +1598,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                             }
 
                             // Construct proposal
-                            let header_hash = self.hasher.hash(&header_digest(height, &parent));
-                            let proposal_digest = proposal_digest(self.view, &header_hash, &payload_hash);
+                            let proposal_digest = proposal_digest(self.view, height, &parent, &payload_hash);
                             let proposal = wire::Proposal {
                                 view: self.view,
                                 height,
@@ -1624,7 +1611,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                             };
 
                             // Handle our proposal
-                            let proposal_hash = self.hasher.hash(&proposal_digest);
+                            self.hasher.update(&proposal_digest);
+                            let proposal_hash = self.hasher.finalize();
                             if !self.our_proposal(proposal_hash, payload_hash, proposal.clone()).await {
                                 continue;
                             }
@@ -1641,10 +1629,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                                 .unwrap();
                         },
                         Message::Verified { view: verified_view } => {
-                            debug!(view = verified_view, "received verified proposal");
-
                             // Handle verified proposal
-                            if !self.verified(verified_view) {
+                            if !self.verified(verified_view).await {
                                 continue;
                             }
                             view = verified_view;
@@ -1696,7 +1682,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                                 continue;
                             }
                             view = vote.view;
-                            self.vote(vote);
+                            self.vote(vote).await;
                         }
                         wire::consensus::Payload::Notarization(notarization) => {
                             if let Some(notarization_hash) = notarization.hash.as_ref() {
@@ -1721,7 +1707,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application> Actor<E, C, H, A> {
                                 continue;
                             }
                             view = finalize.view;
-                            self.finalize(finalize);
+                            self.finalize(finalize).await;
                         }
                         wire::consensus::Payload::Finalization(finalization) => {
                             if !H::validate(&finalization.hash) {

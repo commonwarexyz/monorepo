@@ -2,7 +2,7 @@ use super::{
     actors::{resolver, voter},
     config::Config,
 };
-use crate::{Application, Hasher};
+use crate::{Application, Finalizer, Hasher, Supervisor};
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -10,17 +10,24 @@ use commonware_runtime::{Clock, Spawner};
 use rand::Rng;
 use tracing::debug;
 
-pub struct Engine<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> {
+pub struct Engine<
+    E: Clock + Rng + Spawner,
+    C: Scheme,
+    H: Hasher,
+    A: Application + Supervisor + Finalizer,
+> {
     runtime: E,
 
-    resolver: resolver::Actor<E, H, A>,
+    resolver: resolver::Actor<E, C, H, A>,
     resolver_mailbox: resolver::Mailbox,
 
     voter: voter::Actor<E, C, H, A>,
     voter_mailbox: voter::Mailbox,
 }
 
-impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> Engine<E, C, H, A> {
+impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
+    Engine<E, C, H, A>
+{
     pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> Self {
         // Sort the validators at each view
         if cfg.validators.is_empty() {
@@ -36,25 +43,30 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher, A: Application> Engine<E, C
         // Create resolver
         let (resolver, resolver_mailbox) = resolver::Actor::new(
             runtime.clone(),
-            cfg.hasher.clone(),
-            cfg.application.clone(),
-            cfg.fetch_timeout,
-            cfg.max_fetch_count,
-            cfg.max_fetch_size,
+            resolver::Config {
+                crypto: cfg.crypto.clone(),
+                hasher: cfg.hasher.clone(),
+                application: cfg.application.clone(),
+                namespace: cfg.namespace.clone(),
+                fetch_timeout: cfg.fetch_timeout,
+                max_fetch_count: cfg.max_fetch_count,
+                max_fetch_size: cfg.max_fetch_size,
+            },
         );
 
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
             runtime.clone(),
-            cfg.crypto,
-            cfg.hasher,
-            cfg.application,
             voter::Config {
+                crypto: cfg.crypto,
+                hasher: cfg.hasher,
+                application: cfg.application,
                 registry: cfg.registry,
                 namespace: cfg.namespace,
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 null_vote_retry: cfg.null_vote_retry,
+                activity_timeout: cfg.activity_timeout,
             },
         );
 
