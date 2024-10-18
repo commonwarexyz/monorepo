@@ -1360,7 +1360,7 @@ mod tests {
         });
     }
 
-    fn jank_links(seed: u64) {
+    fn jank_links(seed: u64) -> String {
         // Create runtime
         let n = 10;
         let required_blocks = 20;
@@ -1370,7 +1370,7 @@ mod tests {
             timeout: Some(Duration::from_secs(180)),
             ..Default::default()
         };
-        let (executor, runtime, _) = Executor::init(cfg);
+        let (executor, runtime, auditor) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1421,7 +1421,7 @@ mod tests {
                             other.clone(),
                             Link {
                                 latency: 200.0,
-                                jitter: 100.0,
+                                jitter: 150.0,
                                 success_rate: 0.8,
                             },
                         )
@@ -1492,11 +1492,29 @@ mod tests {
                 assert!(faults.is_empty());
             }
         });
+
+        // Return audior state
+        auditor.state()
+    }
+
+    #[test_traced]
+    fn test_determinism() {
+        for seed in 0..5 {
+            // Run test with seed
+            let state = jank_links(seed);
+
+            // Run test again with same seed
+            let new_state = jank_links(seed);
+
+            // Ensure states are equal
+            assert_eq!(state, new_state);
+        }
     }
 
     #[test_traced]
     fn test_jank_links() {
-        for seed in 0..10 {
+        // We start at 5 because `test_determinism` already tests seeds 0..5
+        for seed in 5..10 {
             info!(seed, "running test with seed");
             jank_links(seed);
         }
