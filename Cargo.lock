@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-clock"
-version = "0.0.10"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "clap",
