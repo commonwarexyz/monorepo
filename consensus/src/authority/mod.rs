@@ -29,6 +29,7 @@
 //! * Immediately vote Null if observed no participation for n views or committed a fault.
 
 mod actors;
+pub mod byzantine;
 mod config;
 mod encoder;
 mod engine;
