@@ -203,6 +203,11 @@ mod tests {
     }
 
     #[test]
+    fn test_ed25519_size() {
+        assert_eq!(Ed25519::size(), (32, 64));
+    }
+
+    #[test]
     fn test_bls12381_validate() {
         test_validate::<Bls12381>();
     }
@@ -240,5 +245,10 @@ mod tests {
     #[test]
     fn test_bls12381_invalid_signature_length() {
         test_invalid_signature_length::<Bls12381>();
+    }
+
+    #[test]
+    fn test_bls12381_size() {
+        assert_eq!(Bls12381::size(), (48, 96));
     }
 }
