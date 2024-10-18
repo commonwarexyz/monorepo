@@ -1652,13 +1652,11 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        //
-                        // byzantine will vote randomly, so this is always n - 1
                         let hash = finalized.get(height).expect("missing finalized hash");
                         let count = views.get(hash).expect("missing finalized view").len();
-                        if count != n - 1 {
+                        if count < n - 1 {
                             panic!(
-                                "incorrect votes at height: {} ({} != {})",
+                                "incorrect votes at height: {} ({} < {})",
                                 height,
                                 count,
                                 n - 1
@@ -1675,13 +1673,11 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        //
-                        // byzantine can broadcast valid finalize, so this is >= n - 1
                         let hash = finalized.get(height).expect("missing finalized hash");
                         let count = views.get(hash).expect("missing finalized view").len();
                         if count < n - 1 {
                             panic!(
-                                "incorrect finalizes at height: {} ({} != {})",
+                                "incorrect finalizes at height: {} ({} < {})",
                                 height,
                                 count,
                                 n - 1

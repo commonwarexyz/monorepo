@@ -73,54 +73,6 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C, H> {
 
             // Process message
             match payload {
-                wire::consensus::Payload::Proposal(proposal) => {
-                    // Vote for random hash
-                    let hash = self.random_hash();
-                    let vote = wire::Vote {
-                        view: proposal.view,
-                        height: Some(proposal.height),
-                        hash: Some(hash.clone()),
-                        signature: Some(wire::Signature {
-                            public_key: self.crypto.public_key(),
-                            signature: self.crypto.sign(
-                                &self.vote_namespace,
-                                &vote_digest(proposal.view, Some(proposal.height), Some(&hash)),
-                            ),
-                        }),
-                    };
-                    let msg = wire::Consensus {
-                        payload: Some(wire::consensus::Payload::Vote(vote)),
-                    }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
-
-                    // Vote for random hash at different height
-                    let hash = self.random_hash();
-                    let height = Some(proposal.height + 1);
-                    let vote = wire::Vote {
-                        view: proposal.view,
-                        height,
-                        hash: Some(hash.clone()),
-                        signature: Some(wire::Signature {
-                            public_key: self.crypto.public_key(),
-                            signature: self.crypto.sign(
-                                &self.vote_namespace,
-                                &vote_digest(proposal.view, height, Some(&hash)),
-                            ),
-                        }),
-                    };
-                    let msg = wire::Consensus {
-                        payload: Some(wire::consensus::Payload::Vote(vote)),
-                    }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
-                }
                 wire::consensus::Payload::Vote(vote) => {
                     // Skip null votes
                     let height = match vote.height {
@@ -132,21 +84,67 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C, H> {
                         None => continue,
                     };
 
-                    // Finalize provided hash
-                    let finalize = wire::Finalize {
+                    // Vote for received hash
+                    let vo = wire::Vote {
                         view: vote.view,
-                        height,
-                        hash: hash.clone(),
+                        height: Some(height),
+                        hash: Some(hash.clone()),
                         signature: Some(wire::Signature {
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
-                                &self.finalize_namespace,
-                                &finalize_digest(vote.view, height, &hash),
+                                &self.vote_namespace,
+                                &vote_digest(vote.view, Some(height), Some(&hash)),
                             ),
                         }),
                     };
                     let msg = wire::Consensus {
-                        payload: Some(wire::consensus::Payload::Finalize(finalize)),
+                        payload: Some(wire::consensus::Payload::Vote(vo)),
+                    }
+                    .encode_to_vec();
+                    sender
+                        .send(Recipients::All, msg.into(), true)
+                        .await
+                        .unwrap();
+
+                    // Vote for random hash
+                    let hash = self.random_hash();
+                    let vo = wire::Vote {
+                        view: vote.view,
+                        height: Some(height),
+                        hash: Some(hash.clone()),
+                        signature: Some(wire::Signature {
+                            public_key: self.crypto.public_key(),
+                            signature: self.crypto.sign(
+                                &self.vote_namespace,
+                                &vote_digest(vote.view, Some(height), Some(&hash)),
+                            ),
+                        }),
+                    };
+                    let msg = wire::Consensus {
+                        payload: Some(wire::consensus::Payload::Vote(vo)),
+                    }
+                    .encode_to_vec();
+                    sender
+                        .send(Recipients::All, msg.into(), true)
+                        .await
+                        .unwrap();
+                }
+                wire::consensus::Payload::Finalize(finalize) => {
+                    // Finalize provided hash
+                    let fin = wire::Finalize {
+                        view: finalize.view,
+                        height: finalize.height,
+                        hash: finalize.hash.clone(),
+                        signature: Some(wire::Signature {
+                            public_key: self.crypto.public_key(),
+                            signature: self.crypto.sign(
+                                &self.finalize_namespace,
+                                &finalize_digest(finalize.view, finalize.height, &finalize.hash),
+                            ),
+                        }),
+                    };
+                    let msg = wire::Consensus {
+                        payload: Some(wire::consensus::Payload::Finalize(fin)),
                     }
                     .encode_to_vec();
                     sender
@@ -156,20 +154,20 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C, H> {
 
                     // Finalize random hash
                     let hash = self.random_hash();
-                    let finalize = wire::Finalize {
-                        view: vote.view,
-                        height,
+                    let fin = wire::Finalize {
+                        view: finalize.view,
+                        height: finalize.height,
                         hash: hash.clone(),
                         signature: Some(wire::Signature {
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.finalize_namespace,
-                                &finalize_digest(vote.view, height, &hash),
+                                &finalize_digest(finalize.view, finalize.height, &hash),
                             ),
                         }),
                     };
                     let msg = wire::Consensus {
-                        payload: Some(wire::consensus::Payload::Finalize(finalize)),
+                        payload: Some(wire::consensus::Payload::Finalize(fin)),
                     }
                     .encode_to_vec();
                     sender
@@ -177,7 +175,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C, H> {
                         .await
                         .unwrap();
                 }
-                _ => {}
+                _ => continue,
             }
         }
     }
