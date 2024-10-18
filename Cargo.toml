@@ -7,11 +7,13 @@ members = [
     "runtime",
     "utils",
     "examples/chat",
+    "examples/clock",
     "examples/vrf",
 ]
 resolver = "2"
 
 [workspace.dependencies]
+commonware-consensus = { version = "0.0.2", path = "consensus" }
 commonware-cryptography = { version = "0.0.10", path = "cryptography" }
 commonware-macros = { version = "0.0.2", path = "macros" }
 commonware-p2p = { version = "0.0.21", path = "p2p" }
