@@ -265,6 +265,10 @@ impl<
                 Knowledge::Notarized(hashes) => {
                     // Only send notarization if greater than our latest knowledge
                     // of the finalizaed tip
+                    //
+                    // We may still only have notarization knowledge at this height because
+                    // we have not been able to resolve blocks from the accepted tip
+                    // to this height yet.
                     if self.last_finalized >= next {
                         trace!(
                             height = next,
@@ -713,7 +717,20 @@ impl<
             if let Some(knowledge) = self.knowledge.get(&target) {
                 match knowledge {
                     Knowledge::Notarized(_) => {
-                        // We only want to batch fill finalized data
+                        // If this height is less than the finalized
+                        // tip but it is still a notarization, we should
+                        // fetch it.
+                        if target <= self.last_finalized {
+                            trace!(
+                                height,
+                                target,
+                                last_finalized = self.last_finalized,
+                                "requesting gap block"
+                            );
+                            continue;
+                        }
+
+                        // We only want to batch fill finalized data.
                         break;
                     }
                     Knowledge::Finalized(hash) => {
