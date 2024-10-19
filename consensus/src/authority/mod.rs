@@ -23,10 +23,10 @@
 //! # Differences from Simplex Paper
 //!
 //! * Block timeout in addition to notarization timeout
-//! * Backfill blocks from notarizing peers rather than passing along with notarization
+//! * Backfill blocks from notarizing peers rather than passing along with notarization message
 //! * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
 //!   more votes)
-//! * Immediately vote Null if observed no participation for n views or committed a fault.
+//! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new blocks on-the-fly)
 
 mod actors;
 pub mod byzantine;

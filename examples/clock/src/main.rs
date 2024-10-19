@@ -1,4 +1,9 @@
 //! TBD
+//!
+//! # Tips
+//!
+//! * If you want to maximize consensus decisions per second, increase rate limits from the default configuration
+//! of 10 messages per peer per second on the voter channel.
 
 mod application;
 
