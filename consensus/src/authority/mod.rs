@@ -782,6 +782,25 @@ mod tests {
 
                 // Verify no participation from slow validator
                 {
+                    let proposals = supervisor.proposals.lock().unwrap();
+                    for (height, views) in proposals.iter() {
+                        // Only check at views below timeout
+                        if *height > latest_complete {
+                            continue;
+                        }
+
+                        // Ensure slow validator never has a proposal
+                        for (_, proposers) in views.iter() {
+                            if proposers.contains(&validators[0]) {
+                                panic!(
+                                    "slow proposer should never have participated: height={}",
+                                    height
+                                );
+                            }
+                        }
+                    }
+                }
+                {
                     let votes = supervisor.votes.lock().unwrap();
                     for (height, views) in votes.iter() {
                         // Only check at views below timeout
