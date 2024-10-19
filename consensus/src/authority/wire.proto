@@ -3,6 +3,7 @@ package wire;
 
 // TODO: request last finalization + best notarization for a view (one at a time, get views that are missing between self.view and self.last_finalized)
 
+// TODO: change name to Voter
 message Consensus {
     oneof payload {
         Proposal proposal = 1;
@@ -59,6 +60,7 @@ message Signature {
     bytes signature = 2;
 }
 
+// TODO: change name to Resovler
 message Backfill {
     oneof payload {
         Request request = 1;
