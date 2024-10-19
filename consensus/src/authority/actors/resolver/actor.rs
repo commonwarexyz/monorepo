@@ -293,6 +293,7 @@ impl<
                                 continue;
                             }
                         };
+                        let proposal_view = proposal.view;
                         if !self.verify(hash.clone(), proposal.clone()).await {
                             debug!(
                                 height = next,
@@ -305,7 +306,9 @@ impl<
                             .entry(next)
                             .or_default()
                             .insert(hash.clone());
-                        self.application.notarized(hash.clone()).await;
+                        self.application
+                            .notarized(proposal_view, hash.clone())
+                            .await;
                     }
                     trace!(height = next, "notified application notarization");
                 }
@@ -322,6 +325,7 @@ impl<
                             return;
                         }
                     };
+                    let proposal_view = proposal.view;
                     if !self.verify(hash.clone(), proposal.clone()).await {
                         debug!(
                             height = next,
@@ -333,7 +337,9 @@ impl<
                     self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
-                    self.application.finalized(hash.clone()).await;
+                    self.application
+                        .finalized(proposal_view, hash.clone())
+                        .await;
                     trace!(height = next, "notified application finalization");
                 }
             }

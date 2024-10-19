@@ -24,7 +24,7 @@ use std::future::Future;
 // - 33% double-voting
 // - block sent to one honest party different than block sent to all others, does it drop at notarization and fetch actual?
 
-type Hash = Bytes; // use fixed size bytes
+pub type Hash = Bytes; // use fixed size bytes
 
 /// Hasher is provided by the application for hashing.
 ///
@@ -53,8 +53,8 @@ pub trait Hasher: Clone + Send + 'static {
     fn size() -> usize;
 }
 
-type View = u64;
-type Height = u64;
+pub type View = u64;
+pub type Height = u64;
 
 /// Context is a collection of information about the context in which a block is built.
 #[derive(Clone)]
@@ -65,7 +65,7 @@ pub struct Context {
     pub proposer: PublicKey,
 }
 
-type Payload = Bytes;
+pub type Payload = Bytes;
 
 /// Application is the interface for the consensus engine to inform of progress.
 ///
@@ -104,9 +104,8 @@ pub trait Application: Clone + Send + 'static {
 /// Various consensus implementations may want to reward participation in different ways. For example,
 /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
 /// both equally may better align incentives with desired behavior.
-type Activity = u8;
-
-type Proof = Bytes;
+pub type Activity = u8;
+pub type Proof = Bytes;
 
 pub trait Supervisor: Clone + Send + 'static {
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
@@ -135,8 +134,8 @@ pub trait Finalizer: Clone + Send + 'static {
     /// Event that the payload has been notarized.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
+    fn notarized(&mut self, view: View, block: Hash) -> impl Future<Output = ()> + Send;
 
     /// Event that the payload has been finalized.
-    fn finalized(&mut self, block: Hash) -> impl Future<Output = ()> + Send;
+    fn finalized(&mut self, view: View, block: Hash) -> impl Future<Output = ()> + Send;
 }
