@@ -288,6 +288,7 @@ mod tests {
                 validators.push(pk);
             }
             validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
@@ -488,8 +489,8 @@ mod tests {
                 schemes.push(scheme);
                 validators.push(pk);
             }
-            schemes.sort_by_key(|s| s.public_key());
             validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
@@ -513,7 +514,10 @@ mod tests {
                     .unwrap();
 
                 // Link to all other validators
-                for other in validators.iter() {
+                for (idx_other, other) in validators.iter().enumerate() {
+                    if idx_other == 0 {
+                        continue;
+                    }
                     if other == &validator {
                         continue;
                     }
@@ -842,7 +846,7 @@ mod tests {
         let n = 5;
         let required_blocks = 100;
         let namespace = Bytes::from("consensus");
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(120));
+        let (executor, runtime, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -865,12 +869,13 @@ mod tests {
                 validators.push(pk);
             }
             validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
-            for (idx, scheme) in schemes.into_iter().enumerate() {
+            for (idx, scheme) in schemes.iter().enumerate() {
                 // Skip first peer
                 if idx == 0 {
                     continue;
@@ -888,7 +893,10 @@ mod tests {
                     .unwrap();
 
                 // Link to all other validators
-                for other in validators.iter() {
+                for (idx_other, other) in validators.iter().enumerate() {
+                    if idx_other == 0 {
+                        continue;
+                    }
                     if other == &validator {
                         continue;
                     }
@@ -925,7 +933,7 @@ mod tests {
                 };
                 let application = Application::new(runtime.clone(), application_cfg);
                 let cfg = config::Config {
-                    crypto: scheme,
+                    crypto: scheme.clone(),
                     hasher,
                     application,
                     registry: Arc::new(Mutex::new(Registry::default())),
@@ -967,19 +975,9 @@ mod tests {
                 }
             }
 
-            // Start engine for first peer
-            let scheme = Ed25519::from_seed(0);
-            let validator = scheme.public_key();
-            let (block_sender, block_receiver) = oracle
-                .register(validator.clone(), 0, 1024 * 1024)
-                .await
-                .unwrap();
-            let (vote_sender, vote_receiver) = oracle
-                .register(validator.clone(), 1, 1024 * 1024)
-                .await
-                .unwrap();
-
             // Link to all other validators
+            let scheme = schemes[0].clone();
+            let validator = scheme.public_key();
             for other in validators.iter() {
                 if other == &validator {
                     continue;
@@ -996,9 +994,29 @@ mod tests {
                     )
                     .await
                     .unwrap();
+                oracle
+                    .add_link(
+                        other.clone(),
+                        validator.clone(),
+                        Link {
+                            latency: 10.0,
+                            jitter: 2.5,
+                            success_rate: 1.0,
+                        },
+                    )
+                    .await
+                    .unwrap();
             }
 
             // Start engine
+            let (block_sender, block_receiver) = oracle
+                .register(validator.clone(), 0, 1024 * 1024)
+                .await
+                .unwrap();
+            let (vote_sender, vote_receiver) = oracle
+                .register(validator.clone(), 1, 1024 * 1024)
+                .await
+                .unwrap();
             let hasher = Sha256::default();
             let supervisor = TestSupervisor::<Ed25519, Sha256>::new(
                 Prover::new(hasher.clone(), namespace.clone()),
@@ -1008,7 +1026,7 @@ mod tests {
             let application_cfg = ApplicationConfig {
                 hasher: hasher.clone(),
                 supervisor,
-                participant: validator,
+                participant: validator.clone(),
                 sender: done_sender.clone(),
                 propose_latency: (10.0, 5.0),
                 parse_latency: (10.0, 5.0),
@@ -1041,8 +1059,303 @@ mod tests {
 
             // Wait for new engine to finish
             loop {
+                let (candidate, event) = done_receiver.next().await.unwrap();
+                if validator != candidate {
+                    continue;
+                }
+                if let Progress::Finalized(height, _) = event {
+                    if height < highest_finalized + required_blocks {
+                        // We want to see `required_blocks` once we catch up
+                        continue;
+                    }
+                    break;
+                }
+            }
+
+            // Ensure no faults
+            for supervisor in supervisors.iter() {
+                let faults = supervisor.faults.lock().unwrap();
+                assert!(faults.is_empty());
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_catchup_null_tip() {
+        // Create runtime
+        let n = 4;
+        let required_blocks = 100;
+        let namespace = Bytes::from("consensus");
+        let (executor, runtime, _) = Executor::timed(Duration::from_secs(360));
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                },
+            );
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+
+            // Create engines
+            let mut supervisors = Vec::new();
+            let (done_sender, mut done_receiver) = mpsc::unbounded();
+            for (idx, scheme) in schemes.iter().enumerate() {
+                // Skip first peer
+                if idx == 0 {
+                    continue;
+                }
+
+                // Register on network
+                let validator = scheme.public_key();
+                let (block_sender, block_receiver) = oracle
+                    .register(validator.clone(), 0, 1024 * 1024)
+                    .await
+                    .unwrap();
+                let (vote_sender, vote_receiver) = oracle
+                    .register(validator.clone(), 1, 1024 * 1024)
+                    .await
+                    .unwrap();
+
+                // Link to all other validators
+                for (idx_other, other) in validators.iter().enumerate() {
+                    if idx_other == 0 {
+                        continue;
+                    }
+                    if other == &validator {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 2.5,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                // Start engine
+                let hasher = Sha256::default();
+                let supervisor = TestSupervisor::<Ed25519, Sha256>::new(
+                    Prover::new(hasher.clone(), namespace.clone()),
+                    view_validators.clone(),
+                );
+                supervisors.push(supervisor.clone());
+                let application_cfg = ApplicationConfig {
+                    hasher: hasher.clone(),
+                    supervisor,
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    allow_invalid_payload: false,
+                };
+                let application = Application::new(runtime.clone(), application_cfg);
+                let cfg = config::Config {
+                    crypto: scheme.clone(),
+                    hasher,
+                    application,
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    null_vote_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
+                    max_fetch_count: 32,
+                    max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    validators: view_validators.clone(),
+                };
+                let engine = Engine::new(runtime.clone(), cfg);
+                runtime.spawn("engine", async move {
+                    engine
+                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .await;
+                });
+            }
+
+            // Wait for all online engines to finish
+            let mut completed = HashSet::new();
+            let mut highest_finalized = 0;
+            loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if validator != validator {
+                if let Progress::Finalized(height, _) = event {
+                    if height > highest_finalized {
+                        highest_finalized = height;
+                    }
+                    if height < required_blocks {
+                        continue;
+                    }
+                    completed.insert(validator);
+                }
+                if completed.len() == n - 1 {
+                    break;
+                }
+            }
+
+            // Degrade network connections for online peers
+            for (idx, scheme) in schemes.iter().enumerate() {
+                // Skip first peer
+                if idx == 0 {
+                    continue;
+                }
+
+                // Degrade connection
+                let validator = scheme.public_key();
+                for (other_idx, other) in validators.iter().enumerate() {
+                    if other_idx == 0 {
+                        continue;
+                    }
+                    if other == &validator {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency: 3_000.0,
+                                jitter: 0.0,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            // Wait for some null notarizations to pile up
+            runtime.sleep(Duration::from_secs(120)).await;
+
+            // Remove all connections from first online peer (at index 1)
+            let failed_validator = validators[1].clone();
+            for (other_idx, other) in validators.iter().enumerate() {
+                if other_idx == 0 {
+                    continue;
+                }
+                if other == &failed_validator {
+                    continue;
+                }
+                oracle
+                    .remove_link(failed_validator.clone(), other.clone())
+                    .await
+                    .unwrap();
+                oracle
+                    .remove_link(other.clone(), failed_validator.clone())
+                    .await
+                    .unwrap();
+            }
+
+            // Start engine for first peer
+            let scheme = schemes[0].clone();
+            let validator = scheme.public_key();
+            let (block_sender, block_receiver) = oracle
+                .register(validator.clone(), 0, 1024 * 1024)
+                .await
+                .unwrap();
+            let (vote_sender, vote_receiver) = oracle
+                .register(validator.clone(), 1, 1024 * 1024)
+                .await
+                .unwrap();
+
+            // Restore network connections for online peers
+            for (idx, scheme) in schemes.iter().enumerate() {
+                // Skip newly offline peer
+                if idx == 1 {
+                    continue;
+                }
+
+                // Restore connection
+                let validator = scheme.public_key();
+                for (idx_other, other) in validators.iter().enumerate() {
+                    if idx_other == 1 {
+                        continue;
+                    }
+                    if other == &validator {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 2.5,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            // Start engine
+            let hasher = Sha256::default();
+            let supervisor = TestSupervisor::<Ed25519, Sha256>::new(
+                Prover::new(hasher.clone(), namespace.clone()),
+                view_validators.clone(),
+            );
+            supervisors.push(supervisor.clone());
+            let application_cfg = ApplicationConfig {
+                hasher: hasher.clone(),
+                supervisor,
+                participant: validator.clone(),
+                sender: done_sender.clone(),
+                propose_latency: (10.0, 5.0),
+                parse_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+                allow_invalid_payload: false,
+            };
+            let application = Application::new(runtime.clone(), application_cfg);
+            let cfg = config::Config {
+                crypto: scheme,
+                hasher,
+                application,
+                registry: Arc::new(Mutex::new(Registry::default())),
+                namespace: namespace.clone(),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                null_vote_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout: 10,
+                max_fetch_count: 32,
+                max_fetch_size: 1024 * 512,
+                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                validators: view_validators.clone(),
+            };
+            let engine = Engine::new(runtime.clone(), cfg);
+            runtime.spawn("engine", async move {
+                engine
+                    .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                    .await;
+            });
+
+            // Wait for new engine to finish
+            loop {
+                let (candidate, event) = done_receiver.next().await.unwrap();
+                if validator != candidate {
                     continue;
                 }
                 if let Progress::Finalized(height, _) = event {
@@ -1091,6 +1404,7 @@ mod tests {
                 validators.push(pk);
             }
             validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
@@ -1251,6 +1565,7 @@ mod tests {
                 validators.push(pk);
             }
             validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
@@ -1386,6 +1701,7 @@ mod tests {
                 validators.push(pk);
             }
             validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
@@ -1597,6 +1913,7 @@ mod tests {
                 validators.push(pk);
             }
             validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
@@ -1753,8 +2070,8 @@ mod tests {
                 schemes.push(scheme);
                 validators.push(pk);
             }
-            schemes.sort_by_key(|s| s.public_key());
             validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
@@ -1961,8 +2278,8 @@ mod tests {
                 schemes.push(scheme);
                 validators.push(pk);
             }
-            schemes.sort_by_key(|s| s.public_key());
             validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
