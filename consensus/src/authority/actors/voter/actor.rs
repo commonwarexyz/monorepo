@@ -831,11 +831,40 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
         let entry = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
+            .or_insert_with(|| Round::new(self.application.clone(), leader.clone(), None, None));
         entry.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
         entry.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         self.view = view;
         info!(view, "entered view");
+
+        // Check if we should fast exit this view
+        if view < self.activity_timeout || leader == self.crypto.public_key() {
+            return;
+        }
+        let mut next = view - 1;
+        while next > view - self.activity_timeout {
+            if !self.application.is_participant(next, &leader).unwrap() {
+                // Don't punish a participant if they weren't online at any point during
+                // the lookback window.
+                return;
+            }
+            let view_obj = match self.views.get(&next) {
+                Some(view_obj) => view_obj,
+                None => {
+                    return;
+                }
+            };
+            if view_obj.proposal_voters.contains_key(&leader)
+                || view_obj.null_votes.contains_key(&leader)
+            {
+                return;
+            }
+            next -= 1;
+        }
+
+        // Reduce leader deadline to now
+        debug!(view, "skipping leader timeout");
+        self.views.get_mut(&view).unwrap().leader_deadline = Some(self.runtime.current());
     }
 
     fn interesting(&self, view: View, allow_future: bool) -> bool {
