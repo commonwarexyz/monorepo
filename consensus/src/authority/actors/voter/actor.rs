@@ -1657,10 +1657,7 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
             }
             next += 1;
         }
-        match base {
-            Some(base) => Some((base, next - base - 1)),
-            None => None,
-        }
+        base.map(|base| (base, next - base - 1))
     }
 
     async fn send_request(
