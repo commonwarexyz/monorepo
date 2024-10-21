@@ -326,6 +326,7 @@ impl<
                         }
                     };
                     let proposal_view = proposal.view;
+                    // TODO: ensure we don't verify twice (when notarization then finalization)
                     if !self.verify(hash.clone(), proposal.clone()).await {
                         debug!(
                             height = next,
@@ -340,7 +341,7 @@ impl<
                     self.application
                         .finalized(proposal_view, hash.clone())
                         .await;
-                    trace!(height = next, "notified application finalization");
+                    debug!(height = next, "notified application finalization");
                 }
             }
 
@@ -663,6 +664,11 @@ impl<
         // Set last finalized
         if height > self.last_finalized {
             self.last_finalized = height;
+        }
+
+        // Also update last notarized (if necessary)
+        if height > self.last_notarized {
+            self.last_notarized = height;
         }
 
         // Prune all null notarizations below this view

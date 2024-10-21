@@ -330,8 +330,9 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
     fn finalizable_proposal(
         &mut self,
         threshold: u32,
+        force: bool,
     ) -> Option<(Hash, Height, &HashMap<PublicKey, wire::Finalize>)> {
-        if self.broadcast_finalization || !self.verified_proposal {
+        if !force && (self.broadcast_finalization || !self.verified_proposal) {
             // We only want to broadcast a finalization if we have verified some proposal at
             // this point.
             return None;
@@ -1446,7 +1447,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         })
     }
 
-    fn construct_finalization(&mut self, view: u64) -> Option<wire::Finalization> {
+    fn construct_finalization(&mut self, view: u64, force: bool) -> Option<wire::Finalization> {
         let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1463,7 +1464,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (hash, height, finalizes) = view_obj.finalizable_proposal(threshold)?;
+        let (hash, height, finalizes) = view_obj.finalizable_proposal(threshold, force)?;
 
         // Construct finalization
         let mut signatures = Vec::new();
@@ -1492,8 +1493,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
             // Broadcast the vote
             let msg = wire::Consensus {
                 payload: Some(wire::consensus::Payload::Vote(vote.clone())),
-            };
-            let msg = msg.encode_to_vec();
+            }
+            .encode_to_vec();
             sender
                 .send(Recipients::All, msg.into(), true)
                 .await
@@ -1510,20 +1511,59 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
             // Broadcast the notarization
             let msg = wire::Consensus {
                 payload: Some(wire::consensus::Payload::Notarization(notarization.clone())),
-            };
-            let msg = msg.encode_to_vec();
+            }
+            .encode_to_vec();
             sender
                 .send(Recipients::All, msg.into(), true)
                 .await
                 .unwrap();
 
             // Handle the notarization
+            let null_broadcast = notarization.hash.is_none();
             debug!(
                 view = notarization.view,
-                null = notarization.hash.is_none(),
+                null = null_broadcast,
                 "broadcast notarization"
             );
             self.handle_notarization(resolver, notarization).await;
+
+            // If we built the proposal and are broadcasting null, also broadcast most recent finalization
+            //
+            // In cases like this, it is possible that other peers cannot verify the proposal because they do not
+            // have the latest finalization and null notarizations.
+            let view_obj = self.views.get(&view).expect("view missing");
+            if null_broadcast
+                && view_obj.leader == self.crypto.public_key()
+                && view_obj.verified_proposal
+            {
+                match self.construct_finalization(self.last_finalized, true) {
+                    Some(finalization) => {
+                        let msg = wire::Consensus {
+                            payload: Some(wire::consensus::Payload::Finalization(
+                                finalization.clone(),
+                            )),
+                        }
+                        .encode_to_vec();
+                        sender
+                            .send(Recipients::All, msg.into(), true)
+                            .await
+                            .unwrap();
+                        debug!(
+                            finalized_view = finalization.view,
+                            finalized_height = finalization.height,
+                            current_view = view,
+                            "broadcast last finalized after null notarization on our proposal"
+                        );
+                    }
+                    None => {
+                        debug!(
+                            finalized_view = self.last_finalized,
+                            current_view = view,
+                            "missing last finalized view, unable to broadcast finalization"
+                        );
+                    }
+                }
+            }
         };
 
         // Attempt to finalize
@@ -1548,7 +1588,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         };
 
         // Attempt to finalization
-        if let Some(finalization) = self.construct_finalization(view) {
+        if let Some(finalization) = self.construct_finalization(view, false) {
             // Broadcast the finalization
             let msg = wire::Consensus {
                 payload: Some(wire::consensus::Payload::Finalization(finalization.clone())),
