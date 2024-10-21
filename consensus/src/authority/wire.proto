@@ -76,7 +76,6 @@ message Backfill {
     oneof payload {
         Request request = 1;
         Resolution resolution = 2;
-        Missing missing = 3;
     }
 }
 message Request {
@@ -86,8 +85,4 @@ message Request {
 
 message Resolution {
     repeated Proposal proposals = 1;
-}
-
-message Missing {
-    bytes hash = 1;
 }

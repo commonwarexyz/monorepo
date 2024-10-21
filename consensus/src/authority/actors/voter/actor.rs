@@ -1996,9 +1996,9 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
                             continue;
                         }
                         wire::consensus::Payload::BatchedNotarizations(response) => {
+                            // Drop anything from someone we don't expect
                             if let Some((ref sender, _, _, _)) = outstanding_task {
                                 if sender != &s {
-                                    // Drop anything from someone we don't expect
                                     continue
                                 }
                                 outstanding_task = None;

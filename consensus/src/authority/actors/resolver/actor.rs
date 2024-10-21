@@ -1006,39 +1006,21 @@ impl<
 
                             // Send messages
                             debug!(hash = hex(&request.hash), requested = request.parents + 1, found = proposals.len(), peer = hex(&s), "responding to backfill request");
-                            let msg = match proposals.len() {
-                                0 => wire::Backfill {
-                                    payload: Some(wire::backfill::Payload::Missing(wire::Missing {
-                                        hash: request.hash,
-                                    })),
-                                },
-                                _ => wire::Backfill {
-                                    payload: Some(wire::backfill::Payload::Resolution(wire::Resolution {
-                                        proposals,
-                                    })),
-                                },
+                            let msg =  wire::Backfill {
+                                payload: Some(wire::backfill::Payload::Resolution(wire::Resolution {
+                                    proposals,
+                                })),
                             };
                             sender.send(Recipients::One(s), msg.encode_to_vec().into(), false).await.unwrap();
                         }
-                        wire::backfill::Payload::Missing(missing) => {
-                            if !H::validate(&missing.hash) {
-                                warn!(sender = hex(&s), "invalid missing hash size");
-                                continue;
-                            }
-                            if let Some(ref outstanding) = outstanding_task {
-                                let hash = outstanding.2.clone();
-                                if outstanding.0 == s && hash == missing.hash {
-                                    debug!(hash = hex(&missing.hash), peer = hex(&s), "peer missing proposal");
-
-                                    // Send request again
-                                    let validator = self.send_request(outstanding.1, hash.clone(), &mut sender).await;
-
-                                    // Reset timeout
-                                    outstanding_task = Some((validator, outstanding.1, hash, self.runtime.current() + Duration::from_secs(1)));
+                        wire::backfill::Payload::Resolution(resolution) => {
+                            // If we arent' expecting any proposals, ignore
+                            if let Some((ref mut validator, _, _, _)) = outstanding_task {
+                                if *validator != s {
+                                    continue;
                                 }
                             }
-                        }
-                        wire::backfill::Payload::Resolution(resolution) => {
+
                             // Parse proposals
                             let mut next = None;
                             for proposal in resolution.proposals {
@@ -1145,6 +1127,14 @@ impl<
                                 // By waiting to register missing until the end, we avoid a bunch of unnecessary
                                 // backfill request additions.
                                 self.register_missing(height, hash).await;
+                            }
+
+                            // Reset outstanding task if it was not resolved
+                            //
+                            // Missing is a channel and thus we need to re-enqueue request if not satisfied.
+                            if let Some(outstanding) = outstanding_task {
+                                let validator = self.send_request(outstanding.1, outstanding.2.clone(), &mut sender).await;
+                                outstanding_task = Some((validator, outstanding.1, outstanding.2, self.runtime.current() + self.fetch_timeout));
                             }
                         }
                     }
