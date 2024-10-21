@@ -72,6 +72,10 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 null_vote_retry: cfg.null_vote_retry,
+                fetch_timeout: cfg.fetch_timeout,
+                max_fetch_count: cfg.max_fetch_count,
+                max_fetch_size: cfg.max_fetch_size,
+                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
                 activity_timeout: cfg.activity_timeout,
             },
         );
