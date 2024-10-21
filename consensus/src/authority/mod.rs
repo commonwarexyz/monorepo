@@ -1081,7 +1081,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_catchup_null_tip() {
+    fn test_catchup_recovery() {
         // Create runtime
         let n = 4;
         let required_blocks = 100;
