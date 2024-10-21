@@ -310,7 +310,7 @@ impl<
                             .notarized(proposal_view, hash.clone())
                             .await;
                     }
-                    trace!(height = next, "notified application notarization");
+                    debug!(height = next, "notified application notarization");
                 }
                 Knowledge::Finalized(hash) => {
                     // Send finalized proposal
@@ -326,7 +326,8 @@ impl<
                         }
                     };
                     let proposal_view = proposal.view;
-                    // TODO: ensure we don't verify twice (when notarization then finalization)
+                    // If we already verified this proposal, this function will ensure we don't
+                    // notify the application of it again.
                     if !self.verify(hash.clone(), proposal.clone()).await {
                         debug!(
                             height = next,
