@@ -1,6 +1,9 @@
 syntax = "proto3";
 package wire;
 
+// TODO: request last finalization + best notarization for a view (one at a time, get views that are missing between self.view and self.last_finalized)
+
+// TODO: change name to Voter
 message Consensus {
     oneof payload {
         Proposal proposal = 1;
@@ -8,6 +11,8 @@ message Consensus {
         Notarization notarization = 3;
         Finalize finalize = 4;  
         Finalization finalization = 5;
+        NotarizationRequest notarization_request = 6;
+        BatchedNotarizations batched_notarizations = 7;
     }
 }
 
@@ -52,16 +57,25 @@ message Finalization {
     repeated Signature signatures = 4;
 }
 
+message NotarizationRequest {
+    uint64 view = 1;
+    uint64 children = 2;
+}
+
+message BatchedNotarizations {
+    repeated Notarization notarizations = 1;
+}
+
 message Signature {
     bytes public_key = 1;
     bytes signature = 2;
 }
 
+// TODO: change name to Resovler
 message Backfill {
     oneof payload {
         Request request = 1;
         Resolution resolution = 2;
-        Missing missing = 3;
     }
 }
 message Request {
@@ -71,8 +85,4 @@ message Request {
 
 message Resolution {
     repeated Proposal proposals = 1;
-}
-
-message Missing {
-    bytes hash = 1;
 }

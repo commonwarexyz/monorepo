@@ -83,8 +83,8 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> Application<E, H, S> {
 
             participant: cfg.participant,
 
-            parse_latency,
             propose_latency,
+            parse_latency,
             verify_latency,
             allow_invalid_payload: cfg.allow_invalid_payload,
 
@@ -184,7 +184,10 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
             }
             let parsed_height = Height::from_be_bytes(payload[32..].try_into().unwrap());
             if parsed_height != context.height {
-                self.panic("invalid height");
+                self.panic(&format!(
+                    "invalid height (in payload): {} != {}",
+                    parsed_height, context.height
+                ));
             }
         }
 
@@ -195,7 +198,11 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
         }
         if let Some(parent) = state.verified.get(&context.parent) {
             if parent + 1 != context.height {
-                self.panic("invalid height");
+                self.panic(&format!(
+                    "invalid height (from last verified): {} != {}",
+                    parent + 1,
+                    context.height
+                ));
             }
         } else {
             self.panic("parent not verified");

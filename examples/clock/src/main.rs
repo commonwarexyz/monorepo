@@ -3,7 +3,7 @@
 //! # Tips
 //!
 //! * If you want to maximize consensus decisions per second, increase rate limits from the default configuration
-//! of 10 messages per peer per second on the voter channel.
+//!   of 10 messages per peer per second on the voter channel.
 
 mod application;
 
@@ -169,6 +169,7 @@ fn main() {
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
                 null_vote_retry: Duration::from_secs(10),
+                proposal_retry: Duration::from_millis(100),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: 10,
                 max_fetch_count: 32,

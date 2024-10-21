@@ -11,6 +11,9 @@ pub enum Message {
         payload: Bytes,
         payload_hash: Hash,
     },
+    ProposalFailed {
+        view: View,
+    },
     Verified {
         view: View,
     },
@@ -42,6 +45,13 @@ impl Mailbox {
                 payload,
                 payload_hash,
             })
+            .await
+            .unwrap();
+    }
+
+    pub async fn proposal_failed(&mut self, view: View) {
+        self.sender
+            .send(Message::ProposalFailed { view })
             .await
             .unwrap();
     }
