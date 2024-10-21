@@ -351,8 +351,7 @@ impl<
         }
     }
 
-    // TODO: no guarantee this approach will ensure we load off verified
-    fn best_parent(&self) -> Option<(Hash, Height)> {
+    fn best_parent(&self) -> Option<(Hash, View, Height)> {
         // Find highest block that we have notified the application of
         let mut next = self.last_notarized;
         loop {
@@ -362,14 +361,16 @@ impl<
                     for (_, hash) in hashes.iter() {
                         if let Some(notifications) = self.notarizations_sent.get(&next) {
                             if notifications.contains(hash) {
-                                return Some((hash.clone(), self.blocks.get(hash).unwrap().height));
+                                let block = self.blocks.get(hash).unwrap();
+                                return Some((hash.clone(), block.view, block.height));
                             }
                         }
                     }
                 }
                 Some(Knowledge::Finalized(hash)) => {
                     if self.last_notified >= next {
-                        return Some((hash.clone(), self.blocks.get(hash).unwrap().height));
+                        let block = self.blocks.get(hash).unwrap();
+                        return Some((hash.clone(), block.view, block.height));
                     }
                 }
                 None => return None,
@@ -396,14 +397,29 @@ impl<
             }
         };
 
+        // Ensure we have null notarizations back to best parent block (if not, we may
+        // just be missing blocks and should try again later)
+        let height = parent.2 + 1;
+        for gap_view in (parent.1 + 1)..view {
+            if !self.null_notarizations.contains(&gap_view) {
+                debug!(
+                    height,
+                    view,
+                    parent_view = parent.1,
+                    missing = gap_view,
+                    "missing null notarization, skipping propose"
+                );
+                return None;
+            }
+        }
+
         // Propose block
         let context = Context {
             view,
             parent: parent.0.clone(),
-            height: parent.1 + 1,
+            height,
             proposer,
         };
-        let height = parent.1 + 1;
         let payload = match self.application.propose(context).await {
             Some(payload) => payload,
             None => {
@@ -915,6 +931,7 @@ impl<
                             let (parent, height, payload, payload_hash)= match self.propose(view, proposer).await{
                                 Some(proposal) => proposal,
                                 None => {
+                                    voter.proposal_failed(view).await;
                                     continue;
                                 }
                             };

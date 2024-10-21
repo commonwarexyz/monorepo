@@ -21,6 +21,7 @@ pub struct Config<C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
     pub null_vote_retry: Duration,
+    pub proposal_retry: Duration,
     pub fetch_timeout: Duration,
     pub max_fetch_count: u64,
     pub max_fetch_size: usize,

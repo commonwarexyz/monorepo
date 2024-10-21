@@ -50,6 +50,7 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     null_vote_retry: Option<SystemTime>,
 
     // Track one proposal per view
+    next_proposal_request: Option<SystemTime>,
     requested_proposal: bool,
     proposal: Option<(
         Hash, /* proposal */
@@ -94,6 +95,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             advance_deadline,
             null_vote_retry: None,
 
+            next_proposal_request: None,
             requested_proposal: false,
             proposal: None,
             verified_proposal: false,
@@ -394,6 +396,7 @@ pub struct Actor<
     leader_timeout: Duration,
     notarization_timeout: Duration,
     null_vote_retry: Duration,
+    proposal_retry: Duration,
     activity_timeout: View,
     fetch_timeout: Duration,
     max_fetch_count: u64,
@@ -448,6 +451,7 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 null_vote_retry: cfg.null_vote_retry,
+                proposal_retry: cfg.proposal_retry,
                 fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
@@ -476,27 +480,35 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
         Some(validators[view as usize % validators.len()].clone())
     }
 
-    async fn propose(&mut self, resolver: &mut resolver::Mailbox) -> bool {
+    async fn propose(&mut self, resolver: &mut resolver::Mailbox) -> Option<SystemTime> {
         // Check if we are leader
         let view = self.views.get_mut(&self.view).unwrap();
         if view.leader != self.crypto.public_key() {
-            return false;
+            return None;
+        }
+
+        // Check if we need to wait to propose
+        if let Some(next_proposal_request) = view.next_proposal_request {
+            if next_proposal_request > self.runtime.current() {
+                return Some(next_proposal_request);
+            }
         }
 
         // Check if we have already requested a proposal
         if view.requested_proposal {
-            return false;
+            return None;
         }
 
         // Check if we have already proposed
         if view.proposal.is_some() {
-            return false;
+            return None;
         }
 
         // Request proposal from resolver
         view.requested_proposal = true;
         resolver.propose(self.view, self.crypto.public_key()).await;
-        true
+        debug!(view = self.view, "requested proposal");
+        None
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -1823,9 +1835,12 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
             };
 
             // Attempt to propose a block
-            if self.propose(resolver).await {
-                debug!(view = self.view, "requested proposal");
-            }
+            let propose_retry = match self.propose(resolver).await {
+                Some(retry) => Either::Left(self.runtime.sleep_until(retry)),
+                None => Either::Right(futures::future::pending()),
+            };
+
+            // Create proposal timeout
 
             // Wait for a timeout to fire or for a message to arrive
             let null_timeout = self.timeout_deadline();
@@ -1835,6 +1850,10 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
                     // Trigger the timeout
                     self.timeout(&mut sender).await;
                     view = self.view;
+                },
+                _ = propose_retry => {
+                    debug!(view = self.view, "retrying proposal");
+                    continue;
                 },
                 _ = fetch_timeout => {
                     // Send request again
@@ -1887,6 +1906,19 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
                                 .await
                                 .unwrap();
                         },
+                        Message::ProposalFailed {view} => {
+                            if self.view != view {
+                                debug!(view = view, our_view = self.view, reason = "no longer in required view", "dropping proposal failure");
+                                continue;
+                            }
+
+                            // Handle proposal failure
+                            let view_obj = self.views.get_mut(&view).expect("view missing");
+                            view_obj.requested_proposal = false;
+                            view_obj.next_proposal_request = Some(self.runtime.current() + self.proposal_retry);
+                            debug!(view = view, "proposal failed");
+                            continue;
+                        }
                         Message::Verified { view: verified_view } => {
                             // Handle verified proposal
                             if !self.verified(verified_view).await {
