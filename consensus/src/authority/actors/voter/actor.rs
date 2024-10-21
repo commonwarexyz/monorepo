@@ -11,14 +11,20 @@ use crate::{
     },
     Application, Finalizer, Hash, Hasher, Height, Supervisor, View,
 };
+use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::{hex, quorum};
-use futures::{channel::mpsc, StreamExt};
+use futures::{channel::mpsc, future::Either, StreamExt};
+use governor::{
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
+    RateLimiter,
+};
 use prometheus_client::metrics::gauge::Gauge;
 use prost::Message as _;
+use rand::prelude::SliceRandom;
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -44,6 +50,7 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     null_vote_retry: Option<SystemTime>,
 
     // Track one proposal per view
+    next_proposal_request: Option<SystemTime>,
     requested_proposal: bool,
     proposal: Option<(
         Hash, /* proposal */
@@ -88,6 +95,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             advance_deadline,
             null_vote_retry: None,
 
+            next_proposal_request: None,
             requested_proposal: false,
             proposal: None,
             verified_proposal: false,
@@ -330,8 +338,9 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
     fn finalizable_proposal(
         &mut self,
         threshold: u32,
+        force: bool,
     ) -> Option<(Hash, Height, &HashMap<PublicKey, wire::Finalize>)> {
-        if self.broadcast_finalization || !self.verified_proposal {
+        if !force && (self.broadcast_finalization || !self.verified_proposal) {
             // We only want to broadcast a finalization if we have verified some proposal at
             // this point.
             return None;
@@ -369,7 +378,12 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
     }
 }
 
-pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer> {
+pub struct Actor<
+    E: Clock + Rng + GClock,
+    C: Scheme,
+    H: Hasher,
+    A: Application + Supervisor + Finalizer,
+> {
     runtime: E,
     crypto: C,
     hasher: H,
@@ -382,7 +396,13 @@ pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervis
     leader_timeout: Duration,
     notarization_timeout: Duration,
     null_vote_retry: Duration,
+    proposal_retry: Duration,
     activity_timeout: View,
+    fetch_timeout: Duration,
+    max_fetch_count: u64,
+    max_fetch_size: usize,
+    fetch_rate_limiter:
+        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -394,7 +414,7 @@ pub struct Actor<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervis
     tracked_views: Gauge,
 }
 
-impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
+impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
     Actor<E, C, H, A>
 {
     pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {
@@ -412,6 +432,9 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
             registry.register("tracked_views", "tracked views", tracked_views.clone());
         }
 
+        // Initialize rate limiter
+        let fetch_rate_limiter = RateLimiter::hashmap_with_clock(cfg.fetch_rate_per_peer, &runtime);
+
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         (
@@ -428,6 +451,12 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 null_vote_retry: cfg.null_vote_retry,
+                proposal_retry: cfg.proposal_retry,
+                fetch_timeout: cfg.fetch_timeout,
+                max_fetch_count: cfg.max_fetch_count,
+                max_fetch_size: cfg.max_fetch_size,
+                fetch_rate_limiter,
+
                 activity_timeout: cfg.activity_timeout,
 
                 mailbox_receiver,
@@ -451,27 +480,35 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         Some(validators[view as usize % validators.len()].clone())
     }
 
-    async fn propose(&mut self, resolver: &mut resolver::Mailbox) -> bool {
+    async fn propose(&mut self, resolver: &mut resolver::Mailbox) -> Option<SystemTime> {
         // Check if we are leader
         let view = self.views.get_mut(&self.view).unwrap();
         if view.leader != self.crypto.public_key() {
-            return false;
+            return None;
+        }
+
+        // Check if we need to wait to propose
+        if let Some(next_proposal_request) = view.next_proposal_request {
+            if next_proposal_request > self.runtime.current() {
+                return Some(next_proposal_request);
+            }
         }
 
         // Check if we have already requested a proposal
         if view.requested_proposal {
-            return false;
+            return None;
         }
 
         // Check if we have already proposed
         if view.proposal.is_some() {
-            return false;
+            return None;
         }
 
         // Request proposal from resolver
         view.requested_proposal = true;
         resolver.propose(self.view, self.crypto.public_key()).await;
-        true
+        debug!(view = self.view, "requested proposal");
+        None
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -580,6 +617,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
             view = proposal_view,
             height = proposal_height,
             hash = hex(&proposal_hash),
+            retried = view.next_proposal_request.is_some(),
             "generated proposal"
         );
         view.proposal = Some((proposal_hash, payload_hash.clone(), proposal));
@@ -806,11 +844,40 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         let entry = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
+            .or_insert_with(|| Round::new(self.application.clone(), leader.clone(), None, None));
         entry.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
         entry.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         self.view = view;
         info!(view, "entered view");
+
+        // Check if we should fast exit this view
+        if view < self.activity_timeout || leader == self.crypto.public_key() {
+            return;
+        }
+        let mut next = view - 1;
+        while next > view - self.activity_timeout {
+            if !self.application.is_participant(next, &leader).unwrap() {
+                // Don't punish a participant if they weren't online at any point during
+                // the lookback window.
+                return;
+            }
+            let view_obj = match self.views.get(&next) {
+                Some(view_obj) => view_obj,
+                None => {
+                    return;
+                }
+            };
+            if view_obj.proposal_voters.contains_key(&leader)
+                || view_obj.null_votes.contains_key(&leader)
+            {
+                return;
+            }
+            next -= 1;
+        }
+
+        // Reduce leader deadline to now
+        debug!(view, "skipping leader timeout");
+        self.views.get_mut(&view).unwrap().leader_deadline = Some(self.runtime.current());
     }
 
     fn interesting(&self, view: View, allow_future: bool) -> bool {
@@ -1446,7 +1513,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         })
     }
 
-    fn construct_finalization(&mut self, view: u64) -> Option<wire::Finalization> {
+    fn construct_finalization(&mut self, view: u64, force: bool) -> Option<wire::Finalization> {
         let view_obj = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1463,7 +1530,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (hash, height, finalizes) = view_obj.finalizable_proposal(threshold)?;
+        let (hash, height, finalizes) = view_obj.finalizable_proposal(threshold, force)?;
 
         // Construct finalization
         let mut signatures = Vec::new();
@@ -1492,8 +1559,8 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
             // Broadcast the vote
             let msg = wire::Consensus {
                 payload: Some(wire::consensus::Payload::Vote(vote.clone())),
-            };
-            let msg = msg.encode_to_vec();
+            }
+            .encode_to_vec();
             sender
                 .send(Recipients::All, msg.into(), true)
                 .await
@@ -1510,20 +1577,59 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
             // Broadcast the notarization
             let msg = wire::Consensus {
                 payload: Some(wire::consensus::Payload::Notarization(notarization.clone())),
-            };
-            let msg = msg.encode_to_vec();
+            }
+            .encode_to_vec();
             sender
                 .send(Recipients::All, msg.into(), true)
                 .await
                 .unwrap();
 
             // Handle the notarization
+            let null_broadcast = notarization.hash.is_none();
             debug!(
                 view = notarization.view,
-                null = notarization.hash.is_none(),
+                null = null_broadcast,
                 "broadcast notarization"
             );
             self.handle_notarization(resolver, notarization).await;
+
+            // If we built the proposal and are broadcasting null, also broadcast most recent finalization
+            //
+            // In cases like this, it is possible that other peers cannot verify the proposal because they do not
+            // have the latest finalization and null notarizations.
+            let view_obj = self.views.get(&view).expect("view missing");
+            if null_broadcast
+                && view_obj.leader == self.crypto.public_key()
+                && view_obj.verified_proposal
+            {
+                match self.construct_finalization(self.last_finalized, true) {
+                    Some(finalization) => {
+                        let msg = wire::Consensus {
+                            payload: Some(wire::consensus::Payload::Finalization(
+                                finalization.clone(),
+                            )),
+                        }
+                        .encode_to_vec();
+                        sender
+                            .send(Recipients::All, msg.into(), true)
+                            .await
+                            .unwrap();
+                        debug!(
+                            finalized_view = finalization.view,
+                            finalized_height = finalization.height,
+                            current_view = view,
+                            "broadcast last finalized after null notarization on our proposal"
+                        );
+                    }
+                    None => {
+                        debug!(
+                            finalized_view = self.last_finalized,
+                            current_view = view,
+                            "missing last finalized view, unable to broadcast finalization"
+                        );
+                    }
+                }
+            }
         };
 
         // Attempt to finalize
@@ -1548,7 +1654,7 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         };
 
         // Attempt to finalization
-        if let Some(finalization) = self.construct_finalization(view) {
+        if let Some(finalization) = self.construct_finalization(view, false) {
             // Broadcast the finalization
             let msg = wire::Consensus {
                 payload: Some(wire::consensus::Payload::Finalization(finalization.clone())),
@@ -1569,6 +1675,123 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         };
     }
 
+    fn notarization_observed(&self, view: View) -> bool {
+        if let Some(view_obj) = self.views.get(&view) {
+            if view_obj.broadcast_proposal_notarization {
+                return true;
+            }
+            if view_obj.broadcast_null_notarization {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn get_next_missing(&self) -> Option<(View, View)> {
+        let mut base = None;
+        let mut next = self.last_finalized + 1;
+        while next < self.view {
+            if self.notarization_observed(next) {
+                break;
+            }
+            if base.is_none() {
+                base = Some(next);
+            }
+            next += 1;
+        }
+        base.map(|base| (base, next - base - 1))
+    }
+
+    async fn send_request(
+        &mut self,
+        base: View,
+        children: View,
+        sender: &mut impl Sender,
+    ) -> PublicKey {
+        // Send the request
+        let msg: Bytes = wire::Consensus {
+            payload: Some(wire::consensus::Payload::NotarizationRequest(
+                wire::NotarizationRequest {
+                    view: base,
+                    children,
+                },
+            )),
+        }
+        .encode_to_vec()
+        .into();
+
+        // Get validators from highest view we know about
+        let validators = self.application.participants(self.view).unwrap();
+
+        // Generate a shuffle
+        let mut validator_indices = (0..validators.len()).collect::<Vec<_>>();
+        validator_indices.shuffle(&mut self.runtime);
+
+        // Minimize footprint of rate limiter
+        self.fetch_rate_limiter.shrink_to_fit();
+
+        // Loop until we send a message
+        let mut index = 0;
+        loop {
+            // Check if we have exhausted all validators
+            if index == validators.len() {
+                warn!(
+                    base,
+                    view = self.view,
+                    "failed to send request to any validator"
+                );
+
+                // Avoid busy looping when disconnected
+                self.runtime.sleep(self.fetch_timeout).await;
+                index = 0;
+            }
+
+            // Select random validator to fetch from
+            let validator = validators[validator_indices[index]].clone();
+            if validator == self.crypto.public_key() {
+                index += 1;
+                continue;
+            }
+
+            // Check if rate limit is exceeded
+            if self.fetch_rate_limiter.check_key(&validator).is_err() {
+                debug!(
+                    base,
+                    view = self.view,
+                    peer = hex(&validator),
+                    "skipping request because rate limited"
+                );
+                index += 1;
+                continue;
+            }
+
+            // Send message
+            if !sender
+                .send(Recipients::One(validator.clone()), msg.clone(), true)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                debug!(
+                    base,
+                    view = self.view,
+                    peer = hex(&validator),
+                    "requested missing notarizations"
+                );
+                return validator;
+            }
+
+            // Try again
+            debug!(
+                base,
+                view = self.view,
+                peer = hex(&validator),
+                "failed to send backfill request"
+            );
+            index += 1;
+        }
+    }
+
     pub async fn run(
         mut self,
         resolver: &mut resolver::Mailbox,
@@ -1583,11 +1806,40 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
         self.tracked_views.set(1);
 
         // Process messages
+        let mut outstanding_task = None;
         loop {
-            // Attempt to propose a block
-            if self.propose(resolver).await {
-                debug!(view = self.view, "requested proposal");
+            // Ensure task has not been resolved
+            if let Some((_, ref base, _, _)) = outstanding_task {
+                if self.notarization_observed(*base) {
+                    outstanding_task = None;
+                }
             }
+
+            // Look for next task if nothing
+            if outstanding_task.is_none() {
+                if let Some((base, children)) = self.get_next_missing() {
+                    let validator = self.send_request(base, children, &mut sender).await;
+                    outstanding_task = Some((
+                        validator,
+                        base,
+                        children,
+                        self.runtime.current() + self.fetch_timeout,
+                    ));
+                }
+            }
+
+            // Create fetch timeout
+            let fetch_timeout = if let Some((_, _, _, ref deadline)) = outstanding_task {
+                Either::Left(self.runtime.sleep_until(*deadline))
+            } else {
+                Either::Right(futures::future::pending())
+            };
+
+            // Attempt to propose a block
+            let propose_retry = match self.propose(resolver).await {
+                Some(retry) => Either::Left(self.runtime.sleep_until(retry)),
+                None => Either::Right(futures::future::pending()),
+            };
 
             // Wait for a timeout to fire or for a message to arrive
             let null_timeout = self.timeout_deadline();
@@ -1597,6 +1849,20 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
                     // Trigger the timeout
                     self.timeout(&mut sender).await;
                     view = self.view;
+                },
+                _ = propose_retry => {
+                    debug!(view = self.view, "proposal retry timeout fired");
+                    continue;
+                },
+                _ = fetch_timeout => {
+                    // Send request again
+                    let (_, base, children, _) = outstanding_task.unwrap();
+                    let validator = self.send_request(base, children, &mut sender).await;
+
+                    // Reset timeout
+                    let deadline = self.runtime.current() + self.fetch_timeout;
+                    outstanding_task = Some((validator, base, children, deadline));
+                    continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
@@ -1639,6 +1905,19 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
                                 .await
                                 .unwrap();
                         },
+                        Message::ProposalFailed {view} => {
+                            if self.view != view {
+                                debug!(view = view, our_view = self.view, reason = "no longer in required view", "dropping proposal failure");
+                                continue;
+                            }
+
+                            // Handle proposal failure
+                            let view_obj = self.views.get_mut(&view).expect("view missing");
+                            view_obj.requested_proposal = false;
+                            view_obj.next_proposal_request = Some(self.runtime.current() + self.proposal_retry);
+                            debug!(view = view, "proposal failed");
+                            continue;
+                        }
                         Message::Verified { view: verified_view } => {
                             // Handle verified proposal
                             if !self.verified(verified_view).await {
@@ -1727,6 +2006,81 @@ impl<E: Clock + Rng, C: Scheme, H: Hasher, A: Application + Supervisor + Finaliz
                             }
                             view = finalization.view;
                             self.finalization(resolver, finalization).await;
+                        }
+                        wire::consensus::Payload::NotarizationRequest(request) => {
+                            // Populate as many notarizations as we can
+                            let mut notarization_bytes = 0; // TODO: add a buffer
+                            let mut notarizations = Vec::new();
+                            let mut cursor = request.view;
+                            loop {
+                                // Attempt to construct notarization
+                                let notarization = match self.construct_notarization(cursor, true) {
+                                    Some(notarization) => notarization,
+                                    None => break,
+                                };
+
+                                // If we don't have any more space, stop
+                                notarization_bytes += notarization.encoded_len();
+                                if notarization_bytes > self.max_fetch_size{
+                                    debug!(
+                                        requested = request.children + 1,
+                                        fetched = notarizations.len(),
+                                        peer = hex(&s),
+                                        "reached max fetch size"
+                                    );
+                                    break;
+                                }
+                                notarizations.push(notarization);
+
+                                // If we have all children or we hit our limit, stop
+                                let fetched = notarizations.len() as u64;
+                                if fetched == request.children +1 || fetched == self.max_fetch_count {
+                                    break;
+                                }
+                                cursor +=1;
+                            }
+
+                            // Send back notarizations
+                            debug!(view = cursor, fetched = notarizations.len(), peer = hex(&s), "responding to notarization request");
+                            let msg = wire::Consensus {
+                                payload: Some(wire::consensus::Payload::BatchedNotarizations(
+                                    wire::BatchedNotarizations {
+                                        notarizations,
+                                    },
+                                )),
+                            }.encode_to_vec();
+                            sender
+                                .send(Recipients::One(s), msg.into(), false)
+                                .await
+                                .unwrap();
+                            continue;
+                        }
+                        wire::consensus::Payload::BatchedNotarizations(response) => {
+                            // Drop anything from someone we don't expect
+                            if let Some((ref sender, _, _, _)) = outstanding_task {
+                                if sender != &s {
+                                    continue
+                                }
+                                outstanding_task = None;
+                            }
+                            for notarization in response.notarizations {
+                                if let Some(notarization_hash) = notarization.hash.as_ref() {
+                                    if !H::validate(notarization_hash) {
+                                        debug!(sender = hex(&s), "invalid notarization hash size");
+                                        continue;
+                                    }
+                                    if notarization.height.is_none() {
+                                        debug!(sender = hex(&s), "missing notarization height");
+                                        continue;
+                                    }
+                                } else if notarization.height.is_some() {
+                                    debug!(sender = hex(&s), "invalid notarization height for null block");
+                                    continue;
+                                }
+                                debug!(view = notarization.view, "received batch notarization");
+                                self.notarization(resolver, notarization).await;
+                            }
+                            continue;
                         }
                     };
                 },

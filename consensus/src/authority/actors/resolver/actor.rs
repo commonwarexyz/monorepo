@@ -293,6 +293,7 @@ impl<
                                 continue;
                             }
                         };
+                        let proposal_view = proposal.view;
                         if !self.verify(hash.clone(), proposal.clone()).await {
                             debug!(
                                 height = next,
@@ -305,9 +306,11 @@ impl<
                             .entry(next)
                             .or_default()
                             .insert(hash.clone());
-                        self.application.notarized(hash.clone()).await;
+                        self.application
+                            .notarized(proposal_view, hash.clone())
+                            .await;
                     }
-                    trace!(height = next, "notified application notarization");
+                    debug!(height = next, "notified application notarization");
                 }
                 Knowledge::Finalized(hash) => {
                     // Send finalized proposal
@@ -322,6 +325,9 @@ impl<
                             return;
                         }
                     };
+                    let proposal_view = proposal.view;
+                    // If we already verified this proposal, this function will ensure we don't
+                    // notify the application of it again.
                     if !self.verify(hash.clone(), proposal.clone()).await {
                         debug!(
                             height = next,
@@ -333,8 +339,10 @@ impl<
                     self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
-                    self.application.finalized(hash.clone()).await;
-                    trace!(height = next, "notified application finalization");
+                    self.application
+                        .finalized(proposal_view, hash.clone())
+                        .await;
+                    debug!(height = next, "notified application finalization");
                 }
             }
 
@@ -343,8 +351,7 @@ impl<
         }
     }
 
-    // TODO: no guarantee this approach will ensure we load off verified
-    fn best_parent(&self) -> Option<(Hash, Height)> {
+    fn best_parent(&self) -> Option<(Hash, View, Height)> {
         // Find highest block that we have notified the application of
         let mut next = self.last_notarized;
         loop {
@@ -354,14 +361,16 @@ impl<
                     for (_, hash) in hashes.iter() {
                         if let Some(notifications) = self.notarizations_sent.get(&next) {
                             if notifications.contains(hash) {
-                                return Some((hash.clone(), self.blocks.get(hash).unwrap().height));
+                                let block = self.blocks.get(hash).unwrap();
+                                return Some((hash.clone(), block.view, block.height));
                             }
                         }
                     }
                 }
                 Some(Knowledge::Finalized(hash)) => {
                     if self.last_notified >= next {
-                        return Some((hash.clone(), self.blocks.get(hash).unwrap().height));
+                        let block = self.blocks.get(hash).unwrap();
+                        return Some((hash.clone(), block.view, block.height));
                     }
                 }
                 None => return None,
@@ -388,14 +397,30 @@ impl<
             }
         };
 
+        // Ensure we have null notarizations back to best parent block (if not, we may
+        // just be missing blocks and should try again later)
+        let height = parent.2 + 1;
+        for gap_view in (parent.1 + 1)..view {
+            if !self.null_notarizations.contains(&gap_view) {
+                debug!(
+                    height,
+                    view,
+                    parent_view = parent.1,
+                    missing = gap_view,
+                    reason = "missing null notarization",
+                    "skipping propose"
+                );
+                return None;
+            }
+        }
+
         // Propose block
         let context = Context {
             view,
             parent: parent.0.clone(),
-            height: parent.1 + 1,
+            height,
             proposer,
         };
-        let height = parent.1 + 1;
         let payload = match self.application.propose(context).await {
             Some(payload) => payload,
             None => {
@@ -659,6 +684,11 @@ impl<
             self.last_finalized = height;
         }
 
+        // Also update last notarized (if necessary)
+        if height > self.last_notarized {
+            self.last_notarized = height;
+        }
+
         // Prune all null notarizations below this view
         while let Some(null_view) = self.null_notarizations.iter().next().cloned() {
             if null_view > view {
@@ -902,6 +932,7 @@ impl<
                             let (parent, height, payload, payload_hash)= match self.propose(view, proposer).await{
                                 Some(proposal) => proposal,
                                 None => {
+                                    voter.proposal_failed(view).await;
                                     continue;
                                 }
                             };
@@ -993,39 +1024,21 @@ impl<
 
                             // Send messages
                             debug!(hash = hex(&request.hash), requested = request.parents + 1, found = proposals.len(), peer = hex(&s), "responding to backfill request");
-                            let msg = match proposals.len() {
-                                0 => wire::Backfill {
-                                    payload: Some(wire::backfill::Payload::Missing(wire::Missing {
-                                        hash: request.hash,
-                                    })),
-                                },
-                                _ => wire::Backfill {
-                                    payload: Some(wire::backfill::Payload::Resolution(wire::Resolution {
-                                        proposals,
-                                    })),
-                                },
+                            let msg =  wire::Backfill {
+                                payload: Some(wire::backfill::Payload::Resolution(wire::Resolution {
+                                    proposals,
+                                })),
                             };
                             sender.send(Recipients::One(s), msg.encode_to_vec().into(), false).await.unwrap();
                         }
-                        wire::backfill::Payload::Missing(missing) => {
-                            if !H::validate(&missing.hash) {
-                                warn!(sender = hex(&s), "invalid missing hash size");
-                                continue;
-                            }
-                            if let Some(ref outstanding) = outstanding_task {
-                                let hash = outstanding.2.clone();
-                                if outstanding.0 == s && hash == missing.hash {
-                                    debug!(hash = hex(&missing.hash), peer = hex(&s), "peer missing proposal");
-
-                                    // Send request again
-                                    let validator = self.send_request(outstanding.1, hash.clone(), &mut sender).await;
-
-                                    // Reset timeout
-                                    outstanding_task = Some((validator, outstanding.1, hash, self.runtime.current() + Duration::from_secs(1)));
+                        wire::backfill::Payload::Resolution(resolution) => {
+                            // If we arent' expecting any proposals, ignore
+                            if let Some((ref mut validator, _, _, _)) = outstanding_task {
+                                if *validator != s {
+                                    continue;
                                 }
                             }
-                        }
-                        wire::backfill::Payload::Resolution(resolution) => {
+
                             // Parse proposals
                             let mut next = None;
                             for proposal in resolution.proposals {
@@ -1132,6 +1145,14 @@ impl<
                                 // By waiting to register missing until the end, we avoid a bunch of unnecessary
                                 // backfill request additions.
                                 self.register_missing(height, hash).await;
+                            }
+
+                            // Reset outstanding task if it was not resolved
+                            //
+                            // Missing is a channel and thus we need to re-enqueue request if not satisfied.
+                            if let Some(outstanding) = outstanding_task {
+                                let validator = self.send_request(outstanding.1, outstanding.2.clone(), &mut sender).await;
+                                outstanding_task = Some((validator, outstanding.1, outstanding.2, self.runtime.current() + self.fetch_timeout));
                             }
                         }
                     }

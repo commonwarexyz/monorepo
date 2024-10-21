@@ -1,0 +1,27 @@
+[package]
+name = "commonware-clock"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "TBD"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/clock"
+documentation = "https://docs.rs/commonware-clock"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true } 
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+commonware-consensus = { workspace = true }
+bytes = { workspace = true } 
+rand = { workspace = true }
+tracing = { workspace = true } 
+futures = { workspace = true }
+clap = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus-client = { workspace = true }
+governor = { workspace = true }

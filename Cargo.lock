@@ -400,6 +400,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-clock"
+version = "0.0.2"
+dependencies = [
+ "bytes",
+ "clap",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "prometheus-client",
+ "rand",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-consensus"
 version = "0.0.2"
 dependencies = [
