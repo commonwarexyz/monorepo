@@ -1891,7 +1891,139 @@ mod tests {
         });
     }
 
-    fn jank_links(seed: u64) -> String {
+    #[test_traced]
+    fn test_lossy_links() {
+        // Create runtime
+        let n = 10;
+        let required_blocks = 100;
+        let namespace = Bytes::from("consensus");
+        let (executor, runtime, _) = Executor::timed(Duration::from_secs(300));
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                },
+            );
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+
+            // Create engines
+            let mut supervisors = Vec::new();
+            let (done_sender, mut done_receiver) = mpsc::unbounded();
+            for scheme in schemes.into_iter() {
+                // Register on network
+                let validator = scheme.public_key();
+                let (block_sender, block_receiver) = oracle
+                    .register(validator.clone(), 0, 1024 * 1024)
+                    .await
+                    .unwrap();
+                let (vote_sender, vote_receiver) = oracle
+                    .register(validator.clone(), 1, 1024 * 1024)
+                    .await
+                    .unwrap();
+
+                // Link to all other validators
+                for other in validators.iter() {
+                    if other == &validator {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 1.0,
+                                success_rate: 0.7,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                // Start engine
+                let hasher = Sha256::default();
+                let supervisor = TestSupervisor::<Ed25519, Sha256>::new(
+                    Prover::new(hasher.clone(), namespace.clone()),
+                    view_validators.clone(),
+                );
+                supervisors.push(supervisor.clone());
+                let application_cfg = ApplicationConfig {
+                    hasher: hasher.clone(),
+                    supervisor,
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    allow_invalid_payload: false,
+                };
+                let application = Application::new(runtime.clone(), application_cfg);
+                let cfg = config::Config {
+                    crypto: scheme,
+                    hasher,
+                    application,
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    null_vote_retry: Duration::from_secs(10),
+                    proposal_retry: Duration::from_millis(100),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout: 10,
+                    max_fetch_count: 1,
+                    max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(5).unwrap()),
+                    validators: view_validators.clone(),
+                };
+                let engine = Engine::new(runtime.clone(), cfg);
+                runtime.spawn("engine", async move {
+                    engine
+                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .await;
+                });
+            }
+
+            // Wait for all engines to finish
+            let mut completed = HashSet::new();
+            loop {
+                let (validator, event) = done_receiver.next().await.unwrap();
+                if let Progress::Finalized(height, _) = event {
+                    if height < required_blocks {
+                        continue;
+                    }
+                    completed.insert(validator);
+                }
+                if completed.len() == n {
+                    break;
+                }
+            }
+
+            // Ensure no faults
+            for supervisor in supervisors.iter() {
+                let faults = supervisor.faults.lock().unwrap();
+                assert!(faults.is_empty());
+            }
+        });
+    }
+
+    fn slow_and_lossy_links(seed: u64) -> String {
         // Create runtime
         let n = 10;
         let required_blocks = 20;
@@ -2034,10 +2166,10 @@ mod tests {
     fn test_determinism() {
         for seed in 0..5 {
             // Run test with seed
-            let state = jank_links(seed);
+            let state = slow_and_lossy_links(seed);
 
             // Run test again with same seed
-            let new_state = jank_links(seed);
+            let new_state = slow_and_lossy_links(seed);
 
             // Ensure states are equal
             assert_eq!(state, new_state);
@@ -2045,11 +2177,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_jank_links() {
+    fn test_slow_and_lossy_links() {
         // We start at 5 because `test_determinism` already tests seeds 0..5
         for seed in 5..10 {
             info!(seed, "running test with seed");
-            jank_links(seed);
+            slow_and_lossy_links(seed);
         }
     }
 

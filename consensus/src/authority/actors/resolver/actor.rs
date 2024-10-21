@@ -407,7 +407,8 @@ impl<
                     view,
                     parent_view = parent.1,
                     missing = gap_view,
-                    "missing null notarization, skipping propose"
+                    reason = "missing null notarization",
+                    "skipping propose"
                 );
                 return None;
             }

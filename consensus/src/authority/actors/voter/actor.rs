@@ -617,6 +617,7 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
             view = proposal_view,
             height = proposal_height,
             hash = hex(&proposal_hash),
+            retried = view.next_proposal_request.is_some(),
             "generated proposal"
         );
         view.proposal = Some((proposal_hash, payload_hash.clone(), proposal));
@@ -1840,8 +1841,6 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
                 None => Either::Right(futures::future::pending()),
             };
 
-            // Create proposal timeout
-
             // Wait for a timeout to fire or for a message to arrive
             let null_timeout = self.timeout_deadline();
             let view;
@@ -1852,7 +1851,7 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
                     view = self.view;
                 },
                 _ = propose_retry => {
-                    debug!(view = self.view, "retrying proposal");
+                    debug!(view = self.view, "proposal retry timeout fired");
                     continue;
                 },
                 _ = fetch_timeout => {
