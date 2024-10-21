@@ -12,7 +12,6 @@ fn main() -> Result<()> {
         "Finalize.hash",
         "Finalization.hash",
         "Request.hash",
-        "Missing.hash",
     ]);
     config.compile_protos(&["src/authority/wire.proto"], &["src/authority/"])?;
     Ok(())
