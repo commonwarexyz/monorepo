@@ -24,6 +24,7 @@
 //!
 //! * Leader timeout in addition to notarization timeout
 //! * Skip leader timeout if we haven't seen a participant vote in some number of views
+//! * Periodically retry building of proposal
 //! * Backfill blocks from notarizing peers rather than passing along with notarization message
 //! * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
 //!   more votes)
