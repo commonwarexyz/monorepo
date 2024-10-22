@@ -64,6 +64,8 @@ pub const PROPOSAL: Activity = 0;
 pub const VOTE: Activity = 1;
 pub const FINALIZE: Activity = 2;
 pub const CONFLICTING_PROPOSAL: Activity = 3;
+/// Note: it is ok to have both a vote for a proposal and the null
+/// block in the same view.
 pub const CONFLICTING_VOTE: Activity = 4;
 pub const CONFLICTING_FINALIZE: Activity = 5;
 pub const NULL_AND_FINALIZE: Activity = 6;
