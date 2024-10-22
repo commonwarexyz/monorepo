@@ -1,0 +1,58 @@
+body {
+    background-color: white;
+    color: black;
+    font-family: 'Consolas', monospace;
+    margin: 0;
+    padding: 10px;
+    font-size: 1em;
+}
+
+.logo-line {
+    display: flex;
+    font-size: 1.4em;
+    white-space: pre;
+}
+
+.section-title {
+    padding-bottom: 10px;
+}
+
+.blog-content {
+    max-width: 800px;
+    margin: 20px 0;
+    padding: 0 10px;
+}
+
+.blog-content h1 {
+    font-size: 2em;
+    margin-bottom: 10px;
+}
+
+.blog-content .blog-date {
+    font-size: 0.9em;
+    color: gray;
+    margin-bottom: 20px;
+}
+
+.blog-content h2 {
+    font-size: 1.5em;
+    margin-top: 20px;
+    margin-bottom: 10px;
+}
+
+.blog-content p {
+    line-height: 1.6;
+    margin-bottom: 10px;
+}
+
+.blog-content img {
+    max-width: 100%;
+    height: auto;
+    margin: 20px 0;
+}
+
+.logo-link {
+    text-decoration: none;
+    color: inherit;
+    display: inline-block;
+}
