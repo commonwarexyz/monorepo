@@ -27,124 +27,48 @@
     <meta property="twitter:creator" content="@commonwarexyz" />
     <meta property="twitter:creator:id" content="@commonwarexyz" />
 
-    <meta name="x:card" content="summary_large_image" />
-    <meta property="x:domain" content="commonware.xyz" />
-    <meta property="x:url" content="https://commonware.xyz" />
-    <meta property="x:title" content="commonware" />
-    <meta property="x:description" content="" />
-    <meta property="x:image" content="https://commonware.xyz/card.png" />
-    <meta property="x:site" content="@commonwarexyz" />
-    <meta property="x:creator" content="@commonwarexyz" />
-    <meta property="x:creator:id" content="@commonwarexyz" />
-
-    <style>
-        body {
-            background-color: white;
-            color: black;
-            font-family: 'Consolas', monospace;
-            margin: 0;
-            padding: 10px;
-            height: 100%;
-            display: flex;
-            flex-direction: column;
-            font-size: 1em;
-        }
-
-        .logo-line {
-            display: flex;
-            font-size: 1.4em;
-            white-space: pre;
-        }
-
-        .section-title {
-            padding-bottom: 10px;
-        }
-    </style>
+    <link rel="stylesheet" type="text/css" href="style.css">
 </head>
 
 <body>
-    <div class="logo-line">
-        <span class="edge-logo-symbol">+</span>
-        <span class="horizontal-logo-symbol">~</span>
-        <span class="horizontal-logo-symbol"> </span>
-        <span class="horizontal-logo-symbol">-</span>
-        <span class="horizontal-logo-symbol">+</span>
-        <span class="horizontal-logo-symbol">-</span>
-        <span class="horizontal-logo-symbol">+</span>
-        <span class="horizontal-logo-symbol"> </span>
-        <span class="horizontal-logo-symbol">-</span>
-        <span class="horizontal-logo-symbol">+</span>
-        <span class="horizontal-logo-symbol">-</span>
-        <span class="horizontal-logo-symbol">~</span>
-        <span class="horizontal-logo-symbol">~</span>
-        <span class="edge-logo-symbol">*</span>
+    <div id="logo-placeholder">commonware</div>
+    <div class="content">
+        <h2>Primitives</h2>
+        <h3><a href="https://docs.rs/commonware-cryptography">cryptography</a></h3>
+        <p>Generate keys, sign arbitrary messages, and deterministically verify signatures.</p>
+        <h3><a href="https://docs.rs/commonware-p2p">p2p</a></h3>
+        <p>Communicate with authenticated peers over encrypted connections.</p>
+        <h3><a href="https://docs.rs/commonware-runtime">runtime</a></h3>
+        <p>Execute asynchronous tasks with a configurable scheduler.</p>
+
+        <h2>Blogs</h2>
+        <h3><a href="./blogs/commonware-runtime.html">commonware-runtime: The Foundation for Reliable and Performant Consensus</a></h3>
+        <div class="blog-meta">
+            <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
+            <div class="date">September 24, 2024</div>
+        </div>
+        <p>In blockchain engineering, there are few moments more stressful than the production release of a new mechanism (whether a novel consensus optimization or a tweak to peer discovery).</p>
+        <h3><a href="./blogs/commonware-cryptography.html">commonware-cryptography: Unlocking Seeds, Links, and Views</a></h3>
+        <div class="blog-meta">
+            <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
+            <div class="date">August 28, 2024</div>
+        </div>
+        <p>When I chat with a developer about launching their own onchain application (as a specialized blockchain), the same questions always come up.</p>
+        <h3><a href="./blogs/introducing-commonware.html">Introducing Commonware</a></h3>
+        <div class="blog-meta">
+            <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
+            <div class="date">August 8, 2024</div>
+        </div>
+        <p>Like many of you, I started working in the crypto space because I believe the internet will be a better place if (a lot) more of it is onchain.</p>
+
+        <h2>Examples</h2>
+        <h3><a href="https://docs.rs/commonware-chat">chat</a></h3>
+        <p>Send encrypted messages to a group of friends.</p>
+        <h3><a href="https://docs.rs/commonware-vrf">vrf</a></h3>
+        <p>Generate bias-resistant randomness with untrusted contributors.</p>
     </div>
-    <div class="logo-line">
-        <span class="vertical-logo-symbol">|</span>
-        <span class="logo-text"> commonware </span>
-        <span class="vertical-logo-symbol"> </span>
-    </div>
-    <div class="logo-line">
-        <span class="edge-logo-symbol">*</span>
-        <span class="horizontal-logo-symbol">~</span>
-        <span class="horizontal-logo-symbol">+</span>
-        <span class="horizontal-logo-symbol">+</span>
-        <span class="horizontal-logo-symbol">-</span>
-        <span class="horizontal-logo-symbol"> </span>
-        <span class="horizontal-logo-symbol">~</span>
-        <span class="horizontal-logo-symbol">-</span>
-        <span class="horizontal-logo-symbol">+</span>
-        <span class="horizontal-logo-symbol"> </span>
-        <span class="horizontal-logo-symbol">-</span>
-        <span class="horizontal-logo-symbol">*</span>
-        <span class="horizontal-logo-symbol">-</span>
-        <span class="edge-logo-symbol">+</span>
-    </div>
-    <br>
-    <div class="section-title">> primitives</div>
-    <div>* <a href="https://docs.rs/commonware-cryptography">cryptography</a>: generate keys, sign arbitrary messages, and deterministically verify signatures.</div>
-    <div>* <a href="https://docs.rs/commonware-p2p">p2p</a>: communicate with authenticated peers over encrypted connections.</div>
-    <div>* <a href="https://docs.rs/commonware-runtime">runtime</a>: execute asynchronous tasks with a configurable scheduler.</div>
-    <br>
-    <div class="section-title">> examples</div>
-    <div>* <a href="https://docs.rs/commonware-chat">chat</a>: send encrypted messages to a group of friends.</div>
-    <div>* <a href="https://docs.rs/commonware-vrf">vrf</a>: generate bias-resistant randomness with untrusted contributors.</div>
-    <br>
-    <div class="section-title">> connect</div>
-    <div>* <a href="https://discord.gg/wt5VtKXv5c">discord</a></div>
-    <div>* <a href="https://github.com/commonwarexyz/monorepo">github</a></div>
-    <div>* <a href="https://x.com/commonwarexyz">x</a></div>
-
-    <script>
-        const horizontalSymbols = [" ", "*", "+", "-", "~"];
-        const verticalSymbols = [" ", "*", "+", "|"];
-        const edgeSymbols = [" ", "*", "+"];
-
-        function getRandomItem(arr) {
-            return arr[Math.floor(Math.random() * arr.length)];
-        }
-
-        function getRandomDuration(min) {
-            return Math.random() * (10000 - min) + min;
-        }
-
-        function updateSymbol(symbol, choices) {
-            symbol.innerText = getRandomItem(choices);
-            setTimeout(() => updateSymbol(symbol, choices), getRandomDuration(500));
-        }
-
-        document.querySelectorAll('.horizontal-logo-symbol').forEach(symbol => {
-            setTimeout(() => updateSymbol(symbol, horizontalSymbols), getRandomDuration(1500));
-        });
-
-        document.querySelectorAll('.vertical-logo-symbol').forEach(symbol => {
-            setTimeout(() => updateSymbol(symbol, verticalSymbols), getRandomDuration(1500));
-        });
-
-        document.querySelectorAll('.edge-logo-symbol').forEach(symbol => {
-            setTimeout(() => updateSymbol(symbol, edgeSymbols), getRandomDuration(1500));
-        });
-    </script>
+    <div id="footer-placeholder"></div>
+    <script src="script.js"></script>
 </body>
 
 </html>
