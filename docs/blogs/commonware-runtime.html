@@ -8,18 +8,21 @@
 
     <title>commonware > commonware-runtime: The Foundation for Reliable and Performant Consensus</title>
     <meta name="description" content="In blockchain engineering, there are few moments more stressful than the production release of a new mechanism (whether a novel consensus optimization or a tweak to peer discovery).">
+    <meta name="author" content="Patrick O'Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
-    <meta property="og:url" content="https://commonware.xyz" />
-    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://commonware.xyz/blogs/commonware-runtime.html" />
+    <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/consensus-optimization.jpeg" />
     <meta property="og:title" content="commonware-runtime: The Foundation for Reliable and Performant Consensus" />
     <meta property="og:description" content="In blockchain engineering, there are few moments more stressful than the production release of a new mechanism (whether a novel consensus optimization or a tweak to peer discovery)." />
-    <meta property="og:image" content="https://commonware.xyz/imgs/consensus-optimization.jpeg" />
+    <meta property="article:author" content="https://x.com/_patrickogrady" />
+    <meta property="article:published_time" content="2024-09-24T00:00:00Z" />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
-    <meta property="twitter:url" content="https://commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/commonware-runtime.html" />
     <meta property="twitter:title" content="commonware-runtime: The Foundation for Reliable and Performant Consensus" />
     <meta property="twitter:description" content="In blockchain engineering, there are few moments more stressful than the production release of a new mechanism (whether a novel consensus optimization or a tweak to peer discovery)." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/consensus-optimization.jpeg" />
@@ -33,35 +36,32 @@
     <div id="logo-placeholder">commonware</div>
     <div class="content">
         <h1>commonware-runtime: The Foundation for Reliable and Performant Consensus</h1>
-        <div class="date">September 24, 2024</div>
+        <div class="blog-meta">
+            <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
+            <div class="date">September 24, 2024</div>
+        </div>
         <p>In blockchain engineering, there are few moments more stressful than the production release of a new mechanism (whether a novel consensus optimization or a tweak to peer discovery).</p>
         <p>While Twitter fame invariably awaits the successful, failure too often means nights and weekends parsing thousands of log lines (on top of whatever is required to unhalt a borked network). The sting of wayward improvements has deterred many engineers, reasonably so, from modifying well-behaved code with emergent (and difficult to test) stability.</p>
         <div class="image-container">
-            <img src="../imgs/consensus-fault.jpeg" alt="Panoramic view of the mountains during sunset">
-            <div class="image-caption">
-                Panoramic view of the mountains during sunset. Photo by <a href="https://unsplash.com/@photographer">Photographer's Name</a> on Unsplash.
-            </div>
+            <img src="../imgs/consensus-fault.jpeg" alt="Working through a consensus fault">
         </div>
-        <p>At @commonwarexyz, we believe the relationship between engineers and mechanism iteration must be (substantially) advanced for onchain applications to achieve widespread adoption. If developers are forced to shy away from frequent and aggressive iteration, the onchain future we all hope for will remain just that ... an onchain future.</p>
+        <p>At <a href="https://x.com/commonwarexyz">@commonwarexyz</a>, we believe the relationship between engineers and mechanism iteration must be (substantially) advanced for onchain applications to achieve widespread adoption. If developers are forced to shy away from frequent and aggressive iteration, the onchain future we all hope for will remain just that ... an onchain future.</p>
         <h2>commonware-runtime: 1 Trait, 2 Dialects</h2>
-        <p>As an early step towards this goal, we are excited to release commonware-runtime (Apache-2 and MIT), a new primitive for the configurable execution of concurrent Rust. The commonware-runtime::deterministic dialect enables code to be deterministically simulated (from a user-provided seed) without kernel-level virtualization. The commonware-runtime::tokio dialect allows for the same code (without modification) to be executed in production (using Tokio).</p>
-        <p>Want to develop your own simulator or novel production executor? No worries! Just implement the exported traits from commonware-runtime and you can drop in your runtime to any of the Commonware Library primitives. Want to employ commonware-runtime in your own application? Confirm your application behaves deterministically using commonware-runtime::deterministic::Auditor.</p>
+        <p>As an early step towards this goal, we are excited to release <a href="https://docs.rs/commonware-runtime">commonware-runtime</a> (Apache-2 and MIT), a new primitive for the configurable execution of concurrent Rust. The <i>commonware-runtime::deterministic</i> dialect enables code to be deterministically simulated (from a user-provided seed) without kernel-level virtualization. The <i>commonware-runtime::tokio</i> dialect allows for the same code (without modification) to be executed in production (using Tokio).</p>
+        <p>Want to develop your own simulator or novel production executor? No worries! Just implement the <a href="https://docs.rs/commonware-runtime/latest/commonware_runtime/#traits">exported traits from commonware-runtime</a> and you can drop in your runtime to any of the Commonware Library primitives. Want to employ <i>commonware-runtime</i> in your own application? Confirm your application behaves deterministically using <i>commonware-runtime::deterministic::Auditor</i>.</p>
         <h2>What is Deterministic Simulation and Why Does it Help?</h2>
         <p>Consider a not so uncommon test where 100 different agents send unique messages to each other. The way those messages are constructed (from external randomness, clocks, and storage) and the order that messages are sent has a significant impact on outcome. Sending a message before an agent is initialized means it is dropped. Delaying the delivery of a message until after some timeout leads to the sender being penalized.</p>
         <div class="image-container">
-            <img src="../imgs/neo-deterministic.jpeg" alt="Panoramic view of the mountains during sunset">
-            <div class="image-caption">
-                Panoramic view of the mountains during sunset. Photo by <a href="https://unsplash.com/@photographer">Photographer's Name</a> on Unsplash.
-            </div>
+            <img src="../imgs/neo-deterministic.jpeg" alt="Controlling time and space with deterministic simulation">
         </div>
         <p>What if you could control the order in which these agents interact and the external sources they depend on? With integrated deterministic simulation, you can run the same test with different sources of entropy to shuffle the order of agent execution (broadening exploration of the state space) and, critically, can reproduce any failing result (no more waiting for that random flake to occur again).</p>
-        <h2>Introducing Deterministic Simulation to commonware-p2p</h2>
-        <p>To demonstrate how to use commonware-runtime (and for our own sanity), we upgraded commonware-p2p to this new runtime. We can now deterministically simulate a collection of peers discovering each other and exchanging encrypted messages (from initialization to shutdown) all locally. In fact, we now run commonware-p2p::authenticated connectivity tests (25 peers) with ~10 different seeds during each run of CI (leading to different sequences of peer discovery, message passing, and ultimately simulation termination).</p>
-        <p>Basic unit testing is just the start of what we have planned for commonware-runtime. On the path to the production launch of the Commonware Library (and after), we will continuously test the stability of commonware-p2p and commonware-consensus with random topologies (honest/byzantine behavior, and network conditions) to ensure compatibility across versions and to test for regressions (as measured by observed bandwidth + number of steps required to complete).</p>
+        <h2>Introducing Deterministic Simulation to <i>commonware-p2p</i></h2>
+        <p>To demonstrate how to use <i>commonware-runtime</i> (and for our own sanity), we upgraded <i>commonware-p2p</i> to this new runtime. We can now deterministically simulate a collection of peers discovering each other and exchanging encrypted messages (from initialization to shutdown) all locally. In fact, we now run <i>commonware-p2p::authenticated</i> connectivity tests (25 peers) with ~10 different seeds during each run of CI (leading to different sequences of peer discovery, message passing, and ultimately simulation termination).</p>
+        <p>Basic unit testing is just the start of what we have planned for <i>commonware-runtime</i>. On the path to the production launch of the Commonware Library (and after), we will continuously test the stability of <i>commonware-p2p</i> and <i>commonware-consensus</i> with random topologies (honest/byzantine behavior, and network conditions) to ensure compatibility across versions and to test for regressions (as measured by observed bandwidth + number of steps required to complete).</p>
         <p>Here's to one less Saturday night spent debugging.🍻</p>
         <p><i>Want to help? Commonware is looking for a small group of founding engineers (1-10% equity). If you enjoy the never-ending challenge of building performant distributed systems, reach out to @commonwarexyz or hiring@commonware.xyz with a link to some of your most interesting work!</i></p>
         <h2>Acknowledgements</h2>
-        <p>Our love of deterministic simulation stems from Will Wilson's (Antithesis) solution to Mario and TigerBeetle's "Viewstamped Replication Made Famous" challenge. Thanks to both for doing an incredible job explaining how advanced simulation leads to more reliable distributed systems.</p>
+        <p>Our love of deterministic simulation stems from <a href="https://www.youtube.com/watch?v=m3HwXlQPCEU">Will Wilson's (Antithesis) solution to Mario</a> and <a href="https://github.com/tigerbeetle/viewstamped-replication-made-famous">TigerBeetle's "Viewstamped Replication Made Famous" challenge</a>. Thanks to both for doing an incredible job explaining how advanced simulation leads to more reliable distributed systems.</p>
     </div>
 
     <div id="footer-placeholder"></div>
