@@ -104,10 +104,10 @@ function initializeLogoAnimations() {
     });
 }
 
-function setBlogLinksToOpenInNewTab() {
-    const blogContent = document.querySelector('.blog-content');
-    if (blogContent) {
-        const links = blogContent.querySelectorAll('a');
+function setContentLinksToOpenInNewTab() {
+    const mainContent = document.querySelector('.main-content');
+    if (mainContent) {
+        const links = mainContent.querySelectorAll('a');
         links.forEach(link => {
             link.setAttribute('target', '_blank');
             link.setAttribute('rel', 'noopener noreferrer');
@@ -115,8 +115,23 @@ function setBlogLinksToOpenInNewTab() {
     }
 }
 
+function insertFooter() {
+    const footerHTML = `
+    <div class="footer">
+        <div class="socials">
+            <a href="https://discord.gg/wt5VtKXv5c">Discord</a>
+            <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
+            <a href="https://x.com/commonwarexyz">X</a>
+        </div>
+        &copy; 2024 Commonware, Inc. All rights reserved.
+    </div>
+    `
+    document.getElementById('footer-placeholder').innerHTML = footerHTML;
+}
+
 // Load the logo when the DOM content is loaded
 document.addEventListener('DOMContentLoaded', () => {
     insertLogo();
-    setBlogLinksToOpenInNewTab();
+    insertFooter();
+    setContentLinksToOpenInNewTab();
 });

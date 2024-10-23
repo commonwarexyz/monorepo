@@ -1,11 +1,24 @@
+html,
 body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+}
+
+body {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
     background-color: white;
     color: black;
     font-family: 'Consolas', monospace;
-    margin: 0;
-    padding: 10px;
-    font-size: 1em;
     max-width: 800px;
+    margin: 0 auto;
+}
+
+.main-content {
+    flex: 1;
+    padding-bottom: 200px;
 }
 
 .logo-line {
@@ -70,4 +83,17 @@ img {
     color: #555;
     margin-top: 5px;
     text-align: left;
+}
+
+.footer {
+    text-align: left;
+    padding: 10px 0 10px 0;
+}
+
+.footer .socials {
+    margin-bottom: 10px;
+}
+
+.footer .social-link {
+    margin: 0 10px;
 }
