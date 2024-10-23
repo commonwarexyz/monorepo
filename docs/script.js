@@ -105,9 +105,9 @@ function initializeLogoAnimations() {
 }
 
 function setContentLinksToOpenInNewTab() {
-    const mainContent = document.querySelector('.main-content');
-    if (mainContent) {
-        const links = mainContent.querySelectorAll('a');
+    const content = document.querySelector('.content');
+    if (content) {
+        const links = content.querySelectorAll('a');
         links.forEach(link => {
             link.setAttribute('target', '_blank');
             link.setAttribute('rel', 'noopener noreferrer');
