@@ -104,14 +104,13 @@ function initializeLogoAnimations() {
     });
 }
 
-function setContentLinksToOpenInNewTab() {
-    const content = document.querySelector('.content');
-    if (content) {
-        const links = content.querySelectorAll('a');
-        links.forEach(link => {
+function setExternalLinksToOpenInNewTab() {
+    for (const link of document.querySelectorAll('a')) {
+        const href = link.getAttribute('href');
+        if (href && href.startsWith('http')) {
             link.setAttribute('target', '_blank');
             link.setAttribute('rel', 'noopener noreferrer');
-        });
+        }
     }
 }
 
@@ -133,5 +132,5 @@ function insertFooter() {
 document.addEventListener('DOMContentLoaded', () => {
     insertLogo();
     insertFooter();
-    setContentLinksToOpenInNewTab();
+    setExternalLinksToOpenInNewTab();
 });
