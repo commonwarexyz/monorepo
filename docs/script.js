@@ -104,5 +104,19 @@ function initializeLogoAnimations() {
     });
 }
 
+function setBlogLinksToOpenInNewTab() {
+    const blogContent = document.querySelector('.blog-content');
+    if (blogContent) {
+        const links = blogContent.querySelectorAll('a');
+        links.forEach(link => {
+            link.setAttribute('target', '_blank');
+            link.setAttribute('rel', 'noopener noreferrer');
+        });
+    }
+}
+
 // Load the logo when the DOM content is loaded
-document.addEventListener('DOMContentLoaded', insertLogo);
+document.addEventListener('DOMContentLoaded', () => {
+    insertLogo();
+    setBlogLinksToOpenInNewTab();
+});
