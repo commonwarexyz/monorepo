@@ -1,16 +1,19 @@
 [workspace]
 members = [
+    "consensus",
     "cryptography",
     "macros",
     "p2p",
     "runtime",
     "utils",
     "examples/chat",
+    "examples/clock",
     "examples/vrf",
 ]
 resolver = "2"
 
 [workspace.dependencies]
+commonware-consensus = { version = "0.0.2", path = "consensus" }
 commonware-cryptography = { version = "0.0.10", path = "cryptography" }
 commonware-macros = { version = "0.0.2", path = "macros" }
 commonware-p2p = { version = "0.0.21", path = "p2p" }
@@ -20,6 +23,7 @@ thiserror = "1.0.63"
 bytes = "1.7.1"
 sha2 = "0.10.8"
 rand = "0.8.5"
+rand_distr = "0.4.3"
 futures = "0.3.30"
 tokio = "1.40.0"
 tracing = "0.1.40"
