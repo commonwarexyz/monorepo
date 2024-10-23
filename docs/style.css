@@ -1,3 +1,7 @@
+* {
+    box-sizing: border-box;
+}
+
 html,
 body {
     margin: 0;
@@ -14,6 +18,7 @@ body {
     font-family: 'Consolas', monospace;
     max-width: 800px;
     margin: 0 auto;
+    padding: 10px 10px 0 10px;
 }
 
 .content {
@@ -119,7 +124,7 @@ img {
 
 .footer {
     text-align: left;
-    padding: 10px 0 10px 0;
+    padding: 10px 0;
 }
 
 .footer .socials {
