@@ -17,7 +17,7 @@ body {
 .date {
     font-size: 0.9em;
     color: gray;
-    margin-bottom: 10px;
+    margin-bottom: 5px;
 }
 
 h1 {
@@ -27,18 +27,18 @@ h1 {
 
 h2 {
     font-size: 1.2em;
-    margin-bottom: 10px;
+    margin-bottom: 8px;
 }
 
 h3 {
     font-size: 1em;
-    margin-bottom: 10px;
+    margin-bottom: 6.6px;
     font-weight: bold;
 }
 
 p {
-    line-height: 1.4;
-    margin-bottom: 10px;
+    line-height: 1.2;
+    margin-bottom: 5px;
 }
 
 img {
