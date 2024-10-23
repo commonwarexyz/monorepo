@@ -14,32 +14,30 @@ body {
     white-space: pre;
 }
 
-h1 {
-    font-size: 2em;
+.date {
+    font-size: 0.9em;
+    color: gray;
     margin-bottom: 10px;
 }
 
-.blog-date {
-    font-size: 0.9em;
-    color: gray;
-    margin-bottom: 20px;
+h1 {
+    font-size: 1.5em;
+    margin-bottom: 10px;
 }
 
 h2 {
-    font-size: 1.5em;
-    margin-top: 20px;
+    font-size: 1.2em;
     margin-bottom: 10px;
 }
 
 h3 {
-    font-size: 1.2em;
-    margin-top: 15px;
+    font-size: 1em;
     margin-bottom: 10px;
     font-weight: bold;
 }
 
 p {
-    line-height: 1.6;
+    line-height: 1.4;
     margin-bottom: 10px;
 }
 
