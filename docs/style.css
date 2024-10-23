@@ -57,9 +57,7 @@ img {
 
 .image-container {
     display: block;
-    /* Changed from flex to block */
     margin: 20px 0;
-    /* Vertical spacing remains the same */
 }
 
 .image-container img {
@@ -67,19 +65,11 @@ img {
     height: auto;
     display: block;
     margin: 0;
-    /* Remove any default margins */
 }
 
 .image-caption {
     font-size: 0.9em;
     color: #555;
-    /* Gray color for the caption text */
     margin-top: 5px;
-    /* Space between image and caption */
     text-align: left;
-    /* Left-align the caption text */
-    max-width: 800px;
-    /* Match the blog content width */
-    /* Optional: Adjust padding if needed */
-    /* padding-left: 10px; */
 }
