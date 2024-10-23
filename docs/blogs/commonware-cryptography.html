@@ -8,18 +8,21 @@
 
     <title>commonware > commonware-cryptography: Unlocking Seeds, Links, and Views</title>
     <meta name="description" content="When I chat with a developer about launching their own onchain application (as a specialized blockchain), the same questions always come up.">
+    <meta name="author" content="Patrick O'Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
-    <meta property="og:url" content="https://commonware.xyz" />
-    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://commonware.xyz/blogs/commonware-cryptography.html" />
+    <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/commonware-cryptography.jpeg" />
     <meta property="og:title" content="commonware-cryptography: Unlocking Seeds, Links, and Views" />
     <meta property="og:description" content="When I chat with a developer about launching their own onchain application (as a specialized blockchain), the same questions always come up." />
-    <meta property="og:image" content="https://commonware.xyz/imgs/commonware-cryptography.jpeg" />
+    <meta property="article:author" content="https://x.com/_patrickogrady" />
+    <meta property="article:published_time" content="2024-08-28T00:00:00Z" />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
-    <meta property="twitter:url" content="https://commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/commonware-cryptography.html" />
     <meta property="twitter:title" content="commonware-cryptography: Unlocking Seeds, Links, and Views" />
     <meta property="twitter:description" content="When I chat with a developer about launching their own onchain application (as a specialized blockchain), the same questions always come up." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/commonware-cryptography.jpeg" />
@@ -33,9 +36,48 @@
     <div id="logo-placeholder">commonware</div>
     <div class="content">
         <h1>commonware-cryptography: Unlocking Seeds, Links, and Views</h1>
-        <div class="date">TBD</div>
+        <div class="blog-meta">
+            <div class="author">By <a href="https://x.com/_patrickogrady">Patrick O'Grady</a></div>
+            <div class="date">August 28, 2024</div>
+        </div>
+        <p>When I chat with a developer about launching their own onchain application (as a specialized blockchain), the same questions always come up:</p>
+        <ul>
+            <li>
+                <p>Where can I source bias-resistant randomness? <i>(ensure fair and unpredictable outcomes in onchain games)</i></p>
+            </li>
+            <li>
+                <p>Will my application be able to interact with other applications? <i>(transfer tokens between blockchains and gate experiences with external token ownership)</i></p>
+            </li>
+            <li>
+                <p>Can users verify data fetched from an API is correct? <i>(supermajority of validators indicate whether a payment was finalized, not an API provider)</i></p>
+            </li>
+        </ul>
+        <p>Today, we're excited to share how @commonwarexyz is answering these questions with <a href="https://docs.rs/commonware-cryptography">commonware-cryptography</a> (now in ALPHA).</p>
+        <p>commonware-cryptography is an open (Apache-2 and MIT) implementation of BLS12-381 Distributed Key Generation (DKG), Resharing, and Threshold Signatures in Rust. Unlike most implementations, commonware-cryptography does not employ a "board" for share distribution (that requires dealers to broadcast encrypted shares over a public channel). Rather, dealers distribute shares over encrypted connections directly with each recipient and recipients broadcast an acknowledgement when they receive a correct share (no share material included).</p>
+        <p>With an eye towards consensus integration (natively emitting Threshold Signatures during finalization), the commonware-cryptography DKG/Resharing construction identifies disqualified contributors in each round (missing commitment, invalid commitment, invalid share distribution, ignoring reveal requests, etc.) and supports maintaining a threshold of 2f + 1 (of 3f + 1 total contributors) across Reshares (which can be run to introduce/remove contributors and/or proactively on a regular interval to bound the age of shares). You can read more about this construction <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/index.html">here</a>.</p>
+        <p>So, how does this answer any of a developer's questions?</p>
+        <ul>
+            <li>
+                <p><b>Seeds <i>(Randomness)</i>:</b> BLS12-381 Threshold Signatures are deterministic and can be used as a bias-resistant source of randomness. No contributor knows the value of a signature until collecting at least "threshold" partial signatures.</p>
+            </li>
+            <li>
+                <p><b>Links <i>(Connectivity)</i>:</b> With BLS12-381 DKG/Resharing, a group of contributors (like a validator set) maintain a static public key over time (even as participants are added/removed). If this set of contributors signs over a finalized block, anyone can verify that block (or anything provable from its header) is included in the canonical history using the static public key of the group (48 bytes) and a Threshold Signature (96 bytes). A blockchain can support verification of BLS signatures in the execution layer (many already do) and read finalized data from another blockchain without following its consensus or tracking its validator set (as a lite client).</p>
+            </li>
+            <li>
+                <p><b>Views <i>(Access)</i>:</b> "Links" can be extended beyond blockchain execution environments to wallets and explorers to provide trust-minimized access to onchain activity. Like a blockchain, all a user requires to verify that a blockchain included/emitted some data is its static public key (can be hardcoded) and a Threshold Signature over a block (or whatever artifact a developer wants to emit) referencing said data.</p>
+            </li>
+        </ul>
+        <p>To showcase how "Seeds" will work, we implemented a <a href="https://docs.rs/commonware-vrf">Proof-of-Concept Verifiable Random Function (VRF) CLI</a> with a trusted Arbiter (that will be removed after the release of commonware-consensus) and untrusted Contributors:</p>
+        <div class="video-container">
+            <iframe src="https://www.youtube.com/embed/nGIJk4w63F0?si=jy2QGEvsC0WHJUwi" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+        </div>
+        <p>Contributors to this VRF connect to each other over commonware-p2p (using ED25519 identities), perform an initial DKG (to generate a static public key), and then perform a proactive refresh every 10 seconds. After a successful DKG and/or Reshare, contributors generate partial signatures over the round number and gossip them to others in the group (again using commonware-p2p). These partial signatures, when aggregated, form a bias-resistant source of randomness that was not knowable to any contributor prior to signing.</p>
+        <p>To demonstrate how malicious contributors are tolerated, the CLI also lets you behave as a "rogue" dealer that generates invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, or a "defiant" dealer that doesn't respond to requests to reveal shares that weren't acknowledged by other contributors.</p>
+        <p>Next up, commonware-consensus!</p>
+        <p><i>To support contributors and developers working with the Commonware Framework, we launched a <a href="https://discord.gg/wt5VtKXv5cDiscord">Discord</a>. We look forward to seeing you there soon!</i></p>
     </div>
 
+    <div id="footer-placeholder"></div>
     <script src="../script.js"></script>
 </body>
 
