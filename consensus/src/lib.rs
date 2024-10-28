@@ -1,100 +1,48 @@
 //! TBD
-//!
-//! Makes some assumptions about the consensus construction:
-//! * Cryptographic proof of participation
 
 pub mod authority;
 pub mod mocks;
-pub mod sha256;
 
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{Digest, PublicKey};
 use std::future::Future;
 
-// TODO: add simulated dialect for applications to test their execution environments under (with arbitary orphans, etc.)
-
-// TODO: add a view limit (where no further blocks can be produced) but still respond to sync requests (would need to periodically gossip
-// last finalization to all peers to allow new syncers to catch up)
-
-// TODO: tests
-// - sync from scratch
-// - halt (50% shutdown) and recover
-// - 33% shutdown and recover
-// - full shutdown and recover (no safety failure from voting incorrectly)
-// - 33% double-voting
-// - block sent to one honest party different than block sent to all others, does it drop at notarization and fetch actual?
-
-pub type Hash = Bytes; // use fixed size bytes
-
-/// Hasher is provided by the application for hashing.
-///
-/// In practice, the hasher is not bundled with the application so that
-/// it can be cheaply copied for concurrent hashing.
-///
-/// This is configurable because some hash functions are better suited for
-/// SNARK/STARK proofs than others.
-pub trait Hasher: Clone + Send + 'static {
-    /// Append the digest to the recorded data.
-    fn update(&mut self, digest: &[u8]);
-
-    /// Hash all recorded data and reset
-    /// the hasher to the initial state.
-    fn finalize(&mut self) -> Hash;
-
-    /// Reset the hasher without generating a hash.
-    ///
-    /// This is not required to call before calling `record`.
-    fn reset(&mut self);
-
-    /// Validate the hash.
-    fn validate(hash: &Hash) -> bool;
-
-    /// Size of the hash in bytes.
-    fn size() -> usize;
-}
-
-pub type View = u64;
-pub type Height = u64;
-
-/// Context is a collection of information about the context in which a block is built.
-#[derive(Clone)]
-pub struct Context {
-    pub view: View,
-    pub parent: Hash,
-    pub height: Height,
-    pub proposer: PublicKey,
-}
-
+/// Byte array representing the externally-provided payload of a container.
 pub type Payload = Bytes;
 
-/// Application is the interface for the consensus engine to inform of progress.
+/// Automaton is the interface for the consensus engine to inform of progress.
 ///
-/// While an application may be logically instantiated as a single entity, it may be
-/// cloned by multiple sub-components of a consensus engine.
-pub trait Application: Clone + Send + 'static {
+/// While an automaton may be logically instantiated as a single entity, it may be
+/// cloned by multiple sub-components of a consensus engine to, among other things,
+/// parse payloads concurrently.
+pub trait Automaton: Clone + Send + 'static {
+    type Context;
+
     /// Initialize the application with the genesis block at view=0, height=0.
-    fn genesis(&mut self) -> (Hash, Payload);
+    fn genesis(&mut self) -> (Payload, Digest);
 
     /// Generate a new payload for the given parent hash.
     ///
     /// If state is not yet ready, this will return None.
-    fn propose(&mut self, context: Context) -> impl Future<Output = Option<Payload>> + Send;
+    fn propose(&mut self, context: Self::Context) -> impl Future<Output = Option<Payload>> + Send;
 
     /// Parse the payload and return the hash of the payload. We don't just hash
     /// the payload because it may be more efficient to prove against a hash
     /// that is specifically formatted (like a trie root).
     ///
     /// Parse is a stateless operation and may be called out-of-order.
-    fn parse(&mut self, payload: Payload) -> impl Future<Output = Option<Hash>> + Send;
+    fn parse(&mut self, payload: Payload) -> impl Future<Output = Option<Digest>> + Send;
 
     /// Verify the payload is valid.
     ///
-    /// Verify is a stateful operation and must be called in-order.
+    /// Verify is a stateful operation and must be called in-order. Automatons should
+    /// maintain a mapping of containers to payloads to handle invocations from the
+    /// `Finalizer`.
     fn verify(
         &mut self,
-        context: Context,
+        context: Self::Context,
         payload: Payload,
-        block: Hash,
+        container: Digest,
     ) -> impl Future<Output = bool> + Send;
 }
 
@@ -108,6 +56,8 @@ pub type Activity = u8;
 pub type Proof = Bytes;
 
 pub trait Supervisor: Clone + Send + 'static {
+    type Index;
+
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.
     ///
@@ -117,10 +67,10 @@ pub trait Supervisor: Clone + Send + 'static {
     /// at the next height (asynchronous finalization), a synchrony bound should be enforced around
     /// changes to the set (i.e. participant joining in view 10 should only become active in view 20, where
     /// we assume all other participants have finalized view 10).
-    fn participants(&self, view: View) -> Option<&Vec<PublicKey>>;
+    fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
 
     // Indicate whether a PublicKey is a participant at the given view.
-    fn is_participant(&self, view: View, candidate: &PublicKey) -> Option<bool>;
+    fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<bool>;
 
     /// Report a contribution to the application that can be externally proven.
     ///
@@ -131,11 +81,11 @@ pub trait Supervisor: Clone + Send + 'static {
 }
 
 pub trait Finalizer: Clone + Send + 'static {
-    /// Event that the payload has been notarized.
+    /// Event that the container has been prepared.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, view: View, block: Hash) -> impl Future<Output = ()> + Send;
+    fn prepared(&mut self, container: Digest) -> impl Future<Output = ()> + Send;
 
-    /// Event that the payload has been finalized.
-    fn finalized(&mut self, view: View, block: Hash) -> impl Future<Output = ()> + Send;
+    /// Event that the container has been finalized.
+    fn finalized(&mut self, container: Digest) -> impl Future<Output = ()> + Send;
 }

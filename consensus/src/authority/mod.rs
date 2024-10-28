@@ -45,6 +45,18 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
+pub type View = u64;
+pub type Height = u64;
+
+/// Context is a collection of information about the context in which a block is built.
+#[derive(Clone)]
+pub struct Context {
+    pub view: View,
+    pub parent: Hash,
+    pub height: Height,
+    pub proposer: PublicKey,
+}
+
 use crate::Activity;
 use thiserror::Error;
 

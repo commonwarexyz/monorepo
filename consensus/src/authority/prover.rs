@@ -41,7 +41,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     ) -> Proof {
         // Setup proof
         let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
+        let (public_key_size, signature_size) = C::len();
         let size = 8 + 8 + hash_size + hash_size + public_key_size + signature_size;
         let mut proof = Vec::with_capacity(size);
 
