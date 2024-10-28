@@ -3,8 +3,8 @@ use crate::{
     authority::{
         actors::{resolver, Proposal},
         encoder::{
-            finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
-            vote_namespace,
+            finalize_message, finalize_namespace, proposal_message, proposal_namespace,
+            vote_message, vote_namespace,
         },
         wire, Context, Height, Prover, View, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL,
         CONFLICTING_VOTE, FINALIZE, NULL_AND_FINALIZE, PROPOSAL, VOTE,
@@ -571,14 +571,14 @@ impl<
         }
 
         // Construct null vote
-        let digest = vote_digest(self.view, None, None);
+        let message = vote_message(self.view, None, None);
         let vote = wire::Vote {
             view: self.view,
             height: None,
             digest: None,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
-                signature: self.crypto.sign(&self.vote_namespace, &digest),
+                signature: self.crypto.sign(&self.vote_namespace, &message),
             }),
         };
         let msg = wire::Consensus {
@@ -595,8 +595,8 @@ impl<
 
     async fn our_proposal(
         &mut self,
-        proposal_hash: Digest,
-        payload_hash: Digest,
+        proposal_digest: Digest,
+        payload_digest: Digest,
         proposal: wire::Proposal,
     ) -> bool {
         // Store the proposal
@@ -620,11 +620,11 @@ impl<
         debug!(
             view = proposal_view,
             height = proposal_height,
-            digest = hex(&proposal_hash),
+            digest = hex(&proposal_digest),
             retried = view.next_proposal_request.is_some(),
             "generated proposal"
         );
-        view.proposal = Some((proposal_hash, payload_hash.clone(), proposal));
+        view.proposal = Some((proposal_digest, payload_digest.clone(), proposal));
         view.verified_proposal = true;
         view.leader_deadline = None;
 
@@ -633,7 +633,7 @@ impl<
             proposal_view,
             proposal_height,
             proposal_parent,
-            payload_hash,
+            payload_digest,
             proposal_signature,
         );
         self.application.report(PROPOSAL, proof).await;
@@ -688,21 +688,21 @@ impl<
         }
 
         // Compute digest
-        let payload_hash = match self.application.parse(proposal.payload.clone()).await {
+        let payload_digest = match self.application.parse(proposal.payload.clone()).await {
             Some(digest) => digest,
             None => {
                 debug!(reason = "invalid payload", "dropping proposal");
                 return;
             }
         };
-        let proposal_digest = proposal_digest(
+        let proposal_message = proposal_message(
             proposal.view,
             proposal.height,
             &proposal.parent,
-            &payload_hash,
+            &payload_digest,
         );
-        self.hasher.update(&proposal_digest);
-        let proposal_hash = self.hasher.finalize();
+        self.hasher.update(&proposal_message);
+        let proposal_digest = self.hasher.finalize();
 
         // Check if duplicate or conflicting
         let mut previous = None;
@@ -717,8 +717,8 @@ impl<
                 return;
             }
             if view.proposal.is_some() {
-                let incoming_hash = &view.proposal.as_ref().unwrap().0;
-                if *incoming_hash == proposal_hash {
+                let incoming_digest = &view.proposal.as_ref().unwrap().0;
+                if *incoming_digest == proposal_digest {
                     debug!(
                         leader = hex(&expected_leader),
                         view = proposal.view,
@@ -735,7 +735,7 @@ impl<
         let public_key = &signature.public_key;
         if !C::verify(
             &self.proposal_namespace,
-            &proposal_digest,
+            &proposal_message,
             public_key,
             &signature.signature,
         ) {
@@ -756,7 +756,7 @@ impl<
                 signature_1,
                 proposal.height,
                 proposal.parent.clone(),
-                payload_hash.clone(),
+                payload_digest.clone(),
                 signature_2,
             );
             self.application.report(CONFLICTING_PROPOSAL, proof).await;
@@ -777,17 +777,17 @@ impl<
             .entry(proposal.view)
             .or_insert_with(|| Round::new(self.application.clone(), expected_leader, None, None));
         view.proposal = Some((
-            proposal_hash.clone(),
-            payload_hash.clone(),
+            proposal_digest.clone(),
+            payload_digest.clone(),
             proposal.clone(),
         ));
         resolver
-            .verify(proposal_hash.clone(), proposal.clone())
+            .verify(proposal_digest.clone(), proposal.clone())
             .await;
         trace!(
             view = proposal.view,
             height = proposal.height,
-            digest = hex(&proposal_hash),
+            digest = hex(&proposal_digest),
             "requested proposal verification",
         );
     }
@@ -973,10 +973,10 @@ impl<
         }
 
         // Verify the signature
-        let vote_digest = vote_digest(vote.view, vote.height, vote.digest.as_ref());
+        let vote_message = vote_message(vote.view, vote.height, vote.digest.as_ref());
         if !C::verify(
             &self.vote_namespace,
-            &vote_digest,
+            &vote_message,
             &signature.public_key,
             &signature.signature,
         ) {
@@ -1106,7 +1106,7 @@ impl<
             // Verify signature
             if !C::verify(
                 &self.vote_namespace,
-                &vote_digest(
+                &vote_message(
                     notarization.view,
                     notarization.height,
                     notarization.digest.as_ref(),
@@ -1152,7 +1152,7 @@ impl<
         view.advance_deadline = None;
 
         // Notify resolver of notarization
-        let proposal = if let Some(notarization_hash) = notarization.digest {
+        let proposal = if let Some(notarization_digest) = notarization.digest {
             match view.proposal.as_ref() {
                 Some((digest, _, proposal)) => {
                     Proposal::Populated(digest.clone(), proposal.clone())
@@ -1160,7 +1160,7 @@ impl<
                 None => Proposal::Reference(
                     notarization.view,
                     notarization.height.unwrap(),
-                    notarization_hash,
+                    notarization_digest,
                 ),
             }
         } else {
@@ -1222,16 +1222,16 @@ impl<
         }
 
         // Verify the signature
-        let finalize_digest = finalize_digest(finalize.view, finalize.height, &finalize.digest);
+        let finalize_message = finalize_message(finalize.view, finalize.height, &finalize.digest);
         if !C::verify(
             &self.finalize_namespace,
-            &finalize_digest,
+            &finalize_message,
             &signature.public_key,
             &signature.signature,
         ) {
             debug!(
                 signer = hex(&signature.public_key),
-                digest = hex(&finalize_digest),
+                digest = hex(&finalize_message),
                 reason = "invalid signature",
                 "dropping finalize"
             );
@@ -1343,7 +1343,7 @@ impl<
             // Verify signature
             if !C::verify(
                 &self.finalize_namespace,
-                &finalize_digest(finalization.view, finalization.height, &finalization.digest),
+                &finalize_message(finalization.view, finalization.height, &finalization.digest),
                 &signature.public_key,
                 &signature.signature,
             ) {
@@ -1431,7 +1431,7 @@ impl<
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
                     &self.vote_namespace,
-                    &vote_digest(view, Some(proposal.height), Some(digest)),
+                    &vote_message(view, Some(proposal.height), Some(digest)),
                 ),
             }),
         })
@@ -1513,7 +1513,7 @@ impl<
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
                     &self.finalize_namespace,
-                    &finalize_digest(view, proposal.height, digest),
+                    &finalize_message(view, proposal.height, digest),
                 ),
             }),
         })
@@ -1873,7 +1873,7 @@ impl<
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Proposal{ view: proposal_view, parent, height, payload, payload_hash} => {
+                        Message::Proposal{ view: proposal_view, parent, height, payload, payload_digest} => {
                             // If we have already moved to another view, drop the response as we will
                             // not broadcast it
                             if self.view != proposal_view {
@@ -1882,7 +1882,7 @@ impl<
                             }
 
                             // Construct proposal
-                            let proposal_digest = proposal_digest(self.view, height, &parent, &payload_hash);
+                            let proposal_digest = proposal_message(self.view, height, &parent, &payload_digest);
                             let proposal = wire::Proposal {
                                 view: self.view,
                                 height,
@@ -1896,8 +1896,8 @@ impl<
 
                             // Handle our proposal
                             self.hasher.update(&proposal_digest);
-                            let proposal_hash = self.hasher.finalize();
-                            if !self.our_proposal(proposal_hash, payload_hash, proposal.clone()).await {
+                            let proposal_digest = self.hasher.finalize();
+                            if !self.our_proposal(proposal_digest, payload_digest, proposal.clone()).await {
                                 continue;
                             }
                             view = proposal_view;
@@ -1964,8 +1964,8 @@ impl<
                             self.peer_proposal(resolver, proposal).await;
                         }
                         wire::consensus::Payload::Vote(vote) => {
-                            if let Some(vote_hash) = vote.digest.as_ref() {
-                                if !H::validate(vote_hash) {
+                            if let Some(vote_digest) = vote.digest.as_ref() {
+                                if !H::validate(vote_digest) {
                                     debug!(sender = hex(&s), "invalid vote digest size");
                                     continue;
                                 }
@@ -1981,8 +1981,8 @@ impl<
                             self.vote(vote).await;
                         }
                         wire::consensus::Payload::Notarization(notarization) => {
-                            if let Some(notarization_hash) = notarization.digest.as_ref() {
-                                if !H::validate(notarization_hash) {
+                            if let Some(notarization_digest) = notarization.digest.as_ref() {
+                                if !H::validate(notarization_digest) {
                                     debug!(sender = hex(&s), "invalid notarization digest size");
                                     continue;
                                 }
@@ -2070,8 +2070,8 @@ impl<
                                 outstanding_task = None;
                             }
                             for notarization in response.notarizations {
-                                if let Some(notarization_hash) = notarization.digest.as_ref() {
-                                    if !H::validate(notarization_hash) {
+                                if let Some(notarization_digest) = notarization.digest.as_ref() {
+                                    if !H::validate(notarization_digest) {
                                         debug!(sender = hex(&s), "invalid notarization digest size");
                                         continue;
                                     }

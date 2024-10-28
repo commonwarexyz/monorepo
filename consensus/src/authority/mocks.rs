@@ -105,7 +105,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Automaton
 {
     type Context = Context;
 
-    fn genesis(&mut self) -> (Digest, Payload) {
+    fn genesis(&mut self) -> (Payload, Digest) {
         let payload = Bytes::from(GENESIS_BYTES);
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
@@ -113,7 +113,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Automaton
         state.parsed.insert(digest.clone());
         state.verified.insert(digest.clone(), 0);
         state.finalized.insert(digest.clone(), 0);
-        (digest, payload)
+        (payload, digest)
     }
 
     async fn propose(&mut self, context: Self::Context) -> Option<Payload> {
@@ -367,13 +367,13 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Genesis
-            let (genesis_hash, _) = app.genesis();
+            let (_, genesis_digest) = app.genesis();
 
             // Propose a container at height 1
             let height = 1;
             let view = 1;
             let context = Context {
-                parent: genesis_hash.clone(),
+                parent: genesis_digest.clone(),
                 height,
                 view,
                 proposer: participant.clone(),
@@ -381,42 +381,42 @@ mod tests {
             let payload = app.propose(context.clone()).await.expect("propose failed");
 
             // Parse container
-            let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
-            hasher.update(&payload_hash);
-            let container_hash = hasher.finalize();
+            let payload_digest = app.parse(payload.clone()).await.expect("parse failed");
+            hasher.update(&payload_digest);
+            let container_digest = hasher.finalize();
 
             // Verify the container
             let verified = app
-                .verify(context, payload.clone(), container_hash.clone())
+                .verify(context, payload.clone(), container_digest.clone())
                 .await;
             assert!(verified);
 
             // Notarize the container
-            app.prepared(container_hash.clone()).await;
+            app.prepared(container_digest.clone()).await;
 
             // Expect a progress message for notarization
             let (progress_participant, progress) =
                 receiver.next().await.expect("no progress message");
             assert_eq!(progress_participant, participant);
             match progress {
-                Progress::Notarized(notarized_height, notarized_hash) => {
+                Progress::Notarized(notarized_height, notarized_digest) => {
                     assert_eq!(notarized_height, height);
-                    assert_eq!(notarized_hash, container_hash);
+                    assert_eq!(notarized_digest, container_digest);
                 }
                 _ => panic!("expected Notarized progress"),
             }
 
             // Finalize the container
-            app.finalized(container_hash.clone()).await;
+            app.finalized(container_digest.clone()).await;
 
             // Expect a progress message for finalization
             let (progress_participant, progress) =
                 receiver.next().await.expect("no progress message");
             assert_eq!(progress_participant, participant);
             match progress {
-                Progress::Finalized(finalized_height, finalized_hash) => {
+                Progress::Finalized(finalized_height, finalized_digest) => {
                     assert_eq!(finalized_height, height);
-                    assert_eq!(finalized_hash, container_hash);
+                    assert_eq!(finalized_digest, container_digest);
                 }
                 _ => panic!("expected Finalized progress"),
             }
@@ -446,12 +446,12 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Genesis
-            let (genesis_hash, _) = app.genesis();
+            let (_, genesis_digest) = app.genesis();
 
             // Get container at height 1
             let height = 1;
             let context = Context {
-                parent: genesis_hash.clone(),
+                parent: genesis_digest.clone(),
                 height,
                 view: 1,
                 proposer: participant.clone(),
@@ -462,42 +462,42 @@ mod tests {
             let payload = Bytes::from(payload);
 
             // Parse the payload
-            let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
-            hasher.update(&payload_hash);
-            let container_hash = hasher.finalize();
+            let payload_digest = app.parse(payload.clone()).await.expect("parse failed");
+            hasher.update(&payload_digest);
+            let container_digest = hasher.finalize();
 
             // Verify the container
             let verified = app
-                .verify(context, payload.clone(), container_hash.clone())
+                .verify(context, payload.clone(), container_digest.clone())
                 .await;
             assert!(verified);
 
             // Notarize the container
-            app.prepared(container_hash.clone()).await;
+            app.prepared(container_digest.clone()).await;
 
             // Expect a progress message for notarization
             let (progress_participant, progress) =
                 receiver.next().await.expect("no progress message");
             assert_eq!(progress_participant, participant);
             match progress {
-                Progress::Notarized(notarized_height, notarized_hash) => {
+                Progress::Notarized(notarized_height, notarized_digest) => {
                     assert_eq!(notarized_height, height);
-                    assert_eq!(notarized_hash, container_hash);
+                    assert_eq!(notarized_digest, container_digest);
                 }
                 _ => panic!("expected Notarized progress"),
             }
 
             // Finalize the container
-            app.finalized(container_hash.clone()).await;
+            app.finalized(container_digest.clone()).await;
 
             // Expect a progress message for finalization
             let (progress_participant, progress) =
                 receiver.next().await.expect("no progress message");
             assert_eq!(progress_participant, participant);
             match progress {
-                Progress::Finalized(finalized_height, finalized_hash) => {
+                Progress::Finalized(finalized_height, finalized_digest) => {
                     assert_eq!(finalized_height, height);
-                    assert_eq!(finalized_hash, container_hash);
+                    assert_eq!(finalized_digest, container_digest);
                 }
                 _ => panic!("expected Finalized progress"),
             }
@@ -566,11 +566,11 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Genesis
-            let (genesis_hash, _) = app.genesis();
+            let (_, genesis_digest) = app.genesis();
 
             // Propose a container at invalid height
             let context = Context {
-                parent: genesis_hash.clone(),
+                parent: genesis_digest.clone(),
                 height: 100,
                 view: 1,
                 proposer: participant.clone(),
@@ -603,7 +603,7 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Genesis
-            let (genesis_hash, _) = app.genesis();
+            let (_, genesis_digest) = app.genesis();
 
             // Create a payload
             let height: Height = 1;
@@ -612,18 +612,18 @@ mod tests {
             payload.extend_from_slice(&height.to_be_bytes());
             let payload = Bytes::from(payload);
             hasher.update(&payload);
-            let payload_hash = hasher.finalize();
-            hasher.update(&payload_hash);
-            let container_hash = hasher.finalize();
+            let payload_digest = hasher.finalize();
+            hasher.update(&payload_digest);
+            let container_digest = hasher.finalize();
 
             // Attempt to verify the container without parsing, should panic
             let context = Context {
-                parent: genesis_hash.clone(),
+                parent: genesis_digest.clone(),
                 height,
                 view: 1,
                 proposer: participant.clone(),
             };
-            app.verify(context, payload, container_hash).await;
+            app.verify(context, payload, container_digest).await;
         });
     }
 
@@ -651,12 +651,12 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Genesis
-            let (genesis_hash, _) = app.genesis();
+            let (_, genesis_digest) = app.genesis();
 
             // Propose a container at height 1
             let height = 1;
             let context = Context {
-                parent: genesis_hash.clone(),
+                parent: genesis_digest.clone(),
                 height,
                 view: 1,
                 proposer: participant.clone(),
@@ -664,18 +664,18 @@ mod tests {
             let payload = app.propose(context.clone()).await.expect("propose failed");
 
             // Parse container
-            let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
-            hasher.update(&payload_hash);
-            let container_hash = hasher.finalize();
+            let payload_digest = app.parse(payload.clone()).await.expect("parse failed");
+            hasher.update(&payload_digest);
+            let container_digest = hasher.finalize();
 
             // Attempt to verify the container with incorrect height (e.g., height 2)
             let invalid_context = Context {
-                parent: genesis_hash.clone(),
+                parent: genesis_digest.clone(),
                 height: 2,
                 view: 1,
                 proposer: participant.clone(),
             };
-            app.verify(invalid_context, payload, container_hash).await;
+            app.verify(invalid_context, payload, container_digest).await;
         });
     }
 
@@ -713,9 +713,9 @@ mod tests {
             payload.extend_from_slice(&height.to_be_bytes());
             let payload = Bytes::from(payload);
             hasher.update(&payload);
-            let payload_hash = hasher.finalize();
-            hasher.update(&payload_hash);
-            let container_hash = hasher.finalize();
+            let payload_digest = hasher.finalize();
+            hasher.update(&payload_digest);
+            let container_digest = hasher.finalize();
 
             // Attempt to verify the container with unverified parent, should panic
             let context = Context {
@@ -724,7 +724,7 @@ mod tests {
                 view: 1,
                 proposer: participant.clone(),
             };
-            app.verify(context, payload, container_hash).await;
+            app.verify(context, payload, container_digest).await;
         });
     }
 
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "container already verified")]
-    fn test_verify_same_hash_twice() {
+    fn test_verify_same_digest_twice() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
@@ -813,12 +813,12 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Genesis
-            let (genesis_hash, _) = app.genesis();
+            let (_, genesis_digest) = app.genesis();
 
             // Propose a container at height 1
             let height = 1;
             let context = Context {
-                parent: genesis_hash.clone(),
+                parent: genesis_digest.clone(),
                 height,
                 view: 1,
                 proposer: participant.clone(),
@@ -826,16 +826,16 @@ mod tests {
             let payload = app.propose(context.clone()).await.expect("propose failed");
 
             // Parse container
-            let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
-            hasher.update(&payload_hash);
-            let container_hash = hasher.finalize();
+            let payload_digest = app.parse(payload.clone()).await.expect("parse failed");
+            hasher.update(&payload_digest);
+            let container_digest = hasher.finalize();
 
             // Verify the container
-            app.verify(context.clone(), payload.clone(), container_hash.clone())
+            app.verify(context.clone(), payload.clone(), container_digest.clone())
                 .await;
 
             // Attempt to verify the same container again, should panic
-            app.verify(context, payload, container_hash).await;
+            app.verify(context, payload, container_digest).await;
         });
     }
 
@@ -863,13 +863,13 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Genesis
-            let (genesis_hash, _) = app.genesis();
+            let (_, genesis_digest) = app.genesis();
 
             // Propose a container at height 1
             let view = 1;
             let height = 1;
             let context = Context {
-                parent: genesis_hash.clone(),
+                parent: genesis_digest.clone(),
                 height,
                 view,
                 proposer: participant.clone(),
@@ -877,22 +877,22 @@ mod tests {
             let payload = app.propose(context.clone()).await.expect("propose failed");
 
             // Parse container
-            let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
-            hasher.update(&payload_hash);
-            let container_hash = hasher.finalize();
+            let payload_digest = app.parse(payload.clone()).await.expect("parse failed");
+            hasher.update(&payload_digest);
+            let container_digest = hasher.finalize();
 
             // Verify the container
             let verified = app
-                .verify(context, payload.clone(), container_hash.clone())
+                .verify(context, payload.clone(), container_digest.clone())
                 .await;
             assert!(verified);
 
             // Notarize and finalize the container
-            app.prepared(container_hash.clone()).await;
-            app.finalized(container_hash.clone()).await;
+            app.prepared(container_digest.clone()).await;
+            app.finalized(container_digest.clone()).await;
 
             // Attempt to notarize the container again, should panic
-            app.prepared(container_hash).await;
+            app.prepared(container_digest).await;
         });
     }
 
@@ -927,7 +927,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "invalid digest length")]
-    fn test_notarization_invalid_hash() {
+    fn test_notarization_invalid_digest() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
@@ -977,10 +977,10 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Genesis
-            let (genesis_hash, _) = app.genesis();
+            let (_, genesis_digest) = app.genesis();
 
             // Attempt to notarize the genesis container, should panic
-            app.prepared(genesis_hash.clone()).await;
+            app.prepared(genesis_digest.clone()).await;
         });
     }
 
@@ -1015,7 +1015,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "invalid digest length")]
-    fn test_finalization_invalid_hash() {
+    fn test_finalization_invalid_digest() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
@@ -1065,10 +1065,10 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Genesis
-            let (genesis_hash, _) = app.genesis();
+            let (_, genesis_digest) = app.genesis();
 
             // Attempt to finalize the genesis container, should panic
-            app.finalized(genesis_hash.clone()).await;
+            app.finalized(genesis_digest.clone()).await;
         });
     }
 }

@@ -1,6 +1,6 @@
 use crate::authority::{
     encoder::{
-        finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
+        finalize_message, finalize_namespace, proposal_message, proposal_namespace, vote_message,
         vote_namespace,
     },
     wire,
@@ -85,7 +85,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.vote_namespace,
-                                &vote_digest(vote.view, Some(height), Some(&digest)),
+                                &vote_message(vote.view, Some(height), Some(&digest)),
                             ),
                         }),
                     };
@@ -108,7 +108,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.vote_namespace,
-                                &vote_digest(vote.view, Some(height), Some(&digest)),
+                                &vote_message(vote.view, Some(height), Some(&digest)),
                             ),
                         }),
                     };
@@ -131,7 +131,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.finalize_namespace,
-                                &finalize_digest(finalize.view, finalize.height, &finalize.digest),
+                                &finalize_message(finalize.view, finalize.height, &finalize.digest),
                             ),
                         }),
                     };
@@ -154,7 +154,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.finalize_namespace,
-                                &finalize_digest(finalize.view, finalize.height, &digest),
+                                &finalize_message(finalize.view, finalize.height, &digest),
                             ),
                         }),
                     };
@@ -175,10 +175,11 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                         // Generate random payload
                         let payload = H::random(&mut self.runtime);
                         self.hasher.update(&payload);
-                        let payload_hash = self.hasher.finalize();
+                        let payload_digest = self.hasher.finalize();
 
                         // Construct proposal
-                        let proposal_digest = proposal_digest(view, height, &parent, &payload_hash);
+                        let proposal_message =
+                            proposal_message(view, height, &parent, &payload_digest);
                         let proposal = wire::Proposal {
                             view,
                             height,
@@ -188,7 +189,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                                 public_key: self.crypto.public_key(),
                                 signature: self
                                     .crypto
-                                    .sign(&self.proposal_namespace, &proposal_digest),
+                                    .sign(&self.proposal_namespace, &proposal_message),
                             }),
                         };
                         let msg = wire::Consensus {

@@ -10,7 +10,7 @@ pub enum Message {
         parent: Digest,
         height: Height,
         payload: Bytes,
-        payload_hash: Digest,
+        payload_digest: Digest,
     },
     ProposalFailed {
         view: View,
@@ -36,7 +36,7 @@ impl Mailbox {
         parent: Digest,
         height: Height,
         payload: Bytes,
-        payload_hash: Digest,
+        payload_digest: Digest,
     ) {
         self.sender
             .send(Message::Proposal {
@@ -44,7 +44,7 @@ impl Mailbox {
                 parent,
                 height,
                 payload,
-                payload_hash,
+                payload_digest,
             })
             .await
             .unwrap();

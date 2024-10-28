@@ -1,5 +1,5 @@
 use crate::authority::{
-    encoder::{finalize_digest, finalize_namespace, vote_digest, vote_namespace},
+    encoder::{finalize_message, finalize_namespace, vote_message, vote_namespace},
     wire,
 };
 use bytes::Bytes;
@@ -76,7 +76,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Nuller<E, C, H>
                                 public_key: self.crypto.public_key(),
                                 signature: self.crypto.sign(
                                     &self.vote_namespace,
-                                    &vote_digest(vote.view, Some(height), Some(&digest)),
+                                    &vote_message(vote.view, Some(height), Some(&digest)),
                                 ),
                             }),
                         };
@@ -102,7 +102,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Nuller<E, C, H>
                             public_key: self.crypto.public_key(),
                             signature: self
                                 .crypto
-                                .sign(&self.vote_namespace, &vote_digest(vote.view, None, None)),
+                                .sign(&self.vote_namespace, &vote_message(vote.view, None, None)),
                         }),
                     };
                     let msg = wire::Consensus {
@@ -123,7 +123,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Nuller<E, C, H>
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.finalize_namespace,
-                                &finalize_digest(vote.view, height, &digest),
+                                &finalize_message(vote.view, height, &digest),
                             ),
                         }),
                     };

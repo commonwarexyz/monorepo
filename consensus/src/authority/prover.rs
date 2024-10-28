@@ -1,6 +1,6 @@
 use super::{
     encoder::{
-        finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
+        finalize_message, finalize_namespace, proposal_message, proposal_namespace, vote_message,
         vote_namespace,
     },
     wire, Height, View,
@@ -76,14 +76,14 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let signature = proof.copy_to_bytes(signature_len);
 
         // Verify signature
-        let proposal_digest = proposal_digest(view, height, &parent, &payload);
+        let proposal_message = proposal_message(view, height, &parent, &payload);
         if check_sig {
             if !C::validate(&public_key) {
                 return None;
             }
             if !C::verify(
                 &self.proposal_namespace,
-                &proposal_digest,
+                &proposal_message,
                 &public_key,
                 &signature,
             ) {
@@ -92,7 +92,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         }
 
         // Compute digest
-        self.hasher.update(&proposal_digest);
+        self.hasher.update(&proposal_message);
         Some((public_key, view, height, self.hasher.finalize()))
     }
 
@@ -136,8 +136,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let vote_digest = vote_digest(view, Some(height), Some(&digest));
-            if !C::verify(&self.vote_namespace, &vote_digest, &public_key, &signature) {
+            let vote_message = vote_message(view, Some(height), Some(&digest));
+            if !C::verify(&self.vote_namespace, &vote_message, &public_key, &signature) {
                 return None;
             }
         }
@@ -184,10 +184,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let finalize_digest = finalize_digest(view, height, &digest);
+            let finalize_message = finalize_message(view, height, &digest);
             if !C::verify(
                 &self.finalize_namespace,
-                &finalize_digest,
+                &finalize_message,
                 &public_key,
                 &signature,
             ) {
@@ -283,16 +283,16 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let proposal_digest_1 = proposal_digest(view, height_1, &parent_1, &payload_1);
-            let proposal_digest_2 = proposal_digest(view, height_2, &parent_2, &payload_2);
+            let proposal_message_1 = proposal_message(view, height_1, &parent_1, &payload_1);
+            let proposal_message_2 = proposal_message(view, height_2, &parent_2, &payload_2);
             if !C::verify(
                 &self.proposal_namespace,
-                &proposal_digest_1,
+                &proposal_message_1,
                 &public_key,
                 &signature_1,
             ) || !C::verify(
                 &self.proposal_namespace,
-                &proposal_digest_2,
+                &proposal_message_2,
                 &public_key,
                 &signature_2,
             ) {
@@ -365,16 +365,16 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let vote_digest_1 = vote_digest(view, Some(height_1), Some(&hash_1));
-            let vote_digest_2 = vote_digest(view, Some(height_2), Some(&hash_2));
+            let vote_message_1 = vote_message(view, Some(height_1), Some(&hash_1));
+            let vote_message_2 = vote_message(view, Some(height_2), Some(&hash_2));
             if !C::verify(
                 &self.vote_namespace,
-                &vote_digest_1,
+                &vote_message_1,
                 &public_key,
                 &signature_1,
             ) || !C::verify(
                 &self.vote_namespace,
-                &vote_digest_2,
+                &vote_message_2,
                 &public_key,
                 &signature_2,
             ) {
@@ -446,16 +446,16 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let finalize_digest_1 = finalize_digest(view, height_1, &hash_1);
-            let finalize_digest_2 = finalize_digest(view, height_2, &hash_2);
+            let finalize_message_1 = finalize_message(view, height_1, &hash_1);
+            let finalize_message_2 = finalize_message(view, height_2, &hash_2);
             if !C::verify(
                 &self.finalize_namespace,
-                &finalize_digest_1,
+                &finalize_message_1,
                 &public_key,
                 &signature_1,
             ) || !C::verify(
                 &self.finalize_namespace,
-                &finalize_digest_2,
+                &finalize_message_2,
                 &public_key,
                 &signature_2,
             ) {
@@ -518,16 +518,16 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let finalize_digest = finalize_digest(view, height, &digest);
-            let null_digest = vote_digest(view, None, None);
+            let finalize_message = finalize_message(view, height, &digest);
+            let null_message = vote_message(view, None, None);
             if !C::verify(
                 &self.finalize_namespace,
-                &finalize_digest,
+                &finalize_message,
                 &public_key,
                 &signature_finalize,
             ) || !C::verify(
                 &self.vote_namespace,
-                &null_digest,
+                &null_message,
                 &public_key,
                 &signature_null,
             ) {

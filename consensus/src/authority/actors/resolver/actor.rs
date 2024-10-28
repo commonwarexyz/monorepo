@@ -4,7 +4,7 @@ use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
         actors::{voter, Proposal},
-        encoder::{proposal_digest, proposal_namespace},
+        encoder::{proposal_message, proposal_namespace},
         wire, Context, Height, View,
     },
     Automaton, Finalizer, Payload, Supervisor,
@@ -95,17 +95,17 @@ impl<
         let mut verified = HashMap::new();
         let mut knowledge = HashMap::new();
         let mut containers = HashMap::new();
-        let genesis = cfg.application.genesis();
-        verified.insert(0, HashSet::from([genesis.0.clone()]));
-        knowledge.insert(0, Knowledge::Finalized(genesis.0.clone()));
+        let (genesis_payload, genesis_digest) = cfg.application.genesis();
+        verified.insert(0, HashSet::from([genesis_digest.clone()]));
+        knowledge.insert(0, Knowledge::Finalized(genesis_digest.clone()));
 
         containers.insert(
-            genesis.0.clone(),
+            genesis_digest,
             wire::Proposal {
                 view: 0,
                 height: 0,
                 parent: Digest::new(),
-                payload: genesis.1,
+                payload: genesis_payload,
                 signature: None,
             },
         );
@@ -423,7 +423,7 @@ impl<
         };
 
         // Compute payload digest
-        let payload_hash = match self.application.parse(payload.clone()).await {
+        let payload_digest = match self.application.parse(payload.clone()).await {
             Some(digest) => digest,
             None => {
                 return None;
@@ -431,7 +431,7 @@ impl<
         };
 
         // Generate proposal
-        Some((parent.0, height, payload, payload_hash))
+        Some((parent.0, height, payload, payload_digest))
     }
 
     fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
@@ -440,7 +440,7 @@ impl<
         if parent.is_none() {
             debug!(
                 height = proposal.height,
-                parent_hash = hex(&proposal.parent),
+                parent_digest = hex(&proposal.parent),
                 "missing parent"
             );
             return false;
@@ -482,7 +482,7 @@ impl<
             if hashes.contains(&proposal.parent) {
                 trace!(
                     height = proposal.height,
-                    parent_hash = hex(&proposal.parent),
+                    parent_digest = hex(&proposal.parent),
                     proposal_view = proposal.view,
                     parent_view = parent.view,
                     "ancestry verified"
@@ -492,7 +492,7 @@ impl<
         }
         debug!(
             height = proposal.height,
-            parent_hash = hex(&proposal.parent),
+            parent_digest = hex(&proposal.parent),
             "parent not verified"
         );
         false
@@ -513,7 +513,7 @@ impl<
             // If we return false here, don't vote but don't discard the proposal (as may eventually still be finalized).
             trace!(
                 height = proposal.height,
-                parent_hash = hex(&proposal.parent),
+                parent_digest = hex(&proposal.parent),
                 "invalid ancestry"
             );
             return false;
@@ -564,8 +564,8 @@ impl<
         let previous = self.knowledge.get_mut(&height);
         match previous {
             Some(Knowledge::Notarized(seen)) => {
-                if let Some(old_hash) = seen.get(&view) {
-                    if *old_hash != digest {
+                if let Some(old_digest) = seen.get(&view) {
+                    if *old_digest != digest {
                         panic!("notarized container digest mismatch");
                     }
                     return;
@@ -604,12 +604,12 @@ impl<
             match previous {
                 Some(Knowledge::Notarized(hashes)) => {
                     // Remove unnecessary proposals from memory
-                    for (_, old_hash) in hashes.iter() {
-                        if old_hash != &container {
-                            self.containers.remove(old_hash);
+                    for (_, old_digest) in hashes.iter() {
+                        if old_digest != &container {
+                            self.containers.remove(old_digest);
                             debug!(
                                 height,
-                                digest = hex(old_hash),
+                                digest = hex(old_digest),
                                 "removing unnecessary proposal"
                             );
                         }
@@ -931,14 +931,14 @@ impl<
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Propose { view, proposer } => {
-                            let (parent, height, payload, payload_hash)= match self.propose(view, proposer).await{
+                            let (parent, height, payload, payload_digest)= match self.propose(view, proposer).await{
                                 Some(proposal) => proposal,
                                 None => {
                                     voter.proposal_failed(view).await;
                                     continue;
                                 }
                             };
-                            voter.proposal(view, parent, height, payload, payload_hash).await;
+                            voter.proposal(view, parent, height, payload, payload_digest).await;
                         }
                         Message::Verify { container, proposal } => {
                             // If proposal height is already finalized, fail
@@ -1049,23 +1049,23 @@ impl<
                                     warn!(sender = hex(&s), "invalid proposal parent digest size");
                                     break;
                                 }
-                                let payload_hash = match self.application.parse(proposal.payload.clone()).await {
-                                    Some(payload_hash) => payload_hash,
+                                let payload_digest = match self.application.parse(proposal.payload.clone()).await {
+                                    Some(payload_digest) => payload_digest,
                                     None => {
                                         warn!(sender = hex(&s), "unable to parse notarized/finalized payload");
                                         break;
                                     }
                                 };
-                                let proposal_digest = proposal_digest(
+                                let proposal_message = proposal_message(
                                     proposal.view,
                                     proposal.height,
                                     &proposal.parent,
-                                    &payload_hash,
+                                    &payload_digest,
                                 );
-                                self.hasher.update(&proposal_digest);
-                                let proposal_hash = self.hasher.finalize();
+                                self.hasher.update(&proposal_message);
+                                let proposal_digest = self.hasher.finalize();
                                 if let Some((height, ref digest)) = next {
-                                    if proposal.height != height || proposal_hash != digest {
+                                    if proposal.height != height || proposal_digest != digest {
                                         warn!(sender = hex(&s), "received invalid batch proposal");
                                         break;
                                     }
@@ -1107,7 +1107,7 @@ impl<
                                 }
                                 if !C::verify(
                                     &self.proposal_namespace,
-                                    &proposal_digest,
+                                    &proposal_message,
                                     &signature.public_key,
                                     &signature.signature,
                                 ) {
@@ -1118,8 +1118,8 @@ impl<
 
                                 // Record the proposal
                                 let height = proposal.height;
-                                debug!(height, digest = hex(&proposal_hash), peer = hex(&s), "received proposal via backfill");
-                                let proposal = Proposal::Populated(proposal_hash.clone(), proposal.clone());
+                                debug!(height, digest = hex(&proposal_digest), peer = hex(&s), "received proposal via backfill");
+                                let proposal = Proposal::Populated(proposal_digest.clone(), proposal.clone());
                                 next = self.resolve(proposal);
 
                                 // Remove outstanding task if we were waiting on this
@@ -1127,8 +1127,8 @@ impl<
                                 // Note, we don't care if we are sent the proposal from someone unexpected (although
                                 // this is unexpected).
                                 if let Some(ref outstanding) = outstanding_task {
-                                    if outstanding.2 == proposal_hash {
-                                        debug!(height = outstanding.1, digest = hex(&proposal_hash), peer = hex(&s), "resolved missing proposal via backfill");
+                                    if outstanding.2 == proposal_digest {
+                                        debug!(height = outstanding.1, digest = hex(&proposal_digest), peer = hex(&s), "resolved missing proposal via backfill");
                                         outstanding_task = None;
                                     }
                                 }
