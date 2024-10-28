@@ -114,8 +114,6 @@ pub trait Hasher: Send + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bls12381::Bls12381;
-    use ed25519::Ed25519;
     use rand::rngs::OsRng;
 
     fn test_validate<C: Scheme>() {
