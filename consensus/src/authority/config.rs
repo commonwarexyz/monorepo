@@ -1,5 +1,5 @@
-use super::View;
-use crate::Automaton;
+use super::{Context, View};
+use crate::{Automaton, Finalizer, Supervisor};
 use bytes::Bytes;
 use commonware_cryptography::{Hasher, PublicKey, Scheme};
 use governor::Quota;
@@ -10,7 +10,11 @@ use std::{
     time::Duration,
 };
 
-pub struct Config<C: Scheme, H: Hasher, A: Automaton> {
+pub struct Config<
+    C: Scheme,
+    H: Hasher,
+    A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
+> {
     pub crypto: C,
     pub hasher: H,
     pub application: A,
