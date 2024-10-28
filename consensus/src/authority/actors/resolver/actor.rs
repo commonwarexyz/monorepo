@@ -161,46 +161,46 @@ impl<
         Some(validators[view as usize % validators.len()].clone())
     }
 
-    async fn register_missing(&mut self, height: Height, hash: Digest) {
+    async fn register_missing(&mut self, height: Height, digest: Digest) {
         // Check if we have the proposal
-        if self.containers.contains_key(&hash) {
+        if self.containers.contains_key(&digest) {
             return;
         }
 
         // Check if have already registered
-        if self.missing.contains_key(&hash) {
+        if self.missing.contains_key(&digest) {
             return;
         }
-        self.missing.insert(hash.clone(), height);
-        debug!(height, parent = hex(&hash), "registered missing proposal");
+        self.missing.insert(digest.clone(), height);
+        debug!(height, parent = hex(&digest), "registered missing proposal");
 
         // Enqueue missing proposal for fetching
-        self.missing_sender.send((height, hash)).await.unwrap();
+        self.missing_sender.send((height, digest)).await.unwrap();
     }
 
     fn resolve(&mut self, proposal: Proposal) -> Option<(Height, Digest)> {
         // Parse proposal
-        let (hash, proposal) = match proposal {
-            Proposal::Reference(_, height, hash) => {
-                if self.containers.contains_key(&hash) {
+        let (digest, proposal) = match proposal {
+            Proposal::Reference(_, height, digest) => {
+                if self.containers.contains_key(&digest) {
                     return None;
                 }
-                return Some((height, hash));
+                return Some((height, digest));
             }
-            Proposal::Populated(hash, proposal) => (hash, proposal),
+            Proposal::Populated(digest, proposal) => (digest, proposal),
             Proposal::Null(_) => panic!("null proposal cannot be resolved"),
         };
 
         // If already resolved, do nothing.
-        if self.containers.contains_key(&hash) {
+        if self.containers.contains_key(&digest) {
             return None;
         }
 
         // Remove from missing
-        if self.missing.remove(&hash).is_some() {
+        if self.missing.remove(&digest).is_some() {
             debug!(
                 height = proposal.height,
-                hash = hex(&hash),
+                digest = hex(&digest),
                 "resolved missing proposal"
             );
         }
@@ -210,11 +210,11 @@ impl<
             // Add to notarized if not finalized
             match self.knowledge.get_mut(&proposal.height) {
                 Some(Knowledge::Notarized(seen)) => {
-                    seen.insert(proposal.view, hash.clone());
+                    seen.insert(proposal.view, digest.clone());
                 }
                 None => {
                     let mut seen = BTreeMap::new();
-                    seen.insert(proposal.view, hash.clone());
+                    seen.insert(proposal.view, digest.clone());
                     self.knowledge
                         .insert(proposal.height, Knowledge::Notarized(seen));
                 }
@@ -224,7 +224,7 @@ impl<
             // TODO: clean this up
 
             // Insert as final (in case it doesn't exist)
-            let mut start = (proposal.height, hash.clone());
+            let mut start = (proposal.height, digest.clone());
             if let Some(Knowledge::Finalized(_)) = self.knowledge.get(&proposal.height) {
                 debug!("overriding backfill start to parent");
                 start = (proposal.height - 1, proposal.parent.clone());
@@ -237,7 +237,7 @@ impl<
         // Store proposal
         let height = proposal.height;
         let parent = proposal.parent.clone();
-        self.containers.insert(hash, proposal);
+        self.containers.insert(digest, proposal);
 
         // Check if parent is missing
         if self.containers.contains_key(&parent) {
@@ -279,24 +279,24 @@ impl<
                     }
 
                     // Send fulfilled unsent notarizations
-                    for (_, hash) in hashes {
+                    for (_, digest) in hashes {
                         let already_notified = self
                             .notarizations_sent
                             .get(&next)
-                            .map_or(false, |notifications| notifications.contains(&hash));
+                            .map_or(false, |notifications| notifications.contains(&digest));
                         if already_notified {
                             continue;
                         }
-                        let proposal = match self.containers.get(&hash) {
+                        let proposal = match self.containers.get(&digest) {
                             Some(proposal) => proposal,
                             None => {
                                 continue;
                             }
                         };
-                        if !self.verify(hash.clone(), proposal.clone()).await {
+                        if !self.verify(digest.clone(), proposal.clone()).await {
                             debug!(
                                 height = next,
-                                hash = hex(&hash),
+                                digest = hex(&digest),
                                 "failed to verify notarized proposal"
                             );
                             continue;
@@ -304,19 +304,19 @@ impl<
                         self.notarizations_sent
                             .entry(next)
                             .or_default()
-                            .insert(hash.clone());
-                        self.application.prepared(hash).await;
+                            .insert(digest.clone());
+                        self.application.prepared(digest).await;
                     }
                     debug!(height = next, "notified application notarization");
                 }
-                Knowledge::Finalized(hash) => {
+                Knowledge::Finalized(digest) => {
                     // Send finalized proposal
-                    let proposal = match self.containers.get(&hash) {
+                    let proposal = match self.containers.get(&digest) {
                         Some(proposal) => proposal,
                         None => {
                             debug!(
                                 height = next,
-                                hash = hex(&hash),
+                                digest = hex(&digest),
                                 "missing finalized proposal, exiting backfill"
                             );
                             return;
@@ -324,10 +324,10 @@ impl<
                     };
                     // If we already verified this proposal, this function will ensure we don't
                     // notify the application of it again.
-                    if !self.verify(hash.clone(), proposal.clone()).await {
+                    if !self.verify(digest.clone(), proposal.clone()).await {
                         debug!(
                             height = next,
-                            hash = hex(&hash),
+                            digest = hex(&digest),
                             "failed to verify finalized proposal"
                         );
                         return;
@@ -335,7 +335,7 @@ impl<
                     self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
-                    self.application.finalized(hash).await;
+                    self.application.finalized(digest).await;
                     debug!(height = next, "notified application finalization");
                 }
             }
@@ -352,19 +352,19 @@ impl<
             match self.knowledge.get(&next) {
                 Some(Knowledge::Notarized(hashes)) => {
                     // Find earliest view that we also sent notification for
-                    for (_, hash) in hashes.iter() {
+                    for (_, digest) in hashes.iter() {
                         if let Some(notifications) = self.notarizations_sent.get(&next) {
-                            if notifications.contains(hash) {
-                                let container = self.containers.get(hash).unwrap();
-                                return Some((hash.clone(), container.view, container.height));
+                            if notifications.contains(digest) {
+                                let container = self.containers.get(digest).unwrap();
+                                return Some((digest.clone(), container.view, container.height));
                             }
                         }
                     }
                 }
-                Some(Knowledge::Finalized(hash)) => {
+                Some(Knowledge::Finalized(digest)) => {
                     if self.last_notified >= next {
-                        let container = self.containers.get(hash).unwrap();
-                        return Some((hash.clone(), container.view, container.height));
+                        let container = self.containers.get(digest).unwrap();
+                        return Some((digest.clone(), container.view, container.height));
                     }
                 }
                 None => return None,
@@ -422,9 +422,9 @@ impl<
             }
         };
 
-        // Compute payload hash
+        // Compute payload digest
         let payload_hash = match self.application.parse(payload.clone()).await {
-            Some(hash) => hash,
+            Some(digest) => digest,
             None => {
                 return None;
             }
@@ -498,12 +498,12 @@ impl<
         false
     }
 
-    pub async fn verify(&mut self, hash: Digest, proposal: wire::Proposal) -> bool {
+    pub async fn verify(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {
         // If already verified, do nothing
         if self
             .verified
             .get(&proposal.height)
-            .map_or(false, |hashes| hashes.contains(&hash))
+            .map_or(false, |hashes| hashes.contains(&digest))
         {
             return true;
         }
@@ -528,7 +528,7 @@ impl<
         };
         if !self
             .application
-            .verify(context, proposal.payload.clone(), hash.clone())
+            .verify(context, proposal.payload.clone(), digest.clone())
             .await
         {
             return false;
@@ -536,15 +536,17 @@ impl<
 
         // Record verification
         let entry = self.verified.entry(proposal.height).or_default();
-        entry.insert(hash);
+        entry.insert(digest);
         true
     }
 
     pub async fn notarized(&mut self, proposal: Proposal) {
-        // Extract height and hash
-        let (view, height, hash) = match &proposal {
-            Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
-            Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
+        // Extract height and digest
+        let (view, height, digest) = match &proposal {
+            Proposal::Reference(view, height, digest) => (*view, *height, digest.clone()),
+            Proposal::Populated(digest, proposal) => {
+                (proposal.view, proposal.height, digest.clone())
+            }
             Proposal::Null(view) => {
                 // TODO: write up explanation for why we don't set last_notarized here (which
                 // is really just used to select the best parent for building)
@@ -563,12 +565,12 @@ impl<
         match previous {
             Some(Knowledge::Notarized(seen)) => {
                 if let Some(old_hash) = seen.get(&view) {
-                    if *old_hash != hash {
-                        panic!("notarized container hash mismatch");
+                    if *old_hash != digest {
+                        panic!("notarized container digest mismatch");
                     }
                     return;
                 }
-                seen.insert(view, hash.clone());
+                seen.insert(view, digest.clone());
             }
             Some(Knowledge::Finalized(_)) => {
                 // Already finalized, do nothing
@@ -576,14 +578,14 @@ impl<
             }
             None => {
                 let mut seen = BTreeMap::new();
-                seen.insert(view, hash.clone());
+                seen.insert(view, digest.clone());
                 self.knowledge.insert(height, Knowledge::Notarized(seen));
             }
         }
 
         // Mark as seen
-        if let Some((height, hash)) = self.resolve(proposal) {
-            self.register_missing(height, hash).await;
+        if let Some((height, digest)) = self.resolve(proposal) {
+            self.register_missing(height, digest).await;
         }
 
         // Notify application
@@ -591,7 +593,11 @@ impl<
     }
 
     fn backfill_finalization(&mut self, height: Height, mut container: Digest) {
-        trace!(height, hash = hex(&container), "backfilling finalizations");
+        trace!(
+            height,
+            digest = hex(&container),
+            "backfilling finalizations"
+        );
         let mut next = height;
         loop {
             let previous = self.knowledge.get_mut(&next);
@@ -603,7 +609,7 @@ impl<
                             self.containers.remove(old_hash);
                             debug!(
                                 height,
-                                hash = hex(old_hash),
+                                digest = hex(old_hash),
                                 "removing unnecessary proposal"
                             );
                         }
@@ -613,14 +619,14 @@ impl<
                     self.knowledge
                         .insert(next, Knowledge::Finalized(container.clone()));
 
-                    // Update value of hash to be parent of this container
+                    // Update value of digest to be parent of this container
                     if let Some(parent) = self.containers.get(&container) {
                         container = parent.parent.clone();
                     } else {
                         // If we don't know the parent, we can't finalize any ancestors
                         trace!(
                             next = height - 1,
-                            hash = hex(&container),
+                            digest = hex(&container),
                             reason = "missing parent",
                             "exiting backfill"
                         );
@@ -630,7 +636,7 @@ impl<
                 Some(Knowledge::Finalized(seen)) => {
                     if *seen != container {
                         panic!(
-                            "finalized container hash mismatch at height {}: expected={}, found={}",
+                            "finalized container digest mismatch at height {}: expected={}, found={}",
                             next,
                             hex(seen),
                             hex(&container)
@@ -648,7 +654,7 @@ impl<
                     } else {
                         trace!(
                             next = height - 1,
-                            hash = hex(&container),
+                            digest = hex(&container),
                             reason = "missing parent",
                             "exiting backfill"
                         );
@@ -666,10 +672,12 @@ impl<
     }
 
     pub async fn finalized(&mut self, proposal: Proposal) {
-        // Extract height and hash
-        let (view, height, hash) = match &proposal {
-            Proposal::Reference(view, height, hash) => (*view, *height, hash.clone()),
-            Proposal::Populated(hash, proposal) => (proposal.view, proposal.height, hash.clone()),
+        // Extract height and digest
+        let (view, height, digest) = match &proposal {
+            Proposal::Reference(view, height, digest) => (*view, *height, digest.clone()),
+            Proposal::Populated(digest, proposal) => {
+                (proposal.view, proposal.height, digest.clone())
+            }
             Proposal::Null(_) => panic!("null proposal cannot be finalized"),
         };
 
@@ -693,11 +701,11 @@ impl<
         }
 
         // Finalize this container and all containers we have that are ancestors of this container
-        self.backfill_finalization(height, hash);
+        self.backfill_finalization(height, digest);
 
         // Mark as seen
-        if let Some((height, hash)) = self.resolve(proposal) {
-            self.register_missing(height, hash).await;
+        if let Some((height, digest)) = self.resolve(proposal) {
+            self.register_missing(height, digest).await;
         }
 
         // Notify application
@@ -707,28 +715,28 @@ impl<
     fn get_next_missing(&mut self) -> Option<(Height, Digest)> {
         loop {
             // See if we have any missing proposals
-            let (height, hash) = match self.missing_receiver.try_next() {
+            let (height, digest) = match self.missing_receiver.try_next() {
                 Ok(res) => res.unwrap(),
                 Err(_) => return None,
             };
 
             // Check if still unfulfilled
-            if self.containers.contains_key(&hash) {
+            if self.containers.contains_key(&digest) {
                 continue;
             }
 
             // Return missing proposal
-            return Some((height, hash));
+            return Some((height, digest));
         }
     }
 
     async fn send_request(
         &mut self,
         height: Height,
-        hash: Digest,
+        digest: Digest,
         sender: &mut impl Sender,
     ) -> PublicKey {
-        // Compute missing containers from hash
+        // Compute missing containers from digest
         let mut parents = 0;
         loop {
             // Check to see if we are already at root
@@ -757,8 +765,8 @@ impl<
                         // We only want to batch fill finalized data.
                         break;
                     }
-                    Knowledge::Finalized(hash) => {
-                        if self.containers.contains_key(hash) {
+                    Knowledge::Finalized(digest) => {
+                        if self.containers.contains_key(digest) {
                             // We have a container and no longer need to fetch its parent
                             break;
                         }
@@ -773,7 +781,7 @@ impl<
         // Send the request
         let msg: Bytes = wire::Backfill {
             payload: Some(wire::backfill::Payload::Request(wire::Request {
-                hash: hash.clone(),
+                digest: digest.clone(),
                 parents,
             })),
         }
@@ -817,7 +825,7 @@ impl<
             if self.fetch_rate_limiter.check_key(&validator).is_err() {
                 debug!(
                     height,
-                    hash = hex(&hash),
+                    digest = hex(&digest),
                     peer = hex(&validator),
                     "skipping request because rate limited"
                 );
@@ -834,7 +842,7 @@ impl<
             {
                 debug!(
                     height,
-                    hash = hex(&hash),
+                    digest = hex(&digest),
                     peer = hex(&validator),
                     parents,
                     last_notarized = self.last_notarized,
@@ -846,7 +854,7 @@ impl<
             // Try again
             debug!(
                 height,
-                hash = hex(&hash),
+                digest = hex(&digest),
                 peer = hex(&validator),
                 "failed to send backfill request"
             );
@@ -863,11 +871,11 @@ impl<
         let mut outstanding_task = None;
         loop {
             // Ensure task has not been resolved
-            if let Some((_, ref height, ref hash, _)) = outstanding_task {
-                if self.containers.contains_key(hash) {
+            if let Some((_, ref height, ref digest, _)) = outstanding_task {
+                if self.containers.contains_key(digest) {
                     debug!(
                         height,
-                        hash = hex(hash),
+                        digest = hex(digest),
                         "unexpeted resolution of missing proposal out of backfill"
                     );
                     outstanding_task = None;
@@ -877,26 +885,26 @@ impl<
             // Look for next task if nothing
             if outstanding_task.is_none() {
                 let missing = self.get_next_missing();
-                if let Some((height, hash)) = missing {
+                if let Some((height, digest)) = missing {
                     // Check if already have
-                    if self.containers.contains_key(&hash) {
+                    if self.containers.contains_key(&digest) {
                         continue;
                     }
 
                     // Send request
-                    let validator = self.send_request(height, hash.clone(), &mut sender).await;
+                    let validator = self.send_request(height, digest.clone(), &mut sender).await;
 
                     // Set timeout
                     debug!(
                         height,
-                        hash = hex(&hash),
+                        digest = hex(&digest),
                         peer = hex(&validator),
                         "requesting missing proposal"
                     );
                     outstanding_task = Some((
                         validator,
                         height,
-                        hash,
+                        digest,
                         self.runtime.current() + self.fetch_timeout,
                     ));
                 }
@@ -913,11 +921,11 @@ impl<
             select! {
                 _ = missing_timeout => {
                     // Send request again
-                    let (_, height, hash, _)= outstanding_task.take().unwrap();
-                    let validator = self.send_request(height, hash.clone(), &mut sender).await;
+                    let (_, height, digest, _)= outstanding_task.take().unwrap();
+                    let validator = self.send_request(height, digest.clone(), &mut sender).await;
 
                     // Reset timeout
-                    outstanding_task = Some((validator, height, hash, self.runtime.current() + self.fetch_timeout));
+                    outstanding_task = Some((validator, height, digest, self.runtime.current() + self.fetch_timeout));
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
@@ -975,15 +983,15 @@ impl<
                     match payload {
                         wire::backfill::Payload::Request(request) => {
                             // Confirm request is valid
-                            if !H::validate(&request.hash) {
-                                warn!(sender = hex(&s), "invalid request hash size");
+                            if !H::validate(&request.digest) {
+                                warn!(sender = hex(&s), "invalid request digest size");
                                 continue;
                             }
 
                             // Populate as many proposals as we can
                             let mut proposal_bytes = 0; // TODO: add a buffer
                             let mut proposals = Vec::new();
-                            let mut cursor = request.hash.clone();
+                            let mut cursor = request.digest.clone();
                             loop {
                                 // Check to see if we have proposal
                                 let proposal = match self.containers.get(&cursor).cloned() {
@@ -1017,7 +1025,7 @@ impl<
                             }
 
                             // Send messages
-                            debug!(hash = hex(&request.hash), requested = request.parents + 1, found = proposals.len(), peer = hex(&s), "responding to backfill request");
+                            debug!(digest = hex(&request.digest), requested = request.parents + 1, found = proposals.len(), peer = hex(&s), "responding to backfill request");
                             let msg =  wire::Backfill {
                                 payload: Some(wire::backfill::Payload::Resolution(wire::Resolution {
                                     proposals,
@@ -1038,7 +1046,7 @@ impl<
                             for proposal in resolution.proposals {
                                 // Ensure this is the container we want
                                 if !H::validate(&proposal.parent) {
-                                    warn!(sender = hex(&s), "invalid proposal parent hash size");
+                                    warn!(sender = hex(&s), "invalid proposal parent digest size");
                                     break;
                                 }
                                 let payload_hash = match self.application.parse(proposal.payload.clone()).await {
@@ -1056,8 +1064,8 @@ impl<
                                 );
                                 self.hasher.update(&proposal_digest);
                                 let proposal_hash = self.hasher.finalize();
-                                if let Some((height, ref hash)) = next {
-                                    if proposal.height != height || proposal_hash != hash {
+                                if let Some((height, ref digest)) = next {
+                                    if proposal.height != height || proposal_hash != digest {
                                         warn!(sender = hex(&s), "received invalid batch proposal");
                                         break;
                                     }
@@ -1110,7 +1118,7 @@ impl<
 
                                 // Record the proposal
                                 let height = proposal.height;
-                                debug!(height, hash = hex(&proposal_hash), peer = hex(&s), "received proposal via backfill");
+                                debug!(height, digest = hex(&proposal_hash), peer = hex(&s), "received proposal via backfill");
                                 let proposal = Proposal::Populated(proposal_hash.clone(), proposal.clone());
                                 next = self.resolve(proposal);
 
@@ -1120,7 +1128,7 @@ impl<
                                 // this is unexpected).
                                 if let Some(ref outstanding) = outstanding_task {
                                     if outstanding.2 == proposal_hash {
-                                        debug!(height = outstanding.1, hash = hex(&proposal_hash), peer = hex(&s), "resolved missing proposal via backfill");
+                                        debug!(height = outstanding.1, digest = hex(&proposal_hash), peer = hex(&s), "resolved missing proposal via backfill");
                                         outstanding_task = None;
                                     }
                                 }
@@ -1135,10 +1143,10 @@ impl<
                             }
 
                             // Notify missing if next is not none
-                            if let Some((height, hash)) = next {
+                            if let Some((height, digest)) = next {
                                 // By waiting to register missing until the end, we avoid a bunch of unnecessary
                                 // backfill request additions.
-                                self.register_missing(height, hash).await;
+                                self.register_missing(height, digest).await;
                             }
 
                             // Reset outstanding task if it was not resolved

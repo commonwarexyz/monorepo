@@ -91,7 +91,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             }
         }
 
-        // Compute hash
+        // Compute digest
         self.hasher.update(&proposal_digest);
         Some((public_key, view, height, self.hasher.finalize()))
     }
@@ -105,7 +105,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Encode proofs
         proof.put_u64(vote.view);
         proof.put_u64(vote.height.expect("height not populated"));
-        proof.put(vote.hash.expect("hash not populated"));
+        proof.put(vote.digest.expect("digest not populated"));
         let signature = vote.signature.expect("signature not populated");
         proof.put(signature.public_key);
         proof.put(signature.signature);
@@ -127,7 +127,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Decode proof
         let view = proof.get_u64();
         let height = proof.get_u64();
-        let hash = proof.copy_to_bytes(digest_len);
+        let digest = proof.copy_to_bytes(digest_len);
         let public_key = proof.copy_to_bytes(public_key_len);
         let signature = proof.copy_to_bytes(signature_len);
 
@@ -136,12 +136,12 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let vote_digest = vote_digest(view, Some(height), Some(&hash));
+            let vote_digest = vote_digest(view, Some(height), Some(&digest));
             if !C::verify(&self.vote_namespace, &vote_digest, &public_key, &signature) {
                 return None;
             }
         }
-        Some((public_key, view, height, hash))
+        Some((public_key, view, height, digest))
     }
 
     pub(crate) fn serialize_finalize(finalize: wire::Finalize) -> Proof {
@@ -153,7 +153,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Encode proof
         proof.put_u64(finalize.view);
         proof.put_u64(finalize.height);
-        proof.put(finalize.hash);
+        proof.put(finalize.digest);
         let signature = finalize.signature.expect("signature not populated");
         proof.put(signature.public_key);
         proof.put(signature.signature);
@@ -175,7 +175,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Decode proof
         let view = proof.get_u64();
         let height = proof.get_u64();
-        let hash = proof.copy_to_bytes(digest_len);
+        let digest = proof.copy_to_bytes(digest_len);
         let public_key = proof.copy_to_bytes(public_key_len);
         let signature = proof.copy_to_bytes(signature_len);
 
@@ -184,7 +184,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let finalize_digest = finalize_digest(view, height, &hash);
+            let finalize_digest = finalize_digest(view, height, &digest);
             if !C::verify(
                 &self.finalize_namespace,
                 &finalize_digest,
@@ -194,7 +194,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
                 return None;
             }
         }
-        Some((public_key, view, height, hash))
+        Some((public_key, view, height, digest))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -468,7 +468,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_null_finalize(
         view: View,
         height: Height,
-        hash: Digest,
+        digest: Digest,
         signature_finalize: wire::Signature,
         signature_null: wire::Signature,
     ) -> Proof {
@@ -487,7 +487,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         proof.put_u64(view);
         proof.put(public_key);
         proof.put_u64(height);
-        proof.put(hash);
+        proof.put(digest);
         proof.put(signature_finalize.signature);
         proof.put(signature_null.signature);
         proof.into()
@@ -509,7 +509,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_len);
         let height = proof.get_u64();
-        let hash = proof.copy_to_bytes(H::len());
+        let digest = proof.copy_to_bytes(H::len());
         let signature_finalize = proof.copy_to_bytes(signature_len);
         let signature_null = proof.copy_to_bytes(signature_len);
 
@@ -518,7 +518,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let finalize_digest = finalize_digest(view, height, &hash);
+            let finalize_digest = finalize_digest(view, height, &digest);
             let null_digest = vote_digest(view, None, None);
             if !C::verify(
                 &self.finalize_namespace,

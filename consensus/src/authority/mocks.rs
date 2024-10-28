@@ -108,18 +108,18 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Automaton
     fn genesis(&mut self) -> (Digest, Payload) {
         let payload = Bytes::from(GENESIS_BYTES);
         self.hasher.update(&payload);
-        let hash = self.hasher.finalize();
+        let digest = self.hasher.finalize();
         let mut state = self.state.lock().unwrap();
-        state.parsed.insert(hash.clone());
-        state.verified.insert(hash.clone(), 0);
-        state.finalized.insert(hash.clone(), 0);
-        (hash, payload)
+        state.parsed.insert(digest.clone());
+        state.verified.insert(digest.clone(), 0);
+        state.finalized.insert(digest.clone(), 0);
+        (digest, payload)
     }
 
     async fn propose(&mut self, context: Self::Context) -> Option<Payload> {
         // Verify parent exists and we are at the correct height
         if !H::validate(&context.parent) {
-            self.panic("invalid parent hash length");
+            self.panic("invalid parent digest length");
         }
         {
             let state = self.state.lock().unwrap();
@@ -159,12 +159,12 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Automaton
 
         // Parse the payload
         self.hasher.update(&payload);
-        let hash = self.hasher.finalize();
+        let digest = self.hasher.finalize();
         {
             let mut state = self.state.lock().unwrap();
-            state.parsed.insert(hash.clone());
+            state.parsed.insert(digest.clone());
         }
-        Some(hash)
+        Some(digest)
     }
 
     async fn verify(
@@ -181,10 +181,10 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Automaton
 
         // Verify parent exists and we are at the correct height
         if !H::validate(&context.parent) {
-            self.panic("invalid parent hash length");
+            self.panic("invalid parent digest length");
         }
         if !H::validate(&container) {
-            self.panic("invalid hash length");
+            self.panic("invalid digest length");
         }
 
         // Verify the payload
@@ -218,8 +218,8 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Automaton
             self.panic("parent not verified");
         };
         self.hasher.update(&payload);
-        let hash = self.hasher.finalize();
-        if !state.parsed.contains(&hash) {
+        let digest = self.hasher.finalize();
+        if !state.parsed.contains(&digest) {
             self.panic("payload not parsed");
         }
         state.verified.insert(container, context.height);
@@ -232,7 +232,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Finalizer
 {
     async fn prepared(&mut self, container: Digest) {
         if !H::validate(&container) {
-            self.panic("invalid hash length");
+            self.panic("invalid digest length");
         }
         let height = {
             let mut state = self.state.lock().unwrap();
@@ -259,7 +259,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Finalizer
 
     async fn finalized(&mut self, container: Digest) {
         if !H::validate(&container) {
-            self.panic("invalid hash length");
+            self.panic("invalid digest length");
         }
         let height = {
             let mut state = self.state.lock().unwrap();
@@ -527,7 +527,7 @@ mod tests {
             };
             let mut app = Application::new(runtime, cfg);
 
-            // Create an invalid parent hash
+            // Create an invalid parent digest
             hasher.update(&Bytes::from_static(b"invalid"));
             let invalid_parent = hasher.finalize();
 
@@ -702,7 +702,7 @@ mod tests {
             };
             let mut app = Application::new(runtime, cfg);
 
-            // Create an unverified parent hash
+            // Create an unverified parent digest
             hasher.update(&Bytes::from_static(b"unverified_parent"));
             let unverified_parent = hasher.finalize();
 
@@ -926,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid hash length")]
+    #[should_panic(expected = "invalid digest length")]
     fn test_notarization_invalid_hash() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
@@ -948,7 +948,7 @@ mod tests {
             };
             let mut app = Application::new(runtime, cfg);
 
-            // Attempt to notarize a container with invalid hash length, should panic
+            // Attempt to notarize a container with invalid digest length, should panic
             app.prepared(Bytes::from_static(b"hello")).await;
         });
     }
@@ -1014,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid hash length")]
+    #[should_panic(expected = "invalid digest length")]
     fn test_finalization_invalid_hash() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
@@ -1036,7 +1036,7 @@ mod tests {
             };
             let mut app = Application::new(runtime, cfg);
 
-            // Attempt to finalize a container with invalid hash length, should panic
+            // Attempt to finalize a container with invalid digest length, should panic
             app.finalized(Bytes::from_static(b"hello")).await;
         });
     }

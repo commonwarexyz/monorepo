@@ -70,22 +70,22 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
             match payload {
                 wire::consensus::Payload::Vote(vote) => {
                     // If null vote, skip
-                    if vote.height.is_none() || vote.hash.is_none() {
+                    if vote.height.is_none() || vote.digest.is_none() {
                         continue;
                     }
                     let height = vote.height.unwrap();
-                    let hash = vote.hash.unwrap();
+                    let digest = vote.digest.unwrap();
 
-                    // Vote for received hash
+                    // Vote for received digest
                     let vo = wire::Vote {
                         view: vote.view,
                         height: Some(height),
-                        hash: Some(hash.clone()),
+                        digest: Some(digest.clone()),
                         signature: Some(wire::Signature {
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.vote_namespace,
-                                &vote_digest(vote.view, Some(height), Some(&hash)),
+                                &vote_digest(vote.view, Some(height), Some(&digest)),
                             ),
                         }),
                     };
@@ -98,17 +98,17 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                         .await
                         .unwrap();
 
-                    // Vote for random hash
-                    let hash = H::random(&mut self.runtime);
+                    // Vote for random digest
+                    let digest = H::random(&mut self.runtime);
                     let vo = wire::Vote {
                         view: vote.view,
                         height: Some(height),
-                        hash: Some(hash.clone()),
+                        digest: Some(digest.clone()),
                         signature: Some(wire::Signature {
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.vote_namespace,
-                                &vote_digest(vote.view, Some(height), Some(&hash)),
+                                &vote_digest(vote.view, Some(height), Some(&digest)),
                             ),
                         }),
                     };
@@ -122,16 +122,16 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                         .unwrap();
                 }
                 wire::consensus::Payload::Finalize(finalize) => {
-                    // Finalize provided hash
+                    // Finalize provided digest
                     let fin = wire::Finalize {
                         view: finalize.view,
                         height: finalize.height,
-                        hash: finalize.hash.clone(),
+                        digest: finalize.digest.clone(),
                         signature: Some(wire::Signature {
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.finalize_namespace,
-                                &finalize_digest(finalize.view, finalize.height, &finalize.hash),
+                                &finalize_digest(finalize.view, finalize.height, &finalize.digest),
                             ),
                         }),
                     };
@@ -144,17 +144,17 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                         .await
                         .unwrap();
 
-                    // Finalize random hash
-                    let hash = H::random(&mut self.runtime);
+                    // Finalize random digest
+                    let digest = H::random(&mut self.runtime);
                     let fin = wire::Finalize {
                         view: finalize.view,
                         height: finalize.height,
-                        hash: hash.clone(),
+                        digest: digest.clone(),
                         signature: Some(wire::Signature {
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.finalize_namespace,
-                                &finalize_digest(finalize.view, finalize.height, &hash),
+                                &finalize_digest(finalize.view, finalize.height, &digest),
                             ),
                         }),
                     };
@@ -170,7 +170,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                     // Send conflicting proposals for next height and view
                     let view = finalize.view + 1;
                     let height = finalize.height + 1;
-                    let parent = finalize.hash;
+                    let parent = finalize.digest;
                     for _ in 0..2 {
                         // Generate random payload
                         let payload = H::random(&mut self.runtime);

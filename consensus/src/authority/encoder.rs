@@ -25,7 +25,7 @@ pub fn vote_namespace(namespace: &Bytes) -> Vec<u8> {
 }
 
 pub fn vote_digest(view: View, height: Option<Height>, proposal: Option<&Digest>) -> Bytes {
-    let mut msg = Vec::with_capacity(8 + proposal.map_or(0, |hash| 8 + hash.len()));
+    let mut msg = Vec::with_capacity(8 + proposal.map_or(0, |digest| 8 + digest.len()));
     msg.extend_from_slice(&view.to_be_bytes());
     if let Some(proposal) = proposal {
         msg.extend_from_slice(&height.unwrap().to_be_bytes());

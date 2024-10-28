@@ -65,18 +65,18 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Nuller<E, C, H>
             match payload {
                 wire::consensus::Payload::Vote(vote) => {
                     // If null, vote random
-                    if vote.hash.is_none() || vote.height.is_none() {
-                        let hash = H::random(&mut self.runtime);
+                    if vote.digest.is_none() || vote.height.is_none() {
+                        let digest = H::random(&mut self.runtime);
                         let height = self.runtime.gen();
                         let vo = wire::Vote {
                             view: vote.view,
                             height: Some(height),
-                            hash: Some(hash.clone()),
+                            digest: Some(digest.clone()),
                             signature: Some(wire::Signature {
                                 public_key: self.crypto.public_key(),
                                 signature: self.crypto.sign(
                                     &self.vote_namespace,
-                                    &vote_digest(vote.view, Some(height), Some(&hash)),
+                                    &vote_digest(vote.view, Some(height), Some(&digest)),
                                 ),
                             }),
                         };
@@ -91,13 +91,13 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Nuller<E, C, H>
                         continue;
                     }
                     let height = vote.height.unwrap();
-                    let hash = vote.hash.unwrap();
+                    let digest = vote.digest.unwrap();
 
                     // If not null, vote null
                     let vo = wire::Vote {
                         view: vote.view,
                         height: None,
-                        hash: None,
+                        digest: None,
                         signature: Some(wire::Signature {
                             public_key: self.crypto.public_key(),
                             signature: self
@@ -114,16 +114,16 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Nuller<E, C, H>
                         .await
                         .unwrap();
 
-                    // Finalize received hash
+                    // Finalize received digest
                     let finalize = wire::Finalize {
                         view: vote.view,
                         height,
-                        hash: hash.clone(),
+                        digest: digest.clone(),
                         signature: Some(wire::Signature {
                             public_key: self.crypto.public_key(),
                             signature: self.crypto.sign(
                                 &self.finalize_namespace,
-                                &finalize_digest(vote.view, height, &hash),
+                                &finalize_digest(vote.view, height, &digest),
                             ),
                         }),
                     };

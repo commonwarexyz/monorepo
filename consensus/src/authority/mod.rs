@@ -179,38 +179,38 @@ mod tests {
             // consensus).
             match activity {
                 PROPOSAL => {
-                    let (public_key, _, height, hash) =
+                    let (public_key, _, height, digest) =
                         self.prover.deserialize_proposal(proof, true).unwrap();
                     self.proposals
                         .lock()
                         .unwrap()
                         .entry(height)
                         .or_default()
-                        .entry(hash)
+                        .entry(digest)
                         .or_default()
                         .insert(public_key);
                 }
                 VOTE => {
-                    let (public_key, _, height, hash) =
+                    let (public_key, _, height, digest) =
                         self.prover.deserialize_vote(proof, true).unwrap();
                     self.votes
                         .lock()
                         .unwrap()
                         .entry(height)
                         .or_default()
-                        .entry(hash)
+                        .entry(digest)
                         .or_default()
                         .insert(public_key);
                 }
                 FINALIZE => {
-                    let (public_key, _, height, hash) =
+                    let (public_key, _, height, digest) =
                         self.prover.deserialize_finalize(proof, true).unwrap();
                     self.finalizes
                         .lock()
                         .unwrap()
                         .entry(height)
                         .or_default()
-                        .entry(hash)
+                        .entry(digest)
                         .or_default()
                         .insert(public_key);
                 }
@@ -393,8 +393,8 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height, hash) = event {
-                    finalized.insert(height, hash);
+                if let Progress::Finalized(height, digest) = event {
+                    finalized.insert(height, digest);
                     if height < required_containers {
                         continue;
                     }
@@ -429,8 +429,8 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        let hash = finalized.get(height).expect("height should be finalized");
-                        let proposers = views.get(hash).expect("hash should exist");
+                        let digest = finalized.get(height).expect("height should be finalized");
+                        let proposers = views.get(digest).expect("digest should exist");
                         if proposers.len() != 1 {
                             panic!("height: {}, proposers: {:?}", height, proposers);
                         }
@@ -450,8 +450,8 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        let hash = finalized.get(height).expect("height should be finalized");
-                        let voters = views.get(hash).expect("hash should exist");
+                        let digest = finalized.get(height).expect("height should be finalized");
+                        let voters = views.get(digest).expect("digest should exist");
                         if voters.len() != n {
                             panic!("height: {}, voters: {:?}", height, voters);
                         }
@@ -471,8 +471,8 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        let hash = finalized.get(height).expect("height should be finalized");
-                        let finalizers = views.get(hash).expect("hash should exist");
+                        let digest = finalized.get(height).expect("height should be finalized");
+                        let finalizers = views.get(digest).expect("digest should exist");
                         if finalizers.len() != n {
                             panic!("height: {}, finalizers: {:?}", height, finalizers);
                         }
@@ -792,8 +792,8 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height, hash) = event {
-                    finalized.insert(height, hash);
+                if let Progress::Finalized(height, digest) = event {
+                    finalized.insert(height, digest);
                     if height < required_containers {
                         continue;
                     }
@@ -842,8 +842,8 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        let hash = finalized.get(height).expect("height should be finalized");
-                        let voters = views.get(hash).expect("hash should exist");
+                        let digest = finalized.get(height).expect("height should be finalized");
+                        let voters = views.get(digest).expect("digest should exist");
                         if voters.len() != n - 1 {
                             panic!("height: {}, voters: {:?}", height, voters.len());
                         }
@@ -858,8 +858,8 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        let hash = finalized.get(height).expect("height should be finalized");
-                        let finalizers = views.get(hash).expect("hash should exist");
+                        let digest = finalized.get(height).expect("height should be finalized");
+                        let finalizers = views.get(digest).expect("digest should exist");
                         if finalizers.len() != n - 1 {
                             panic!("height: {}, finalizers: {:?}", height, finalizers.len());
                         }
@@ -2372,8 +2372,8 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height, hash) = event {
-                    finalized.insert(height, hash);
+                if let Progress::Finalized(height, digest) = event {
+                    finalized.insert(height, digest);
                     if height < required_containers {
                         continue;
                     }
@@ -2415,8 +2415,8 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        let hash = finalized.get(height).expect("missing finalized hash");
-                        let count = views.get(hash).expect("missing finalized view").len();
+                        let digest = finalized.get(height).expect("missing finalized digest");
+                        let count = views.get(digest).expect("missing finalized view").len();
                         if count < n - 1 {
                             panic!(
                                 "incorrect votes at height: {} ({} < {})",
@@ -2436,8 +2436,8 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        let hash = finalized.get(height).expect("missing finalized hash");
-                        let count = views.get(hash).expect("missing finalized view").len();
+                        let digest = finalized.get(height).expect("missing finalized digest");
+                        let count = views.get(digest).expect("missing finalized view").len();
                         if count < n - 1 {
                             panic!(
                                 "incorrect finalizes at height: {} ({} < {})",
@@ -2587,8 +2587,8 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height, hash) = event {
-                    finalized.insert(height, hash);
+                if let Progress::Finalized(height, digest) = event {
+                    finalized.insert(height, digest);
                     if height < required_containers {
                         continue;
                     }
@@ -2629,8 +2629,8 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        let hash = finalized.get(height).expect("missing finalized hash");
-                        let count = views.get(hash).expect("missing finalized view").len();
+                        let digest = finalized.get(height).expect("missing finalized digest");
+                        let count = views.get(digest).expect("missing finalized view").len();
                         if count < n - 1 {
                             panic!(
                                 "incorrect votes at height: {} ({} < {})",
@@ -2650,8 +2650,8 @@ mod tests {
                         }
 
                         // Ensure everyone participating
-                        let hash = finalized.get(height).expect("missing finalized hash");
-                        let count = views.get(hash).expect("missing finalized view").len();
+                        let digest = finalized.get(height).expect("missing finalized digest");
+                        let count = views.get(digest).expect("missing finalized view").len();
                         if count < n - 1 {
                             panic!(
                                 "incorrect finalizes at height: {} ({} < {})",

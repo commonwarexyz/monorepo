@@ -20,13 +20,13 @@ pub trait Automaton: Clone + Send + 'static {
     /// Initialize the application with the genesis container at view=0, height=0.
     fn genesis(&mut self) -> (Payload, Digest);
 
-    /// Generate a new payload for the given parent hash.
+    /// Generate a new payload for the given parent digest.
     ///
     /// If state is not yet ready, this will return None.
     fn propose(&mut self, context: Self::Context) -> impl Future<Output = Option<Payload>> + Send;
 
-    /// Parse the payload and return the hash of the payload. We don't just hash
-    /// the payload because it may be more efficient to prove against a hash
+    /// Parse the payload and return the digest of the payload. We don't just digest
+    /// the payload because it may be more efficient to prove against a digest
     /// that is specifically formatted (like a trie root).
     ///
     /// Parse is a stateless operation and may be called out-of-order.
