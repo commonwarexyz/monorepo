@@ -1,9 +1,9 @@
 use bytes::Bytes;
 use commonware_consensus::{
-    authority::{Prover, FINALIZE, PROPOSAL, VOTE},
-    Activity, Context, Finalizer, Hash, Hasher, Payload, Proof, Supervisor, View,
+    authority::{Context, Prover, View, FINALIZE, PROPOSAL, VOTE},
+    Activity, Automaton, Finalizer, Payload, Proof, Supervisor,
 };
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -11,6 +11,8 @@ use std::time::UNIX_EPOCH;
 use tracing::{debug, info};
 
 const SYNCHRONY_BOUND: u128 = 250;
+const PAYLOAD_SIZE: usize = 16;
+type Timestamp = u128;
 
 #[derive(Clone)]
 pub struct Application<E: Clock, C: Scheme, H: Hasher> {
@@ -21,9 +23,9 @@ pub struct Application<E: Clock, C: Scheme, H: Hasher> {
     validators_set: HashSet<PublicKey>,
     prover: Prover<C, H>,
 
-    best: Option<(View, Hash)>,
-    tracking: HashMap<Hash, u128>,
-    tracking_index: BTreeMap<View, Hash>,
+    best: Option<(View, Digest)>,
+    tracking: HashMap<Digest, (View, Timestamp)>,
+    tracking_index: BTreeMap<View, Digest>,
 }
 
 impl<E: Clock, C: Scheme, H: Hasher> Application<E, C, H> {
@@ -44,8 +46,10 @@ impl<E: Clock, C: Scheme, H: Hasher> Application<E, C, H> {
     }
 }
 
-impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Application<E, C, H> {
-    fn genesis(&mut self) -> (Hash, Payload) {
+impl<E: Clock, C: Scheme, H: Hasher> Automaton for Application<E, C, H> {
+    type Context = Context;
+
+    fn genesis(&mut self) -> (Digest, Payload) {
         // Generate genesis value
         //
         // TODO: in production this would be balances
@@ -55,9 +59,10 @@ impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Appli
         let hash = self.hasher.finalize();
 
         // Store genesis value so we can build off of it
-        self.tracking.insert(hash.clone(), now);
-        self.tracking_index.insert(0, hash.clone());
-        self.best = Some((0, hash.clone()));
+        let view = 0;
+        self.tracking.insert(hash.clone(), (view, now));
+        self.tracking_index.insert(view, hash.clone());
+        self.best = Some((view, hash.clone()));
         (hash, payload.into())
     }
 
@@ -72,7 +77,7 @@ impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Appli
 
         // Ensure equal or greater than last
         let last = match &self.best {
-            Some((_, hash)) => *self.tracking.get(hash).unwrap(),
+            Some((_, hash)) => self.tracking.get(hash).unwrap().1,
             None => 0,
         };
         let current_time = if current_time >= last {
@@ -84,9 +89,9 @@ impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Appli
         Some(current_time.to_be_bytes().to_vec().into())
     }
 
-    async fn parse(&mut self, payload: Payload) -> Option<Hash> {
+    async fn parse(&mut self, payload: Payload) -> Option<Digest> {
         // Check that right size
-        if payload.len() != 16 {
+        if payload.len() != PAYLOAD_SIZE {
             return None;
         }
 
@@ -95,14 +100,14 @@ impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Appli
         Some(self.hasher.finalize())
     }
 
-    async fn verify(&mut self, context: Context, payload: Payload, block: Hash) -> bool {
+    async fn verify(&mut self, context: Context, payload: Payload, container: Digest) -> bool {
         // Check validity
         let payload = payload.to_vec().try_into();
         let candidate = match payload {
             Ok(time) => u128::from_be_bytes(time),
             Err(_) => return false,
         };
-        let parent = match self.tracking.get(&context.parent) {
+        let (_, parent) = match self.tracking.get(&context.parent) {
             Some(parent) => *parent,
             None => return false,
         };
@@ -118,13 +123,16 @@ impl<E: Clock, C: Scheme, H: Hasher> commonware_consensus::Application for Appli
         }
 
         // Store result
-        self.tracking.insert(block.clone(), candidate);
-        self.tracking_index.insert(context.view, block);
+        self.tracking
+            .insert(container.clone(), (context.view, candidate));
+        self.tracking_index.insert(context.view, container);
         true
     }
 }
 
 impl<E: Clock, C: Scheme, H: Hasher> Supervisor for Application<E, C, H> {
+    type Index = View;
+
     fn participants(&self, _view: View) -> Option<&Vec<PublicKey>> {
         Some(&self.validators)
     }
@@ -174,22 +182,26 @@ impl<E: Clock, C: Scheme, H: Hasher> Supervisor for Application<E, C, H> {
 }
 
 impl<E: Clock, C: Scheme, H: Hasher> Finalizer for Application<E, C, H> {
-    async fn notarized(&mut self, view: View, block: Hash) {
+    async fn prepared(&mut self, container: Digest) {
+        let (view, _) = self.tracking.get(&container).unwrap();
         let (best_view, _) = self.best.as_ref().unwrap();
-        if view <= *best_view {
+        if view <= best_view {
             return;
         }
-        self.best = Some((view, block));
+        self.best = Some((*view, container));
     }
 
-    async fn finalized(&mut self, view: View, block: Hash) {
+    async fn finalized(&mut self, container: Digest) {
+        // Get view of container
+        let (view, _) = self.tracking.get(&container).unwrap().to_owned();
+
         // Discover minimum pruneable payload
         let required_view = {
             let (best_view, _) = self.best.as_ref().unwrap();
             if view <= *best_view {
                 *best_view
             } else {
-                self.best = Some((view, block));
+                self.best = Some((view, container));
                 view
             }
         };

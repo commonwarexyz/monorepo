@@ -1,7 +1,6 @@
 //! TBD
 
 pub mod authority;
-pub mod mocks;
 
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};

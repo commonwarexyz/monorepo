@@ -1,6 +1,7 @@
-use crate::{Activity, Context, Hash, Hasher, Height, Payload, Proof, Supervisor, View};
+use super::{Context, Height, View};
+use crate::{Activity, Automaton, Finalizer, Payload, Proof, Supervisor};
 use bytes::Bytes;
-use commonware_cryptography::PublicKey;
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt};
@@ -35,23 +36,23 @@ pub struct Config<H: Hasher, S: Supervisor> {
 }
 
 pub enum Progress {
-    Notarized(Height, Hash),
-    Finalized(Height, Hash),
+    Notarized(Height, Digest),
+    Finalized(Height, Digest),
 }
 
 #[derive(Default)]
 struct State {
-    parsed: HashSet<Hash>,
-    verified: HashMap<Hash, Height>,
+    parsed: HashSet<Digest>,
+    verified: HashMap<Digest, Height>,
     last_finalized: u64,
-    finalized: HashMap<Hash, Height>,
+    finalized: HashMap<Digest, Height>,
 
-    notarized_views: HashSet<View>,
-    finalized_views: HashSet<View>,
+    notarized_views: HashSet<Digest>,
+    finalized_views: HashSet<Digest>,
 }
 
 #[derive(Clone)]
-pub struct Application<E: Clock + RngCore, H: Hasher, S: Supervisor> {
+pub struct Application<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> {
     runtime: E,
     hasher: H,
     supervisor: S,
@@ -68,7 +69,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher, S: Supervisor> {
     state: Arc<Mutex<State>>,
 }
 
-impl<E: Clock + RngCore, H: Hasher, S: Supervisor> Application<E, H, S> {
+impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Application<E, H, S> {
     pub fn new(runtime: E, cfg: Config<H, S>) -> Self {
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
@@ -99,8 +100,12 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> Application<E, H, S> {
     }
 }
 
-impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Application<E, H, S> {
-    fn genesis(&mut self) -> (Hash, Payload) {
+impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Automaton
+    for Application<E, H, S>
+{
+    type Context = Context;
+
+    fn genesis(&mut self) -> (Digest, Payload) {
         let payload = Bytes::from(GENESIS_BYTES);
         self.hasher.update(&payload);
         let hash = self.hasher.finalize();
@@ -111,7 +116,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
         (hash, payload)
     }
 
-    async fn propose(&mut self, context: Context) -> Option<Payload> {
+    async fn propose(&mut self, context: Self::Context) -> Option<Payload> {
         // Verify parent exists and we are at the correct height
         if !H::validate(&context.parent) {
             self.panic("invalid parent hash length");
@@ -140,7 +145,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
         Some(Bytes::from(payload))
     }
 
-    async fn parse(&mut self, payload: Payload) -> Option<Hash> {
+    async fn parse(&mut self, payload: Payload) -> Option<Digest> {
         // Verify the payload is well-formed
         if !self.allow_invalid_payload && payload.len() != 40 {
             self.panic("invalid payload length");
@@ -162,7 +167,12 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
         Some(hash)
     }
 
-    async fn verify(&mut self, context: Context, payload: Payload, block: Hash) -> bool {
+    async fn verify(
+        &mut self,
+        context: Self::Context,
+        payload: Payload,
+        container: Digest,
+    ) -> bool {
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
         self.runtime
@@ -173,7 +183,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
         if !H::validate(&context.parent) {
             self.panic("invalid parent hash length");
         }
-        if !H::validate(&block) {
+        if !H::validate(&container) {
             self.panic("invalid hash length");
         }
 
@@ -193,7 +203,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
 
         // Ensure not duplicate check
         let mut state = self.state.lock().unwrap();
-        if state.verified.contains_key(&block) {
+        if state.verified.contains_key(&container) {
             self.panic("block already verified");
         }
         if let Some(parent) = state.verified.get(&context.parent) {
@@ -212,28 +222,27 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Application for Applic
         if !state.parsed.contains(&hash) {
             self.panic("payload not parsed");
         }
-        state.verified.insert(block.clone(), context.height);
+        state.verified.insert(container, context.height);
         true
     }
 }
 
-impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Finalizer for Application<E, H, S> {
-    async fn notarized(&mut self, view: View, block: Hash) {
-        if view == 0 {
-            self.panic("cannot notarize genesis block");
-        }
-        if !H::validate(&block) {
+impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Finalizer
+    for Application<E, H, S>
+{
+    async fn prepared(&mut self, container: Digest) {
+        if !H::validate(&container) {
             self.panic("invalid hash length");
         }
         let height = {
             let mut state = self.state.lock().unwrap();
-            if state.finalized.contains_key(&block) {
+            if state.finalized.contains_key(&container) {
                 self.panic("block already finalized");
             }
-            if !state.notarized_views.insert(view) {
+            if !state.notarized_views.insert(container.clone()) {
                 self.panic("view already notarized");
             }
-            if let Some(height) = state.verified.get(&block) {
+            if let Some(height) = state.verified.get(&container) {
                 *height
             } else {
                 self.panic("block not verified");
@@ -241,26 +250,26 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Finalizer for Applicat
         };
         let _ = self
             .progress
-            .send((self.participant.clone(), Progress::Notarized(height, block)))
+            .send((
+                self.participant.clone(),
+                Progress::Notarized(height, container),
+            ))
             .await;
     }
 
-    async fn finalized(&mut self, view: View, block: Hash) {
-        if view == 0 {
-            self.panic("cannot finalize genesis block");
-        }
-        if !H::validate(&block) {
+    async fn finalized(&mut self, container: Digest) {
+        if !H::validate(&container) {
             self.panic("invalid hash length");
         }
         let height = {
             let mut state = self.state.lock().unwrap();
-            if state.finalized.contains_key(&block) {
+            if state.finalized.contains_key(&container) {
                 self.panic("block already finalized");
             }
-            if !state.finalized_views.insert(view) {
+            if !state.finalized_views.insert(container.clone()) {
                 self.panic("view already finalized");
             }
-            let height = match state.verified.get(&block) {
+            let height = match state.verified.get(&container) {
                 Some(height) => *height,
                 None => self.panic("block not verified"),
             };
@@ -272,23 +281,30 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Finalizer for Applicat
                 ));
             }
             state.last_finalized = height;
-            state.finalized.insert(block.clone(), height);
+            state.finalized.insert(container.clone(), height);
             height
         };
         let _ = self
             .progress
-            .send((self.participant.clone(), Progress::Finalized(height, block)))
+            .send((
+                self.participant.clone(),
+                Progress::Finalized(height, container),
+            ))
             .await;
     }
 }
 
-impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Supervisor for Application<E, H, S> {
-    fn participants(&self, view: View) -> Option<&Vec<PublicKey>> {
-        self.supervisor.participants(view)
+impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Supervisor
+    for Application<E, H, S>
+{
+    type Index = View;
+
+    fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>> {
+        self.supervisor.participants(index)
     }
 
-    fn is_participant(&self, view: View, candidate: &PublicKey) -> Option<bool> {
-        self.supervisor.is_participant(view, candidate)
+    fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<bool> {
+        self.supervisor.is_participant(index, candidate)
     }
 
     async fn report(&mut self, activity: Activity, proof: Proof) {
@@ -299,8 +315,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor> crate::Supervisor for Applica
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{sha256::Sha256, Application as _, Finalizer as _};
-    use commonware_cryptography::{Ed25519, Scheme};
+    use commonware_cryptography::{Ed25519, Scheme, Sha256};
     use commonware_runtime::{deterministic::Executor, Runner};
     use futures::StreamExt;
 
@@ -316,6 +331,8 @@ mod tests {
     }
 
     impl Supervisor for NoReportSupervisor {
+        type Index = View;
+
         fn participants(&self, _view: View) -> Option<&Vec<PublicKey>> {
             Some(&self.participants)
         }
@@ -375,7 +392,7 @@ mod tests {
             assert!(verified);
 
             // Notarize the block
-            app.notarized(view, block_hash.clone()).await;
+            app.prepared(block_hash.clone()).await;
 
             // Expect a progress message for notarization
             let (progress_participant, progress) =
@@ -390,7 +407,7 @@ mod tests {
             }
 
             // Finalize the block
-            app.finalized(view, block_hash.clone()).await;
+            app.finalized(block_hash.clone()).await;
 
             // Expect a progress message for finalization
             let (progress_participant, progress) =
@@ -432,7 +449,6 @@ mod tests {
             let (genesis_hash, _) = app.genesis();
 
             // Get block at height 1
-            let view = 1;
             let height = 1;
             let context = Context {
                 parent: genesis_hash.clone(),
@@ -457,7 +473,7 @@ mod tests {
             assert!(verified);
 
             // Notarize the block
-            app.notarized(view, block_hash.clone()).await;
+            app.prepared(block_hash.clone()).await;
 
             // Expect a progress message for notarization
             let (progress_participant, progress) =
@@ -472,7 +488,7 @@ mod tests {
             }
 
             // Finalize the block
-            app.finalized(view, block_hash.clone()).await;
+            app.finalized(block_hash.clone()).await;
 
             // Expect a progress message for finalization
             let (progress_participant, progress) =
@@ -872,11 +888,11 @@ mod tests {
             assert!(verified);
 
             // Notarize and finalize the block
-            app.notarized(view, block_hash.clone()).await;
-            app.finalized(view, block_hash.clone()).await;
+            app.prepared(block_hash.clone()).await;
+            app.finalized(block_hash.clone()).await;
 
             // Attempt to notarize the block again, should panic
-            app.notarized(view, block_hash).await;
+            app.prepared(block_hash).await;
         });
     }
 
@@ -905,7 +921,7 @@ mod tests {
 
             // Attempt to notarize an unverified block, should panic
             hasher.update(&Bytes::from_static(b"hello"));
-            app.notarized(1, hasher.finalize()).await;
+            app.prepared(hasher.finalize()).await;
         });
     }
 
@@ -933,7 +949,7 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Attempt to notarize a block with invalid hash length, should panic
-            app.notarized(1, Bytes::from_static(b"hello")).await;
+            app.prepared(Bytes::from_static(b"hello")).await;
         });
     }
 
@@ -964,7 +980,7 @@ mod tests {
             let (genesis_hash, _) = app.genesis();
 
             // Attempt to notarize the genesis block, should panic
-            app.notarized(1, genesis_hash.clone()).await;
+            app.prepared(genesis_hash.clone()).await;
         });
     }
 
@@ -993,7 +1009,7 @@ mod tests {
 
             // Attempt to finalize an unverified block, should panic
             hasher.update(&Bytes::from_static(b"hello"));
-            app.finalized(1, hasher.finalize()).await;
+            app.finalized(hasher.finalize()).await;
         });
     }
 
@@ -1021,7 +1037,7 @@ mod tests {
             let mut app = Application::new(runtime, cfg);
 
             // Attempt to finalize a block with invalid hash length, should panic
-            app.finalized(1, Bytes::from_static(b"hello")).await;
+            app.finalized(Bytes::from_static(b"hello")).await;
         });
     }
 
@@ -1052,7 +1068,7 @@ mod tests {
             let (genesis_hash, _) = app.genesis();
 
             // Attempt to finalize the genesis block, should panic
-            app.finalized(1, genesis_hash.clone()).await;
+            app.finalized(genesis_hash.clone()).await;
         });
     }
 }

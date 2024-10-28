@@ -35,6 +35,7 @@ pub mod byzantine;
 mod config;
 mod encoder;
 mod engine;
+pub mod mocks;
 mod prover;
 
 use commonware_cryptography::{Digest, PublicKey};
@@ -86,10 +87,7 @@ pub const NULL_AND_FINALIZE: Activity = 6;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        mocks::application::{Application, Config as ApplicationConfig, Progress},
-        Proof, Supervisor,
-    };
+    use crate::{Proof, Supervisor};
     use bytes::Bytes;
     use byzantine::{
         conflicter::{self, Conflicter},
@@ -105,6 +103,7 @@ mod tests {
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
+    use mocks::{Application, Config as ApplicationConfig, Progress};
     use prometheus_client::registry::Registry;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
