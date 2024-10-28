@@ -1,7 +1,7 @@
-use crate::{Hash, Hasher};
-use sha2::{Digest, Sha256 as ISha256};
+use crate::{Digest, Hasher};
+use sha2::{Digest as _, Sha256 as ISha256};
 
-const HASH_LENGTH: usize = 32;
+const DIGEST_SIZE: usize = 32;
 
 #[derive(Clone)]
 pub struct Sha256 {
@@ -23,11 +23,11 @@ impl Default for Sha256 {
 }
 
 impl Hasher for Sha256 {
-    fn update(&mut self, digest: &[u8]) {
-        self.hasher.as_mut().unwrap().update(digest);
+    fn update(&mut self, message: &[u8]) {
+        self.hasher.as_mut().unwrap().update(message);
     }
 
-    fn finalize(&mut self) -> Hash {
+    fn finalize(&mut self) -> Digest {
         let hash = self.hasher.take().unwrap().finalize().to_vec().into();
         self.reset();
         hash
@@ -37,12 +37,12 @@ impl Hasher for Sha256 {
         self.hasher = Some(ISha256::new());
     }
 
-    fn validate(hash: &Hash) -> bool {
-        hash.len() == HASH_LENGTH
+    fn validate(digest: &Digest) -> bool {
+        digest.len() == DIGEST_SIZE
     }
 
     fn size() -> usize {
-        HASH_LENGTH
+        DIGEST_SIZE
     }
 }
 
@@ -77,6 +77,6 @@ mod tests {
 
     #[test]
     fn test_sha256_size() {
-        assert_eq!(Sha256::size(), HASH_LENGTH);
+        assert_eq!(Sha256::size(), DIGEST_SIZE);
     }
 }
