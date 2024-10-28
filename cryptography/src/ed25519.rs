@@ -1,4 +1,4 @@
-//! Ed25519 implementation of the Scheme trait.
+//! Ed25519 implementation of the `Scheme` trait.
 //!
 //! This implementation uses the `ed25519-consensus` crate to adhere to a strict
 //! set of validation rules for Ed25519 signatures (which is necessary for
@@ -112,7 +112,7 @@ impl Scheme for Ed25519 {
         public_key.verify(&signature, &payload).is_ok()
     }
 
-    fn size() -> (usize, usize) {
+    fn len() -> (usize, usize) {
         (PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH)
     }
 }

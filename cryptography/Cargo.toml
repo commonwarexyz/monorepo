@@ -15,6 +15,7 @@ commonware-utils = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
+sha2 = { workspace = true }
 ed25519-consensus = "2.1.0"
 blst = { version = "0.3.13", features = ["no-threads"] }
 zeroize = "1.5.7"
