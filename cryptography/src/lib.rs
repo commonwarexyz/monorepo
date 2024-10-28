@@ -106,7 +106,7 @@ pub trait Hasher: Clone + Send + 'static {
     fn validate(digest: &Digest) -> bool;
 
     /// Size of the digest in bytes.
-    fn size() -> usize;
+    fn len() -> usize;
 }
 
 #[cfg(test)]
@@ -281,7 +281,7 @@ mod tests {
         hasher.update(b"hello world");
         let digest = hasher.finalize();
         assert!(H::validate(&digest));
-        assert_eq!(digest.len(), H::size());
+        assert_eq!(digest.len(), H::len());
 
         // Reuse hasher without reset
         hasher.update(b"hello world");

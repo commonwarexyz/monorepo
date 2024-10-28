@@ -1,8 +1,11 @@
+//! SHA-256 implementation of the `Hasher` trait.
+
 use crate::{Digest, Hasher};
 use sha2::{Digest as _, Sha256 as ISha256};
 
-const DIGEST_SIZE: usize = 32;
+const DIGEST_LENGTH: usize = 32;
 
+/// SHA-256 hasher.
 #[derive(Clone)]
 pub struct Sha256 {
     hasher: Option<ISha256>,
@@ -36,11 +39,11 @@ impl Hasher for Sha256 {
     }
 
     fn validate(digest: &Digest) -> bool {
-        digest.len() == DIGEST_SIZE
+        digest.len() == DIGEST_LENGTH
     }
 
-    fn size() -> usize {
-        DIGEST_SIZE
+    fn len() -> usize {
+        DIGEST_LENGTH
     }
 }
 
@@ -74,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sha256_size() {
-        assert_eq!(Sha256::size(), DIGEST_SIZE);
+    fn test_sha256_len() {
+        assert_eq!(Sha256::len(), DIGEST_LENGTH);
     }
 }

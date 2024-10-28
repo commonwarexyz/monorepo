@@ -1,4 +1,4 @@
-//! Ed25519 implementation of the Scheme trait.
+//! Ed25519 implementation of the `Scheme` trait.
 //!
 //! This implementation uses the `ed25519-consensus` crate to adhere to a strict
 //! set of validation rules for Ed25519 signatures (which is necessary for
