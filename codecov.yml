@@ -5,3 +5,12 @@ comment:
   require_head: false
   require_base: false
   hide_project_coverage: false
+
+coverage:
+  status:
+    patch:
+      default:
+        threshold: 0.25%
+    project:
+      default:
+        threshold: 0.25%
