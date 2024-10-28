@@ -1,17 +1,14 @@
-use crate::{
-    authority::{
-        encoder::{finalize_digest, finalize_namespace, vote_digest, vote_namespace},
-        wire,
-    },
-    Hash, Hasher,
+use crate::authority::{
+    encoder::{finalize_digest, finalize_namespace, vote_digest, vote_namespace},
+    wire,
 };
 use bytes::Bytes;
-use commonware_cryptography::Scheme;
+use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::hex;
 use prost::Message;
-use rand::Rng;
+use rand::{CryptoRng, Rng};
 use tracing::debug;
 
 pub struct Config<C: Scheme, H: Hasher> {
@@ -20,7 +17,7 @@ pub struct Config<C: Scheme, H: Hasher> {
     pub namespace: Bytes,
 }
 
-pub struct Nuller<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> {
+pub struct Nuller<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> {
     runtime: E,
     crypto: C,
     _hasher: H,
@@ -29,7 +26,7 @@ pub struct Nuller<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> {
     finalize_namespace: Vec<u8>,
 }
 
-impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Nuller<E, C, H> {
+impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Nuller<E, C, H> {
     pub fn new(runtime: E, cfg: Config<C, H>) -> Self {
         Self {
             runtime,
@@ -39,13 +36,6 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Nuller<E, C, H> {
             vote_namespace: vote_namespace(&cfg.namespace),
             finalize_namespace: finalize_namespace(&cfg.namespace),
         }
-    }
-
-    fn random_hash(&mut self) -> Hash {
-        let hash_size = H::size();
-        let mut hash = vec![0u8; hash_size];
-        self.runtime.fill_bytes(&mut hash);
-        hash.into()
     }
 
     pub async fn run(
@@ -76,7 +66,7 @@ impl<E: Clock + Rng + Spawner, C: Scheme, H: Hasher> Nuller<E, C, H> {
                 wire::consensus::Payload::Vote(vote) => {
                     // If null, vote random
                     if vote.hash.is_none() || vote.height.is_none() {
-                        let hash = self.random_hash();
+                        let hash = H::random(&mut self.runtime);
                         let height = self.runtime.gen();
                         let vo = wire::Vote {
                             view: vote.view,

@@ -3,11 +3,11 @@ use super::{
         finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
         vote_namespace,
     },
-    wire,
+    wire, Height, View,
 };
-use crate::{Hash, Hasher, Height, Proof, View};
+use crate::Proof;
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use core::panic;
 use std::marker::PhantomData;
 
@@ -35,8 +35,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_proposal(
         view: View,
         height: Height,
-        parent: Hash,
-        payload: Hash,
+        parent: Digest,
+        payload: Digest,
         signature: wire::Signature,
     ) -> Proof {
         // Setup proof
@@ -59,7 +59,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         &mut self,
         mut proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View, Height, Hash)> {
+    ) -> Option<(PublicKey, View, Height, Digest)> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
@@ -116,7 +116,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         &self,
         mut proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View, Height, Hash)> {
+    ) -> Option<(PublicKey, View, Height, Digest)> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
@@ -164,7 +164,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         &self,
         mut proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View, Height, Hash)> {
+    ) -> Option<(PublicKey, View, Height, Digest)> {
         // Ensure proof is big enough
         let hash_size = H::size();
         let (public_key_size, signature_size) = C::size();
@@ -201,12 +201,12 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_conflicting_proposal(
         view: View,
         height_1: Height,
-        parent_1: Hash,
-        payload_1: Hash,
+        parent_1: Digest,
+        payload_1: Digest,
         signature_1: wire::Signature,
         height_2: Height,
-        parent_2: Hash,
-        payload_2: Hash,
+        parent_2: Digest,
+        payload_2: Digest,
         signature_2: wire::Signature,
     ) -> Proof {
         // Setup proof
@@ -305,10 +305,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_conflicting_vote(
         view: View,
         height_1: Height,
-        hash_1: Hash,
+        hash_1: Digest,
         signature_1: wire::Signature,
         height_2: Height,
-        hash_2: Hash,
+        hash_2: Digest,
         signature_2: wire::Signature,
     ) -> Proof {
         // Setup proof
@@ -387,10 +387,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_conflicting_finalize(
         view: View,
         height_1: Height,
-        hash_1: Hash,
+        hash_1: Digest,
         signature_1: wire::Signature,
         height_2: Height,
-        hash_2: Hash,
+        hash_2: Digest,
         signature_2: wire::Signature,
     ) -> Proof {
         // Setup proof
@@ -468,7 +468,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_null_finalize(
         view: View,
         height: Height,
-        hash: Hash,
+        hash: Digest,
         signature_finalize: wire::Signature,
         signature_null: wire::Signature,
     ) -> Proof {

@@ -1,18 +1,18 @@
 mod actor;
 mod ingress;
 
+use super::View;
+use crate::{Automaton, Finalizer, Supervisor};
 pub use actor::Actor;
-use commonware_cryptography::Scheme;
+use bytes::Bytes;
+use commonware_cryptography::{Hasher, Scheme};
 use governor::Quota;
 pub use ingress::{Mailbox, Message};
-
-use crate::{Application, Finalizer, Hasher, Supervisor, View};
-use bytes::Bytes;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub struct Config<C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer> {
+pub struct Config<C: Scheme, H: Hasher, A: Automaton + Supervisor + Finalizer> {
     pub crypto: C,
     pub hasher: H,
     pub application: A,

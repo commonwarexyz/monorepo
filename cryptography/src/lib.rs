@@ -88,7 +88,7 @@ pub type Digest = Bytes;
 /// may work better with different cryptographic schemes, may be more efficient
 /// to use in STARK/SNARK proofs, or provide different levels of security (with some
 /// performance/size penalty).
-pub trait Hasher: Send + 'static {
+pub trait Hasher: Clone + Send + 'static {
     /// Create a new hasher.
     fn new() -> Self;
 
@@ -109,6 +109,14 @@ pub trait Hasher: Send + 'static {
 
     /// Size of the digest in bytes.
     fn len() -> usize;
+
+    /// Generate a random digest.
+    ///
+    /// # Warning
+    ///
+    /// This function is typically used for testing and is not recommended
+    /// for production use.
+    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Digest;
 }
 
 #[cfg(test)]

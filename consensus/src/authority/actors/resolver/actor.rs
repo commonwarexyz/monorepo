@@ -5,12 +5,12 @@ use crate::{
     authority::{
         actors::{voter, Proposal},
         encoder::{proposal_digest, proposal_namespace},
-        wire,
+        wire, Context, Height, View,
     },
-    Application, Context, Finalizer, Hash, Hasher, Height, Payload, Supervisor, View,
+    Automaton, Finalizer, Payload, Supervisor,
 };
 use bytes::Bytes;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
@@ -31,15 +31,15 @@ use tracing::{debug, trace, warn};
 
 #[derive(Clone)]
 enum Knowledge {
-    Notarized(BTreeMap<View, Hash>), // priotize building off of earliest view (avoid wasting work)
-    Finalized(Hash),
+    Notarized(BTreeMap<View, Digest>), // priotize building off of earliest view (avoid wasting work)
+    Finalized(Digest),
 }
 
 pub struct Actor<
     E: Clock + GClock + Rng + Spawner,
     C: Scheme,
     H: Hasher,
-    A: Application + Supervisor + Finalizer,
+    A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
 > {
     runtime: E,
     crypto: C,
@@ -58,27 +58,27 @@ pub struct Actor<
 
     null_notarizations: BTreeSet<View>,
     knowledge: HashMap<Height, Knowledge>,
-    blocks: HashMap<Hash, wire::Proposal>,
+    blocks: HashMap<Digest, wire::Proposal>,
 
     // Track verifications
     //
     // We never verify the same block twice.
-    verified: HashMap<Height, HashSet<Hash>>,
+    verified: HashMap<Height, HashSet<Digest>>,
 
     // Track notarization/finalization
     last_notarized: Height,
     last_finalized: Height,
 
     // Fetch missing proposals
-    missing: HashMap<Hash, Height>,
-    missing_sender: mpsc::Sender<(Height, Hash)>,
-    missing_receiver: mpsc::Receiver<(Height, Hash)>,
+    missing: HashMap<Digest, Height>,
+    missing_sender: mpsc::Sender<(Height, Digest)>,
+    missing_receiver: mpsc::Receiver<(Height, Digest)>,
 
     // Track last notifications
     //
     // We only increase this once we notify of finalization at some height.
     // It is not guaranteed that we will notify every notarization (may just be finalizes).
-    notarizations_sent: HashMap<Height, HashSet<Hash>>,
+    notarizations_sent: HashMap<Height, HashSet<Digest>>,
     last_notified: Height,
 }
 
@@ -87,7 +87,7 @@ impl<
         E: Clock + GClock + Rng + Spawner,
         C: Scheme,
         H: Hasher,
-        A: Application + Supervisor + Finalizer,
+        A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
     > Actor<E, C, H, A>
 {
     pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> (Self, Mailbox) {
@@ -104,7 +104,7 @@ impl<
             wire::Proposal {
                 view: 0,
                 height: 0,
-                parent: Hash::new(),
+                parent: Digest::new(),
                 payload: genesis.1,
                 signature: None,
             },
@@ -161,7 +161,7 @@ impl<
         Some(validators[view as usize % validators.len()].clone())
     }
 
-    async fn register_missing(&mut self, height: Height, hash: Hash) {
+    async fn register_missing(&mut self, height: Height, hash: Digest) {
         // Check if we have the proposal
         if self.blocks.contains_key(&hash) {
             return;
@@ -178,7 +178,7 @@ impl<
         self.missing_sender.send((height, hash)).await.unwrap();
     }
 
-    fn resolve(&mut self, proposal: Proposal) -> Option<(Height, Hash)> {
+    fn resolve(&mut self, proposal: Proposal) -> Option<(Height, Digest)> {
         // Parse proposal
         let (hash, proposal) = match proposal {
             Proposal::Reference(_, height, hash) => {
@@ -293,7 +293,6 @@ impl<
                                 continue;
                             }
                         };
-                        let proposal_view = proposal.view;
                         if !self.verify(hash.clone(), proposal.clone()).await {
                             debug!(
                                 height = next,
@@ -306,9 +305,7 @@ impl<
                             .entry(next)
                             .or_default()
                             .insert(hash.clone());
-                        self.application
-                            .notarized(proposal_view, hash.clone())
-                            .await;
+                        self.application.prepared(hash).await;
                     }
                     debug!(height = next, "notified application notarization");
                 }
@@ -325,7 +322,6 @@ impl<
                             return;
                         }
                     };
-                    let proposal_view = proposal.view;
                     // If we already verified this proposal, this function will ensure we don't
                     // notify the application of it again.
                     if !self.verify(hash.clone(), proposal.clone()).await {
@@ -339,9 +335,7 @@ impl<
                     self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
-                    self.application
-                        .finalized(proposal_view, hash.clone())
-                        .await;
+                    self.application.finalized(hash).await;
                     debug!(height = next, "notified application finalization");
                 }
             }
@@ -351,7 +345,7 @@ impl<
         }
     }
 
-    fn best_parent(&self) -> Option<(Hash, View, Height)> {
+    fn best_parent(&self) -> Option<(Digest, View, Height)> {
         // Find highest block that we have notified the application of
         let mut next = self.last_notarized;
         loop {
@@ -388,7 +382,7 @@ impl<
         &mut self,
         view: View,
         proposer: PublicKey,
-    ) -> Option<(Hash, Height, Hash, Payload)> {
+    ) -> Option<(Digest, Height, Digest, Payload)> {
         // If don't have ancestry to last notarized block fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
@@ -504,7 +498,7 @@ impl<
         false
     }
 
-    pub async fn verify(&mut self, hash: Hash, proposal: wire::Proposal) -> bool {
+    pub async fn verify(&mut self, hash: Digest, proposal: wire::Proposal) -> bool {
         // If already verified, do nothing
         if self
             .verified
@@ -596,7 +590,7 @@ impl<
         self.notify().await;
     }
 
-    fn backfill_finalization(&mut self, height: Height, mut block: Hash) {
+    fn backfill_finalization(&mut self, height: Height, mut block: Digest) {
         trace!(height, hash = hex(&block), "backfilling finalizations");
         let mut next = height;
         loop {
@@ -710,7 +704,7 @@ impl<
         self.notify().await;
     }
 
-    fn get_next_missing(&mut self) -> Option<(Height, Hash)> {
+    fn get_next_missing(&mut self) -> Option<(Height, Digest)> {
         loop {
             // See if we have any missing proposals
             let (height, hash) = match self.missing_receiver.try_next() {
@@ -731,7 +725,7 @@ impl<
     async fn send_request(
         &mut self,
         height: Height,
-        hash: Hash,
+        hash: Digest,
         sender: &mut impl Sender,
     ) -> PublicKey {
         // Compute missing blocks from hash
@@ -938,7 +932,7 @@ impl<
                             };
                             voter.proposal(view, parent, height, payload, payload_hash).await;
                         }
-                        Message::Verify { hash, proposal } => {
+                        Message::Verify { container, proposal } => {
                             // If proposal height is already finalized, fail
                             //
                             // We will only verify old proposals via notify loop.
@@ -953,7 +947,7 @@ impl<
 
                             // Attempt to verify proposal
                             let proposal_view = proposal.view;
-                            if !self.verify(hash, proposal).await {
+                            if !self.verify(container, proposal).await {
                                 continue;
                             }
                             voter.verified(proposal_view).await;

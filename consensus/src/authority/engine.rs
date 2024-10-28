@@ -1,21 +1,22 @@
 use super::{
     actors::{resolver, voter},
     config::Config,
+    Context, View,
 };
-use crate::{Application, Finalizer, Hasher, Supervisor};
-use commonware_cryptography::Scheme;
+use crate::{Automaton, Finalizer, Supervisor};
+use commonware_cryptography::{Hasher, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Clock, Spawner};
 use governor::clock::Clock as GClock;
-use rand::Rng;
+use rand::{CryptoRng, Rng};
 use tracing::debug;
 
 pub struct Engine<
-    E: Clock + GClock + Rng + Spawner,
+    E: Clock + GClock + Rng + CryptoRng + Spawner,
     C: Scheme,
     H: Hasher,
-    A: Application + Supervisor + Finalizer,
+    A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
 > {
     runtime: E,
 
@@ -27,10 +28,10 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Rng + Spawner,
+        E: Clock + GClock + Rng + CryptoRng + Spawner,
         C: Scheme,
         H: Hasher,
-        A: Application + Supervisor + Finalizer,
+        A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
     > Engine<E, C, H, A>
 {
     pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> Self {

@@ -37,6 +37,7 @@ mod encoder;
 mod engine;
 mod prover;
 
+use commonware_cryptography::{Digest, PublicKey};
 pub use config::Config;
 pub use engine::Engine;
 pub use prover::Prover;
@@ -52,7 +53,7 @@ pub type Height = u64;
 #[derive(Clone)]
 pub struct Context {
     pub view: View,
-    pub parent: Hash,
+    pub parent: Digest,
     pub height: Height,
     pub proposer: PublicKey,
 }
@@ -87,15 +88,14 @@ mod tests {
     use super::*;
     use crate::{
         mocks::application::{Application, Config as ApplicationConfig, Progress},
-        sha256::Sha256,
-        Hash, Hasher, Height, Proof, Supervisor, View,
+        Proof, Supervisor,
     };
     use bytes::Bytes;
     use byzantine::{
         conflicter::{self, Conflicter},
         nuller::{self, Nuller},
     };
-    use commonware_cryptography::{Ed25519, PublicKey, Scheme};
+    use commonware_cryptography::{Ed25519, Hasher, PublicKey, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{
@@ -114,7 +114,7 @@ mod tests {
     };
     use tracing::{debug, info};
 
-    type HeightActivity = HashMap<Height, HashMap<Hash, HashSet<PublicKey>>>;
+    type HeightActivity = HashMap<Height, HashMap<Digest, HashSet<PublicKey>>>;
     type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
     #[derive(Clone)]
@@ -152,8 +152,10 @@ mod tests {
     }
 
     impl<C: Scheme, H: Hasher> Supervisor for TestSupervisor<C, H> {
-        fn participants(&self, view: View) -> Option<&Vec<PublicKey>> {
-            let closest = match self.participants.range(..=view).next_back() {
+        type Index = View;
+
+        fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>> {
+            let closest = match self.participants.range(..=index).next_back() {
                 Some((_, p)) => p,
                 None => {
                     panic!("no participants in required range");
@@ -162,8 +164,8 @@ mod tests {
             Some(&closest.1)
         }
 
-        fn is_participant(&self, view: View, candidate: &PublicKey) -> Option<bool> {
-            let closest = match self.participants.range(..=view).next_back() {
+        fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<bool> {
+            let closest = match self.participants.range(..=index).next_back() {
                 Some((_, p)) => p,
                 None => {
                     panic!("no participants in required range");

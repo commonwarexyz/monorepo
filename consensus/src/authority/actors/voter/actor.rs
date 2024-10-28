@@ -6,13 +6,13 @@ use crate::{
             finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
             vote_namespace,
         },
-        wire, Prover, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL, CONFLICTING_VOTE, FINALIZE,
-        NULL_AND_FINALIZE, PROPOSAL, VOTE,
+        wire, Context, Height, Prover, View, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL,
+        CONFLICTING_VOTE, FINALIZE, NULL_AND_FINALIZE, PROPOSAL, VOTE,
     },
-    Application, Finalizer, Hash, Hasher, Height, Supervisor, View,
+    Automaton, Finalizer, Supervisor,
 };
 use bytes::Bytes;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
@@ -34,7 +34,7 @@ use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
 type Notarizable<'a> = Option<(
-    Option<Hash>,
+    Option<Digest>,
     Option<Height>,
     &'a HashMap<PublicKey, wire::Vote>,
 )>;
@@ -53,8 +53,8 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     next_proposal_request: Option<SystemTime>,
     requested_proposal: bool,
     proposal: Option<(
-        Hash, /* proposal */
-        Hash, /* payload */
+        Digest, /* proposal */
+        Digest, /* payload */
         wire::Proposal,
     )>,
     verified_proposal: bool,
@@ -64,8 +64,8 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     broadcast_finalize: bool,
 
     // Track votes for all proposals (ensuring any participant only has one recorded vote)
-    proposal_voters: HashMap<PublicKey, Hash>,
-    proposal_votes: HashMap<Hash, HashMap<PublicKey, wire::Vote>>,
+    proposal_voters: HashMap<PublicKey, Digest>,
+    proposal_votes: HashMap<Digest, HashMap<PublicKey, wire::Vote>>,
     broadcast_proposal_notarization: bool,
 
     timeout_fired: bool,
@@ -73,8 +73,8 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     broadcast_null_notarization: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalizers: HashMap<PublicKey, Hash>,
-    finalizes: HashMap<Hash, HashMap<PublicKey, wire::Finalize>>,
+    finalizers: HashMap<PublicKey, Digest>,
+    finalizes: HashMap<Digest, HashMap<PublicKey, wire::Finalize>>,
     broadcast_finalization: bool,
 }
 
@@ -339,7 +339,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         &mut self,
         threshold: u32,
         force: bool,
-    ) -> Option<(Hash, Height, &HashMap<PublicKey, wire::Finalize>)> {
+    ) -> Option<(Digest, Height, &HashMap<PublicKey, wire::Finalize>)> {
         if !force && (self.broadcast_finalization || !self.verified_proposal) {
             // We only want to broadcast a finalization if we have verified some proposal at
             // this point.
@@ -382,7 +382,7 @@ pub struct Actor<
     E: Clock + Rng + GClock,
     C: Scheme,
     H: Hasher,
-    A: Application + Supervisor + Finalizer,
+    A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
 > {
     runtime: E,
     crypto: C,
@@ -414,8 +414,12 @@ pub struct Actor<
     tracked_views: Gauge,
 }
 
-impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor + Finalizer>
-    Actor<E, C, H, A>
+impl<
+        E: Clock + Rng + GClock,
+        C: Scheme,
+        H: Hasher,
+        A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
+    > Actor<E, C, H, A>
 {
     pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
@@ -591,8 +595,8 @@ impl<E: Clock + Rng + GClock, C: Scheme, H: Hasher, A: Application + Supervisor 
 
     async fn our_proposal(
         &mut self,
-        proposal_hash: Hash,
-        payload_hash: Hash,
+        proposal_hash: Digest,
+        payload_hash: Digest,
         proposal: wire::Proposal,
     ) -> bool {
         // Store the proposal

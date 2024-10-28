@@ -1,6 +1,7 @@
-use crate::{Application, Hasher, View};
+use super::View;
+use crate::Automaton;
 use bytes::Bytes;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Hasher, PublicKey, Scheme};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
@@ -9,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-pub struct Config<C: Scheme, H: Hasher, A: Application> {
+pub struct Config<C: Scheme, H: Hasher, A: Automaton> {
     pub crypto: C,
     pub hasher: H,
     pub application: A,
