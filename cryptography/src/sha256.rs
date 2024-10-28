@@ -6,9 +6,8 @@ use sha2::{Digest as _, Sha256 as ISha256};
 const DIGEST_LENGTH: usize = 32;
 
 /// SHA-256 hasher.
-#[derive(Clone)]
 pub struct Sha256 {
-    hasher: Option<ISha256>,
+    hasher: ISha256,
 }
 
 impl Default for Sha256 {
@@ -20,22 +19,20 @@ impl Default for Sha256 {
 impl Hasher for Sha256 {
     fn new() -> Self {
         Self {
-            hasher: Some(ISha256::new()),
+            hasher: ISha256::new(),
         }
     }
 
     fn update(&mut self, message: &[u8]) {
-        self.hasher.as_mut().unwrap().update(message);
+        self.hasher.update(message);
     }
 
     fn finalize(&mut self) -> Digest {
-        let hash = self.hasher.take().unwrap().finalize().to_vec().into();
-        self.reset();
-        hash
+        self.hasher.finalize_reset().to_vec().into()
     }
 
     fn reset(&mut self) {
-        self.hasher = Some(ISha256::new());
+        self.hasher = ISha256::new();
     }
 
     fn validate(digest: &Digest) -> bool {

@@ -86,7 +86,7 @@ pub type Digest = Bytes;
 /// may work better with different cryptographic schemes, may be more efficient
 /// to use in STARK/SNARK proofs, or provide different levels of security (with some
 /// performance/size penalty).
-pub trait Hasher: Clone + Send + 'static {
+pub trait Hasher: Send + 'static {
     /// Create a new hasher.
     fn new() -> Self;
 
@@ -275,7 +275,7 @@ mod tests {
         test_invalid_signature_length::<Bls12381>();
     }
 
-    fn test_hasher<H: Hasher>() {
+    fn test_hasher_multiple_runs<H: Hasher>() {
         // Generate initial hash
         let mut hasher = H::new();
         hasher.update(b"hello world");
@@ -296,10 +296,61 @@ mod tests {
         let digest_reset = hasher.finalize();
         assert!(H::validate(&digest_reset));
         assert_eq!(digest, digest_reset);
+
+        // Hash different data
+        hasher.update(b"hello mars");
+        let digest_mars = hasher.finalize();
+        assert!(H::validate(&digest_mars));
+        assert_ne!(digest, digest_mars);
+    }
+
+    fn test_hasher_multiple_updates<H: Hasher>() {
+        // Generate initial hash
+        let mut hasher = H::new();
+        hasher.update(b"hello");
+        hasher.update(b" world");
+        let digest = hasher.finalize();
+        assert!(H::validate(&digest));
+
+        // Generate hash in oneshot
+        let mut hasher = H::new();
+        hasher.update(b"hello world");
+        let digest_oneshot = hasher.finalize();
+        assert!(H::validate(&digest_oneshot));
+        assert_eq!(digest, digest_oneshot);
+    }
+
+    fn test_hasher_empty_input<H: Hasher>() {
+        let mut hasher = H::new();
+        let digest = hasher.finalize();
+        assert!(H::validate(&digest));
+    }
+
+    fn test_hasher_large_input<H: Hasher>() {
+        let mut hasher = H::new();
+        let data = vec![1; 1024];
+        hasher.update(&data);
+        let digest = hasher.finalize();
+        assert!(H::validate(&digest));
     }
 
     #[test]
-    fn test_sha256_hasher() {
-        test_hasher::<Sha256>();
+    fn test_sha256_hasher_multiple_runs() {
+        test_hasher_multiple_runs::<Sha256>();
+    }
+
+    #[test]
+    fn test_sha256_hasher_multiple_updates() {
+        test_hasher_multiple_updates::<Sha256>();
+    }
+
+    #[test]
+    fn test_sha256_hasher_empty_input() {
+        test_hasher_empty_input::<Sha256>();
+    }
+
+    #[test]
+    fn test_sha256_hasher_large_input() {
+        test_hasher_large_input::<Sha256>();
     }
 }
