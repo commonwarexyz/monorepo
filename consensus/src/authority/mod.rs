@@ -18,7 +18,7 @@
 //! # Async Handling
 //!
 //! All application interaction occurs asynchronously, meaning that the engine can continue processing messages
-//! while a payload is being built or verified (usually take hundres of milliseconds).
+//! while a payload is being built or verified (usually take hundreds of milliseconds).
 //!
 //! # Differences from Simplex Paper
 //!
