@@ -7,11 +7,11 @@ fn main() -> Result<()> {
         "Signature.signature",
         "Proposal.payload",
         "Proposal.parent",
-        "Vote.hash",
-        "Notarization.hash",
-        "Finalize.hash",
-        "Finalization.hash",
-        "Request.hash",
+        "Vote.digest",
+        "Notarization.digest",
+        "Finalize.digest",
+        "Finalization.digest",
+        "Request.digest",
     ]);
     config.compile_protos(&["src/authority/wire.proto"], &["src/authority/"])?;
     Ok(())

@@ -28,7 +28,7 @@ message Proposal {
 message Vote {
     uint64 view = 1;
     optional uint64 height = 2;
-    optional bytes hash = 3; 
+    optional bytes digest = 3; 
 
     Signature signature = 4;
 }
@@ -36,7 +36,7 @@ message Vote {
 message Notarization {
     uint64 view = 1;
     optional uint64 height = 2;
-    optional bytes hash = 3;
+    optional bytes digest = 3;
     
     repeated Signature signatures = 4;
 }
@@ -44,7 +44,7 @@ message Notarization {
 message Finalize {
     uint64 view = 1;
     uint64 height = 2;
-    bytes hash = 3;
+    bytes digest = 3;
 
     Signature signature = 4;
 }
@@ -52,7 +52,7 @@ message Finalize {
 message Finalization {
     uint64 view = 1;
     uint64 height = 2;
-    bytes hash = 3;
+    bytes digest = 3;
 
     repeated Signature signatures = 4;
 }
@@ -79,7 +79,7 @@ message Backfill {
     }
 }
 message Request {
-    bytes hash = 1;
+    bytes digest = 1;
     uint64 parents = 2;
 }
 

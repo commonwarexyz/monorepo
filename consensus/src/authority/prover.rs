@@ -3,11 +3,11 @@ use super::{
         finalize_digest, finalize_namespace, proposal_digest, proposal_namespace, vote_digest,
         vote_namespace,
     },
-    wire,
+    wire, Height, View,
 };
-use crate::{Hash, Hasher, Height, Proof, View};
+use crate::Proof;
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use core::panic;
 use std::marker::PhantomData;
 
@@ -35,15 +35,15 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_proposal(
         view: View,
         height: Height,
-        parent: Hash,
-        payload: Hash,
+        parent: Digest,
+        payload: Digest,
         signature: wire::Signature,
     ) -> Proof {
         // Setup proof
-        let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
-        let size = 8 + 8 + hash_size + hash_size + public_key_size + signature_size;
-        let mut proof = Vec::with_capacity(size);
+        let digest_len = H::len();
+        let (public_key_len, signature_len) = C::len();
+        let len = 8 + 8 + digest_len + digest_len + public_key_len + signature_len;
+        let mut proof = Vec::with_capacity(len);
 
         // Encode proof
         proof.put_u64(view);
@@ -59,21 +59,21 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         &mut self,
         mut proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View, Height, Hash)> {
+    ) -> Option<(PublicKey, View, Height, Digest)> {
         // Ensure proof is big enough
-        let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
-        if proof.len() != 8 + 8 + hash_size + hash_size + public_key_size + signature_size {
+        let digest_len = H::len();
+        let (public_key_len, signature_len) = C::len();
+        if proof.len() != 8 + 8 + digest_len + digest_len + public_key_len + signature_len {
             return None;
         }
 
         // Decode proof
         let view = proof.get_u64();
         let height = proof.get_u64();
-        let parent = proof.copy_to_bytes(hash_size);
-        let payload = proof.copy_to_bytes(hash_size);
-        let public_key = proof.copy_to_bytes(public_key_size);
-        let signature = proof.copy_to_bytes(signature_size);
+        let parent = proof.copy_to_bytes(digest_len);
+        let payload = proof.copy_to_bytes(digest_len);
+        let public_key = proof.copy_to_bytes(public_key_len);
+        let signature = proof.copy_to_bytes(signature_len);
 
         // Verify signature
         let proposal_digest = proposal_digest(view, height, &parent, &payload);
@@ -91,21 +91,21 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             }
         }
 
-        // Compute hash
+        // Compute digest
         self.hasher.update(&proposal_digest);
         Some((public_key, view, height, self.hasher.finalize()))
     }
 
     pub(crate) fn serialize_vote(vote: wire::Vote) -> Proof {
         // Setup proof
-        let (public_key_size, signature_size) = C::size();
-        let size = 8 + 8 + H::size() + public_key_size + signature_size;
-        let mut proof = Vec::with_capacity(size);
+        let (public_key_len, signature_len) = C::len();
+        let len = 8 + 8 + H::len() + public_key_len + signature_len;
+        let mut proof = Vec::with_capacity(len);
 
         // Encode proofs
         proof.put_u64(vote.view);
         proof.put_u64(vote.height.expect("height not populated"));
-        proof.put(vote.hash.expect("hash not populated"));
+        proof.put(vote.digest.expect("digest not populated"));
         let signature = vote.signature.expect("signature not populated");
         proof.put(signature.public_key);
         proof.put(signature.signature);
@@ -116,44 +116,44 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         &self,
         mut proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View, Height, Hash)> {
+    ) -> Option<(PublicKey, View, Height, Digest)> {
         // Ensure proof is big enough
-        let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
-        if proof.len() != 8 + 8 + hash_size + public_key_size + signature_size {
+        let digest_len = H::len();
+        let (public_key_len, signature_len) = C::len();
+        if proof.len() != 8 + 8 + digest_len + public_key_len + signature_len {
             return None;
         }
 
         // Decode proof
         let view = proof.get_u64();
         let height = proof.get_u64();
-        let hash = proof.copy_to_bytes(hash_size);
-        let public_key = proof.copy_to_bytes(public_key_size);
-        let signature = proof.copy_to_bytes(signature_size);
+        let digest = proof.copy_to_bytes(digest_len);
+        let public_key = proof.copy_to_bytes(public_key_len);
+        let signature = proof.copy_to_bytes(signature_len);
 
         // Verify signature
         if check_sig {
             if !C::validate(&public_key) {
                 return None;
             }
-            let vote_digest = vote_digest(view, Some(height), Some(&hash));
+            let vote_digest = vote_digest(view, Some(height), Some(&digest));
             if !C::verify(&self.vote_namespace, &vote_digest, &public_key, &signature) {
                 return None;
             }
         }
-        Some((public_key, view, height, hash))
+        Some((public_key, view, height, digest))
     }
 
     pub(crate) fn serialize_finalize(finalize: wire::Finalize) -> Proof {
         // Setup proof
-        let (public_key_size, signature_size) = C::size();
-        let size = 8 + 8 + H::size() + public_key_size + signature_size;
-        let mut proof = Vec::with_capacity(size);
+        let (public_key_len, signature_len) = C::len();
+        let len = 8 + 8 + H::len() + public_key_len + signature_len;
+        let mut proof = Vec::with_capacity(len);
 
         // Encode proof
         proof.put_u64(finalize.view);
         proof.put_u64(finalize.height);
-        proof.put(finalize.hash);
+        proof.put(finalize.digest);
         let signature = finalize.signature.expect("signature not populated");
         proof.put(signature.public_key);
         proof.put(signature.signature);
@@ -164,27 +164,27 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         &self,
         mut proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View, Height, Hash)> {
+    ) -> Option<(PublicKey, View, Height, Digest)> {
         // Ensure proof is big enough
-        let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
-        if proof.len() != 8 + 8 + hash_size + public_key_size + signature_size {
+        let digest_len = H::len();
+        let (public_key_len, signature_len) = C::len();
+        if proof.len() != 8 + 8 + digest_len + public_key_len + signature_len {
             return None;
         }
 
         // Decode proof
         let view = proof.get_u64();
         let height = proof.get_u64();
-        let hash = proof.copy_to_bytes(hash_size);
-        let public_key = proof.copy_to_bytes(public_key_size);
-        let signature = proof.copy_to_bytes(signature_size);
+        let digest = proof.copy_to_bytes(digest_len);
+        let public_key = proof.copy_to_bytes(public_key_len);
+        let signature = proof.copy_to_bytes(signature_len);
 
         // Verify signature
         if check_sig {
             if !C::validate(&public_key) {
                 return None;
             }
-            let finalize_digest = finalize_digest(view, height, &hash);
+            let finalize_digest = finalize_digest(view, height, &digest);
             if !C::verify(
                 &self.finalize_namespace,
                 &finalize_digest,
@@ -194,34 +194,34 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
                 return None;
             }
         }
-        Some((public_key, view, height, hash))
+        Some((public_key, view, height, digest))
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn serialize_conflicting_proposal(
         view: View,
         height_1: Height,
-        parent_1: Hash,
-        payload_1: Hash,
+        parent_1: Digest,
+        payload_1: Digest,
         signature_1: wire::Signature,
         height_2: Height,
-        parent_2: Hash,
-        payload_2: Hash,
+        parent_2: Digest,
+        payload_2: Digest,
         signature_2: wire::Signature,
     ) -> Proof {
         // Setup proof
-        let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
-        let size = 8
-            + public_key_size
+        let digest_len = H::len();
+        let (public_key_len, signature_len) = C::len();
+        let len = 8
+            + public_key_len
             + 8
-            + hash_size
-            + hash_size
-            + signature_size
+            + digest_len
+            + digest_len
+            + signature_len
             + 8
-            + hash_size
-            + hash_size
-            + signature_size;
+            + digest_len
+            + digest_len
+            + signature_len;
 
         // Ensure proof can be generated correctly
         if signature_1.public_key != signature_2.public_key {
@@ -230,7 +230,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let public_key = signature_1.public_key;
 
         // Encode proof
-        let mut proof = Vec::with_capacity(size);
+        let mut proof = Vec::with_capacity(len);
         proof.put_u64(view);
         proof.put(public_key);
         proof.put_u64(height_1);
@@ -250,33 +250,33 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         check_sig: bool,
     ) -> Option<(PublicKey, View)> {
         // Ensure proof is big enough
-        let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
-        let size = 8
-            + public_key_size
+        let digest_len = H::len();
+        let (public_key_len, signature_len) = C::len();
+        let len = 8
+            + public_key_len
             + 8
-            + hash_size
-            + hash_size
-            + signature_size
+            + digest_len
+            + digest_len
+            + signature_len
             + 8
-            + hash_size
-            + hash_size
-            + signature_size;
-        if proof.len() != size {
+            + digest_len
+            + digest_len
+            + signature_len;
+        if proof.len() != len {
             return None;
         }
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key = proof.copy_to_bytes(public_key_size);
+        let public_key = proof.copy_to_bytes(public_key_len);
         let height_1 = proof.get_u64();
-        let parent_1 = proof.copy_to_bytes(hash_size);
-        let payload_1 = proof.copy_to_bytes(hash_size);
-        let signature_1 = proof.copy_to_bytes(signature_size);
+        let parent_1 = proof.copy_to_bytes(digest_len);
+        let payload_1 = proof.copy_to_bytes(digest_len);
+        let signature_1 = proof.copy_to_bytes(signature_len);
         let height_2 = proof.get_u64();
-        let parent_2 = proof.copy_to_bytes(hash_size);
-        let payload_2 = proof.copy_to_bytes(hash_size);
-        let signature_2 = proof.copy_to_bytes(signature_size);
+        let parent_2 = proof.copy_to_bytes(digest_len);
+        let payload_2 = proof.copy_to_bytes(digest_len);
+        let signature_2 = proof.copy_to_bytes(signature_len);
 
         // Verify signatures
         if check_sig {
@@ -305,17 +305,17 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_conflicting_vote(
         view: View,
         height_1: Height,
-        hash_1: Hash,
+        hash_1: Digest,
         signature_1: wire::Signature,
         height_2: Height,
-        hash_2: Hash,
+        hash_2: Digest,
         signature_2: wire::Signature,
     ) -> Proof {
         // Setup proof
-        let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
-        let size =
-            8 + public_key_size + 8 + hash_size + signature_size + 8 + hash_size + signature_size;
+        let digest_len = H::len();
+        let (public_key_len, signature_len) = C::len();
+        let len =
+            8 + public_key_len + 8 + digest_len + signature_len + 8 + digest_len + signature_len;
 
         // Ensure proof can be generated correctly
         if signature_1.public_key != signature_2.public_key {
@@ -324,7 +324,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let public_key = signature_1.public_key;
 
         // Encode proof
-        let mut proof = Vec::with_capacity(size);
+        let mut proof = Vec::with_capacity(len);
         proof.put_u64(view);
         proof.put(public_key);
         proof.put_u64(height_1);
@@ -342,23 +342,23 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         check_sig: bool,
     ) -> Option<(PublicKey, View)> {
         // Ensure proof is big enough
-        let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
-        let size =
-            8 + public_key_size + 8 + hash_size + signature_size + 8 + hash_size + signature_size;
-        if proof.len() != size {
+        let digest_len = H::len();
+        let (public_key_len, signature_len) = C::len();
+        let len =
+            8 + public_key_len + 8 + digest_len + signature_len + 8 + digest_len + signature_len;
+        if proof.len() != len {
             return None;
         }
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key = proof.copy_to_bytes(public_key_size);
+        let public_key = proof.copy_to_bytes(public_key_len);
         let height_1 = proof.get_u64();
-        let hash_1 = proof.copy_to_bytes(hash_size);
-        let signature_1 = proof.copy_to_bytes(signature_size);
+        let hash_1 = proof.copy_to_bytes(digest_len);
+        let signature_1 = proof.copy_to_bytes(signature_len);
         let height_2 = proof.get_u64();
-        let hash_2 = proof.copy_to_bytes(hash_size);
-        let signature_2 = proof.copy_to_bytes(signature_size);
+        let hash_2 = proof.copy_to_bytes(digest_len);
+        let signature_2 = proof.copy_to_bytes(signature_len);
 
         // Verify signatures
         if check_sig {
@@ -387,17 +387,17 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_conflicting_finalize(
         view: View,
         height_1: Height,
-        hash_1: Hash,
+        hash_1: Digest,
         signature_1: wire::Signature,
         height_2: Height,
-        hash_2: Hash,
+        hash_2: Digest,
         signature_2: wire::Signature,
     ) -> Proof {
         // Setup proof
-        let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
-        let size =
-            8 + public_key_size + 8 + hash_size + signature_size + 8 + hash_size + signature_size;
+        let digest_len = H::len();
+        let (public_key_len, signature_len) = C::len();
+        let len =
+            8 + public_key_len + 8 + digest_len + signature_len + 8 + digest_len + signature_len;
 
         // Ensure proof can be generated correctly
         if signature_1.public_key != signature_2.public_key {
@@ -406,7 +406,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let public_key = signature_1.public_key;
 
         // Encode proof
-        let mut proof = Vec::with_capacity(size);
+        let mut proof = Vec::with_capacity(len);
         proof.put_u64(view);
         proof.put(public_key);
         proof.put_u64(height_1);
@@ -423,23 +423,23 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         mut proof: Proof,
         check_sig: bool,
     ) -> Option<(PublicKey, View)> {
-        let hash_size = H::size();
-        let (public_key_size, signature_size) = C::size();
-        let size =
-            8 + public_key_size + 8 + hash_size + signature_size + 8 + hash_size + signature_size;
-        if proof.len() != size {
+        let digest_len = H::len();
+        let (public_key_len, signature_len) = C::len();
+        let len =
+            8 + public_key_len + 8 + digest_len + signature_len + 8 + digest_len + signature_len;
+        if proof.len() != len {
             return None;
         }
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key = proof.copy_to_bytes(public_key_size);
+        let public_key = proof.copy_to_bytes(public_key_len);
         let height_1 = proof.get_u64();
-        let hash_1 = proof.copy_to_bytes(hash_size);
-        let signature_1 = proof.copy_to_bytes(signature_size);
+        let hash_1 = proof.copy_to_bytes(digest_len);
+        let signature_1 = proof.copy_to_bytes(signature_len);
         let height_2 = proof.get_u64();
-        let hash_2 = proof.copy_to_bytes(hash_size);
-        let signature_2 = proof.copy_to_bytes(signature_size);
+        let hash_2 = proof.copy_to_bytes(digest_len);
+        let signature_2 = proof.copy_to_bytes(signature_len);
 
         // Verify signatures
         if check_sig {
@@ -468,13 +468,13 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub(crate) fn serialize_null_finalize(
         view: View,
         height: Height,
-        hash: Hash,
+        digest: Digest,
         signature_finalize: wire::Signature,
         signature_null: wire::Signature,
     ) -> Proof {
         // Setup proof
-        let (public_key_size, signature_size) = C::size();
-        let size = 8 + public_key_size + 8 + H::size() + signature_size + signature_size;
+        let (public_key_len, signature_len) = C::len();
+        let len = 8 + public_key_len + 8 + H::len() + signature_len + signature_len;
 
         // Ensure proof can be generated correctly
         if signature_finalize.public_key != signature_null.public_key {
@@ -483,11 +483,11 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let public_key = signature_finalize.public_key;
 
         // Encode proof
-        let mut proof = Vec::with_capacity(size);
+        let mut proof = Vec::with_capacity(len);
         proof.put_u64(view);
         proof.put(public_key);
         proof.put_u64(height);
-        proof.put(hash);
+        proof.put(digest);
         proof.put(signature_finalize.signature);
         proof.put(signature_null.signature);
         proof.into()
@@ -499,26 +499,26 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         check_sig: bool,
     ) -> Option<(PublicKey, View)> {
         // Ensure proof is big enough
-        let (public_key_size, signature_size) = C::size();
-        let size = 8 + public_key_size + 8 + H::size() + signature_size + signature_size;
-        if proof.len() != size {
+        let (public_key_len, signature_len) = C::len();
+        let len = 8 + public_key_len + 8 + H::len() + signature_len + signature_len;
+        if proof.len() != len {
             return None;
         }
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key = proof.copy_to_bytes(public_key_size);
+        let public_key = proof.copy_to_bytes(public_key_len);
         let height = proof.get_u64();
-        let hash = proof.copy_to_bytes(H::size());
-        let signature_finalize = proof.copy_to_bytes(signature_size);
-        let signature_null = proof.copy_to_bytes(signature_size);
+        let digest = proof.copy_to_bytes(H::len());
+        let signature_finalize = proof.copy_to_bytes(signature_len);
+        let signature_null = proof.copy_to_bytes(signature_len);
 
         // Verify signatures
         if check_sig {
             if !C::validate(&public_key) {
                 return None;
             }
-            let finalize_digest = finalize_digest(view, height, &hash);
+            let finalize_digest = finalize_digest(view, height, &digest);
             let null_digest = vote_digest(view, None, None);
             if !C::verify(
                 &self.finalize_namespace,

@@ -9,11 +9,8 @@ mod application;
 
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::{
-    authority::{Config, Engine},
-    sha256::Sha256,
-};
-use commonware_cryptography::{Ed25519, Scheme};
+use commonware_consensus::authority::{Config, Engine};
+use commonware_cryptography::{Ed25519, Scheme, Sha256};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Context, Executor},

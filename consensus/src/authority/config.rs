@@ -1,6 +1,7 @@
-use crate::{Application, Hasher, View};
+use super::{Context, View};
+use crate::{Automaton, Finalizer, Supervisor};
 use bytes::Bytes;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Hasher, PublicKey, Scheme};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
@@ -9,7 +10,11 @@ use std::{
     time::Duration,
 };
 
-pub struct Config<C: Scheme, H: Hasher, A: Application> {
+pub struct Config<
+    C: Scheme,
+    H: Hasher,
+    A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
+> {
     pub crypto: C,
     pub hasher: H,
     pub application: A,
@@ -30,7 +35,7 @@ pub struct Config<C: Scheme, H: Hasher, A: Application> {
     /// Timeout to wait for a peer to respond to a fetch request.
     pub fetch_timeout: Duration,
 
-    /// Maximum number of blocks to request/respond with in a single fetch.
+    /// Maximum number of containers to request/respond with in a single fetch.
     pub max_fetch_count: u64,
 
     /// Maximum number of bytes to respond with in a single fetch.

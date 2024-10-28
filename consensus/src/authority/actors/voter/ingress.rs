@@ -1,15 +1,16 @@
-use crate::{Hash, Height, View};
+use crate::authority::{Height, View};
 use bytes::Bytes;
+use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message {
     Proposal {
         view: View,
-        parent: Hash,
+        parent: Digest,
         height: Height,
         payload: Bytes,
-        payload_hash: Hash,
+        payload_hash: Digest,
     },
     ProposalFailed {
         view: View,
@@ -32,10 +33,10 @@ impl Mailbox {
     pub async fn proposal(
         &mut self,
         view: View,
-        parent: Hash,
+        parent: Digest,
         height: Height,
         payload: Bytes,
-        payload_hash: Hash,
+        payload_hash: Digest,
     ) {
         self.sender
             .send(Message::Proposal {

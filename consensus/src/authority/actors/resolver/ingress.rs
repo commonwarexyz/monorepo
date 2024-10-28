@@ -1,7 +1,5 @@
-use crate::{
-    authority::{actors::Proposal, wire},
-    Hash, PublicKey, View,
-};
+use crate::authority::{actors::Proposal, wire, View};
+use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {
@@ -10,7 +8,7 @@ pub enum Message {
         proposer: PublicKey, // will be self
     },
     Verify {
-        hash: Hash,
+        container: Digest,
         proposal: wire::Proposal,
     },
     Notarized {
@@ -38,9 +36,12 @@ impl Mailbox {
             .unwrap();
     }
 
-    pub async fn verify(&mut self, hash: Hash, proposal: wire::Proposal) {
+    pub async fn verify(&mut self, container: Digest, proposal: wire::Proposal) {
         self.sender
-            .send(Message::Verify { hash, proposal })
+            .send(Message::Verify {
+                container,
+                proposal,
+            })
             .await
             .unwrap();
     }
