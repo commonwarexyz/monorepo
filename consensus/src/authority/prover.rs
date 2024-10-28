@@ -1,3 +1,8 @@
+//! Prover module for the authority node.
+//!
+//! We don't use protobuf for proof encoding because we expect external parties
+//! to decode proofs in constrained environments where protobuf may not be implemented.
+
 use super::{
     encoder::{
         finalize_message, finalize_namespace, proposal_message, proposal_namespace, vote_message,
