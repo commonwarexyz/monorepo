@@ -58,11 +58,11 @@ pub struct Actor<
 
     null_notarizations: BTreeSet<View>,
     knowledge: HashMap<Height, Knowledge>,
-    blocks: HashMap<Digest, wire::Proposal>,
+    containers: HashMap<Digest, wire::Proposal>,
 
     // Track verifications
     //
-    // We never verify the same block twice.
+    // We never verify the same container twice.
     verified: HashMap<Height, HashSet<Digest>>,
 
     // Track notarization/finalization
@@ -91,15 +91,15 @@ impl<
     > Actor<E, C, H, A>
 {
     pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> (Self, Mailbox) {
-        // Create genesis block and store it
+        // Create genesis container and store it
         let mut verified = HashMap::new();
         let mut knowledge = HashMap::new();
-        let mut blocks = HashMap::new();
+        let mut containers = HashMap::new();
         let genesis = cfg.application.genesis();
         verified.insert(0, HashSet::from([genesis.0.clone()]));
         knowledge.insert(0, Knowledge::Finalized(genesis.0.clone()));
 
-        blocks.insert(
+        containers.insert(
             genesis.0.clone(),
             wire::Proposal {
                 view: 0,
@@ -134,7 +134,7 @@ impl<
 
                 null_notarizations: BTreeSet::new(),
                 knowledge,
-                blocks,
+                containers,
 
                 verified,
 
@@ -163,7 +163,7 @@ impl<
 
     async fn register_missing(&mut self, height: Height, hash: Digest) {
         // Check if we have the proposal
-        if self.blocks.contains_key(&hash) {
+        if self.containers.contains_key(&hash) {
             return;
         }
 
@@ -182,7 +182,7 @@ impl<
         // Parse proposal
         let (hash, proposal) = match proposal {
             Proposal::Reference(_, height, hash) => {
-                if self.blocks.contains_key(&hash) {
+                if self.containers.contains_key(&hash) {
                     return None;
                 }
                 return Some((height, hash));
@@ -192,7 +192,7 @@ impl<
         };
 
         // If already resolved, do nothing.
-        if self.blocks.contains_key(&hash) {
+        if self.containers.contains_key(&hash) {
             return None;
         }
 
@@ -230,17 +230,17 @@ impl<
                 start = (proposal.height - 1, proposal.parent.clone());
             }
 
-            // Finalize this block and all blocks we have that are ancestors of this block
+            // Finalize this container and all containers we have that are ancestors of this container
             self.backfill_finalization(start.0, start.1);
         }
 
         // Store proposal
         let height = proposal.height;
         let parent = proposal.parent.clone();
-        self.blocks.insert(hash, proposal);
+        self.containers.insert(hash, proposal);
 
         // Check if parent is missing
-        if self.blocks.contains_key(&parent) {
+        if self.containers.contains_key(&parent) {
             return None;
         }
         Some((height - 1, parent))
@@ -254,7 +254,7 @@ impl<
             let knowledge = match self.knowledge.get(&next).cloned() {
                 Some(knowledge) => knowledge,
                 None => {
-                    // No more blocks to notify
+                    // No more containers to notify
                     return;
                 }
             };
@@ -267,7 +267,7 @@ impl<
                     // of the finalizaed tip
                     //
                     // We may still only have notarization knowledge at this height because
-                    // we have not been able to resolve blocks from the accepted tip
+                    // we have not been able to resolve containers from the accepted tip
                     // to this height yet.
                     if self.last_finalized >= next {
                         trace!(
@@ -287,7 +287,7 @@ impl<
                         if already_notified {
                             continue;
                         }
-                        let proposal = match self.blocks.get(&hash) {
+                        let proposal = match self.containers.get(&hash) {
                             Some(proposal) => proposal,
                             None => {
                                 continue;
@@ -311,7 +311,7 @@ impl<
                 }
                 Knowledge::Finalized(hash) => {
                     // Send finalized proposal
-                    let proposal = match self.blocks.get(&hash) {
+                    let proposal = match self.containers.get(&hash) {
                         Some(proposal) => proposal,
                         None => {
                             debug!(
@@ -346,7 +346,7 @@ impl<
     }
 
     fn best_parent(&self) -> Option<(Digest, View, Height)> {
-        // Find highest block that we have notified the application of
+        // Find highest container that we have notified the application of
         let mut next = self.last_notarized;
         loop {
             match self.knowledge.get(&next) {
@@ -355,16 +355,16 @@ impl<
                     for (_, hash) in hashes.iter() {
                         if let Some(notifications) = self.notarizations_sent.get(&next) {
                             if notifications.contains(hash) {
-                                let block = self.blocks.get(hash).unwrap();
-                                return Some((hash.clone(), block.view, block.height));
+                                let container = self.containers.get(hash).unwrap();
+                                return Some((hash.clone(), container.view, container.height));
                             }
                         }
                     }
                 }
                 Some(Knowledge::Finalized(hash)) => {
                     if self.last_notified >= next {
-                        let block = self.blocks.get(hash).unwrap();
-                        return Some((hash.clone(), block.view, block.height));
+                        let container = self.containers.get(hash).unwrap();
+                        return Some((hash.clone(), container.view, container.height));
                     }
                 }
                 None => return None,
@@ -383,7 +383,7 @@ impl<
         view: View,
         proposer: PublicKey,
     ) -> Option<(Digest, Height, Digest, Payload)> {
-        // If don't have ancestry to last notarized block fulfilled, do nothing.
+        // If don't have ancestry to last notarized container fulfilled, do nothing.
         let parent = match self.best_parent() {
             Some(parent) => parent,
             None => {
@@ -391,8 +391,8 @@ impl<
             }
         };
 
-        // Ensure we have null notarizations back to best parent block (if not, we may
-        // just be missing blocks and should try again later)
+        // Ensure we have null notarizations back to best parent container (if not, we may
+        // just be missing containers and should try again later)
         let height = parent.2 + 1;
         for gap_view in (parent.1 + 1)..view {
             if !self.null_notarizations.contains(&gap_view) {
@@ -408,7 +408,7 @@ impl<
             }
         }
 
-        // Propose block
+        // Propose container
         let context = Context {
             view,
             parent: parent.0.clone(),
@@ -436,7 +436,7 @@ impl<
 
     fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
         // Check if we have the parent
-        let parent = self.blocks.get(&proposal.parent);
+        let parent = self.containers.get(&proposal.parent);
         if parent.is_none() {
             debug!(
                 height = proposal.height,
@@ -447,7 +447,7 @@ impl<
         }
         let parent = parent.unwrap();
 
-        // TODO: add condition to ensure we can't skip a proposal notarization unless there is a null block notarization?
+        // TODO: add condition to ensure we can't skip a proposal notarization unless there is a null container notarization?
         // if building at height 5 (view 10), need to ensure there are null notarizations to parent (height 4, view V) -> if there are
         // not null notarizations, it is possible those intermediate views could be finalized
         if self.last_finalized < proposal.height {
@@ -564,7 +564,7 @@ impl<
             Some(Knowledge::Notarized(seen)) => {
                 if let Some(old_hash) = seen.get(&view) {
                     if *old_hash != hash {
-                        panic!("notarized block hash mismatch");
+                        panic!("notarized container hash mismatch");
                     }
                     return;
                 }
@@ -590,8 +590,8 @@ impl<
         self.notify().await;
     }
 
-    fn backfill_finalization(&mut self, height: Height, mut block: Digest) {
-        trace!(height, hash = hex(&block), "backfilling finalizations");
+    fn backfill_finalization(&mut self, height: Height, mut container: Digest) {
+        trace!(height, hash = hex(&container), "backfilling finalizations");
         let mut next = height;
         loop {
             let previous = self.knowledge.get_mut(&next);
@@ -599,8 +599,8 @@ impl<
                 Some(Knowledge::Notarized(hashes)) => {
                     // Remove unnecessary proposals from memory
                     for (_, old_hash) in hashes.iter() {
-                        if old_hash != &block {
-                            self.blocks.remove(old_hash);
+                        if old_hash != &container {
+                            self.containers.remove(old_hash);
                             debug!(
                                 height,
                                 hash = hex(old_hash),
@@ -609,18 +609,18 @@ impl<
                         }
                     }
 
-                    // Store finalized block record
+                    // Store finalized container record
                     self.knowledge
-                        .insert(next, Knowledge::Finalized(block.clone()));
+                        .insert(next, Knowledge::Finalized(container.clone()));
 
-                    // Update value of hash to be parent of this block
-                    if let Some(parent) = self.blocks.get(&block) {
-                        block = parent.parent.clone();
+                    // Update value of hash to be parent of this container
+                    if let Some(parent) = self.containers.get(&container) {
+                        container = parent.parent.clone();
                     } else {
                         // If we don't know the parent, we can't finalize any ancestors
                         trace!(
                             next = height - 1,
-                            hash = hex(&block),
+                            hash = hex(&container),
                             reason = "missing parent",
                             "exiting backfill"
                         );
@@ -628,27 +628,27 @@ impl<
                     }
                 }
                 Some(Knowledge::Finalized(seen)) => {
-                    if *seen != block {
+                    if *seen != container {
                         panic!(
-                            "finalized block hash mismatch at height {}: expected={}, found={}",
+                            "finalized container hash mismatch at height {}: expected={}, found={}",
                             next,
                             hex(seen),
-                            hex(&block)
+                            hex(&container)
                         );
                     }
                     break;
                 }
                 None => {
                     self.knowledge
-                        .insert(next, Knowledge::Finalized(block.clone()));
+                        .insert(next, Knowledge::Finalized(container.clone()));
 
-                    // Attempt to keep recursing backwards until hit a finalized block or 0
-                    if let Some(parent) = self.blocks.get(&block) {
-                        block = parent.parent.clone();
+                    // Attempt to keep recursing backwards until hit a finalized container or 0
+                    if let Some(parent) = self.containers.get(&container) {
+                        container = parent.parent.clone();
                     } else {
                         trace!(
                             next = height - 1,
-                            hash = hex(&block),
+                            hash = hex(&container),
                             reason = "missing parent",
                             "exiting backfill"
                         );
@@ -692,7 +692,7 @@ impl<
             debug!(view = null_view, "pruned null notarization");
         }
 
-        // Finalize this block and all blocks we have that are ancestors of this block
+        // Finalize this container and all containers we have that are ancestors of this container
         self.backfill_finalization(height, hash);
 
         // Mark as seen
@@ -713,7 +713,7 @@ impl<
             };
 
             // Check if still unfulfilled
-            if self.blocks.contains_key(&hash) {
+            if self.containers.contains_key(&hash) {
                 continue;
             }
 
@@ -728,7 +728,7 @@ impl<
         hash: Digest,
         sender: &mut impl Sender,
     ) -> PublicKey {
-        // Compute missing blocks from hash
+        // Compute missing containers from hash
         let mut parents = 0;
         loop {
             // Check to see if we are already at root
@@ -749,7 +749,7 @@ impl<
                                 height,
                                 target,
                                 last_finalized = self.last_finalized,
-                                "requesting gap block"
+                                "requesting gap container"
                             );
                             continue;
                         }
@@ -758,8 +758,8 @@ impl<
                         break;
                     }
                     Knowledge::Finalized(hash) => {
-                        if self.blocks.contains_key(hash) {
-                            // We have a block and no longer need to fetch its parent
+                        if self.containers.contains_key(hash) {
+                            // We have a container and no longer need to fetch its parent
                             break;
                         }
                     }
@@ -864,7 +864,7 @@ impl<
         loop {
             // Ensure task has not been resolved
             if let Some((_, ref height, ref hash, _)) = outstanding_task {
-                if self.blocks.contains_key(hash) {
+                if self.containers.contains_key(hash) {
                     debug!(
                         height,
                         hash = hex(hash),
@@ -879,7 +879,7 @@ impl<
                 let missing = self.get_next_missing();
                 if let Some((height, hash)) = missing {
                     // Check if already have
-                    if self.blocks.contains_key(&hash) {
+                    if self.containers.contains_key(&hash) {
                         continue;
                     }
 
@@ -986,7 +986,7 @@ impl<
                             let mut cursor = request.hash.clone();
                             loop {
                                 // Check to see if we have proposal
-                                let proposal = match self.blocks.get(&cursor).cloned() {
+                                let proposal = match self.containers.get(&cursor).cloned() {
                                     Some(proposal) => proposal,
                                     None => {
                                         break;
@@ -1036,7 +1036,7 @@ impl<
                             // Parse proposals
                             let mut next = None;
                             for proposal in resolution.proposals {
-                                // Ensure this is the block we want
+                                // Ensure this is the container we want
                                 if !H::validate(&proposal.parent) {
                                     warn!(sender = hex(&s), "invalid proposal parent hash size");
                                     break;

@@ -2,7 +2,7 @@
 //!
 //! PoA Consensus useful for running a DKG (round-robin leader selection, update participants with config).
 //!
-//! All decisions made to minimize block time and finalization latency without sacrificing
+//! All decisions made to minimize container time and finalization latency without sacrificing
 //! the ability to attribute uptime and faults.
 //!
 //! # Externalizable Uptime and Faults
@@ -12,7 +12,7 @@
 //!
 //! # Sync
 //!
-//! Wait for block finalization at tip (2f+1), fetch heights backwards (don't
+//! Wait for container finalization at tip (2f+1), fetch heights backwards (don't
 //! need to backfill views).
 //!
 //! # Async Handling
@@ -25,10 +25,10 @@
 //! * Leader timeout in addition to notarization timeout
 //! * Skip leader timeout if we haven't seen a participant vote in some number of views
 //! * Periodically retry building of proposal
-//! * Backfill blocks from notarizing peers rather than passing along with notarization message
+//! * Backfill containers from notarizing peers rather than passing along with notarization message
 //! * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
 //!   more votes)
-//! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new blocks on-the-fly)
+//! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)
 
 mod actors;
 pub mod byzantine;
@@ -50,7 +50,7 @@ mod wire {
 pub type View = u64;
 pub type Height = u64;
 
-/// Context is a collection of information about the context in which a block is built.
+/// Context is a collection of information about the context in which a container is built.
 #[derive(Clone)]
 pub struct Context {
     pub view: View,
@@ -68,8 +68,8 @@ pub enum Error {
     NetworkClosed,
     #[error("Invalid message")]
     InvalidMessage,
-    #[error("Invalid block")]
-    InvalidBlock,
+    #[error("Invalid container")]
+    InvalidContainer,
     #[error("Invalid signature")]
     InvalidSignature,
 }
@@ -79,7 +79,7 @@ pub const VOTE: Activity = 1;
 pub const FINALIZE: Activity = 2;
 pub const CONFLICTING_PROPOSAL: Activity = 3;
 /// Note: it is ok to have both a vote for a proposal and the null
-/// block in the same view.
+/// container in the same view.
 pub const CONFLICTING_VOTE: Activity = 4;
 pub const CONFLICTING_FINALIZE: Activity = 5;
 pub const NULL_AND_FINALIZE: Activity = 6;
@@ -279,7 +279,7 @@ mod tests {
     fn test_all_online() {
         // Create runtime
         let n = 5;
-        let required_blocks = 100;
+        let required_containers = 100;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
@@ -314,7 +314,7 @@ mod tests {
             for scheme in schemes.into_iter() {
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -380,7 +380,10 @@ mod tests {
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
                     engine
-                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
                         .await;
                 });
             }
@@ -392,7 +395,7 @@ mod tests {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let Progress::Finalized(height, hash) = event {
                     finalized.insert(height, hash);
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -403,7 +406,7 @@ mod tests {
             }
 
             // Check supervisors for correct activity
-            let latest_complete = required_blocks - activity_timeout;
+            let latest_complete = required_containers - activity_timeout;
             for supervisor in supervisors.iter() {
                 // Ensure no faults
                 {
@@ -483,7 +486,7 @@ mod tests {
     fn test_one_offline() {
         // Create runtime
         let n = 5;
-        let required_blocks = 100;
+        let required_containers = 100;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(60));
         executor.start(async move {
@@ -522,7 +525,7 @@ mod tests {
 
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -591,7 +594,10 @@ mod tests {
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
                     engine
-                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
                         .await;
                 });
             }
@@ -601,7 +607,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let Progress::Finalized(height, _) = event {
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -659,7 +665,7 @@ mod tests {
     fn test_slow_validator() {
         // Create runtime
         let n = 5;
-        let required_blocks = 30;
+        let required_containers = 30;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(300));
@@ -694,7 +700,7 @@ mod tests {
             for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -773,7 +779,10 @@ mod tests {
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
                     engine
-                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
                         .await;
                 });
             }
@@ -785,7 +794,7 @@ mod tests {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let Progress::Finalized(height, hash) = event {
                     finalized.insert(height, hash);
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -796,7 +805,7 @@ mod tests {
             }
 
             // Check supervisors for correct activity
-            let latest_complete = required_blocks - activity_timeout;
+            let latest_complete = required_containers - activity_timeout;
             for supervisor in supervisors.iter() {
                 // Ensure no faults (i.e. voting for both whatever is eventually processed and timeout)
                 {
@@ -864,7 +873,7 @@ mod tests {
     fn test_catchup() {
         // Create runtime
         let n = 5;
-        let required_blocks = 100;
+        let required_containers = 100;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
@@ -903,7 +912,7 @@ mod tests {
 
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -972,7 +981,10 @@ mod tests {
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
                     engine
-                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
                         .await;
                 });
             }
@@ -986,7 +998,7 @@ mod tests {
                     if height > highest_finalized {
                         highest_finalized = height;
                     }
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -1030,7 +1042,7 @@ mod tests {
             }
 
             // Start engine
-            let (block_sender, block_receiver) = oracle
+            let (container_sender, container_receiver) = oracle
                 .register(validator.clone(), 0, 1024 * 1024)
                 .await
                 .unwrap();
@@ -1075,7 +1087,10 @@ mod tests {
             let engine = Engine::new(runtime.clone(), cfg);
             runtime.spawn("engine", async move {
                 engine
-                    .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                    .run(
+                        (container_sender, container_receiver),
+                        (vote_sender, vote_receiver),
+                    )
                     .await;
             });
 
@@ -1086,8 +1101,8 @@ mod tests {
                     continue;
                 }
                 if let Progress::Finalized(height, _) = event {
-                    if height < highest_finalized + required_blocks {
-                        // We want to see `required_blocks` once we catch up
+                    if height < highest_finalized + required_containers {
+                        // We want to see `required_containers` once we catch up
                         continue;
                     }
                     break;
@@ -1106,7 +1121,7 @@ mod tests {
     fn test_catchup_recovery() {
         // Create runtime
         let n = 4;
-        let required_blocks = 100;
+        let required_containers = 100;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
@@ -1145,7 +1160,7 @@ mod tests {
 
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -1214,7 +1229,10 @@ mod tests {
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
                     engine
-                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
                         .await;
                 });
             }
@@ -1228,7 +1246,7 @@ mod tests {
                     if height > highest_finalized {
                         highest_finalized = height;
                     }
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -1294,7 +1312,7 @@ mod tests {
             // Start engine for first peer
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
-            let (block_sender, block_receiver) = oracle
+            let (container_sender, container_receiver) = oracle
                 .register(validator.clone(), 0, 1024 * 1024)
                 .await
                 .unwrap();
@@ -1372,7 +1390,10 @@ mod tests {
             let engine = Engine::new(runtime.clone(), cfg);
             runtime.spawn("engine", async move {
                 engine
-                    .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                    .run(
+                        (container_sender, container_receiver),
+                        (vote_sender, vote_receiver),
+                    )
                     .await;
             });
 
@@ -1383,8 +1404,8 @@ mod tests {
                     continue;
                 }
                 if let Progress::Finalized(height, _) = event {
-                    if height < highest_finalized + required_blocks {
-                        // We want to see `required_blocks` once we catch up
+                    if height < highest_finalized + required_containers {
+                        // We want to see `required_containers` once we catch up
                         continue;
                     }
                     break;
@@ -1403,7 +1424,7 @@ mod tests {
     fn test_all_recovery() {
         // Create runtime
         let n = 5;
-        let required_blocks = 100;
+        let required_containers = 100;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(120));
         executor.start(async move {
@@ -1437,7 +1458,7 @@ mod tests {
             for scheme in schemes.iter() {
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -1503,7 +1524,10 @@ mod tests {
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
                     engine
-                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
                         .await;
                 });
             }
@@ -1543,7 +1567,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let Progress::Finalized(height, _) = event {
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -1565,7 +1589,7 @@ mod tests {
     fn test_no_finality() {
         // Create runtime
         let n = 5;
-        let required_blocks = 100;
+        let required_containers = 100;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
@@ -1599,7 +1623,7 @@ mod tests {
             for scheme in schemes.iter() {
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -1665,7 +1689,10 @@ mod tests {
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
                     engine
-                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
                         .await;
                 });
             }
@@ -1676,7 +1703,7 @@ mod tests {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 match event {
                     Progress::Notarized(height, _) => {
-                        if height < required_blocks {
+                        if height < required_containers {
                             continue;
                         }
                         completed.insert(validator);
@@ -1702,7 +1729,7 @@ mod tests {
     fn test_partition() {
         // Create runtime
         let n = 10;
-        let required_blocks = 25;
+        let required_containers = 25;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(900));
         executor.start(async move {
@@ -1736,7 +1763,7 @@ mod tests {
             for scheme in schemes.iter() {
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -1802,7 +1829,10 @@ mod tests {
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
                     engine
-                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
                         .await;
                 });
             }
@@ -1816,7 +1846,7 @@ mod tests {
                     if height > highest_finalized {
                         highest_finalized = height;
                     }
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -1889,7 +1919,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let Progress::Finalized(height, _) = event {
-                    if height < required_blocks + highest_finalized {
+                    if height < required_containers + highest_finalized {
                         continue;
                     }
                     completed.insert(validator);
@@ -1911,7 +1941,7 @@ mod tests {
     fn test_lossy_links() {
         // Create runtime
         let n = 10;
-        let required_blocks = 100;
+        let required_containers = 100;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(300));
         executor.start(async move {
@@ -1945,7 +1975,7 @@ mod tests {
             for scheme in schemes.into_iter() {
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -2011,7 +2041,10 @@ mod tests {
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
                     engine
-                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
                         .await;
                 });
             }
@@ -2021,7 +2054,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let Progress::Finalized(height, _) = event {
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -2042,7 +2075,7 @@ mod tests {
     fn slow_and_lossy_links(seed: u64) -> String {
         // Create runtime
         let n = 10;
-        let required_blocks = 20;
+        let required_containers = 20;
         let namespace = Bytes::from("consensus");
         let cfg = deterministic::Config {
             seed,
@@ -2081,7 +2114,7 @@ mod tests {
             for scheme in schemes.into_iter() {
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -2147,7 +2180,10 @@ mod tests {
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
                     engine
-                        .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
                         .await;
                 });
             }
@@ -2157,7 +2193,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let Progress::Finalized(height, _) = event {
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -2205,7 +2241,7 @@ mod tests {
     fn test_conflicter() {
         // Create runtime
         let n = 5;
-        let required_blocks = 100;
+        let required_containers = 100;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(60));
@@ -2240,7 +2276,7 @@ mod tests {
             for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -2279,7 +2315,10 @@ mod tests {
                     let engine = Conflicter::new(runtime.clone(), cfg);
                     runtime.spawn("byzantine_engine", async move {
                         engine
-                            .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                            .run(
+                                (container_sender, container_receiver),
+                                (vote_sender, vote_receiver),
+                            )
                             .await;
                     });
                 } else {
@@ -2319,7 +2358,10 @@ mod tests {
                     let engine = Engine::new(runtime.clone(), cfg);
                     runtime.spawn("engine", async move {
                         engine
-                            .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                            .run(
+                                (container_sender, container_receiver),
+                                (vote_sender, vote_receiver),
+                            )
                             .await;
                     });
                 }
@@ -2332,7 +2374,7 @@ mod tests {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let Progress::Finalized(height, hash) = event {
                     finalized.insert(height, hash);
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -2344,7 +2386,7 @@ mod tests {
 
             // Check supervisors for correct activity
             let offline = &validators[0];
-            let latest_complete = required_blocks - activity_timeout;
+            let latest_complete = required_containers - activity_timeout;
             for supervisor in supervisors.iter() {
                 // Ensure only faults
                 {
@@ -2414,7 +2456,7 @@ mod tests {
     fn test_nuller() {
         // Create runtime
         let n = 5;
-        let required_blocks = 100;
+        let required_containers = 100;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(60));
@@ -2449,7 +2491,7 @@ mod tests {
             for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Register on network
                 let validator = scheme.public_key();
-                let (block_sender, block_receiver) = oracle
+                let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
@@ -2488,7 +2530,10 @@ mod tests {
                     let engine = Nuller::new(runtime.clone(), cfg);
                     runtime.spawn("byzantine_engine", async move {
                         engine
-                            .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                            .run(
+                                (container_sender, container_receiver),
+                                (vote_sender, vote_receiver),
+                            )
                             .await;
                     });
                 } else {
@@ -2528,7 +2573,10 @@ mod tests {
                     let engine = Engine::new(runtime.clone(), cfg);
                     runtime.spawn("engine", async move {
                         engine
-                            .run((block_sender, block_receiver), (vote_sender, vote_receiver))
+                            .run(
+                                (container_sender, container_receiver),
+                                (vote_sender, vote_receiver),
+                            )
                             .await;
                     });
                 }
@@ -2541,7 +2589,7 @@ mod tests {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let Progress::Finalized(height, hash) = event {
                     finalized.insert(height, hash);
-                    if height < required_blocks {
+                    if height < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -2553,7 +2601,7 @@ mod tests {
 
             // Check supervisors for correct activity
             let offline = &validators[0];
-            let latest_complete = required_blocks - activity_timeout;
+            let latest_complete = required_containers - activity_timeout;
             for supervisor in supervisors.iter() {
                 // Ensure only faults
                 {

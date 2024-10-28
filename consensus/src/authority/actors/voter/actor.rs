@@ -526,7 +526,7 @@ impl<
         }
 
         // If no deadlines are still set (waiting for null votes),
-        // return next try for null block vote
+        // return next try for null container vote
         if let Some(deadline) = view.null_vote_retry {
             return deadline;
         }
@@ -1804,7 +1804,7 @@ impl<
     ) {
         // Add initial view
         //
-        // We start on view 1 because the genesis block occupies view 0/height 0.
+        // We start on view 1 because the genesis container occupies view 0/height 0.
         self.enter_view(1);
         self.current_view.set(1);
         self.tracked_views.set(1);
@@ -1839,7 +1839,7 @@ impl<
                 Either::Right(futures::future::pending())
             };
 
-            // Attempt to propose a block
+            // Attempt to propose a container
             let propose_retry = match self.propose(resolver).await {
                 Some(retry) => Either::Left(self.runtime.sleep_until(retry)),
                 None => Either::Right(futures::future::pending()),
@@ -1972,7 +1972,7 @@ impl<
                                     continue;
                                 }
                             } else if vote.height.is_some() {
-                                debug!(sender = hex(&s), "invalid vote height for null block");
+                                debug!(sender = hex(&s), "invalid vote height for null container");
                                 continue;
                             }
                             view = vote.view;
@@ -1989,7 +1989,7 @@ impl<
                                     continue;
                                 }
                             } else if notarization.height.is_some() {
-                                debug!(sender = hex(&s), "invalid notarization height for null block");
+                                debug!(sender = hex(&s), "invalid notarization height for null container");
                                 continue;
                             }
                             view = notarization.view;
@@ -2078,7 +2078,7 @@ impl<
                                         continue;
                                     }
                                 } else if notarization.height.is_some() {
-                                    debug!(sender = hex(&s), "invalid notarization height for null block");
+                                    debug!(sender = hex(&s), "invalid notarization height for null container");
                                     continue;
                                 }
                                 debug!(view = notarization.view, "received batch notarization");

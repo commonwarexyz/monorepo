@@ -17,7 +17,7 @@ pub type Payload = Bytes;
 pub trait Automaton: Clone + Send + 'static {
     type Context;
 
-    /// Initialize the application with the genesis block at view=0, height=0.
+    /// Initialize the application with the genesis container at view=0, height=0.
     fn genesis(&mut self) -> (Payload, Digest);
 
     /// Generate a new payload for the given parent hash.
@@ -62,7 +62,7 @@ pub trait Supervisor: Clone + Send + 'static {
     ///
     /// It is up to the developer to ensure changes to this list are synchronized across nodes in the network
     /// at a given view. If care is not taken to do this, the chain could fork/halt. If using an underlying
-    /// consensus implementation that does not require finalization of a height before producing a block
+    /// consensus implementation that does not require finalization of a height before producing a container
     /// at the next height (asynchronous finalization), a synchrony bound should be enforced around
     /// changes to the set (i.e. participant joining in view 10 should only become active in view 20, where
     /// we assume all other participants have finalized view 10).

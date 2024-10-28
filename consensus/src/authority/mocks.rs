@@ -204,7 +204,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Automaton
         // Ensure not duplicate check
         let mut state = self.state.lock().unwrap();
         if state.verified.contains_key(&container) {
-            self.panic("block already verified");
+            self.panic("container already verified");
         }
         if let Some(parent) = state.verified.get(&context.parent) {
             if parent + 1 != context.height {
@@ -237,7 +237,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Finalizer
         let height = {
             let mut state = self.state.lock().unwrap();
             if state.finalized.contains_key(&container) {
-                self.panic("block already finalized");
+                self.panic("container already finalized");
             }
             if !state.notarized_views.insert(container.clone()) {
                 self.panic("view already notarized");
@@ -245,7 +245,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Finalizer
             if let Some(height) = state.verified.get(&container) {
                 *height
             } else {
-                self.panic("block not verified");
+                self.panic("container not verified");
             }
         };
         let _ = self
@@ -264,14 +264,14 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Finalizer
         let height = {
             let mut state = self.state.lock().unwrap();
             if state.finalized.contains_key(&container) {
-                self.panic("block already finalized");
+                self.panic("container already finalized");
             }
             if !state.finalized_views.insert(container.clone()) {
                 self.panic("view already finalized");
             }
             let height = match state.verified.get(&container) {
                 Some(height) => *height,
-                None => self.panic("block not verified"),
+                None => self.panic("container not verified"),
             };
             let expected = state.last_finalized + 1;
             if expected != height {
@@ -369,7 +369,7 @@ mod tests {
             // Genesis
             let (genesis_hash, _) = app.genesis();
 
-            // Propose a block at height 1
+            // Propose a container at height 1
             let height = 1;
             let view = 1;
             let context = Context {
@@ -380,19 +380,19 @@ mod tests {
             };
             let payload = app.propose(context.clone()).await.expect("propose failed");
 
-            // Parse block
+            // Parse container
             let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
             hasher.update(&payload_hash);
-            let block_hash = hasher.finalize();
+            let container_hash = hasher.finalize();
 
-            // Verify the block
+            // Verify the container
             let verified = app
-                .verify(context, payload.clone(), block_hash.clone())
+                .verify(context, payload.clone(), container_hash.clone())
                 .await;
             assert!(verified);
 
-            // Notarize the block
-            app.prepared(block_hash.clone()).await;
+            // Notarize the container
+            app.prepared(container_hash.clone()).await;
 
             // Expect a progress message for notarization
             let (progress_participant, progress) =
@@ -401,13 +401,13 @@ mod tests {
             match progress {
                 Progress::Notarized(notarized_height, notarized_hash) => {
                     assert_eq!(notarized_height, height);
-                    assert_eq!(notarized_hash, block_hash);
+                    assert_eq!(notarized_hash, container_hash);
                 }
                 _ => panic!("expected Notarized progress"),
             }
 
-            // Finalize the block
-            app.finalized(block_hash.clone()).await;
+            // Finalize the container
+            app.finalized(container_hash.clone()).await;
 
             // Expect a progress message for finalization
             let (progress_participant, progress) =
@@ -416,7 +416,7 @@ mod tests {
             match progress {
                 Progress::Finalized(finalized_height, finalized_hash) => {
                     assert_eq!(finalized_height, height);
-                    assert_eq!(finalized_hash, block_hash);
+                    assert_eq!(finalized_hash, container_hash);
                 }
                 _ => panic!("expected Finalized progress"),
             }
@@ -448,7 +448,7 @@ mod tests {
             // Genesis
             let (genesis_hash, _) = app.genesis();
 
-            // Get block at height 1
+            // Get container at height 1
             let height = 1;
             let context = Context {
                 parent: genesis_hash.clone(),
@@ -464,16 +464,16 @@ mod tests {
             // Parse the payload
             let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
             hasher.update(&payload_hash);
-            let block_hash = hasher.finalize();
+            let container_hash = hasher.finalize();
 
-            // Verify the block
+            // Verify the container
             let verified = app
-                .verify(context, payload.clone(), block_hash.clone())
+                .verify(context, payload.clone(), container_hash.clone())
                 .await;
             assert!(verified);
 
-            // Notarize the block
-            app.prepared(block_hash.clone()).await;
+            // Notarize the container
+            app.prepared(container_hash.clone()).await;
 
             // Expect a progress message for notarization
             let (progress_participant, progress) =
@@ -482,13 +482,13 @@ mod tests {
             match progress {
                 Progress::Notarized(notarized_height, notarized_hash) => {
                     assert_eq!(notarized_height, height);
-                    assert_eq!(notarized_hash, block_hash);
+                    assert_eq!(notarized_hash, container_hash);
                 }
                 _ => panic!("expected Notarized progress"),
             }
 
-            // Finalize the block
-            app.finalized(block_hash.clone()).await;
+            // Finalize the container
+            app.finalized(container_hash.clone()).await;
 
             // Expect a progress message for finalization
             let (progress_participant, progress) =
@@ -497,7 +497,7 @@ mod tests {
             match progress {
                 Progress::Finalized(finalized_height, finalized_hash) => {
                     assert_eq!(finalized_height, height);
-                    assert_eq!(finalized_hash, block_hash);
+                    assert_eq!(finalized_hash, container_hash);
                 }
                 _ => panic!("expected Finalized progress"),
             }
@@ -531,7 +531,7 @@ mod tests {
             hasher.update(&Bytes::from_static(b"invalid"));
             let invalid_parent = hasher.finalize();
 
-            // Attempt to propose a block with invalid parent, should panic
+            // Attempt to propose a container with invalid parent, should panic
             let context = Context {
                 parent: invalid_parent.clone(),
                 height: 1,
@@ -568,7 +568,7 @@ mod tests {
             // Genesis
             let (genesis_hash, _) = app.genesis();
 
-            // Propose a block at invalid height
+            // Propose a container at invalid height
             let context = Context {
                 parent: genesis_hash.clone(),
                 height: 100,
@@ -614,16 +614,16 @@ mod tests {
             hasher.update(&payload);
             let payload_hash = hasher.finalize();
             hasher.update(&payload_hash);
-            let block_hash = hasher.finalize();
+            let container_hash = hasher.finalize();
 
-            // Attempt to verify the block without parsing, should panic
+            // Attempt to verify the container without parsing, should panic
             let context = Context {
                 parent: genesis_hash.clone(),
                 height,
                 view: 1,
                 proposer: participant.clone(),
             };
-            app.verify(context, payload, block_hash).await;
+            app.verify(context, payload, container_hash).await;
         });
     }
 
@@ -653,7 +653,7 @@ mod tests {
             // Genesis
             let (genesis_hash, _) = app.genesis();
 
-            // Propose a block at height 1
+            // Propose a container at height 1
             let height = 1;
             let context = Context {
                 parent: genesis_hash.clone(),
@@ -663,19 +663,19 @@ mod tests {
             };
             let payload = app.propose(context.clone()).await.expect("propose failed");
 
-            // Parse block
+            // Parse container
             let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
             hasher.update(&payload_hash);
-            let block_hash = hasher.finalize();
+            let container_hash = hasher.finalize();
 
-            // Attempt to verify the block with incorrect height (e.g., height 2)
+            // Attempt to verify the container with incorrect height (e.g., height 2)
             let invalid_context = Context {
                 parent: genesis_hash.clone(),
                 height: 2,
                 view: 1,
                 proposer: participant.clone(),
             };
-            app.verify(invalid_context, payload, block_hash).await;
+            app.verify(invalid_context, payload, container_hash).await;
         });
     }
 
@@ -715,16 +715,16 @@ mod tests {
             hasher.update(&payload);
             let payload_hash = hasher.finalize();
             hasher.update(&payload_hash);
-            let block_hash = hasher.finalize();
+            let container_hash = hasher.finalize();
 
-            // Attempt to verify the block with unverified parent, should panic
+            // Attempt to verify the container with unverified parent, should panic
             let context = Context {
                 parent: unverified_parent.clone(),
                 height,
                 view: 1,
                 proposer: participant.clone(),
             };
-            app.verify(context, payload, block_hash).await;
+            app.verify(context, payload, container_hash).await;
         });
     }
 
@@ -790,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "block already verified")]
+    #[should_panic(expected = "container already verified")]
     fn test_verify_same_hash_twice() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
@@ -815,7 +815,7 @@ mod tests {
             // Genesis
             let (genesis_hash, _) = app.genesis();
 
-            // Propose a block at height 1
+            // Propose a container at height 1
             let height = 1;
             let context = Context {
                 parent: genesis_hash.clone(),
@@ -825,22 +825,22 @@ mod tests {
             };
             let payload = app.propose(context.clone()).await.expect("propose failed");
 
-            // Parse block
+            // Parse container
             let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
             hasher.update(&payload_hash);
-            let block_hash = hasher.finalize();
+            let container_hash = hasher.finalize();
 
-            // Verify the block
-            app.verify(context.clone(), payload.clone(), block_hash.clone())
+            // Verify the container
+            app.verify(context.clone(), payload.clone(), container_hash.clone())
                 .await;
 
-            // Attempt to verify the same block again, should panic
-            app.verify(context, payload, block_hash).await;
+            // Attempt to verify the same container again, should panic
+            app.verify(context, payload, container_hash).await;
         });
     }
 
     #[test]
-    #[should_panic(expected = "block already finalized")]
+    #[should_panic(expected = "container already finalized")]
     fn test_notarize_after_finalize() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
@@ -865,7 +865,7 @@ mod tests {
             // Genesis
             let (genesis_hash, _) = app.genesis();
 
-            // Propose a block at height 1
+            // Propose a container at height 1
             let view = 1;
             let height = 1;
             let context = Context {
@@ -876,28 +876,28 @@ mod tests {
             };
             let payload = app.propose(context.clone()).await.expect("propose failed");
 
-            // Parse block
+            // Parse container
             let payload_hash = app.parse(payload.clone()).await.expect("parse failed");
             hasher.update(&payload_hash);
-            let block_hash = hasher.finalize();
+            let container_hash = hasher.finalize();
 
-            // Verify the block
+            // Verify the container
             let verified = app
-                .verify(context, payload.clone(), block_hash.clone())
+                .verify(context, payload.clone(), container_hash.clone())
                 .await;
             assert!(verified);
 
-            // Notarize and finalize the block
-            app.prepared(block_hash.clone()).await;
-            app.finalized(block_hash.clone()).await;
+            // Notarize and finalize the container
+            app.prepared(container_hash.clone()).await;
+            app.finalized(container_hash.clone()).await;
 
-            // Attempt to notarize the block again, should panic
-            app.prepared(block_hash).await;
+            // Attempt to notarize the container again, should panic
+            app.prepared(container_hash).await;
         });
     }
 
     #[test]
-    #[should_panic(expected = "block not verified")]
+    #[should_panic(expected = "container not verified")]
     fn test_notarization_not_verified() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
@@ -919,7 +919,7 @@ mod tests {
             };
             let mut app = Application::new(runtime, cfg);
 
-            // Attempt to notarize an unverified block, should panic
+            // Attempt to notarize an unverified container, should panic
             hasher.update(&Bytes::from_static(b"hello"));
             app.prepared(hasher.finalize()).await;
         });
@@ -948,14 +948,14 @@ mod tests {
             };
             let mut app = Application::new(runtime, cfg);
 
-            // Attempt to notarize a block with invalid hash length, should panic
+            // Attempt to notarize a container with invalid hash length, should panic
             app.prepared(Bytes::from_static(b"hello")).await;
         });
     }
 
     #[test]
-    #[should_panic(expected = "block already finalized")]
-    fn test_notarization_genesis_block() {
+    #[should_panic(expected = "container already finalized")]
+    fn test_notarization_genesis_container() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
@@ -979,13 +979,13 @@ mod tests {
             // Genesis
             let (genesis_hash, _) = app.genesis();
 
-            // Attempt to notarize the genesis block, should panic
+            // Attempt to notarize the genesis container, should panic
             app.prepared(genesis_hash.clone()).await;
         });
     }
 
     #[test]
-    #[should_panic(expected = "block not verified")]
+    #[should_panic(expected = "container not verified")]
     fn test_finalization_not_verified() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
@@ -1007,7 +1007,7 @@ mod tests {
             };
             let mut app = Application::new(runtime, cfg);
 
-            // Attempt to finalize an unverified block, should panic
+            // Attempt to finalize an unverified container, should panic
             hasher.update(&Bytes::from_static(b"hello"));
             app.finalized(hasher.finalize()).await;
         });
@@ -1036,14 +1036,14 @@ mod tests {
             };
             let mut app = Application::new(runtime, cfg);
 
-            // Attempt to finalize a block with invalid hash length, should panic
+            // Attempt to finalize a container with invalid hash length, should panic
             app.finalized(Bytes::from_static(b"hello")).await;
         });
     }
 
     #[test]
-    #[should_panic(expected = "block already finalized")]
-    fn test_finalization_genesis_block() {
+    #[should_panic(expected = "container already finalized")]
+    fn test_finalization_genesis_container() {
         // Create the runtime
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
@@ -1067,7 +1067,7 @@ mod tests {
             // Genesis
             let (genesis_hash, _) = app.genesis();
 
-            // Attempt to finalize the genesis block, should panic
+            // Attempt to finalize the genesis container, should panic
             app.finalized(genesis_hash.clone()).await;
         });
     }

@@ -31,7 +31,7 @@ pub struct Config<C: Scheme, H: Hasher, A: Automaton> {
     /// Timeout to wait for a peer to respond to a fetch request.
     pub fetch_timeout: Duration,
 
-    /// Maximum number of blocks to request/respond with in a single fetch.
+    /// Maximum number of containers to request/respond with in a single fetch.
     pub max_fetch_count: u64,
 
     /// Maximum number of bytes to respond with in a single fetch.
