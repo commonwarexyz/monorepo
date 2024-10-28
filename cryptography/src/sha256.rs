@@ -8,14 +8,6 @@ pub struct Sha256 {
     hasher: Option<ISha256>,
 }
 
-impl Sha256 {
-    pub fn new() -> Self {
-        Self {
-            hasher: Some(ISha256::new()),
-        }
-    }
-}
-
 impl Default for Sha256 {
     fn default() -> Self {
         Self::new()
@@ -23,6 +15,12 @@ impl Default for Sha256 {
 }
 
 impl Hasher for Sha256 {
+    fn new() -> Self {
+        Self {
+            hasher: Some(ISha256::new()),
+        }
+    }
+
     fn update(&mut self, message: &[u8]) {
         self.hasher.as_mut().unwrap().update(message);
     }

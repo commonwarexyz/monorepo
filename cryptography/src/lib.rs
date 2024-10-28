@@ -76,32 +76,36 @@ pub trait Scheme: Send + Sync + Clone + 'static {
     ) -> bool;
 }
 
+/// Byte array representing a hash digest.
 pub type Digest = Bytes;
 
-/// Hasher is provided by the application for hashing.
+/// Interface that commonware crates rely on for hashing.
 ///
-/// In practice, the hasher is not bundled with the application so that
-/// it can be cheaply copied for concurrent hashing.
-///
-/// This is configurable because some hash functions are better suited for
-/// SNARK/STARK proofs than others.
+/// Hash functions in commonware primitives are not typically hardcoded
+/// to a specific algorithm (e.g. SHA-256) because different hash functions
+/// may work better with different cryptographic schemes, may be more efficient
+/// to use in STARK/SNARK proofs, or provide different levels of security (with some
+/// performance/size penalty).
 pub trait Hasher: Clone + Send + 'static {
-    /// Append the message to the recorded data.
+    /// Create a new hasher.
+    fn new() -> Self;
+
+    /// Append message to previously recorded data.
     fn update(&mut self, message: &[u8]);
 
-    /// Hash all recorded data and reset
-    /// the hasher to the initial state.
+    /// Hash all recorded data and reset the hasher
+    /// to the initial state.
     fn finalize(&mut self) -> Digest;
 
     /// Reset the hasher without generating a hash.
     ///
-    /// This is not required to call before calling `record`.
+    /// This function does not need to be called after `finalize`.
     fn reset(&mut self);
 
-    /// Validate the hash.
+    /// Validate the digest.
     fn validate(digest: &Digest) -> bool;
 
-    /// Size of the hash in bytes.
+    /// Size of the digest in bytes.
     fn size() -> usize;
 }
 
@@ -269,5 +273,33 @@ mod tests {
     #[test]
     fn test_bls12381_invalid_signature_length() {
         test_invalid_signature_length::<Bls12381>();
+    }
+
+    fn test_hasher<H: Hasher>() {
+        // Generate initial hash
+        let mut hasher = H::new();
+        hasher.update(b"hello world");
+        let digest = hasher.finalize();
+        assert!(H::validate(&digest));
+        assert_eq!(digest.len(), H::size());
+
+        // Reuse hasher without reset
+        hasher.update(b"hello world");
+        let digest_again = hasher.finalize();
+        assert!(H::validate(&digest_again));
+        assert_eq!(digest, digest_again);
+
+        // Reuse hasher with reset
+        hasher.update(b"hello mars");
+        hasher.reset();
+        hasher.update(b"hello world");
+        let digest_reset = hasher.finalize();
+        assert!(H::validate(&digest_reset));
+        assert_eq!(digest, digest_reset);
+    }
+
+    #[test]
+    fn test_sha256_hasher() {
+        test_hasher::<Sha256>();
     }
 }
