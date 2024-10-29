@@ -424,8 +424,8 @@ mod tests {
                 .expect("Failed to remove partition");
 
             // Scan the partition
-            let result = context.scan(partition).await.unwrap_err();
-            assert!(matches!(result, Error::PartitionMissing(_)));
+            let result = context.scan(partition).await;
+            assert!(matches!(result, Err(Error::PartitionMissing(_))));
         });
     }
 
@@ -455,11 +455,22 @@ mod tests {
 
             // Read data back
             let mut buffer = vec![0u8; 10];
-            blob.read_at(&mut buffer, 0)
+            let read = blob
+                .read_at(&mut buffer, 0)
                 .await
                 .expect("Failed to read data");
+            assert_eq!(read, 10);
             assert_eq!(&buffer[..5], data1);
             assert_eq!(&buffer[5..], data2);
+
+            // Read data never written to blob
+            let mut buffer = vec![0u8; 10];
+            let read = blob
+                .read_at(&mut buffer, 10)
+                .await
+                .expect("Failed to read data");
+            assert_eq!(read, 0);
+            assert_eq!(&buffer, &[0u8; 10]);
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
