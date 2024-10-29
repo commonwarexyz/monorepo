@@ -18,7 +18,7 @@ impl Default for Sha256 {
 
 impl Clone for Sha256 {
     fn clone(&self) -> Self {
-        // We don't clone the hasher state when cloning the hasher.
+        // We manually implement `Clone` to avoid cloning the hasher state.
         Self::default()
     }
 }

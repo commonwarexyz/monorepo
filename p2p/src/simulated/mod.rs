@@ -103,6 +103,8 @@ pub enum Error {
     ChannelAlreadyRegistered(u32),
     #[error("peer missing")]
     PeerMissing,
+    #[error("invalid connection definition: latency={0}, jitter={1}")]
+    InvalidBehavior(f64, f64),
 }
 
 pub use ingress::Oracle;
@@ -379,6 +381,61 @@ mod tests {
 
             // Confirm error is correct
             assert!(matches!(result, Err(Error::InvalidSuccessRate(_))));
+        });
+    }
+
+    #[test]
+    fn test_invalid_behavior() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                },
+            );
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Register agents
+            let pk1 = Ed25519::from_seed(0).public_key();
+            let pk2 = Ed25519::from_seed(1).public_key();
+            oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
+            oracle.register(pk2.clone(), 0, 1024 * 1024).await.unwrap();
+
+            // Attempt to link with invalid jitter
+            let result = oracle
+                .add_link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    Link {
+                        latency: -5.0,
+                        jitter: 2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .await;
+
+            // Confirm error is correct
+            assert!(matches!(result, Err(Error::InvalidBehavior(-5.0, 2.5))));
+
+            // Attempt to link with invalid jitter
+            let result = oracle
+                .add_link(
+                    pk1.clone(),
+                    pk2.clone(),
+                    Link {
+                        latency: 5.0,
+                        jitter: -2.5,
+                        success_rate: 1.0,
+                    },
+                )
+                .await;
+
+            // Confirm error is correct
+            assert!(matches!(result, Err(Error::InvalidBehavior(5.0, -2.5))));
         });
     }
 

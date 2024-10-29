@@ -101,6 +101,13 @@ impl Oracle {
         if config.success_rate < 0.0 || config.success_rate > 1.0 {
             return Err(Error::InvalidSuccessRate(config.success_rate));
         }
+        if config.latency < 0.0 || config.jitter < 0.0 {
+            return Err(Error::InvalidBehavior(config.latency, config.jitter));
+        }
+
+        // Create distribution
+        let sampler = Normal::new(config.latency, config.jitter)
+            .map_err(|_| Error::InvalidBehavior(config.latency, config.jitter))?;
 
         // Create distribution
         let sampler = Normal::new(config.latency, config.jitter).unwrap();
