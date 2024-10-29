@@ -40,7 +40,6 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BinaryHeap, HashMap},
     future::Future,
-    hash::Hash,
     mem::replace,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,

@@ -468,7 +468,7 @@ mod tests {
         B: Blob,
     {
         runner.start(async move {
-            let partitions = vec!["partition1", "partition2", "partition3"];
+            let partitions = ["partition1", "partition2", "partition3"];
             let name = "test_blob_rw";
 
             for (additional, partition) in partitions.iter().enumerate() {
