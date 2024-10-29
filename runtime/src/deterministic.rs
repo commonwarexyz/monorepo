@@ -40,6 +40,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{hash_map::Entry, BTreeMap, BinaryHeap, HashMap},
     future::Future,
+    hash::Hash,
     mem::replace,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
@@ -403,7 +404,7 @@ pub struct Executor {
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
-    files: Mutex<File>,
+    root: Mutex<File>,
 }
 
 impl Executor {
@@ -434,19 +435,8 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
-            files: Mutex::new(HashMap::new()),
+            root: Mutex::new(File::new_directory("/")),
         });
-
-        // Add root
-        {
-            let root_path = "/".to_string();
-            executor.files.lock().unwrap().insert(
-                root_path.clone(),
-                File::new_directory(executor.clone(), &root_path),
-            );
-        }
-
-        // Return runtime
         (
             Runner {
                 executor: executor.clone(),
@@ -1001,12 +991,11 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 enum Content {
-    Bytes(Vec<u8>),
-    Directory(BTreeMap<String, File>),
+    Bytes(Arc<Executor>, Vec<u8>),
+    Directory(HashMap<String, File>),
 }
 
 pub struct File {
-    executor: Arc<Executor>,
     path: String,
     content: Content,
 }
@@ -1014,15 +1003,13 @@ pub struct File {
 impl File {
     fn new_bytes(executor: Arc<Executor>, path: &str) -> Self {
         Self {
-            executor,
             path: path.to_string(),
-            content: Content::Bytes(Vec::new()),
+            content: Content::Bytes(executor, Vec::new()),
         }
     }
 
-    fn new_directory(executor: Arc<Executor>, path: &str) -> Self {
+    fn new_directory(path: &str) -> Self {
         Self {
-            executor,
             path: path.to_string(),
             content: Content::Directory(HashMap::new()),
         }
@@ -1031,11 +1018,11 @@ impl File {
 
 impl crate::Filesystem<File> for Context {
     async fn create_dir(&mut self, path: &str) -> Result<(), Error> {
-        let mut files = self.executor.files.lock().unwrap();
+        let mut root = self.executor.root.lock().unwrap();
         let formatted_path = Path::new(path);
         let mut components = formatted_path.components();
         let mut file = match components.next() {
-            Some(Component::RootDir) => files.get_mut("/").unwrap(),
+            Some(Component::RootDir) => &mut *root,
             _ => return Err(Error::InvalidPath),
         };
         let mut created = 0;
@@ -1046,7 +1033,7 @@ impl crate::Filesystem<File> for Context {
                     Entry::Occupied(entry) => entry.into_mut(),
                     Entry::Vacant(entry) => {
                         created += 1;
-                        entry.insert(File::new_directory(self.executor.clone(), name))
+                        entry.insert(File::new_directory(name))
                     }
                 },
                 _ => return Err(Error::IntermediateDirectoryIsFile(name.to_string())),
@@ -1059,11 +1046,11 @@ impl crate::Filesystem<File> for Context {
     }
 
     async fn read_dir(&self, path: &str) -> Result<Vec<String>, Error> {
-        let files = self.executor.files.lock().unwrap();
+        let root = self.executor.root.lock().unwrap();
         let formatted_path = Path::new(path);
         let mut components = formatted_path.components();
         let mut file = match components.next() {
-            Some(Component::RootDir) => files.get("/").unwrap(),
+            Some(Component::RootDir) => &*root,
             _ => return Err(Error::InvalidPath),
         };
         for component in components {
@@ -1076,29 +1063,34 @@ impl crate::Filesystem<File> for Context {
             }
         }
         match &file.content {
-            Content::Directory(directory) => Ok(directory.keys().cloned().collect()),
+            Content::Directory(directory) => {
+                let mut names: Vec<_> = directory.keys().cloned().collect();
+                names.sort(); // ensure deterministic
+                Ok(names)
+            }
             _ => Err(Error::NotDirectory(path.to_string())),
         }
     }
 
     async fn remove_dir(&mut self, path: &str) -> Result<(), Error> {
-        let mut files = self.executor.files.lock().unwrap();
+        let mut root = self.executor.root.lock().unwrap();
         let path = Path::new(path);
         let mut components = path.components();
         let mut file = match components.next() {
-            Some(Component::RootDir) => files.get_mut("/").unwrap(),
+            Some(Component::RootDir) => &mut *root,
             _ => return Err(Error::InvalidPath),
         };
         let mut parent = None;
         for component in components {
-            parent = Some(file);
             let name = component.as_os_str().to_str().ok_or(Error::InvalidPath)?;
-            file = match file.content {
+            let next_file = match file.content {
                 Content::Directory(ref mut directory) => {
                     directory.get_mut(name).ok_or(Error::InvalidPath)?
                 }
                 _ => return Err(Error::IntermediateDirectoryIsFile(name.to_string())),
-            }
+            };
+            parent = Some(file);
+            file = next_file;
         }
         if let Some(parent) = parent {
             if let Content::Directory(ref mut directory) = parent.content {
