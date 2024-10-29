@@ -205,6 +205,11 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        // Generate a random directory name to avoid conflicts (used in tests, so we shouldn't need to reload)
+        let rng = OsRng.next_u64();
+        let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{}", rng));
+
+        // Return the configuration
         Self {
             registry: Arc::new(Mutex::new(Registry::default())),
             threads: 2,
@@ -213,7 +218,7 @@ impl Default for Config {
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             tcp_nodelay: None,
-            storage_directory: env::temp_dir().join("commonware_tokio_runtime"),
+            storage_directory,
         }
     }
 }
