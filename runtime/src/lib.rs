@@ -42,24 +42,10 @@ pub enum Error {
     WriteFailed,
     #[error("read failed")]
     ReadFailed,
-    #[error("invalid path")]
-    InvalidPath,
-    #[error("file already exists: {0}")]
-    FileAlreadyExists(String),
-    #[error("directory already exists: {0}")]
-    DirectoryAlreadyExists(String),
-    #[error("intermediate directory does not exist: {0}")]
-    IntermediateDirectoryDoesNotExist(String),
-    #[error("intermediate directory is a file: {0}")]
-    IntermediateDirectoryIsFile(String),
-    #[error("not a directory: {0}")]
-    NotDirectory(String),
-    #[error("file not found: {0}")]
-    FileNotFound(String),
-    #[error("permission denied")]
-    PermissionDenied,
-    #[error("file operation failed")]
-    FileOpFailed,
+    #[error("partition missing: {0}")]
+    PartitionMissing(String),
+    #[error("blob missing: {0}/{1}")]
+    BlobMissing(String, String),
 }
 
 /// Interface that any task scheduler must implement to start
@@ -158,10 +144,12 @@ where
     ) -> impl Future<Output = Result<B, Error>> + Send;
 
     /// Remove a blob from a given partition.
+    ///
+    /// If no `name` is provided, the entire partition is removed.
     fn remove(
         &mut self,
         partition: &str,
-        name: &str,
+        name: Option<&str>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Read the contents of a partition.
@@ -171,20 +159,20 @@ where
 /// Interface to read and write to a blob.
 pub trait Blob: Send + Sync + 'static {
     /// Get the length of the blob.
-    fn len(&self) -> impl Future<Output = Result<u64, Error>> + Send;
+    fn len(&self) -> impl Future<Output = Result<usize, Error>> + Send;
 
     /// Read from the blob at the given offset.
     fn read_at(
         &mut self,
         buf: &mut [u8],
-        offset: u64,
+        offset: usize,
     ) -> impl Future<Output = Result<usize, Error>> + Send;
 
     /// Write to the blob at the given offset.
     fn write_at(
         &mut self,
         buf: &[u8],
-        offset: u64,
+        offset: usize,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Ensure all pending data is durably persisted.

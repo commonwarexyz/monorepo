@@ -38,13 +38,12 @@ use prometheus_client::{
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{hash_map::Entry, BTreeMap, BinaryHeap, HashMap},
+    collections::{BinaryHeap, HashMap},
     future::Future,
     hash::Hash,
     mem::replace,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
-    path::{self, Component, Path},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
@@ -226,13 +225,15 @@ impl Auditor {
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn remove(&self, partition: &str, name: &str) {
+    fn remove(&self, partition: &str, name: Option<&str>) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"remove");
         hasher.update(partition.as_bytes());
-        hasher.update(name.as_bytes());
+        if let Some(name) = name {
+            hasher.update(name.as_bytes());
+        }
         *hash = format!("{:x}", hasher.finalize());
     }
 
@@ -255,7 +256,7 @@ impl Auditor {
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn read_at(&self, partition: &str, name: &str, buf: u64, offset: u64) {
+    fn read_at(&self, partition: &str, name: &str, buf: usize, offset: usize) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
@@ -267,7 +268,7 @@ impl Auditor {
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn write_at(&self, partition: &str, name: &str, buf: &[u8], offset: u64) {
+    fn write_at(&self, partition: &str, name: &str, buf: &[u8], offset: usize) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
@@ -410,7 +411,7 @@ pub struct Executor {
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
-    root: Mutex<File>,
+    partitions: Mutex<HashMap<String, Partition>>,
 }
 
 impl Executor {
@@ -441,7 +442,7 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
-            root: Mutex::new(File::new_directory("/")),
+            partitions: Mutex::new(HashMap::new()),
         });
         (
             Runner {
@@ -952,7 +953,7 @@ impl crate::Sink for Sink {
             .send(msg)
             .await
             .map_err(|_| Error::WriteFailed)?;
-        self.metrics.bandwidth.inc_by(len as u64);
+        self.metrics.network_bandwidth.inc_by(len as u64);
         Ok(())
     }
 }
@@ -996,12 +997,29 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
+struct Partition {
+    blobs: HashMap<String, Blob>,
+}
+
+impl Partition {
+    fn new() -> Self {
+        Self {
+            blobs: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Blob {
     executor: Arc<Executor>,
 
     partition: String,
     name: String,
-    content: Mutex<Vec<u8>>,
+
+    // For content to be updated for future opens,
+    // it must be synced (which writes back any updates)
+    // to the partition.
+    content: Vec<u8>,
 }
 
 impl Blob {
@@ -1011,44 +1029,124 @@ impl Blob {
 
             partition,
             name,
-            content: Mutex::new(Vec::new()),
+
+            content: Vec::new(),
         }
     }
 }
 
 impl crate::Storage<Blob> for Context {
-    async fn open(&mut self, _partition: &str, _name: &str) -> Result<Blob, Error> {
-        unimplemented!()
+    async fn open(&mut self, partition: &str, name: &str) -> Result<Blob, Error> {
+        self.executor.auditor.open(partition, name);
+        let mut partitions = self.executor.partitions.lock().unwrap();
+        let partition_entry = partitions
+            .entry(partition.into())
+            .or_insert_with(Partition::new);
+        let blob = partition_entry
+            .blobs
+            .entry(name.into())
+            .or_insert_with(|| Blob::new(self.executor.clone(), partition.into(), name.into()));
+        Ok(blob.clone())
     }
 
-    async fn remove(&mut self, _partition: &str, _name: &str) -> Result<(), Error> {
-        unimplemented!()
+    async fn remove(&mut self, partition: &str, name: Option<&str>) -> Result<(), Error> {
+        self.executor.auditor.remove(partition, name);
+        let mut partitions = self.executor.partitions.lock().unwrap();
+        match name {
+            Some(name) => {
+                partitions
+                    .get_mut(partition)
+                    .ok_or(Error::PartitionMissing(partition.into()))?
+                    .blobs
+                    .remove(name)
+                    .ok_or(Error::BlobMissing(partition.into(), name.into()))?;
+            }
+            None => {
+                partitions
+                    .remove(partition)
+                    .ok_or(Error::PartitionMissing(partition.into()))?;
+            }
+        }
+        Ok(())
     }
 
-    async fn scan(&self, _partition: &str) -> Result<Vec<String>, Error> {
-        unimplemented!()
+    async fn scan(&self, partition: &str) -> Result<Vec<String>, Error> {
+        self.executor.auditor.scan(partition);
+        let partitions = self.executor.partitions.lock().unwrap();
+        let partition = partitions
+            .get(partition)
+            .ok_or(Error::PartitionMissing(partition.into()))?;
+        let mut results = Vec::with_capacity(partition.blobs.len());
+        for name in partition.blobs.keys() {
+            results.push(name.clone());
+        }
+        results.sort(); // deterministic output
+        Ok(results)
     }
 }
 
 impl crate::Blob for Blob {
-    async fn len(&self) -> Result<u64, Error> {
-        unimplemented!()
+    async fn len(&self) -> Result<usize, Error> {
+        self.executor.auditor.len(&self.partition, &self.name);
+        Ok(self.content.len())
     }
 
-    async fn read_at(&mut self, _buf: &mut [u8], _offset: u64) -> Result<usize, Error> {
-        unimplemented!()
+    async fn read_at(&mut self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
+        let buf_len = buf.len();
+        self.executor
+            .auditor
+            .read_at(&self.partition, &self.name, buf_len, offset);
+        let content_len = self.content.len();
+        if offset >= content_len {
+            return Ok(0);
+        }
+        let len = buf_len.min(content_len - offset);
+        buf[..len].copy_from_slice(&self.content[offset..offset + len]);
+        self.executor.metrics.storage_reads.inc();
+        self.executor
+            .metrics
+            .storage_read_bandwidth
+            .inc_by(len as u64);
+        Ok(len)
     }
 
-    async fn write_at(&mut self, _buf: &[u8], _offset: u64) -> Result<(), Error> {
-        unimplemented!()
+    async fn write_at(&mut self, buf: &[u8], offset: usize) -> Result<(), Error> {
+        self.executor
+            .auditor
+            .write_at(&self.partition, &self.name, buf, offset);
+        let required = offset + buf.len();
+        if required > self.content.len() {
+            self.content.resize(required, 0);
+        }
+        self.content[offset..offset + buf.len()].copy_from_slice(buf);
+        self.executor.metrics.storage_writes.inc();
+        self.executor
+            .metrics
+            .storage_write_bandwidth
+            .inc_by(buf.len() as u64);
+        Ok(())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        unimplemented!()
+        self.executor.auditor.sync(&self.partition, &self.name);
+        let mut partitions = self.executor.partitions.lock().unwrap();
+        let partition = partitions
+            .get_mut(&self.partition)
+            .ok_or(Error::PartitionMissing(self.partition.clone()))?;
+        let blob = partition
+            .blobs
+            .get_mut(&self.name)
+            .ok_or(Error::BlobMissing(
+                self.partition.clone(),
+                self.name.clone(),
+            ))?;
+        blob.content.clone_from(&self.content);
+        Ok(())
     }
 
     async fn close(&mut self) -> Result<(), Error> {
-        unimplemented!()
+        self.executor.auditor.close(&self.partition, &self.name);
+        Ok(())
     }
 }
 
