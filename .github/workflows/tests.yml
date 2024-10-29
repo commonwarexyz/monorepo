@@ -24,6 +24,10 @@ jobs:
         rust-version: ${{ steps.rust-version.outputs.rust_version}}
     - name: Lint with clippy
       run: cargo clippy -- -D warnings
+    - name: Check docs
+      run: cargo doc --no-deps --document-private-items
+      env:
+        RUSTDOCFLAGS: "-D warnings"
     - name: Run tests
       run: cargo test --verbose
   
