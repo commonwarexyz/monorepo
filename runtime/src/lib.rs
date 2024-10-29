@@ -42,10 +42,18 @@ pub enum Error {
     WriteFailed,
     #[error("read failed")]
     ReadFailed,
+    #[error("partition creation failed: {0}")]
+    PartitionCreationFailed(String),
     #[error("partition missing: {0}")]
     PartitionMissing(String),
+    #[error("blob open failed: {0}/{1}")]
+    BlobOpenFailed(String, String),
     #[error("blob missing: {0}/{1}")]
     BlobMissing(String, String),
+    #[error("blob sync failed")]
+    BlobSyncFailed,
+    #[error("blob close failed")]
+    BlobCloseFailed,
 }
 
 /// Interface that any task scheduler must implement to start
@@ -152,11 +160,12 @@ where
         name: Option<&str>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Read the contents of a partition.
+    /// Return all blobs in a given partition.
     fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
 }
 
 /// Interface to read and write to a blob.
+#[allow(clippy::len_without_is_empty)]
 pub trait Blob: Send + Sync + 'static {
     /// Get the length of the blob.
     fn len(&self) -> impl Future<Output = Result<usize, Error>> + Send;

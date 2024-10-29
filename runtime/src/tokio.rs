@@ -1,5 +1,5 @@
 //! A production-focused runtime based on [Tokio](https://tokio.rs) with
-//! secure randomness.
+//! secure randomness and storage backed by the local filesystem.
 //!
 //! # Panics
 //!
@@ -37,12 +37,17 @@ use prometheus_client::{
 };
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
+    env,
     future::Future,
+    io::SeekFrom,
     net::SocketAddr,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     runtime::{Builder, Runtime},
     task_local,
@@ -67,6 +72,12 @@ struct Metrics {
     outbound_connections: Counter,
     inbound_bandwidth: Counter,
     outbound_bandwidth: Counter,
+
+    open_files: Gauge,
+    storage_reads: Counter,
+    storage_read_bytes: Counter,
+    storage_writes: Counter,
+    storage_write_bytes: Counter,
 }
 
 impl Metrics {
@@ -78,6 +89,11 @@ impl Metrics {
             outbound_connections: Counter::default(),
             inbound_bandwidth: Counter::default(),
             outbound_bandwidth: Counter::default(),
+            open_files: Gauge::default(),
+            storage_reads: Counter::default(),
+            storage_read_bytes: Counter::default(),
+            storage_writes: Counter::default(),
+            storage_write_bytes: Counter::default(),
         };
         {
             let mut registry = registry.lock().unwrap();
@@ -110,6 +126,31 @@ impl Metrics {
                 "outbound_bandwidth",
                 "Bandwidth used by sending data to others",
                 metrics.outbound_bandwidth.clone(),
+            );
+            registry.register(
+                "open_files",
+                "Number of open files",
+                metrics.open_files.clone(),
+            );
+            registry.register(
+                "storage_reads",
+                "Total number of disk reads",
+                metrics.storage_reads.clone(),
+            );
+            registry.register(
+                "storage_read_bytes",
+                "Total amount of data read from disk",
+                metrics.storage_read_bytes.clone(),
+            );
+            registry.register(
+                "storage_writes",
+                "Total number of disk writes",
+                metrics.storage_writes.clone(),
+            );
+            registry.register(
+                "storage_write_bytes",
+                "Total amount of data written to disk",
+                metrics.storage_write_bytes.clone(),
             );
         }
         metrics
@@ -157,6 +198,9 @@ pub struct Config {
     /// Note: Make sure that your compile target has and allows this configuration otherwise
     /// panics or unexpected behaviours are possible.
     pub tcp_nodelay: Option<bool>,
+
+    /// Base directory for all storage operations.
+    pub storage_directory: PathBuf,
 }
 
 impl Default for Config {
@@ -169,6 +213,7 @@ impl Default for Config {
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             tcp_nodelay: None,
+            storage_directory: env::temp_dir().join("commonware_tokio_runtime"),
         }
     }
 }
@@ -432,6 +477,135 @@ impl RngCore for Context {
 }
 
 impl CryptoRng for Context {}
+
+pub struct Blob {
+    file: fs::File,
+    metrics: Arc<Metrics>,
+}
+
+impl crate::Storage<Blob> for Context {
+    async fn open(&mut self, partition: &str, name: &str) -> Result<Blob, Error> {
+        // Construct the full path
+        let path = self
+            .executor
+            .cfg
+            .storage_directory
+            .join(partition)
+            .join(name);
+
+        // Create the partition directory if it does not exist
+        fs::create_dir_all(path.parent().unwrap())
+            .await
+            .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
+
+        // Open the file in read-write mode, create if it does not exist
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .await
+            .map_err(|_| Error::BlobOpenFailed(partition.into(), name.into()))?;
+
+        self.executor.metrics.open_files.inc();
+        Ok(Blob {
+            file,
+            metrics: self.executor.metrics.clone(),
+        })
+    }
+
+    async fn remove(&mut self, partition: &str, name: Option<&str>) -> Result<(), Error> {
+        let path = self.executor.cfg.storage_directory.join(partition);
+        if let Some(name) = name {
+            let blob_path = path.join(name);
+            fs::remove_file(blob_path)
+                .await
+                .map_err(|_| Error::BlobMissing(partition.into(), name.into()))?;
+        } else {
+            fs::remove_dir_all(path)
+                .await
+                .map_err(|_| Error::PartitionMissing(partition.into()))?;
+        }
+        Ok(())
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<String>, Error> {
+        let path = self.executor.cfg.storage_directory.join(partition);
+        let mut entries = fs::read_dir(path)
+            .await
+            .map_err(|_| Error::PartitionMissing(partition.into()))?;
+        let mut blobs = Vec::new();
+        while let Some(entry) = entries.next_entry().await.map_err(|_| Error::ReadFailed)? {
+            let file_type = entry.file_type().await.map_err(|_| Error::ReadFailed)?;
+            if !file_type.is_file() {
+                continue;
+            }
+            if let Some(name) = entry.file_name().to_str() {
+                blobs.push(name.into());
+            }
+        }
+        Ok(blobs)
+    }
+}
+
+impl crate::Blob for Blob {
+    async fn len(&self) -> Result<usize, Error> {
+        let metadata = self.file.metadata().await.map_err(|_| Error::ReadFailed)?;
+        let len = metadata.len() as usize;
+        Ok(len)
+    }
+
+    async fn read_at(&mut self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
+        self.file
+            .seek(SeekFrom::Start(offset as u64))
+            .await
+            .map_err(|_| Error::ReadFailed)?;
+
+        let n = self.file.read(buf).await.map_err(|_| Error::ReadFailed)?;
+
+        self.metrics.storage_reads.inc();
+        self.metrics.storage_read_bytes.inc_by(n as u64);
+        Ok(n)
+    }
+
+    async fn write_at(&mut self, buf: &[u8], offset: usize) -> Result<(), Error> {
+        self.file
+            .seek(SeekFrom::Start(offset as u64))
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+
+        self.file
+            .write_all(buf)
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+
+        self.metrics.storage_writes.inc();
+        self.metrics.storage_write_bytes.inc_by(buf.len() as u64);
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.file
+            .sync_all()
+            .await
+            .map_err(|_| Error::BlobSyncFailed)
+    }
+
+    async fn close(&mut self) -> Result<(), Error> {
+        self.sync().await?;
+        self.file
+            .shutdown()
+            .await
+            .map_err(|_| Error::BlobCloseFailed)
+    }
+}
+
+impl Drop for Blob {
+    fn drop(&mut self) {
+        self.metrics.open_files.dec();
+    }
+}
 
 #[cfg(test)]
 mod tests {

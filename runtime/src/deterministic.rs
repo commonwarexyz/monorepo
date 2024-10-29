@@ -68,6 +68,8 @@ struct Metrics {
     task_polls: Family<Work, Counter>,
 
     network_bandwidth: Counter,
+
+    open_blobs: Gauge,
     storage_reads: Counter,
     storage_read_bandwidth: Counter,
     storage_writes: Counter,
@@ -81,6 +83,7 @@ impl Metrics {
             tasks_running: Family::default(),
             tasks_spawned: Family::default(),
             network_bandwidth: Counter::default(),
+            open_blobs: Gauge::default(),
             storage_reads: Counter::default(),
             storage_read_bandwidth: Counter::default(),
             storage_writes: Counter::default(),
@@ -107,6 +110,11 @@ impl Metrics {
                 "bandwidth",
                 "Total amount of data sent over network",
                 metrics.network_bandwidth.clone(),
+            );
+            registry.register(
+                "open_blobs",
+                "Number of open blobs",
+                metrics.open_blobs.clone(),
             );
             registry.register(
                 "storage_reads",
@@ -1009,7 +1017,6 @@ impl Partition {
     }
 }
 
-#[derive(Clone)]
 pub struct Blob {
     executor: Arc<Executor>,
 
@@ -1033,6 +1040,19 @@ impl Blob {
             content: Vec::new(),
         }
     }
+
+    // We define this privately because we don't want to imply that blobs
+    // are generally safe to clone.
+    fn clone(&self) -> Self {
+        Self {
+            executor: self.executor.clone(),
+
+            partition: self.partition.clone(),
+            name: self.name.clone(),
+
+            content: self.content.clone(),
+        }
+    }
 }
 
 impl crate::Storage<Blob> for Context {
@@ -1046,6 +1066,7 @@ impl crate::Storage<Blob> for Context {
             .blobs
             .entry(name.into())
             .or_insert_with(|| Blob::new(self.executor.clone(), partition.into(), name.into()));
+        self.executor.metrics.open_blobs.inc();
         Ok(blob.clone())
     }
 
@@ -1146,7 +1167,14 @@ impl crate::Blob for Blob {
 
     async fn close(&mut self) -> Result<(), Error> {
         self.executor.auditor.close(&self.partition, &self.name);
+        self.sync().await?;
         Ok(())
+    }
+}
+
+impl Drop for Blob {
+    fn drop(&mut self) {
+        self.executor.metrics.open_blobs.dec();
     }
 }
 
