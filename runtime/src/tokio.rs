@@ -73,7 +73,7 @@ struct Metrics {
     inbound_bandwidth: Counter,
     outbound_bandwidth: Counter,
 
-    open_files: Gauge,
+    open_blobs: Gauge,
     storage_reads: Counter,
     storage_read_bytes: Counter,
     storage_writes: Counter,
@@ -89,7 +89,7 @@ impl Metrics {
             outbound_connections: Counter::default(),
             inbound_bandwidth: Counter::default(),
             outbound_bandwidth: Counter::default(),
-            open_files: Gauge::default(),
+            open_blobs: Gauge::default(),
             storage_reads: Counter::default(),
             storage_read_bytes: Counter::default(),
             storage_writes: Counter::default(),
@@ -128,9 +128,9 @@ impl Metrics {
                 metrics.outbound_bandwidth.clone(),
             );
             registry.register(
-                "open_files",
-                "Number of open files",
-                metrics.open_files.clone(),
+                "open_blobs",
+                "Number of open blobs",
+                metrics.open_blobs.clone(),
             );
             registry.register(
                 "storage_reads",
@@ -508,7 +508,7 @@ impl crate::Storage<Blob> for Context {
             .await
             .map_err(|_| Error::BlobOpenFailed(partition.into(), name.into()))?;
 
-        self.executor.metrics.open_files.inc();
+        self.executor.metrics.open_blobs.inc();
         Ok(Blob {
             file,
             metrics: self.executor.metrics.clone(),
@@ -603,7 +603,7 @@ impl crate::Blob for Blob {
 
 impl Drop for Blob {
     fn drop(&mut self) {
-        self.metrics.open_files.dec();
+        self.metrics.open_blobs.dec();
     }
 }
 
