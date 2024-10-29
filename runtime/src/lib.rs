@@ -127,6 +127,45 @@ pub trait Stream: Sync + Send + 'static {
     fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }
 
+/// Interface to interact with the filesystem.
+pub trait Filesystem<F>: Clone + Send + Sync + 'static
+where
+    F: File,
+{
+    /// Create a new file (error if already exists).
+    fn create(&self, path: &str, permissions: u32)
+        -> impl Future<Output = Result<F, Error>> + Send;
+
+    /// Open an existing file.
+    fn open(&self, path: &str) -> impl Future<Output = Result<F, Error>> + Send;
+
+    /// Remove a file.
+    fn remove(&self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+/// Interface to read and write to a file.
+pub trait File: Send + Sync + 'static {
+    /// Read from the file at the given offset.
+    fn read_at(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> impl Future<Output = Result<usize, Error>> + Send;
+
+    /// Write to the file at the given offset.
+    fn write_at(
+        &mut self,
+        offset: u64,
+        buf: &[u8],
+    ) -> impl Future<Output = Result<usize, Error>> + Send;
+
+    /// Sync the file to disk.
+    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// Close the file.
+    fn close(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
