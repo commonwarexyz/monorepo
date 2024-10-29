@@ -66,7 +66,13 @@ struct Metrics {
     tasks_running: Family<Work, Gauge>,
     task_polls: Family<Work, Counter>,
 
-    bandwidth: Counter,
+    network_bandwidth: Counter,
+
+    open_blobs: Gauge,
+    storage_reads: Counter,
+    storage_read_bandwidth: Counter,
+    storage_writes: Counter,
+    storage_write_bandwidth: Counter,
 }
 
 impl Metrics {
@@ -75,7 +81,12 @@ impl Metrics {
             task_polls: Family::default(),
             tasks_running: Family::default(),
             tasks_spawned: Family::default(),
-            bandwidth: Counter::default(),
+            network_bandwidth: Counter::default(),
+            open_blobs: Gauge::default(),
+            storage_reads: Counter::default(),
+            storage_read_bandwidth: Counter::default(),
+            storage_writes: Counter::default(),
+            storage_write_bandwidth: Counter::default(),
         };
         {
             let mut registry = registry.lock().unwrap();
@@ -97,7 +108,32 @@ impl Metrics {
             registry.register(
                 "bandwidth",
                 "Total amount of data sent over network",
-                metrics.bandwidth.clone(),
+                metrics.network_bandwidth.clone(),
+            );
+            registry.register(
+                "open_blobs",
+                "Number of open blobs",
+                metrics.open_blobs.clone(),
+            );
+            registry.register(
+                "storage_reads",
+                "Total number of disk reads",
+                metrics.storage_reads.clone(),
+            );
+            registry.register(
+                "storage_read_bandwidth",
+                "Total amount of data read from disk",
+                metrics.storage_read_bandwidth.clone(),
+            );
+            registry.register(
+                "storage_writes",
+                "Total number of disk writes",
+                metrics.storage_writes.clone(),
+            );
+            registry.register(
+                "storage_write_bandwidth",
+                "Total amount of data written to disk",
+                metrics.storage_write_bandwidth.clone(),
             );
         }
         metrics
@@ -183,6 +219,91 @@ impl Auditor {
         hasher.update(hash.as_bytes());
         hasher.update(b"rand");
         hasher.update(method.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn open(&self, partition: &str, name: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"open");
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn remove(&self, partition: &str, name: Option<&str>) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"remove");
+        hasher.update(partition.as_bytes());
+        if let Some(name) = name {
+            hasher.update(name.as_bytes());
+        }
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn scan(&self, partition: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"scan");
+        hasher.update(partition.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn len(&self, partition: &str, name: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"len");
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn read_at(&self, partition: &str, name: &str, buf: usize, offset: usize) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"read_at");
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update(buf.to_be_bytes());
+        hasher.update(offset.to_be_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn write_at(&self, partition: &str, name: &str, buf: &[u8], offset: usize) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"write_at");
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update(buf);
+        hasher.update(offset.to_be_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn sync(&self, partition: &str, name: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"sync");
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn close(&self, partition: &str, name: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"close");
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
@@ -297,6 +418,7 @@ pub struct Executor {
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
+    partitions: Mutex<HashMap<String, Partition>>,
 }
 
 impl Executor {
@@ -327,6 +449,7 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
+            partitions: Mutex::new(HashMap::new()),
         });
         (
             Runner {
@@ -543,8 +666,9 @@ impl crate::Runner for Runner {
     }
 }
 
-/// Implementation of [`crate::Spawner`] and [`crate::Clock`]
-/// for the `deterministic` runtime.
+/// Implementation of [`crate::Spawner`], [`crate::Clock`],
+/// [`crate::Network`], and [`crate::Storage`] for the `deterministic`
+/// runtime.
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,
@@ -787,6 +911,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
     }
 }
 
+/// Implementation of [`crate::Listener`] for the `deterministic` runtime.
 pub struct Listener {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -821,6 +946,7 @@ impl crate::Listener<Sink, Stream> for Listener {
     }
 }
 
+/// Implementation of [`crate::Sink`] for the `deterministic` runtime.
 pub struct Sink {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -837,11 +963,12 @@ impl crate::Sink for Sink {
             .send(msg)
             .await
             .map_err(|_| Error::WriteFailed)?;
-        self.metrics.bandwidth.inc_by(len as u64);
+        self.metrics.network_bandwidth.inc_by(len as u64);
         Ok(())
     }
 }
 
+/// Implementation of [`crate::Stream`] for the `deterministic` runtime.
 pub struct Stream {
     auditor: Arc<Auditor>,
     me: SocketAddr,
@@ -880,6 +1007,169 @@ impl RngCore for Context {
 }
 
 impl CryptoRng for Context {}
+
+struct Partition {
+    blobs: HashMap<String, Vec<u8>>,
+}
+
+impl Partition {
+    fn new() -> Self {
+        Self {
+            blobs: HashMap::new(),
+        }
+    }
+}
+
+/// Implementation of [`crate::Blob`] for the `deterministic` runtime.
+pub struct Blob {
+    executor: Arc<Executor>,
+
+    partition: String,
+    name: String,
+
+    // For content to be updated for future opens,
+    // it must be synced back to the partition (occurs on
+    // `sync` and `close`).
+    content: Vec<u8>,
+}
+
+impl Blob {
+    fn new(executor: Arc<Executor>, partition: String, name: String, content: Vec<u8>) -> Self {
+        executor.metrics.open_blobs.inc();
+        Self {
+            executor,
+
+            partition,
+            name,
+
+            content,
+        }
+    }
+}
+
+impl crate::Storage<Blob> for Context {
+    async fn open(&mut self, partition: &str, name: &str) -> Result<Blob, Error> {
+        self.executor.auditor.open(partition, name);
+        let mut partitions = self.executor.partitions.lock().unwrap();
+        let partition_entry = partitions
+            .entry(partition.into())
+            .or_insert_with(Partition::new);
+        let content = partition_entry.blobs.entry(name.into()).or_default();
+        Ok(Blob::new(
+            self.executor.clone(),
+            partition.into(),
+            name.into(),
+            content.clone(),
+        ))
+    }
+
+    async fn remove(&mut self, partition: &str, name: Option<&str>) -> Result<(), Error> {
+        self.executor.auditor.remove(partition, name);
+        let mut partitions = self.executor.partitions.lock().unwrap();
+        match name {
+            Some(name) => {
+                partitions
+                    .get_mut(partition)
+                    .ok_or(Error::PartitionMissing(partition.into()))?
+                    .blobs
+                    .remove(name)
+                    .ok_or(Error::BlobMissing(partition.into(), name.into()))?;
+            }
+            None => {
+                partitions
+                    .remove(partition)
+                    .ok_or(Error::PartitionMissing(partition.into()))?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<String>, Error> {
+        self.executor.auditor.scan(partition);
+        let partitions = self.executor.partitions.lock().unwrap();
+        let partition = partitions
+            .get(partition)
+            .ok_or(Error::PartitionMissing(partition.into()))?;
+        let mut results = Vec::with_capacity(partition.blobs.len());
+        for name in partition.blobs.keys() {
+            results.push(name.clone());
+        }
+        results.sort(); // deterministic output
+        Ok(results)
+    }
+}
+
+impl crate::Blob for Blob {
+    async fn len(&self) -> Result<usize, Error> {
+        self.executor.auditor.len(&self.partition, &self.name);
+        Ok(self.content.len())
+    }
+
+    async fn read_at(&mut self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
+        let buf_len = buf.len();
+        self.executor
+            .auditor
+            .read_at(&self.partition, &self.name, buf_len, offset);
+        let content_len = self.content.len();
+        if offset >= content_len {
+            return Ok(0);
+        }
+        let len = buf_len.min(content_len - offset);
+        buf[..len].copy_from_slice(&self.content[offset..offset + len]);
+        self.executor.metrics.storage_reads.inc();
+        self.executor
+            .metrics
+            .storage_read_bandwidth
+            .inc_by(len as u64);
+        Ok(len)
+    }
+
+    async fn write_at(&mut self, buf: &[u8], offset: usize) -> Result<(), Error> {
+        self.executor
+            .auditor
+            .write_at(&self.partition, &self.name, buf, offset);
+        let required = offset + buf.len();
+        if required > self.content.len() {
+            self.content.resize(required, 0);
+        }
+        self.content[offset..offset + buf.len()].copy_from_slice(buf);
+        self.executor.metrics.storage_writes.inc();
+        self.executor
+            .metrics
+            .storage_write_bandwidth
+            .inc_by(buf.len() as u64);
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.executor.auditor.sync(&self.partition, &self.name);
+        let mut partitions = self.executor.partitions.lock().unwrap();
+        let partition = partitions
+            .get_mut(&self.partition)
+            .ok_or(Error::PartitionMissing(self.partition.clone()))?;
+        let blob = partition
+            .blobs
+            .get_mut(&self.name)
+            .ok_or(Error::BlobMissing(
+                self.partition.clone(),
+                self.name.clone(),
+            ))?;
+        blob.clone_from(&self.content);
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), Error> {
+        self.executor.auditor.close(&self.partition, &self.name);
+        self.sync().await?;
+        Ok(())
+    }
+}
+
+impl Drop for Blob {
+    fn drop(&mut self) {
+        self.executor.metrics.open_blobs.dec();
+    }
+}
 
 #[cfg(test)]
 mod tests {

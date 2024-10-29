@@ -62,7 +62,7 @@ pub struct Link {
     /// Standard deviation of the latency for the delivery of a message in milliseconds.
     pub jitter: f64,
 
-    /// Probability of a message being delivered successfully (in range [0,1]).
+    /// Probability of a message being delivered successfully (in range \[0,1\]).
     pub success_rate: f64,
 }
 
