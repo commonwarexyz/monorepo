@@ -141,8 +141,6 @@ where
     F: File,
 {
     /// Create a new file (error if already exists).
-    ///
-    /// Any missing parent directories will be created.
     fn create(&self, path: &str, permissions: u32)
         -> impl Future<Output = Result<F, Error>> + Send;
 
@@ -151,6 +149,8 @@ where
 
     /// Remove a file.
     fn remove(&self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
+
+    // TODO: add directory operations (mkdir, rmdir, readdir)
 }
 
 /// Interface to read and write to a file.
