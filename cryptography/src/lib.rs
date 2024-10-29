@@ -14,7 +14,6 @@ pub mod ed25519;
 pub use ed25519::Ed25519;
 pub mod sha256;
 pub use sha256::Sha256;
-pub mod utils;
 
 /// Byte array representing an arbitrary private key.
 pub type PrivateKey = Bytes;
@@ -74,6 +73,9 @@ pub trait Scheme: Send + Sync + Clone + 'static {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool;
+
+    /// Returns the size of a public key and signature in bytes.
+    fn len() -> (usize, usize);
 }
 
 /// Byte array representing a hash digest.
@@ -86,7 +88,12 @@ pub type Digest = Bytes;
 /// may work better with different cryptographic schemes, may be more efficient
 /// to use in STARK/SNARK proofs, or provide different levels of security (with some
 /// performance/size penalty).
-pub trait Hasher: Send + 'static {
+///
+/// This trait is required to implement the `Clone` trait because it is often
+/// part of a struct that is cloned. In practice, implementations do not actually
+/// clone the hasher state but users should not rely on this behavior and call `reset`
+/// after cloning.
+pub trait Hasher: Clone + Send + 'static {
     /// Create a new hasher.
     fn new() -> Self;
 
@@ -107,13 +114,19 @@ pub trait Hasher: Send + 'static {
 
     /// Size of the digest in bytes.
     fn len() -> usize;
+
+    /// Generate a random digest.
+    ///
+    /// # Warning
+    ///
+    /// This function is typically used for testing and is not recommended
+    /// for production use.
+    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Digest;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bls12381::Bls12381;
-    use ed25519::Ed25519;
     use rand::rngs::OsRng;
 
     fn test_validate<C: Scheme>() {
@@ -236,6 +249,11 @@ mod tests {
     }
 
     #[test]
+    fn test_ed25519_len() {
+        assert_eq!(Ed25519::len(), (32, 64));
+    }
+
+    #[test]
     fn test_bls12381_validate() {
         test_validate::<Bls12381>();
     }
@@ -273,6 +291,11 @@ mod tests {
     #[test]
     fn test_bls12381_invalid_signature_length() {
         test_invalid_signature_length::<Bls12381>();
+    }
+
+    #[test]
+    fn test_bls12381_len() {
+        assert_eq!(Bls12381::len(), (48, 96));
     }
 
     fn test_hasher_multiple_runs<H: Hasher>() {

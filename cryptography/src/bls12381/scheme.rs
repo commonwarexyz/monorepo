@@ -93,4 +93,8 @@ impl Scheme for Bls12381 {
         };
         ops::verify(&public, namespace, message, &signature).is_ok()
     }
+
+    fn len() -> (usize, usize) {
+        (group::G1_ELEMENT_BYTE_LENGTH, group::G2_ELEMENT_BYTE_LENGTH)
+    }
 }

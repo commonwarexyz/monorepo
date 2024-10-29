@@ -16,6 +16,13 @@ impl Default for Sha256 {
     }
 }
 
+impl Clone for Sha256 {
+    fn clone(&self) -> Self {
+        // We manually implement `Clone` to avoid cloning the hasher state.
+        Self::default()
+    }
+}
+
 impl Hasher for Sha256 {
     fn new() -> Self {
         Self {
@@ -41,6 +48,12 @@ impl Hasher for Sha256 {
 
     fn len() -> usize {
         DIGEST_LENGTH
+    }
+
+    fn random<R: rand::Rng + rand::CryptoRng>(rng: &mut R) -> Digest {
+        let mut digest = [0u8; DIGEST_LENGTH];
+        rng.fill_bytes(&mut digest);
+        digest.to_vec().into()
     }
 }
 

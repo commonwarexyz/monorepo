@@ -44,7 +44,7 @@ pub struct Network<E: Spawner + Rng + Clock> {
 
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
-    links: HashMap<PublicKey, HashMap<PublicKey, Link>>,
+    links: HashMap<PublicKey, HashMap<PublicKey, (Normal<f64>, f64)>>,
     peers: BTreeMap<PublicKey, HashMap<Channel, (usize, mpsc::UnboundedSender<Message>)>>,
 
     received_messages: Family<metrics::Message, Counter>,
@@ -57,10 +57,10 @@ pub struct Network<E: Spawner + Rng + Clock> {
 /// for a bidirectional connection).
 pub struct Link {
     /// Mean latency for the delivery of a message in milliseconds.
-    pub latency_mean: f64,
+    pub latency: f64,
 
     /// Standard deviation of the latency for the delivery of a message in milliseconds.
-    pub latency_stddev: f64,
+    pub jitter: f64,
 
     /// Probability of a message being delivered successfully (in range [0,1]).
     pub success_rate: f64,
@@ -158,13 +158,14 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             ingress::Message::AddLink {
                 sender,
                 receiver,
-                config,
+                sampler,
+                success_rate,
                 result,
             } => {
                 self.links
                     .entry(sender)
                     .or_default()
-                    .insert(receiver, config);
+                    .insert(receiver, (sampler, success_rate));
                 if let Err(err) = result.send(()) {
                     error!(?err, "failed to send add link ack to oracle");
                 }
@@ -256,10 +257,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 .inc();
 
             // Apply link settings
-            let should_deliver = self.runtime.gen_bool(link.success_rate);
-            let delay = Normal::new(link.latency_mean, link.latency_stddev)
-                .unwrap()
-                .sample(&mut self.runtime);
+            let delay = link.0.sample(&mut self.runtime);
+            let should_deliver = self.runtime.gen_bool(link.1);
             trace!(
                 origin = hex(&origin),
                 recipient = hex(&recipient),
