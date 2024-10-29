@@ -1016,181 +1016,45 @@ impl File {
     }
 }
 
-impl crate::Filesystem<File> for Context {
-    async fn create_dir(&mut self, path: &str) -> Result<(), Error> {
-        let mut root = self.executor.root.lock().unwrap();
-        let formatted_path = Path::new(path);
-        let mut components = formatted_path.components();
-        let mut file = match components.next() {
-            Some(Component::RootDir) => &mut *root,
-            _ => return Err(Error::InvalidPath),
-        };
-        let mut created = 0;
-        for component in components {
-            let name = component.as_os_str().to_str().ok_or(Error::InvalidPath)?;
-            file = match file.content {
-                Content::Directory(ref mut dir) => match dir.entry(name.to_string()) {
-                    Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => {
-                        created += 1;
-                        entry.insert(File::new_directory(name))
-                    }
-                },
-                _ => return Err(Error::IntermediateDirectoryIsFile(name.to_string())),
-            }
-        }
-        if created == 0 {
-            return Err(Error::DirectoryAlreadyExists(path.to_string()));
-        }
-        Ok(())
+pub struct Blob {}
+
+impl crate::Storage<Blob> for Context {
+    async fn partition(&self, _name: &str) -> Result<Self, Error> {
+        unimplemented!()
     }
 
-    async fn read_dir(&self, path: &str) -> Result<Vec<String>, Error> {
-        let root = self.executor.root.lock().unwrap();
-        let formatted_path = Path::new(path);
-        let mut components = formatted_path.components();
-        let mut file = match components.next() {
-            Some(Component::RootDir) => &*root,
-            _ => return Err(Error::InvalidPath),
-        };
-        for component in components {
-            let name = component.as_os_str().to_str().ok_or(Error::InvalidPath)?;
-            file = match file.content {
-                Content::Directory(ref directory) => {
-                    directory.get(name).ok_or(Error::InvalidPath)?
-                }
-                _ => return Err(Error::IntermediateDirectoryIsFile(name.to_string())),
-            }
-        }
-        match &file.content {
-            Content::Directory(directory) => {
-                let mut names: Vec<_> = directory.keys().cloned().collect();
-                names.sort(); // ensure deterministic
-                Ok(names)
-            }
-            _ => Err(Error::NotDirectory(path.to_string())),
-        }
+    async fn open(&mut self, _name: &str) -> Result<Blob, Error> {
+        unimplemented!()
     }
 
-    async fn remove_dir(&mut self, path: &str) -> Result<(), Error> {
-        let mut root = self.executor.root.lock().unwrap();
-        let path = Path::new(path);
-        let mut components = path.components();
-        let mut file = match components.next() {
-            Some(Component::RootDir) => &mut *root,
-            _ => return Err(Error::InvalidPath),
-        };
-        let mut parent = None;
-        for component in components {
-            let name = component.as_os_str().to_str().ok_or(Error::InvalidPath)?;
-            let next_file = match file.content {
-                Content::Directory(ref mut directory) => {
-                    directory.get_mut(name).ok_or(Error::InvalidPath)?
-                }
-                _ => return Err(Error::IntermediateDirectoryIsFile(name.to_string())),
-            };
-            parent = Some(file);
-            file = next_file;
-        }
-        if let Some(parent) = parent {
-            if let Content::Directory(ref mut directory) = parent.content {
-                let name = path
-                    .file_name()
-                    .ok_or(Error::InvalidPath)?
-                    .to_str()
-                    .ok_or(Error::InvalidPath)?;
-                directory.remove(name).ok_or(Error::InvalidPath)?;
-            }
-        }
-        Ok(())
+    async fn remove(&mut self, _name: &str) -> Result<(), Error> {
+        unimplemented!()
     }
 
-    async fn create_file(&mut self, path: &str) -> Result<File, Error> {
-        self.executor.auditor.create(path, 0o666);
-        let mut files = self.executor.files.lock().unwrap();
-        match files.entry(path.to_string()) {
-            Entry::Occupied(_) => Err(Error::FileAlreadyExists(path.to_string())),
-            Entry::Vacant(entry) => {
-                let file = File::new_bytes(self.executor.clone(), path);
-                entry.insert(file.clone());
-                Ok(file)
-            }
-        }
-    }
-
-    async fn open_file(&self, path: &str) -> Result<File, Error> {
-        self.executor.auditor.open(path);
-        let files = self.executor.files.lock().unwrap();
-        files
-            .get(path)
-            .cloned()
-            .ok_or(Error::FileNotFound(path.to_string()))
-    }
-
-    async fn remove_file(&mut self, path: &str) -> Result<(), Error> {
-        self.executor.auditor.remove(path);
-        let mut files = self.executor.files.lock().unwrap();
-        files
-            .remove(path)
-            .ok_or(Error::FileNotFound(path.to_string()))?;
-        Ok(())
+    async fn scan(&self) -> Result<Vec<String>, Error> {
+        unimplemented!()
     }
 }
 
-impl crate::File for File {
+impl crate::Blob for Blob {
     async fn len(&self) -> Result<u64, Error> {
-        self.executor.auditor.len(&self.path);
-        Ok(self.content.len() as u64)
+        unimplemented!()
     }
 
-    async fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        let len = buf.len();
-        self.executor.auditor.read_at(&self.path, offset, len);
-        if offset >= self.content.len() as u64 {
-            return Ok(0);
-        }
-        let to_read = len.min(self.content.len() - offset as usize);
-        buf[..to_read].copy_from_slice(&self.content[offset as usize..][..to_read]);
-        self.executor.metrics.disk_reads.inc();
-        self.executor
-            .metrics
-            .disk_read_bandwidth
-            .inc_by(to_read as u64);
-        Ok(to_read)
+    async fn read_at(&mut self, _buf: &mut [u8], _offset: u64) -> Result<usize, Error> {
+        unimplemented!()
     }
 
-    async fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        self.executor.auditor.write_at(&self.path, offset, buf);
-        if self.permissions.readonly() {
-            return Err(Error::PermissionDenied);
-        }
-        let len = buf.len();
-        let end = offset as usize + len;
-        if end > self.content.len() {
-            self.content.resize(end, 0);
-        }
-        self.content[offset as usize..end].copy_from_slice(buf);
-        self.executor.metrics.disk_writes.inc();
-        self.executor
-            .metrics
-            .disk_write_bandwidth
-            .inc_by(len as u64);
-        Ok(())
+    async fn write_at(&mut self, _buf: &[u8], _offset: u64) -> Result<(), Error> {
+        unimplemented!()
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.executor.auditor.sync(&self.path);
-        let mut files = self.executor.files.lock().unwrap();
-        let file = files
-            .get_mut(&self.path)
-            .ok_or(Error::FileNotFound(self.path.clone()))?;
-        file.content.clone_from(&self.content);
-        Ok(())
+        unimplemented!()
     }
 
     async fn close(&mut self) -> Result<(), Error> {
-        self.executor.auditor.close(&self.path);
-        self.sync().await
+        unimplemented!()
     }
 }
 

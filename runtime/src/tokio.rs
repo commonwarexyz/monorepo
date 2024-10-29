@@ -44,8 +44,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::{
-    fs::{File as TFile, OpenOptions},
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     runtime::{Builder, Runtime},
     task_local,
@@ -435,63 +433,6 @@ impl RngCore for Context {
 }
 
 impl CryptoRng for Context {}
-
-pub struct File {
-    file: TFile,
-}
-
-impl crate::Filesystem for Context {
-    async fn create(&self, path: &str, permissions: u32) -> Result<File, Error> {
-        let mut options = OpenOptions::new();
-        options.mode(permissions);
-        let file = options
-            .open(path)
-            .await
-            .map_err(|_| Error::FileOpenFailed)?;
-        Ok(File { file })
-    }
-
-    async fn open(&self, path: &str) -> Result<File, Error> {}
-
-    async fn remove(&self, path: &str) -> Result<(), Error> {}
-}
-
-impl crate::File for File {
-    async fn len(&self) -> Result<u64, Error> {
-        self.file
-            .metadata()
-            .await
-            .map(|metadata| metadata.len())
-            .map_err(|_| Error::FileOpFailed)
-    }
-
-    async fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .await
-            .map_err(|_| Error::FileOpFailed)?;
-        self.file.read(buf).await.map_err(|_| Error::FileOpFailed)
-    }
-
-    async fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .await
-            .map_err(|_| Error::FileOpFailed)?;
-        self.file
-            .write_all(buf)
-            .await
-            .map_err(|_| Error::FileOpFailed)
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.file.sync_all().await.map_err(|_| Error::FileOpFailed)
-    }
-
-    async fn close(&mut self) -> Result<(), Error> {
-        self.file.shutdown().await.map_err(|_| Error::FileOpFailed)
-    }
-}
 
 #[cfg(test)]
 mod tests {

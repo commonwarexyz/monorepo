@@ -145,55 +145,44 @@ pub trait Stream: Sync + Send + 'static {
     fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }
 
-/// Interface to interact with the filesystem.
-///
-/// All paths provided must be absolute.
-pub trait Filesystem<F>: Clone + Send + Sync + 'static
+/// Interface to interact with storage.
+pub trait Storage<B>: Clone + Send + Sync + 'static
 where
-    F: File,
+    B: Blob,
 {
-    /// Create a new directory with default permissions (0o666) and any parent directories along the way (error if already exists).
-    fn create_dir(&mut self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    fn partition(&self, namespace: &str) -> impl Future<Output = Result<Self, Error>> + Send;
+
+    fn open(&mut self, name: &str) -> impl Future<Output = Result<B, Error>> + Send;
+
+    fn remove(&mut self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Read the contents of a directory.
-    fn read_dir(&self, path: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
-
-    /// Remove a directory.
-    fn remove_dir(&mut self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Create a new file with default permissions (0o666) for reading and writing (error if already exists).
-    fn create_file(&mut self, path: &str) -> impl Future<Output = Result<F, Error>> + Send;
-
-    /// Open an existing file for reading and writing.
-    fn open_file(&self, path: &str) -> impl Future<Output = Result<F, Error>> + Send;
-
-    /// Remove a file.
-    fn remove_file(&mut self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    fn scan(&self) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
 }
 
 /// Interface to read and write to a file.
-pub trait File: Send + Sync + 'static {
-    /// Get the length of the file.
+pub trait Blob: Send + Sync + 'static {
+    /// Get the length of the blob.
     fn len(&self) -> impl Future<Output = Result<u64, Error>> + Send;
 
-    /// Read from the file at the given offset.
+    /// Read from the blob at the given offset.
     fn read_at(
         &mut self,
         buf: &mut [u8],
         offset: u64,
     ) -> impl Future<Output = Result<usize, Error>> + Send;
 
-    /// Write to the file at the given offset.
+    /// Write to the blob at the given offset.
     fn write_at(
         &mut self,
         buf: &[u8],
         offset: u64,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Sync the file to disk.
+    /// Ensure all pending data is durably persisted.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Close the file.
+    /// Close the blob.
     fn close(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
