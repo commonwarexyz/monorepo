@@ -68,11 +68,11 @@ struct Metrics {
     tasks_running: Family<Work, Gauge>,
     task_polls: Family<Work, Counter>,
 
-    bandwidth: Counter,
-    disk_reads: Counter,
-    disk_read_bandwidth: Counter,
-    disk_writes: Counter,
-    disk_write_bandwidth: Counter,
+    network_bandwidth: Counter,
+    storage_reads: Counter,
+    storage_read_bandwidth: Counter,
+    storage_writes: Counter,
+    storage_write_bandwidth: Counter,
 }
 
 impl Metrics {
@@ -81,11 +81,11 @@ impl Metrics {
             task_polls: Family::default(),
             tasks_running: Family::default(),
             tasks_spawned: Family::default(),
-            bandwidth: Counter::default(),
-            disk_reads: Counter::default(),
-            disk_read_bandwidth: Counter::default(),
-            disk_writes: Counter::default(),
-            disk_write_bandwidth: Counter::default(),
+            network_bandwidth: Counter::default(),
+            storage_reads: Counter::default(),
+            storage_read_bandwidth: Counter::default(),
+            storage_writes: Counter::default(),
+            storage_write_bandwidth: Counter::default(),
         };
         {
             let mut registry = registry.lock().unwrap();
@@ -107,27 +107,27 @@ impl Metrics {
             registry.register(
                 "bandwidth",
                 "Total amount of data sent over network",
-                metrics.bandwidth.clone(),
+                metrics.network_bandwidth.clone(),
             );
             registry.register(
-                "disk_reads",
+                "storage_reads",
                 "Total number of disk reads",
-                metrics.disk_reads.clone(),
+                metrics.storage_reads.clone(),
             );
             registry.register(
-                "disk_read_bandwidth",
+                "storage_read_bandwidth",
                 "Total amount of data read from disk",
-                metrics.disk_read_bandwidth.clone(),
+                metrics.storage_read_bandwidth.clone(),
             );
             registry.register(
-                "disk_writes",
+                "storage_writes",
                 "Total number of disk writes",
-                metrics.disk_writes.clone(),
+                metrics.storage_writes.clone(),
             );
             registry.register(
-                "disk_write_bandwidth",
+                "storage_write_bandwidth",
                 "Total amount of data written to disk",
-                metrics.disk_write_bandwidth.clone(),
+                metrics.storage_write_bandwidth.clone(),
             );
         }
         metrics
@@ -216,80 +216,86 @@ impl Auditor {
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn create(&self, path: &str, permissions: u32) {
-        let mut hash = self.hash.lock().unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
-        hasher.update(b"create");
-        hasher.update(path.as_bytes());
-        hasher.update(permissions.to_be_bytes());
-        *hash = format!("{:x}", hasher.finalize());
-    }
-
-    fn open(&self, path: &str) {
+    fn open(&self, partition: &str, name: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"open");
-        hasher.update(path.as_bytes());
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn remove(&self, path: &str) {
+    fn remove(&self, partition: &str, name: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"remove");
-        hasher.update(path.as_bytes());
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn len(&self, path: &str) {
+    fn scan(&self, partition: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"scan");
+        hasher.update(partition.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn len(&self, partition: &str, name: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"len");
-        hasher.update(path.as_bytes());
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn read_at(&self, path: &str, offset: u64, buf: usize) {
+    fn read_at(&self, partition: &str, name: &str, buf: u64, offset: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"read_at");
-        hasher.update(path.as_bytes());
-        hasher.update(offset.to_be_bytes());
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
         hasher.update(buf.to_be_bytes());
+        hasher.update(offset.to_be_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn write_at(&self, path: &str, offset: u64, buf: &[u8]) {
+    fn write_at(&self, partition: &str, name: &str, buf: &[u8], offset: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"write_at");
-        hasher.update(path.as_bytes());
-        hasher.update(offset.to_be_bytes());
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
         hasher.update(buf);
+        hasher.update(offset.to_be_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn sync(&self, path: &str) {
+    fn sync(&self, partition: &str, name: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"sync");
-        hasher.update(path.as_bytes());
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn close(&self, path: &str) {
+    fn close(&self, partition: &str, name: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"close");
-        hasher.update(path.as_bytes());
+        hasher.update(partition.as_bytes());
+        hasher.update(name.as_bytes());
         *hash = format!("{:x}", hasher.finalize());
     }
 
@@ -990,48 +996,36 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
-enum Content {
-    Bytes(Arc<Executor>, Vec<u8>),
-    Directory(HashMap<String, File>),
+pub struct Blob {
+    executor: Arc<Executor>,
+
+    partition: String,
+    name: String,
+    content: Mutex<Vec<u8>>,
 }
 
-pub struct File {
-    path: String,
-    content: Content,
-}
-
-impl File {
-    fn new_bytes(executor: Arc<Executor>, path: &str) -> Self {
+impl Blob {
+    fn new(executor: Arc<Executor>, partition: String, name: String) -> Self {
         Self {
-            path: path.to_string(),
-            content: Content::Bytes(executor, Vec::new()),
-        }
-    }
+            executor,
 
-    fn new_directory(path: &str) -> Self {
-        Self {
-            path: path.to_string(),
-            content: Content::Directory(HashMap::new()),
+            partition,
+            name,
+            content: Mutex::new(Vec::new()),
         }
     }
 }
-
-pub struct Blob {}
 
 impl crate::Storage<Blob> for Context {
-    async fn partition(&self, _name: &str) -> Result<Self, Error> {
+    async fn open(&mut self, _partition: &str, _name: &str) -> Result<Blob, Error> {
         unimplemented!()
     }
 
-    async fn open(&mut self, _name: &str) -> Result<Blob, Error> {
+    async fn remove(&mut self, _partition: &str, _name: &str) -> Result<(), Error> {
         unimplemented!()
     }
 
-    async fn remove(&mut self, _name: &str) -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    async fn scan(&self) -> Result<Vec<String>, Error> {
+    async fn scan(&self, _partition: &str) -> Result<Vec<String>, Error> {
         unimplemented!()
     }
 }

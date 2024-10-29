@@ -38,7 +38,6 @@ use prometheus_client::{
 use rand::{rngs::OsRng, CryptoRng, RngCore};
 use std::{
     future::Future,
-    io::SeekFrom,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
