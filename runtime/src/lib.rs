@@ -46,14 +46,16 @@ pub enum Error {
     PartitionCreationFailed(String),
     #[error("partition missing: {0}")]
     PartitionMissing(String),
+    #[error("partition corrupt: {0}")]
+    PartitionCorrupt(String),
     #[error("blob open failed: {0}/{1}")]
     BlobOpenFailed(String, String),
     #[error("blob missing: {0}/{1}")]
     BlobMissing(String, String),
-    #[error("blob sync failed")]
-    BlobSyncFailed,
-    #[error("blob close failed")]
-    BlobCloseFailed,
+    #[error("blob sync failed: {0}/{1}")]
+    BlobSyncFailed(String, String),
+    #[error("blob close failed: {0}/{1}")]
+    BlobCloseFailed(String, String),
 }
 
 /// Interface that any task scheduler must implement to start

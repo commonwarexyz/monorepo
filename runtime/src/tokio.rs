@@ -484,8 +484,24 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 pub struct Blob {
-    file: fs::File,
     metrics: Arc<Metrics>,
+
+    partition: String,
+    name: String,
+
+    file: fs::File,
+}
+
+impl Blob {
+    fn new(metrics: Arc<Metrics>, partition: String, name: String, file: fs::File) -> Self {
+        metrics.open_blobs.inc();
+        Self {
+            metrics,
+            partition,
+            name,
+            file,
+        }
+    }
 }
 
 impl crate::Storage<Blob> for Context {
@@ -497,9 +513,13 @@ impl crate::Storage<Blob> for Context {
             .storage_directory
             .join(partition)
             .join(name);
+        let parent = match path.parent() {
+            Some(parent) => parent,
+            None => return Err(Error::PartitionCreationFailed(partition.into())),
+        };
 
         // Create the partition directory if it does not exist
-        fs::create_dir_all(path.parent().unwrap())
+        fs::create_dir_all(parent)
             .await
             .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
@@ -513,11 +533,12 @@ impl crate::Storage<Blob> for Context {
             .await
             .map_err(|_| Error::BlobOpenFailed(partition.into(), name.into()))?;
 
-        self.executor.metrics.open_blobs.inc();
-        Ok(Blob {
+        Ok(Blob::new(
+            self.executor.metrics.clone(),
+            partition.into(),
+            name.into(),
             file,
-            metrics: self.executor.metrics.clone(),
-        })
+        ))
     }
 
     async fn remove(&mut self, partition: &str, name: Option<&str>) -> Result<(), Error> {
@@ -544,7 +565,7 @@ impl crate::Storage<Blob> for Context {
         while let Some(entry) = entries.next_entry().await.map_err(|_| Error::ReadFailed)? {
             let file_type = entry.file_type().await.map_err(|_| Error::ReadFailed)?;
             if !file_type.is_file() {
-                continue;
+                return Err(Error::PartitionCorrupt(partition.into()));
             }
             if let Some(name) = entry.file_name().to_str() {
                 blobs.push(name.into());
@@ -592,9 +613,13 @@ impl crate::Blob for Blob {
 
     async fn sync(&mut self) -> Result<(), Error> {
         self.file
+            .flush()
+            .await
+            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), self.name.clone()))?;
+        self.file
             .sync_all()
             .await
-            .map_err(|_| Error::BlobSyncFailed)
+            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), self.name.clone()))
     }
 
     async fn close(&mut self) -> Result<(), Error> {
@@ -602,7 +627,7 @@ impl crate::Blob for Blob {
         self.file
             .shutdown()
             .await
-            .map_err(|_| Error::BlobCloseFailed)
+            .map_err(|_| Error::BlobCloseFailed(self.partition.clone(), self.name.clone()))
     }
 }
 

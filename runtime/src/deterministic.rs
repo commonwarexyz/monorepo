@@ -1005,7 +1005,7 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 struct Partition {
-    blobs: HashMap<String, Blob>,
+    blobs: HashMap<String, Vec<u8>>,
 }
 
 impl Partition {
@@ -1023,33 +1023,21 @@ pub struct Blob {
     name: String,
 
     // For content to be updated for future opens,
-    // it must be synced (which writes back any updates)
-    // to the partition.
+    // it must be synced back to the partition (occurs on
+    // `sync` and `close`).
     content: Vec<u8>,
 }
 
 impl Blob {
-    fn new(executor: Arc<Executor>, partition: String, name: String) -> Self {
+    fn new(executor: Arc<Executor>, partition: String, name: String, content: Vec<u8>) -> Self {
+        executor.metrics.open_blobs.inc();
         Self {
             executor,
 
             partition,
             name,
 
-            content: Vec::new(),
-        }
-    }
-
-    // We define this privately because we don't want to imply that blobs
-    // are generally safe to clone.
-    fn clone(&self) -> Self {
-        Self {
-            executor: self.executor.clone(),
-
-            partition: self.partition.clone(),
-            name: self.name.clone(),
-
-            content: self.content.clone(),
+            content,
         }
     }
 }
@@ -1061,12 +1049,13 @@ impl crate::Storage<Blob> for Context {
         let partition_entry = partitions
             .entry(partition.into())
             .or_insert_with(Partition::new);
-        let blob = partition_entry
-            .blobs
-            .entry(name.into())
-            .or_insert_with(|| Blob::new(self.executor.clone(), partition.into(), name.into()));
-        self.executor.metrics.open_blobs.inc();
-        Ok(blob.clone())
+        let content = partition_entry.blobs.entry(name.into()).or_default();
+        Ok(Blob::new(
+            self.executor.clone(),
+            partition.into(),
+            name.into(),
+            content.clone(),
+        ))
     }
 
     async fn remove(&mut self, partition: &str, name: Option<&str>) -> Result<(), Error> {
@@ -1160,7 +1149,7 @@ impl crate::Blob for Blob {
                 self.partition.clone(),
                 self.name.clone(),
             ))?;
-        blob.content.clone_from(&self.content);
+        blob.clone_from(&self.content);
         Ok(())
     }
 
