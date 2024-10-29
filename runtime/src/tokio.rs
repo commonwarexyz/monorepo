@@ -201,6 +201,11 @@ pub struct Config {
 
     /// Base directory for all storage operations.
     pub storage_directory: PathBuf,
+
+    /// Maximum buffer size for operations on blobs.
+    ///
+    /// `tokio` defaults this value to 2MB.
+    pub maximum_buffer_size: usize,
 }
 
 impl Default for Config {
@@ -219,6 +224,7 @@ impl Default for Config {
             write_timeout: Duration::from_secs(30),
             tcp_nodelay: None,
             storage_directory,
+            maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
         }
     }
 }
@@ -529,7 +535,7 @@ impl crate::Storage<Blob> for Context {
             .map_err(|_| Error::PartitionCreationFailed(partition.into()))?;
 
         // Open the file in read-write mode, create if it does not exist
-        let file = fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -538,6 +544,10 @@ impl crate::Storage<Blob> for Context {
             .await
             .map_err(|_| Error::BlobOpenFailed(partition.into(), name.into()))?;
 
+        // Set the maximum buffer size
+        file.set_max_buf_size(self.executor.cfg.maximum_buffer_size);
+
+        // Construct the blob
         Ok(Blob::new(
             self.executor.metrics.clone(),
             partition.into(),
@@ -592,9 +602,7 @@ impl crate::Blob for Blob {
             .seek(SeekFrom::Start(offset as u64))
             .await
             .map_err(|_| Error::ReadFailed)?;
-
         let n = self.file.read(buf).await.map_err(|_| Error::ReadFailed)?;
-
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(n as u64);
         Ok(n)
@@ -605,12 +613,10 @@ impl crate::Blob for Blob {
             .seek(SeekFrom::Start(offset as u64))
             .await
             .map_err(|_| Error::WriteFailed)?;
-
         self.file
             .write_all(buf)
             .await
             .map_err(|_| Error::WriteFailed)?;
-
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(buf.len() as u64);
         Ok(())
