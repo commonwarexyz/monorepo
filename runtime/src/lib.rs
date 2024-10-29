@@ -150,17 +150,25 @@ pub trait Storage<B>: Clone + Send + Sync + 'static
 where
     B: Blob,
 {
-    fn partition(&self, namespace: &str) -> impl Future<Output = Result<Self, Error>> + Send;
+    /// Open an existing blob in a given partition or create a new one.
+    fn open(
+        &mut self,
+        partition: &str,
+        name: &str,
+    ) -> impl Future<Output = Result<B, Error>> + Send;
 
-    fn open(&mut self, name: &str) -> impl Future<Output = Result<B, Error>> + Send;
+    /// Remove a blob from a given partition.
+    fn remove(
+        &mut self,
+        partition: &str,
+        name: &str,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
-    fn remove(&mut self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Read the contents of a directory.
-    fn scan(&self) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
+    /// Read the contents of a partition.
+    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
 }
 
-/// Interface to read and write to a file.
+/// Interface to read and write to a blob.
 pub trait Blob: Send + Sync + 'static {
     /// Get the length of the blob.
     fn len(&self) -> impl Future<Output = Result<u64, Error>> + Send;
