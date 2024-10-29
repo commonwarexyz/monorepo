@@ -69,6 +69,10 @@ struct Metrics {
     task_polls: Family<Work, Counter>,
 
     bandwidth: Counter,
+    disk_reads: Counter,
+    disk_read_bandwidth: Counter,
+    disk_writes: Counter,
+    disk_write_bandwidth: Counter,
 }
 
 impl Metrics {
@@ -78,6 +82,10 @@ impl Metrics {
             tasks_running: Family::default(),
             tasks_spawned: Family::default(),
             bandwidth: Counter::default(),
+            disk_reads: Counter::default(),
+            disk_read_bandwidth: Counter::default(),
+            disk_writes: Counter::default(),
+            disk_write_bandwidth: Counter::default(),
         };
         {
             let mut registry = registry.lock().unwrap();
@@ -100,6 +108,26 @@ impl Metrics {
                 "bandwidth",
                 "Total amount of data sent over network",
                 metrics.bandwidth.clone(),
+            );
+            registry.register(
+                "disk_reads",
+                "Total number of disk reads",
+                metrics.disk_reads.clone(),
+            );
+            registry.register(
+                "disk_read_bandwidth",
+                "Total amount of data read from disk",
+                metrics.disk_read_bandwidth.clone(),
+            );
+            registry.register(
+                "disk_writes",
+                "Total number of disk writes",
+                metrics.disk_writes.clone(),
+            );
+            registry.register(
+                "disk_write_bandwidth",
+                "Total amount of data written to disk",
+                metrics.disk_write_bandwidth.clone(),
             );
         }
         metrics
@@ -1028,6 +1056,11 @@ impl crate::File for File {
         }
         let to_read = len.min(self.content.len() - offset as usize);
         buf[..to_read].copy_from_slice(&self.content[offset as usize..][..to_read]);
+        self.executor.metrics.disk_reads.inc();
+        self.executor
+            .metrics
+            .disk_read_bandwidth
+            .inc_by(to_read as u64);
         Ok(to_read)
     }
 
@@ -1042,6 +1075,11 @@ impl crate::File for File {
             self.content.resize(end, 0);
         }
         self.content[offset as usize..end].copy_from_slice(buf);
+        self.executor.metrics.disk_writes.inc();
+        self.executor
+            .metrics
+            .disk_write_bandwidth
+            .inc_by(len as u64);
         Ok(len)
     }
 
