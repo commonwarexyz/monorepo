@@ -147,6 +147,9 @@ where
     B: Blob,
 {
     /// Open an existing blob in a given partition or create a new one.
+    ///
+    /// Multiple instances of the same blob can be opened concurrently, however,
+    /// writing to the same blob concurrently may lead to undefined behavior.
     fn open(
         &mut self,
         partition: &str,
