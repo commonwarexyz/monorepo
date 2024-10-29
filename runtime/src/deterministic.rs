@@ -303,10 +303,8 @@ impl Executor {
     /// Initialize a new `deterministic` runtime with the given seed and cycle duration.
     pub fn init(cfg: Config) -> (Runner, Context, Arc<Auditor>) {
         // Ensure config is valid
-        if let (Some(_), cycle) = (cfg.timeout, cfg.cycle) {
-            if cycle == Duration::default() {
-                panic!("cycle duration must be non-zero when timeout is set");
-            }
+        if cfg.timeout.is_some() && cfg.cycle == Duration::default() {
+            panic!("cycle duration must be non-zero when timeout is set");
         }
 
         // Initialize runtime

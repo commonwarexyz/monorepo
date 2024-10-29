@@ -88,6 +88,11 @@ pub type Digest = Bytes;
 /// may work better with different cryptographic schemes, may be more efficient
 /// to use in STARK/SNARK proofs, or provide different levels of security (with some
 /// performance/size penalty).
+///
+/// This trait is required to implement the `Clone` trait because it is often
+/// part of a struct that is cloned. In practice, implementations do not actually
+/// clone the hasher state but users should not rely on this behavior and call `reset`
+/// after cloning.
 pub trait Hasher: Clone + Send + 'static {
     /// Create a new hasher.
     fn new() -> Self;

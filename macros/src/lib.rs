@@ -38,7 +38,7 @@ pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
     // accepts sync functions)
     sig.asyncness
         .take()
-        .expect("expected test function to be async");
+        .expect("test_async macro can only be used with async functions");
 
     // Generate output tokens
     let expanded = quote! {
