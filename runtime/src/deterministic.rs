@@ -188,6 +188,83 @@ impl Auditor {
         *hash = format!("{:x}", hasher.finalize());
     }
 
+    fn create(&self, path: &str, permissions: u32) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"create");
+        hasher.update(path.as_bytes());
+        hasher.update(permissions.to_be_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn open(&self, path: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"open");
+        hasher.update(path.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn remove(&self, path: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"remove");
+        hasher.update(path.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn len(&self, path: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"len");
+        hasher.update(path.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn read_at(&self, path: &str, offset: u64, buf: usize) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"read_at");
+        hasher.update(path.as_bytes());
+        hasher.update(offset.to_be_bytes());
+        hasher.update(buf.to_be_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn write_at(&self, path: &str, offset: u64, buf: usize) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"write_at");
+        hasher.update(path.as_bytes());
+        hasher.update(offset.to_be_bytes());
+        hasher.update(buf.to_be_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn sync(&self, path: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"sync");
+        hasher.update(path.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
+    fn close(&self, path: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"close");
+        hasher.update(path.as_bytes());
+        *hash = format!("{:x}", hasher.finalize());
+    }
+
     /// Generate a representation of the current state of the runtime.
     ///
     /// This can be used to ensure that logic running on top
@@ -906,6 +983,7 @@ impl File {
 
 impl crate::Filesystem<File> for Context {
     async fn create(&self, path: &str, permissions: u32) -> Result<File, Error> {
+        self.executor.auditor.create(path, permissions);
         let mut files = self.executor.files.lock().unwrap();
         match files.entry(path.to_string()) {
             Entry::Occupied(_) => Err(Error::FileAlreadyExists(path.to_string())),
@@ -918,6 +996,7 @@ impl crate::Filesystem<File> for Context {
     }
 
     async fn open(&self, path: &str) -> Result<File, Error> {
+        self.executor.auditor.open(path);
         let files = self.executor.files.lock().unwrap();
         files
             .get(path)
@@ -926,6 +1005,7 @@ impl crate::Filesystem<File> for Context {
     }
 
     async fn remove(&self, path: &str) -> Result<(), Error> {
+        self.executor.auditor.remove(path);
         let mut files = self.executor.files.lock().unwrap();
         files
             .remove(path)
@@ -936,31 +1016,37 @@ impl crate::Filesystem<File> for Context {
 
 impl crate::File for File {
     async fn len(&self) -> Result<u64, Error> {
+        self.executor.auditor.len(&self.path);
         Ok(self.content.len() as u64)
     }
 
     async fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
+        let len = buf.len();
+        self.executor.auditor.read_at(&self.path, offset, len);
         if offset >= self.content.len() as u64 {
             return Ok(0);
         }
-        let to_read = buf.len().min(self.content.len() - offset as usize);
+        let to_read = len.min(self.content.len() - offset as usize);
         buf[..to_read].copy_from_slice(&self.content[offset as usize..][..to_read]);
         Ok(to_read)
     }
 
     async fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<usize, Error> {
+        let len = buf.len();
+        self.executor.auditor.write_at(&self.path, offset, len);
         if self.permissions.readonly() {
             return Err(Error::PermissionDenied);
         }
-        let end = offset as usize + buf.len();
+        let end = offset as usize + len;
         if end > self.content.len() {
             self.content.resize(end, 0);
         }
         self.content[offset as usize..end].copy_from_slice(buf);
-        Ok(buf.len())
+        Ok(len)
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
+        self.executor.auditor.sync(&self.path);
         let mut files = self.executor.files.lock().unwrap();
         let file = files
             .get_mut(&self.path)
@@ -970,6 +1056,7 @@ impl crate::File for File {
     }
 
     async fn close(&mut self) -> Result<(), Error> {
+        self.executor.auditor.close(&self.path);
         self.sync().await
     }
 }
