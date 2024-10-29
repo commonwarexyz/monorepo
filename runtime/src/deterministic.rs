@@ -39,12 +39,11 @@ use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{hash_map::Entry, BinaryHeap, HashMap},
-    fs::Permissions,
     future::Future,
     mem::replace,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
-    os::unix::fs::PermissionsExt,
+    path::{self, Component, Path},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
@@ -437,6 +436,17 @@ impl Executor {
             sleeping: Mutex::new(BinaryHeap::new()),
             files: Mutex::new(HashMap::new()),
         });
+
+        // Add root
+        {
+            let root_path = "/".to_string();
+            executor.files.lock().unwrap().insert(
+                root_path.clone(),
+                File::new_directory(executor.clone(), &root_path),
+            );
+        }
+
+        // Return runtime
         (
             Runner {
                 executor: executor.clone(),
@@ -990,39 +1000,133 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
+enum Content {
+    Bytes(Vec<u8>),
+    Directory(HashMap<String, File>),
+}
+
 pub struct File {
     executor: Arc<Executor>,
     path: String,
-    permissions: Permissions,
-    content: Vec<u8>,
+    content: Content,
 }
 
 impl File {
-    fn new(executor: Arc<Executor>, path: &str, permissions: u32) -> Self {
+    fn new_bytes(executor: Arc<Executor>, path: &str) -> Self {
         Self {
             executor,
             path: path.to_string(),
-            permissions: Permissions::from_mode(permissions),
-            content: Vec::new(),
+            content: Content::Bytes(Vec::new()),
+        }
+    }
+
+    fn new_directory(executor: Arc<Executor>, path: &str) -> Self {
+        Self {
+            executor,
+            path: path.to_string(),
+            content: Content::Directory(HashMap::new()),
         }
     }
 }
 
 impl crate::Filesystem<File> for Context {
-    async fn create(&self, path: &str, permissions: u32) -> Result<File, Error> {
-        self.executor.auditor.create(path, permissions);
+    async fn create_dir(&mut self, path: &str) -> Result<(), Error> {
+        let mut files = self.executor.files.lock().unwrap();
+        let formatted_path = Path::new(path);
+        let mut components = formatted_path.components();
+        let mut file = match components.next() {
+            Some(Component::RootDir) => files.get_mut("/").unwrap(),
+            _ => return Err(Error::InvalidPath),
+        };
+        let mut created = 0;
+        for component in components {
+            let name = component.as_os_str().to_str().ok_or(Error::InvalidPath)?;
+            file = match file.content {
+                Content::Directory(ref mut dir) => match dir.entry(name.to_string()) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        created += 1;
+                        entry.insert(File::new_directory(self.executor.clone(), name))
+                    }
+                },
+                _ => return Err(Error::IntermediateDirectoryIsFile(name.to_string())),
+            }
+        }
+        if created == 0 {
+            return Err(Error::DirectoryAlreadyExists(path.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn read_dir(&self, path: &str) -> Result<Vec<String>, Error> {
+        let files = self.executor.files.lock().unwrap();
+        let formatted_path = Path::new(path);
+        let mut components = formatted_path.components();
+        let mut file = match components.next() {
+            Some(Component::RootDir) => files.get("/").unwrap(),
+            _ => return Err(Error::InvalidPath),
+        };
+        for component in components {
+            let name = component.as_os_str().to_str().ok_or(Error::InvalidPath)?;
+            file = match file.content {
+                Content::Directory(ref directory) => {
+                    directory.get(name).ok_or(Error::InvalidPath)?
+                }
+                _ => return Err(Error::IntermediateDirectoryIsFile(name.to_string())),
+            }
+        }
+        match &file.content {
+            Content::Directory(directory) => Ok(directory.keys().cloned().collect()),
+            _ => Err(Error::NotDirectory(path.to_string())),
+        }
+    }
+
+    async fn remove_dir(&mut self, path: &str) -> Result<(), Error> {
+        let mut files = self.executor.files.lock().unwrap();
+        let path = Path::new(path);
+        let mut components = path.components();
+        let mut file = match components.next() {
+            Some(Component::RootDir) => files.get_mut("/").unwrap(),
+            _ => return Err(Error::InvalidPath),
+        };
+        let mut parent = None;
+        for component in components {
+            parent = Some(file);
+            let name = component.as_os_str().to_str().ok_or(Error::InvalidPath)?;
+            file = match file.content {
+                Content::Directory(ref mut directory) => {
+                    directory.get_mut(name).ok_or(Error::InvalidPath)?
+                }
+                _ => return Err(Error::IntermediateDirectoryIsFile(name.to_string())),
+            }
+        }
+        if let Some(parent) = parent {
+            if let Content::Directory(ref mut directory) = parent.content {
+                let name = path
+                    .file_name()
+                    .ok_or(Error::InvalidPath)?
+                    .to_str()
+                    .ok_or(Error::InvalidPath)?;
+                directory.remove(name).ok_or(Error::InvalidPath)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn create_file(&mut self, path: &str) -> Result<File, Error> {
+        self.executor.auditor.create(path, 0o666);
         let mut files = self.executor.files.lock().unwrap();
         match files.entry(path.to_string()) {
             Entry::Occupied(_) => Err(Error::FileAlreadyExists(path.to_string())),
             Entry::Vacant(entry) => {
-                let file = File::new(self.executor.clone(), path, permissions);
+                let file = File::new_bytes(self.executor.clone(), path);
                 entry.insert(file.clone());
                 Ok(file)
             }
         }
     }
 
-    async fn open(&self, path: &str) -> Result<File, Error> {
+    async fn open_file(&self, path: &str) -> Result<File, Error> {
         self.executor.auditor.open(path);
         let files = self.executor.files.lock().unwrap();
         files
@@ -1031,7 +1135,7 @@ impl crate::Filesystem<File> for Context {
             .ok_or(Error::FileNotFound(path.to_string()))
     }
 
-    async fn remove(&self, path: &str) -> Result<(), Error> {
+    async fn remove_file(&mut self, path: &str) -> Result<(), Error> {
         self.executor.auditor.remove(path);
         let mut files = self.executor.files.lock().unwrap();
         files

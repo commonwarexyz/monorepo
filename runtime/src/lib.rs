@@ -42,8 +42,18 @@ pub enum Error {
     WriteFailed,
     #[error("read failed")]
     ReadFailed,
+    #[error("invalid path")]
+    InvalidPath,
     #[error("file already exists: {0}")]
     FileAlreadyExists(String),
+    #[error("directory already exists: {0}")]
+    DirectoryAlreadyExists(String),
+    #[error("intermediate directory does not exist: {0}")]
+    IntermediateDirectoryDoesNotExist(String),
+    #[error("intermediate directory is a file: {0}")]
+    IntermediateDirectoryIsFile(String),
+    #[error("not a directory: {0}")]
+    NotDirectory(String),
     #[error("file not found: {0}")]
     FileNotFound(String),
     #[error("permission denied")]
@@ -136,27 +146,29 @@ pub trait Stream: Sync + Send + 'static {
 }
 
 /// Interface to interact with the filesystem.
+///
+/// All paths provided must be absolute.
 pub trait Filesystem<F>: Clone + Send + Sync + 'static
 where
     F: File,
 {
     /// Create a new directory with default permissions (0o666) and any parent directories along the way (error if already exists).
-    fn create_dir(&self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
-
-    /// Remove a directory.
-    fn remove_dir(&self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    fn create_dir(&mut self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Read the contents of a directory.
     fn read_dir(&self, path: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
 
+    /// Remove a directory.
+    fn remove_dir(&mut self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
+
     /// Create a new file with default permissions (0o666) for reading and writing (error if already exists).
-    fn create_file(&self, path: &str) -> impl Future<Output = Result<F, Error>> + Send;
+    fn create_file(&mut self, path: &str) -> impl Future<Output = Result<F, Error>> + Send;
 
     /// Open an existing file for reading and writing.
     fn open_file(&self, path: &str) -> impl Future<Output = Result<F, Error>> + Send;
 
     /// Remove a file.
-    fn remove_file(&self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    fn remove_file(&mut self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface to read and write to a file.
