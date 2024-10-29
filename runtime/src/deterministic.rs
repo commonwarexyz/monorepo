@@ -38,7 +38,7 @@ use prometheus_client::{
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{hash_map::Entry, BinaryHeap, HashMap},
+    collections::{hash_map::Entry, BTreeMap, BinaryHeap, HashMap},
     future::Future,
     mem::replace,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -403,7 +403,7 @@ pub struct Executor {
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
-    files: Mutex<HashMap<String, File>>,
+    files: Mutex<File>,
 }
 
 impl Executor {
@@ -1002,7 +1002,7 @@ impl CryptoRng for Context {}
 
 enum Content {
     Bytes(Vec<u8>),
-    Directory(HashMap<String, File>),
+    Directory(BTreeMap<String, File>),
 }
 
 pub struct File {
