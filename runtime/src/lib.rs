@@ -42,6 +42,12 @@ pub enum Error {
     WriteFailed,
     #[error("read failed")]
     ReadFailed,
+    #[error("file already exists: {0}")]
+    FileAlreadyExists(String),
+    #[error("file not found: {0}")]
+    FileNotFound(String),
+    #[error("permission denied")]
+    PermissionDenied,
 }
 
 /// Interface that any task scheduler must implement to start
@@ -133,6 +139,8 @@ where
     F: File,
 {
     /// Create a new file (error if already exists).
+    ///
+    /// Any missing parent directories will be created.
     fn create(&self, path: &str, permissions: u32)
         -> impl Future<Output = Result<F, Error>> + Send;
 
@@ -145,18 +153,21 @@ where
 
 /// Interface to read and write to a file.
 pub trait File: Send + Sync + 'static {
+    /// Get the length of the file.
+    fn len(&self) -> impl Future<Output = Result<u64, Error>> + Send;
+
     /// Read from the file at the given offset.
     fn read_at(
-        &self,
-        offset: u64,
+        &mut self,
         buf: &mut [u8],
+        offset: u64,
     ) -> impl Future<Output = Result<usize, Error>> + Send;
 
     /// Write to the file at the given offset.
     fn write_at(
         &mut self,
-        offset: u64,
         buf: &[u8],
+        offset: u64,
     ) -> impl Future<Output = Result<usize, Error>> + Send;
 
     /// Sync the file to disk.

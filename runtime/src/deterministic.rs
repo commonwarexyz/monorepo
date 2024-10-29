@@ -38,11 +38,13 @@ use prometheus_client::{
 use rand::{prelude::SliceRandom, rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BinaryHeap, HashMap},
+    collections::{hash_map::Entry, BinaryHeap, HashMap},
+    fs::Permissions,
     future::Future,
     mem::replace,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
+    os::unix::fs::PermissionsExt,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{self, Poll, Waker},
@@ -297,6 +299,7 @@ pub struct Executor {
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
+    files: Mutex<HashMap<String, File>>,
 }
 
 impl Executor {
@@ -327,6 +330,7 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
+            files: Mutex::new(HashMap::new()),
         });
         (
             Runner {
@@ -880,6 +884,95 @@ impl RngCore for Context {
 }
 
 impl CryptoRng for Context {}
+
+#[derive(Clone)]
+pub struct File {
+    executor: Arc<Executor>,
+    path: String,
+    permissions: Permissions,
+    content: Vec<u8>,
+}
+
+impl File {
+    fn new(executor: Arc<Executor>, path: &str, permissions: u32) -> Self {
+        Self {
+            executor,
+            path: path.to_string(),
+            permissions: Permissions::from_mode(permissions),
+            content: Vec::new(),
+        }
+    }
+}
+
+impl crate::Filesystem<File> for Context {
+    async fn create(&self, path: &str, permissions: u32) -> Result<File, Error> {
+        let mut files = self.executor.files.lock().unwrap();
+        match files.entry(path.to_string()) {
+            Entry::Occupied(_) => Err(Error::FileAlreadyExists(path.to_string())),
+            Entry::Vacant(entry) => {
+                let file = File::new(self.executor.clone(), path, permissions);
+                entry.insert(file.clone());
+                Ok(file)
+            }
+        }
+    }
+
+    async fn open(&self, path: &str) -> Result<File, Error> {
+        let files = self.executor.files.lock().unwrap();
+        files
+            .get(path)
+            .cloned()
+            .ok_or(Error::FileNotFound(path.to_string()))
+    }
+
+    async fn remove(&self, path: &str) -> Result<(), Error> {
+        let mut files = self.executor.files.lock().unwrap();
+        files
+            .remove(path)
+            .ok_or(Error::FileNotFound(path.to_string()))?;
+        Ok(())
+    }
+}
+
+impl crate::File for File {
+    async fn len(&self) -> Result<u64, Error> {
+        Ok(self.content.len() as u64)
+    }
+
+    async fn read_at(&mut self, buf: &mut [u8], offset: u64) -> Result<usize, Error> {
+        if offset >= self.content.len() as u64 {
+            return Ok(0);
+        }
+        let to_read = buf.len().min(self.content.len() - offset as usize);
+        buf[..to_read].copy_from_slice(&self.content[offset as usize..][..to_read]);
+        Ok(to_read)
+    }
+
+    async fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<usize, Error> {
+        if self.permissions.readonly() {
+            return Err(Error::PermissionDenied);
+        }
+        let end = offset as usize + buf.len();
+        if end > self.content.len() {
+            self.content.resize(end, 0);
+        }
+        self.content[offset as usize..end].copy_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        let mut files = self.executor.files.lock().unwrap();
+        let file = files
+            .get_mut(&self.path)
+            .ok_or(Error::FileNotFound(self.path.clone()))?;
+        file.content.clone_from(&self.content);
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), Error> {
+        self.sync().await
+    }
+}
 
 #[cfg(test)]
 mod tests {
