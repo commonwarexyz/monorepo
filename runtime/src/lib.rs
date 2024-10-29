@@ -461,6 +461,58 @@ mod tests {
         });
     }
 
+    fn test_many_partition_read_write<B>(
+        runner: impl Runner,
+        mut context: impl Spawner + Storage<B>,
+    ) where
+        B: Blob,
+    {
+        runner.start(async move {
+            let partitions = vec!["partition1", "partition2", "partition3"];
+            let name = "test_blob_rw";
+
+            for (additional, partition) in partitions.iter().enumerate() {
+                // Open a new blob
+                let mut blob = context
+                    .open(partition, name)
+                    .await
+                    .expect("Failed to open blob");
+
+                // Write data at different offsets
+                let data1 = b"Hello";
+                let data2 = b"World";
+                blob.write_at(data1, 0)
+                    .await
+                    .expect("Failed to write data1");
+                blob.write_at(data2, 5 + additional)
+                    .await
+                    .expect("Failed to write data2");
+
+                // Close the blob
+                blob.close().await.expect("Failed to close blob");
+            }
+
+            for (additional, partition) in partitions.iter().enumerate() {
+                // Open a new blob
+                let mut blob = context
+                    .open(partition, name)
+                    .await
+                    .expect("Failed to open blob");
+
+                // Read data back
+                let mut buffer = vec![0u8; 10 + additional];
+                blob.read_at(&mut buffer, 0)
+                    .await
+                    .expect("Failed to read data");
+                assert_eq!(&buffer[..5], b"Hello");
+                assert_eq!(&buffer[5 + additional..], b"World");
+
+                // Close the blob
+                blob.close().await.expect("Failed to close blob");
+            }
+        });
+    }
+
     #[test]
     fn test_deterministic_future() {
         let (runner, _, _) = deterministic::Executor::default();
@@ -530,6 +582,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_many_partition_read_write() {
+        let (executor, runtime, _) = deterministic::Executor::default();
+        test_many_partition_read_write(executor, runtime);
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
@@ -593,5 +651,11 @@ mod tests {
     fn test_tokio_blob_read_write() {
         let (executor, runtime) = tokio::Executor::default();
         test_blob_read_write(executor, runtime);
+    }
+
+    #[test]
+    fn test_tokio_many_partition_read_write() {
+        let (executor, runtime) = tokio::Executor::default();
+        test_many_partition_read_write(executor, runtime);
     }
 }
