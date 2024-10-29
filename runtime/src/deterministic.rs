@@ -666,8 +666,9 @@ impl crate::Runner for Runner {
     }
 }
 
-/// Implementation of [`crate::Spawner`] and [`crate::Clock`]
-/// for the `deterministic` runtime.
+/// Implementation of [`crate::Spawner`], [`crate::Clock`],
+/// [`crate::Network`], and [`crate::Storage`] for the `deterministic`
+/// runtime.
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,
@@ -910,6 +911,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
     }
 }
 
+/// Implementation of [`crate::Listener`] for the `deterministic` runtime.
 pub struct Listener {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -944,6 +946,7 @@ impl crate::Listener<Sink, Stream> for Listener {
     }
 }
 
+/// Implementation of [`crate::Sink`] for the `deterministic` runtime.
 pub struct Sink {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -965,6 +968,7 @@ impl crate::Sink for Sink {
     }
 }
 
+/// Implementation of [`crate::Stream`] for the `deterministic` runtime.
 pub struct Stream {
     auditor: Arc<Auditor>,
     me: SocketAddr,
@@ -1016,6 +1020,7 @@ impl Partition {
     }
 }
 
+/// Implementation of [`crate::Blob`] for the `deterministic` runtime.
 pub struct Blob {
     executor: Arc<Executor>,
 

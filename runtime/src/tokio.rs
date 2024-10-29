@@ -275,8 +275,9 @@ impl crate::Runner for Runner {
     }
 }
 
-/// Implementation of [`crate::Spawner`] and [`crate::Clock`]
-/// for the `tokio` runtime.
+/// Implementation of [`crate::Spawner`], [`crate::Clock`],
+/// [`crate::Network`], and [`crate::Storage`] for the `tokio`
+/// runtime.
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,
@@ -390,6 +391,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
     }
 }
 
+/// Implementation of [`crate::Listener`] for the `tokio` runtime.
 pub struct Listener {
     context: Context,
     listener: TcpListener,
@@ -421,6 +423,7 @@ impl crate::Listener<Sink, Stream> for Listener {
     }
 }
 
+/// Implementation of [`crate::Sink`] for the `tokio` runtime.
 pub struct Sink {
     context: Context,
     sink: SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>,
@@ -442,6 +445,7 @@ impl crate::Sink for Sink {
     }
 }
 
+/// Implementation of [`crate::Stream`] for the `tokio` runtime.
 pub struct Stream {
     context: Context,
     stream: SplitStream<Framed<TcpStream, LengthDelimitedCodec>>,
@@ -483,6 +487,7 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
+/// Implementation of [`crate::Blob`] for the `tokio` runtime.
 pub struct Blob {
     metrics: Arc<Metrics>,
 
