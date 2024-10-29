@@ -48,6 +48,8 @@ pub enum Error {
     FileNotFound(String),
     #[error("permission denied")]
     PermissionDenied,
+    #[error("file operation failed")]
+    FileOpFailed,
 }
 
 /// Interface that any task scheduler must implement to start
@@ -168,7 +170,7 @@ pub trait File: Send + Sync + 'static {
         &mut self,
         buf: &[u8],
         offset: u64,
-    ) -> impl Future<Output = Result<usize, Error>> + Send;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Sync the file to disk.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;

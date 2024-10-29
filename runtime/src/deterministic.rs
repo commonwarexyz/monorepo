@@ -990,7 +990,6 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
-#[derive(Clone)]
 pub struct File {
     executor: Arc<Executor>,
     path: String,
@@ -1064,7 +1063,7 @@ impl crate::File for File {
         Ok(to_read)
     }
 
-    async fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<usize, Error> {
+    async fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<(), Error> {
         let len = buf.len();
         self.executor.auditor.write_at(&self.path, offset, len);
         if self.permissions.readonly() {
@@ -1080,7 +1079,7 @@ impl crate::File for File {
             .metrics
             .disk_write_bandwidth
             .inc_by(len as u64);
-        Ok(len)
+        Ok(())
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
