@@ -969,4 +969,15 @@ mod tests {
             }
         });
     }
+
+    #[test]
+    #[should_panic(expected = "cycle duration must be non-zero when timeout is set")]
+    fn test_bad_timeout() {
+        let cfg = Config {
+            timeout: Some(Duration::default()),
+            cycle: Duration::default(),
+            ..Config::default()
+        };
+        let (_, _, _) = Executor::init(cfg);
+    }
 }
