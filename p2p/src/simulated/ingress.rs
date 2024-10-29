@@ -109,9 +109,6 @@ impl Oracle {
         let sampler = Normal::new(config.latency, config.jitter)
             .map_err(|_| Error::InvalidBehavior(config.latency, config.jitter))?;
 
-        // Create distribution
-        let sampler = Normal::new(config.latency, config.jitter).unwrap();
-
         // Wait for update to complete
         let (s, r) = oneshot::channel();
         self.sender
