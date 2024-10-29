@@ -140,6 +140,8 @@ pub trait Stream: Sync + Send + 'static {
 }
 
 /// Interface to interact with storage.
+///
+/// Storage can be backed by a local filesystem, cloud storage, etc.
 pub trait Storage<B>: Clone + Send + Sync + 'static
 where
     B: Blob,
@@ -337,6 +339,128 @@ mod tests {
         });
     }
 
+    fn test_storage_operations<B>(runner: impl Runner, mut context: impl Spawner + Storage<B>)
+    where
+        B: Blob,
+    {
+        runner.start(async move {
+            let partition = "test_partition";
+            let name = "test_blob";
+
+            // Open a new blob
+            let mut blob = context
+                .open(partition, name)
+                .await
+                .expect("Failed to open blob");
+
+            // Write data to the blob
+            let data = b"Hello, Storage!";
+            blob.write_at(data, 0)
+                .await
+                .expect("Failed to write to blob");
+
+            // Sync the blob
+            blob.sync().await.expect("Failed to sync blob");
+
+            // Read data from the blob
+            let mut buffer = vec![0u8; data.len()];
+            blob.read_at(&mut buffer, 0)
+                .await
+                .expect("Failed to read from blob");
+            assert_eq!(&buffer, data);
+
+            // Get blob length
+            let length = blob.len().await.expect("Failed to get blob length");
+            assert_eq!(length, data.len());
+
+            // Close the blob
+            blob.close().await.expect("Failed to close blob");
+
+            // Scan blobs in the partition
+            let blobs = context
+                .scan(partition)
+                .await
+                .expect("Failed to scan partition");
+            assert!(blobs.contains(&name.to_string()));
+
+            // Reopen the blob
+            let mut blob = context
+                .open(partition, name)
+                .await
+                .expect("Failed to reopen blob");
+
+            // Read data part of message back
+            let mut buffer = vec![0u8; 7];
+            blob.read_at(&mut buffer, 7)
+                .await
+                .expect("Failed to read data");
+            assert_eq!(&buffer, b"Storage");
+
+            // Close the blob
+            blob.close().await.expect("Failed to close blob");
+
+            // Remove the blob
+            context
+                .remove(partition, Some(name))
+                .await
+                .expect("Failed to remove blob");
+
+            // Ensure the blob is removed
+            let blobs = context
+                .scan(partition)
+                .await
+                .expect("Failed to scan partition");
+            assert!(!blobs.contains(&name.to_string()));
+
+            // Remove the partition
+            context
+                .remove(partition, None)
+                .await
+                .expect("Failed to remove partition");
+
+            // Scan the partition
+            let result = context.scan(partition).await.unwrap_err();
+            assert!(matches!(result, Error::PartitionMissing(_)));
+        });
+    }
+
+    fn test_blob_read_write<B>(runner: impl Runner, mut context: impl Spawner + Storage<B>)
+    where
+        B: Blob,
+    {
+        runner.start(async move {
+            let partition = "test_partition";
+            let name = "test_blob_rw";
+
+            // Open a new blob
+            let mut blob = context
+                .open(partition, name)
+                .await
+                .expect("Failed to open blob");
+
+            // Write data at different offsets
+            let data1 = b"Hello";
+            let data2 = b"World";
+            blob.write_at(data1, 0)
+                .await
+                .expect("Failed to write data1");
+            blob.write_at(data2, 5)
+                .await
+                .expect("Failed to write data2");
+
+            // Read data back
+            let mut buffer = vec![0u8; 10];
+            blob.read_at(&mut buffer, 0)
+                .await
+                .expect("Failed to read data");
+            assert_eq!(&buffer[..5], data1);
+            assert_eq!(&buffer[5..], data2);
+
+            // Close the blob
+            blob.close().await.expect("Failed to close blob");
+        });
+    }
+
     #[test]
     fn test_deterministic_future() {
         let (runner, _, _) = deterministic::Executor::default();
@@ -394,6 +518,18 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_storage_operations() {
+        let (executor, runtime, _) = deterministic::Executor::default();
+        test_storage_operations(executor, runtime);
+    }
+
+    #[test]
+    fn test_deterministic_blob_read_write() {
+        let (executor, runtime, _) = deterministic::Executor::default();
+        test_blob_read_write(executor, runtime);
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
@@ -445,5 +581,17 @@ mod tests {
     fn test_tokio_select_loop() {
         let (executor, runtime) = tokio::Executor::default();
         test_select_loop(executor, runtime);
+    }
+
+    #[test]
+    fn test_tokio_storage_operations() {
+        let (executor, runtime) = tokio::Executor::default();
+        test_storage_operations(executor, runtime);
+    }
+
+    #[test]
+    fn test_tokio_blob_read_write() {
+        let (executor, runtime) = tokio::Executor::default();
+        test_blob_read_write(executor, runtime);
     }
 }
