@@ -140,7 +140,7 @@ pub trait Filesystem<F>: Clone + Send + Sync + 'static
 where
     F: File,
 {
-    /// Create a new directory and any parent directories along the way (error if already exists).
+    /// Create a new directory with default permissions (0o666) and any parent directories along the way (error if already exists).
     fn create_dir(&self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Remove a directory.
@@ -149,7 +149,7 @@ where
     /// Read the contents of a directory.
     fn read_dir(&self, path: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
 
-    /// Create a new file for reading and writing (error if already exists).
+    /// Create a new file with default permissions (0o666) for reading and writing (error if already exists).
     fn create_file(&self, path: &str) -> impl Future<Output = Result<F, Error>> + Send;
 
     /// Open an existing file for reading and writing.
