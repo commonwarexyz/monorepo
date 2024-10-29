@@ -264,14 +264,14 @@ impl Auditor {
         *hash = format!("{:x}", hasher.finalize());
     }
 
-    fn write_at(&self, path: &str, offset: u64, buf: usize) {
+    fn write_at(&self, path: &str, offset: u64, buf: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(hash.as_bytes());
         hasher.update(b"write_at");
         hasher.update(path.as_bytes());
         hasher.update(offset.to_be_bytes());
-        hasher.update(buf.to_be_bytes());
+        hasher.update(buf);
         *hash = format!("{:x}", hasher.finalize());
     }
 
@@ -1064,11 +1064,11 @@ impl crate::File for File {
     }
 
     async fn write_at(&mut self, buf: &[u8], offset: u64) -> Result<(), Error> {
-        let len = buf.len();
-        self.executor.auditor.write_at(&self.path, offset, len);
+        self.executor.auditor.write_at(&self.path, offset, buf);
         if self.permissions.readonly() {
             return Err(Error::PermissionDenied);
         }
+        let len = buf.len();
         let end = offset as usize + len;
         if end > self.content.len() {
             self.content.resize(end, 0);

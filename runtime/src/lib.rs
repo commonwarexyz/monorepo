@@ -140,17 +140,23 @@ pub trait Filesystem<F>: Clone + Send + Sync + 'static
 where
     F: File,
 {
-    /// Create a new file (error if already exists).
-    fn create(&self, path: &str, permissions: u32)
-        -> impl Future<Output = Result<F, Error>> + Send;
+    /// Create a new directory and any parent directories along the way (error if already exists).
+    fn create_dir(&self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Open an existing file.
-    fn open(&self, path: &str) -> impl Future<Output = Result<F, Error>> + Send;
+    /// Remove a directory.
+    fn remove_dir(&self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// Read the contents of a directory.
+    fn read_dir(&self, path: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
+
+    /// Create a new file for reading and writing (error if already exists).
+    fn create_file(&self, path: &str) -> impl Future<Output = Result<F, Error>> + Send;
+
+    /// Open an existing file for reading and writing.
+    fn open_file(&self, path: &str) -> impl Future<Output = Result<F, Error>> + Send;
 
     /// Remove a file.
-    fn remove(&self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
-
-    // TODO: add directory operations (mkdir, rmdir, readdir)
+    fn remove_file(&self, path: &str) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface to read and write to a file.
