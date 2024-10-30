@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-storage.svg)](https://crates.io/crates/commonware-storage)
 
-TBD
+Persist and retrieve data from an abstract store.
 
 ## Status 
 

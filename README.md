@@ -12,6 +12,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections. 
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
+* [storage](./storage/README.md): Persist and retrieve data from an abstract store.
 
 ## Examples
 
