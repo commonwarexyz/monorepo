@@ -624,10 +624,6 @@ impl crate::Blob for Blob {
 
     async fn sync(&mut self) -> Result<(), Error> {
         self.file
-            .flush()
-            .await
-            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), self.name.clone()))?;
-        self.file
             .sync_all()
             .await
             .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), self.name.clone()))
