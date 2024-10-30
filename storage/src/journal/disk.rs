@@ -1,12 +1,12 @@
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
-use commonware_runtime::{Blob, Storage};
+use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::hex;
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     marker::PhantomData,
 };
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 pub struct Journal<B: Blob, E: Storage<B>> {
     runtime: E,
@@ -21,7 +21,11 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     pub async fn init(mut runtime: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
-        let stored_blobs = runtime.scan(&cfg.partition).await.map_err(Error::Runtime)?;
+        let stored_blobs = match runtime.scan(&cfg.partition).await {
+            Ok(blobs) => blobs,
+            Err(RError::PartitionMissing(_)) => Vec::new(),
+            Err(err) => return Err(Error::Runtime(err)),
+        };
         for name in stored_blobs {
             let blob = runtime
                 .open(&cfg.partition, &name)
@@ -90,7 +94,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         Ok((offset, Bytes::from(item)))
     }
 
-    pub async fn replay(&mut self, f: impl Fn(u64, Bytes) -> bool) -> Result<(), Error> {
+    pub async fn replay(&mut self, mut f: impl FnMut(u64, Bytes) -> bool) -> Result<(), Error> {
         for (index, blob) in self.blobs.iter_mut() {
             debug!(blob = *index, "replaying blob");
             let mut cursor = 0;
@@ -98,6 +102,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             loop {
                 match Self::read(blob, cursor).await {
                     Ok((new_cursor, item)) => {
+                        trace!(blob = *index, cursor, "replayed item");
                         if !f(*index, item) {
                             break;
                         }

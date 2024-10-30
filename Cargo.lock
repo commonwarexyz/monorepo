@@ -479,11 +479,13 @@ name = "commonware-storage"
 version = "0.0.2"
 dependencies = [
  "bytes",
+ "commonware-macros",
  "commonware-runtime",
  "commonware-utils",
  "crc32fast",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
