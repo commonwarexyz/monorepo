@@ -196,6 +196,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         loop {
+            // Check if we should remove next blob
             let index = match self.blobs.first_key_value() {
                 Some((index, _)) => *index,
                 None => return Ok(()),
@@ -203,11 +204,17 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             if index >= min {
                 return Ok(());
             }
-            self.blobs.remove(&index);
+
+            // Remove and close blob
+            let mut blob = self.blobs.remove(&index).unwrap();
+            blob.close().await.map_err(Error::Runtime)?;
+
+            // Remove blob from storage
             self.runtime
                 .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
                 .await
                 .map_err(Error::Runtime)?;
+            debug!(blob = index, "pruned blob");
         }
     }
 }
