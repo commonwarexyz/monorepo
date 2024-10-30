@@ -1,7 +1,6 @@
 //! TBD
 
 mod disk;
-use std::error;
 
 pub use disk::Journal;
 

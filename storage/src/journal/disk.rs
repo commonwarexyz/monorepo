@@ -1,6 +1,7 @@
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
+use commonware_utils::hex;
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::{debug, warn};
 
@@ -23,11 +24,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                 .open(&cfg.partition, &name)
                 .await
                 .map_err(Error::Runtime)?;
-            let name_bytes = name
-                .as_bytes()
-                .try_into()
-                .map_err(|_| Error::InvalidBlobName(name))?;
-            let blob_index = u64::from_be_bytes(name_bytes);
+            if name.len() != 8 {
+                return Err(Error::InvalidBlobName(hex(&name)));
+            }
+            let blob_index = u64::from_be_bytes(name.try_into().unwrap());
             debug!(blob = blob_index, "loaded blob");
             blobs.insert(blob_index, blob);
         }
@@ -130,25 +130,26 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         let blob = match self.blobs.get_mut(&index) {
             Some(blob) => blob,
             None => {
-                let name = index.to_be_bytes().to_vec();
+                let name = index.to_be_bytes();
                 let blob = self
                     .runtime
                     .open(&self.cfg.partition, &name)
                     .await
                     .map_err(Error::Runtime)?;
                 self.blobs.insert(index, blob);
-                blob
+                &mut blob
             }
         };
 
         // Write item
+        let cursor = blob.len().await.map_err(Error::Runtime)?;
         let len = 4 + item.len() + 4;
         let mut buf = Vec::with_capacity(len);
         buf.put_u32(item.len() as u32);
         let checksum = crc32fast::hash(&item);
         buf.put(item);
         buf.put_u32(checksum);
-        blob.write(&buf).await.map_err(Error::Runtime)
+        blob.write_at(&buf, cursor).await.map_err(Error::Runtime)
     }
 
     /// If the blob does not exist, no error will be returned.
@@ -162,17 +163,16 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         loop {
-            let (index, blob) = match self.blobs.first_key_value() {
-                Some((index, blob)) => (*index, blob),
+            let index = match self.blobs.first_key_value() {
+                Some((index, _)) => *index,
                 None => return Ok(()),
             };
             if index >= min {
                 return Ok(());
             }
             self.blobs.remove(&index);
-            let name = index.to_be_bytes().to_vec();
             self.runtime
-                .remove(&self.cfg.partition, &index.to_be_bytes().to_vec())
+                .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
                 .await
                 .map_err(Error::Runtime)?;
         }

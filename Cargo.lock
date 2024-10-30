@@ -480,6 +480,7 @@ version = "0.0.2"
 dependencies = [
  "bytes",
  "commonware-runtime",
+ "commonware-utils",
  "crc32fast",
  "thiserror",
  "tracing",

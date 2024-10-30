@@ -18,5 +18,5 @@ pub fn payload(round: u64, dealer: u32, share: &[u8]) -> Vec<u8> {
 /// Convert a public polynomial to a hexadecimal representation of
 /// the public key.
 pub fn public_hex(public: &poly::Public) -> String {
-    hex(&poly::public(public).serialize().into())
+    hex(&poly::public(public).serialize())
 }

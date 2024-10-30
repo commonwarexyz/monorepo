@@ -12,6 +12,7 @@ documentation = "https://docs.rs/commonware-storage"
 
 [dependencies]
 commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }

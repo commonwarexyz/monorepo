@@ -76,7 +76,7 @@ impl<E: Clock> Arbiter<E> {
         if let Some(previous) = &previous {
             group = Some(previous.serialize());
             let public = poly::public(previous).serialize();
-            info!(round, public = hex(&public.into()), "starting reshare");
+            info!(round, public = hex(&public), "starting reshare");
         } else {
             info!(round, "starting key generation");
         }
@@ -462,7 +462,7 @@ impl<E: Clock> Arbiter<E> {
             commitments = ?commitments.iter().map(|(_, pk, _)| hex(pk)).collect::<Vec<_>>(),
             disqualified = ?disqualified
                 .iter()
-                .map(hex)
+                .map(|pk| hex(pk))
                 .collect::<Vec<_>>(),
             "repair phase complete"
         );
