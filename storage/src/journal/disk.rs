@@ -217,4 +217,13 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             debug!(blob = index, "pruned blob");
         }
     }
+
+    /// Closes all open blobs.
+    pub async fn close(mut self) -> Result<(), Error> {
+        for (index, blob) in self.blobs.iter_mut() {
+            blob.close().await.map_err(Error::Runtime)?;
+            debug!(blob = index, "closed blob");
+        }
+        Ok(())
+    }
 }

@@ -28,7 +28,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
     use futures::{pin_mut, StreamExt};
 
     #[test_traced]
@@ -56,8 +56,8 @@ mod tests {
                 .await
                 .expect("Failed to append data");
 
-            // Sync the blob to storage
-            journal.sync(index).await.expect("Failed to sync blob");
+            // Close the journal
+            journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
             let mut journal = Journal::init(context, cfg)
@@ -106,7 +106,6 @@ mod tests {
                 (2u64, Bytes::from("Data for blob 2")),
                 (3u64, Bytes::from("Data for blob 3")),
             ];
-
             for (index, data) in &data_items {
                 journal
                     .append(*index, data.clone())
@@ -114,6 +113,9 @@ mod tests {
                     .expect("Failed to append data");
                 journal.sync(*index).await.expect("Failed to sync blob");
             }
+
+            // Close the journal
+            journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
             let mut journal = Journal::init(context, cfg)
@@ -180,6 +182,9 @@ mod tests {
             // Prune blobs with indices less than 3
             journal.prune(3).await.expect("Failed to prune blobs");
 
+            // Close the journal
+            journal.close().await.expect("Failed to close journal");
+
             // Re-initialize the journal to simulate a restart
             let mut journal = Journal::init(context, cfg)
                 .await
@@ -202,6 +207,93 @@ mod tests {
             for (item, expected_index) in items.iter().zip(expected_indices.iter()) {
                 assert_eq!(item.0, *expected_index);
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_handling_corrupted_data() {
+        // Initialize the deterministic runtime
+        let (executor, mut context, _) = Executor::default();
+
+        // Start the test within the executor
+        executor.start(async move {
+            // Create a journal configuration
+            let cfg = Config {
+                partition: "test_partition".to_string(),
+            };
+
+            // Initialize the journal
+            let mut journal = Journal::init(context.clone(), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            // Append 1 item to the first index
+            journal
+                .append(1, Bytes::from("Valid data"))
+                .await
+                .expect("Failed to append data");
+
+            // Append multiple items to the second index
+            let data_items = vec![
+                (2u64, Bytes::from("Valid data")),
+                (2u64, Bytes::from("Valid data, second item")),
+                (2u64, Bytes::from("Valid data, third item")),
+            ];
+            for (index, data) in &data_items {
+                journal
+                    .append(*index, data.clone())
+                    .await
+                    .expect("Failed to append data");
+                journal.sync(*index).await.expect("Failed to sync blob");
+            }
+
+            // Close the journal
+            journal.close().await.expect("Failed to close journal");
+
+            // Manually corrupt the blob 1st blob
+            let corrupt_data = vec![0xFF; 10];
+            let mut blob = context
+                .open(&cfg.partition, &1u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            blob.write_at(&corrupt_data, 0)
+                .await
+                .expect("Failed to corrupt blob");
+            blob.close().await.expect("Failed to close blob");
+
+            // Manually corrupt the end of the second blob
+            let mut blob = context
+                .open(&cfg.partition, &2u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let blob_len = blob.len().await.expect("Failed to get blob length");
+            blob.truncate(blob_len - 4)
+                .await
+                .expect("Failed to corrupt blob");
+            blob.close().await.expect("Failed to close blob");
+
+            // Re-initialize the journal to simulate a restart
+            let mut journal = Journal::init(context, cfg)
+                .await
+                .expect("Failed to re-initialize journal");
+
+            // Attempt to replay the journal
+            let mut items = Vec::new();
+            let stream = journal.replay();
+            pin_mut!(stream);
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Err(err) => panic!("Failed to read item: {}", err),
+                }
+            }
+
+            // Verify that only non-corrupted items were replayed
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0].0, data_items[0].0);
+            assert_eq!(items[0].1, data_items[0].1);
+            assert_eq!(items[1].0, data_items[1].0);
+            assert_eq!(items[1].1, data_items[1].1);
         });
     }
 }
