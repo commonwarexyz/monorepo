@@ -1,5 +1,5 @@
 use super::{Config, Error};
-use bytes::Bytes;
+use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use std::{collections::BTreeMap, marker::PhantomData};
 use tracing::debug;
@@ -43,7 +43,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         })
     }
 
-    async fn read_next(&self, blob: &mut B, offset: usize) -> Result<(usize, Bytes), Error> {
+    async fn read(&self, blob: &mut B, offset: usize) -> Result<(usize, Bytes), Error> {
         // Read item size
         let mut size = [0u8; 4];
         let bytes_read = blob
@@ -92,5 +92,57 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             let cursor = 0;
         }
         Ok(())
+    }
+
+    pub async fn append(&mut self, index: u64, item: Bytes) -> Result<(), Error> {
+        // Get existing blob or create new one
+        let blob = match self.blobs.get_mut(&index) {
+            Some(blob) => blob,
+            None => {
+                let name = index.to_be_bytes().to_vec();
+                let blob = self
+                    .runtime
+                    .open(&self.cfg.partition, &name)
+                    .await
+                    .map_err(Error::Runtime)?;
+                self.blobs.insert(index, blob);
+                blob
+            }
+        };
+
+        // Write item
+        let len = 4 + item.len() + 4;
+        let mut buf = Vec::with_capacity(len);
+        buf.put_u32(item.len() as u32);
+        let checksum = crc32fast::hash(&item);
+        buf.put(item);
+        buf.put_u32(checksum);
+        blob.write(&buf).await.map_err(Error::Runtime)
+    }
+
+    /// If the blob does not exist, no error will be returned.
+    pub async fn sync(&mut self, index: u64) -> Result<(), Error> {
+        let blob = match self.blobs.get_mut(&index) {
+            Some(blob) => blob,
+            None => return Ok(()),
+        };
+        blob.sync().await.map_err(Error::Runtime)
+    }
+
+    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+        loop {
+            let (index, blob) = match self.blobs.iter().next() {
+                Some((index, blob)) => (*index, blob),
+                None => break,
+            };
+            if index >= min {
+                break;
+            }
+            self.blobs.remove(&index);
+            self.runtime
+                .remove(&self.cfg.partition, &index.to_be_bytes().to_vec())
+                .await
+                .map_err(Error::Runtime)?;
+        }
     }
 }
