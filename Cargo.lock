@@ -477,6 +477,7 @@ dependencies = [
 name = "commonware-storage"
 version = "0.0.2"
 dependencies = [
+ "bytes",
  "commonware-runtime",
  "crc32fast",
  "thiserror",
