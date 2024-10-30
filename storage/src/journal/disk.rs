@@ -162,14 +162,15 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         loop {
-            let (index, blob) = match self.blobs.iter().next() {
+            let (index, blob) = match self.blobs.first_key_value() {
                 Some((index, blob)) => (*index, blob),
-                None => break,
+                None => return Ok(()),
             };
             if index >= min {
-                break;
+                return Ok(());
             }
             self.blobs.remove(&index);
+            let name = index.to_be_bytes().to_vec();
             self.runtime
                 .remove(&self.cfg.partition, &index.to_be_bytes().to_vec())
                 .await

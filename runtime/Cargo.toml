@@ -12,6 +12,7 @@ documentation = "https://docs.rs/commonware-runtime"
 
 [dependencies]
 commonware-macros = { workspace = true }
+commonware-utils = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true } 

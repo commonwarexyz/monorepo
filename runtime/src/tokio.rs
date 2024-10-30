@@ -25,6 +25,7 @@
 
 use crate::{Clock, Error, Handle};
 use bytes::Bytes;
+use commonware_utils::{from_hex, hex};
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
@@ -498,32 +499,32 @@ pub struct Blob {
     metrics: Arc<Metrics>,
 
     partition: String,
-    name: String,
+    name: Vec<u8>,
 
     file: fs::File,
 }
 
 impl Blob {
-    fn new(metrics: Arc<Metrics>, partition: String, name: String, file: fs::File) -> Self {
+    fn new(metrics: Arc<Metrics>, partition: String, name: &[u8], file: fs::File) -> Self {
         metrics.open_blobs.inc();
         Self {
             metrics,
             partition,
-            name,
+            name: name.into(),
             file,
         }
     }
 }
 
 impl crate::Storage<Blob> for Context {
-    async fn open(&mut self, partition: &str, name: &str) -> Result<Blob, Error> {
+    async fn open(&mut self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         // Construct the full path
         let path = self
             .executor
             .cfg
             .storage_directory
             .join(partition)
-            .join(name);
+            .join(hex(name));
         let parent = match path.parent() {
             Some(parent) => parent,
             None => return Err(Error::PartitionCreationFailed(partition.into())),
@@ -542,7 +543,7 @@ impl crate::Storage<Blob> for Context {
             .truncate(false)
             .open(&path)
             .await
-            .map_err(|_| Error::BlobOpenFailed(partition.into(), name.into()))?;
+            .map_err(|_| Error::BlobOpenFailed(partition.into(), hex(name)))?;
 
         // Set the maximum buffer size
         file.set_max_buf_size(self.executor.cfg.maximum_buffer_size);
@@ -551,18 +552,18 @@ impl crate::Storage<Blob> for Context {
         Ok(Blob::new(
             self.executor.metrics.clone(),
             partition.into(),
-            name.into(),
+            name,
             file,
         ))
     }
 
-    async fn remove(&mut self, partition: &str, name: Option<&str>) -> Result<(), Error> {
+    async fn remove(&mut self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         let path = self.executor.cfg.storage_directory.join(partition);
         if let Some(name) = name {
-            let blob_path = path.join(name);
+            let blob_path = path.join(hex(name));
             fs::remove_file(blob_path)
                 .await
-                .map_err(|_| Error::BlobMissing(partition.into(), name.into()))?;
+                .map_err(|_| Error::BlobMissing(partition.into(), hex(name)))?;
         } else {
             fs::remove_dir_all(path)
                 .await
@@ -571,7 +572,7 @@ impl crate::Storage<Blob> for Context {
         Ok(())
     }
 
-    async fn scan(&self, partition: &str) -> Result<Vec<String>, Error> {
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         let path = self.executor.cfg.storage_directory.join(partition);
         let mut entries = fs::read_dir(path)
             .await
@@ -583,7 +584,8 @@ impl crate::Storage<Blob> for Context {
                 return Err(Error::PartitionCorrupt(partition.into()));
             }
             if let Some(name) = entry.file_name().to_str() {
-                blobs.push(name.into());
+                let name = from_hex(name).ok_or(Error::PartitionCorrupt(partition.into()))?;
+                blobs.push(name);
             }
         }
         Ok(blobs)
@@ -626,14 +628,14 @@ impl crate::Blob for Blob {
         self.file
             .set_len(len as u64)
             .await
-            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), self.name.clone()))
+            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
         self.file
             .sync_all()
             .await
-            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), self.name.clone()))
+            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))
     }
 
     async fn close(&mut self) -> Result<(), Error> {
@@ -641,7 +643,7 @@ impl crate::Blob for Blob {
         self.file
             .shutdown()
             .await
-            .map_err(|_| Error::BlobCloseFailed(self.partition.clone(), self.name.clone()))
+            .map_err(|_| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name)))
     }
 }
 

@@ -1,15 +1,29 @@
 //! Leverage common functionality across multiple primitives.
 
-use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
-/// Converts `Bytes` to a hexadecimal string.
-pub fn hex(bytes: &Bytes) -> String {
+/// Converts bytes to a hexadecimal string.
+pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
     for byte in bytes.iter() {
         hex.push_str(&format!("{:02x}", byte));
     }
     hex
+}
+
+/// Converts a hexadecimal string to bytes.
+pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| match u8::from_str_radix(&hex[i..i + 2], 16) {
+            Ok(byte) => Some(byte),
+            Err(_) => None,
+        })
+        .collect()
 }
 
 /// Assuming that `n = 3f + 1`, compute the minimum size of `t` such that `t >= 2f + 1`.
@@ -22,10 +36,10 @@ pub fn quorum(n: u32) -> Option<u32> {
 }
 
 /// Hashes the given `Bytes` using SHA-256.
-pub fn hash(bytes: &Bytes) -> Bytes {
+pub fn hash(bytes: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().to_vec().into()
+    hasher.finalize().to_vec()
 }
 
 /// Computes the union of two byte slices.
@@ -43,13 +57,26 @@ mod tests {
     #[test]
     fn test_hex() {
         // Test case 0: empty bytes
-        assert_eq!(hex(&Bytes::new()), "");
+        let b = &[];
+        let h = hex(b);
+        assert_eq!(h, "");
+        assert_eq!(from_hex(&h).unwrap(), b.to_vec());
 
         // Test case 1: single byte
-        assert_eq!(hex(&Bytes::from_static(&[0x01])), "01");
+        let b = &[0x01];
+        let h = hex(b);
+        assert_eq!(h, "01");
+        assert_eq!(from_hex(&h).unwrap(), b.to_vec());
 
         // Test case 2: multiple bytes
-        assert_eq!(hex(&Bytes::from_static(&[0x01, 0x02, 0x03])), "010203");
+        let b = &[0x01, 0x02, 0x03];
+        let h = hex(b);
+        assert_eq!(h, "010203");
+        assert_eq!(from_hex(&h).unwrap(), b.to_vec());
+
+        // Test case 3: odd number of bytes
+        let h = "0102030";
+        assert!(from_hex(h).is_none());
     }
 
     #[test]
@@ -70,21 +97,21 @@ mod tests {
     #[test]
     fn test_hash() {
         // Test case 0: empty bytes
-        let empty = hash(&Bytes::from_static(b""));
+        let empty = hash(b"");
         assert_eq!(
             hex(&empty),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         );
 
         // Test case 1: single byte
-        let single = hash(&Bytes::from_static(b"a"));
+        let single = hash(b"a");
         assert_eq!(
             hex(&single),
             "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
         );
 
         // Test case 2: multiple bytes
-        let multiple = hash(&Bytes::from_static(b"hello world"));
+        let multiple = hash(b"hello world");
         assert_eq!(
             hex(&multiple),
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",

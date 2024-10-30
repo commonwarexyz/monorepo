@@ -24,6 +24,7 @@
 
 use crate::{Clock, Error, Handle};
 use bytes::Bytes;
+use commonware_utils::hex;
 use futures::{
     channel::mpsc,
     task::{waker_ref, ArcWake},
@@ -142,169 +143,169 @@ impl Metrics {
 
 /// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
-    hash: Mutex<String>,
+    hash: Mutex<Vec<u8>>,
 }
 
 impl Auditor {
     fn new() -> Self {
         Self {
-            hash: Mutex::new(String::new()),
+            hash: Mutex::new(Vec::new()),
         }
     }
 
     fn process_task(&self, task: u128, label: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"process_task");
         hasher.update(task.to_be_bytes());
         hasher.update(label.as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn bind(&self, address: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"bind");
         hasher.update(address.to_string().as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn dial(&self, dialer: SocketAddr, dialee: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"dial");
         hasher.update(dialer.to_string().as_bytes());
         hasher.update(dialee.to_string().as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn accept(&self, dialee: SocketAddr, dialer: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"accept");
         hasher.update(dialee.to_string().as_bytes());
         hasher.update(dialer.to_string().as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn send(&self, sender: SocketAddr, receiver: SocketAddr, message: Bytes) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"send");
         hasher.update(sender.to_string().as_bytes());
         hasher.update(receiver.to_string().as_bytes());
         hasher.update(&message);
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn recv(&self, receiver: SocketAddr, sender: SocketAddr, message: Bytes) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"recv");
         hasher.update(receiver.to_string().as_bytes());
         hasher.update(sender.to_string().as_bytes());
         hasher.update(&message);
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn rand(&self, method: String) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"rand");
         hasher.update(method.as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
-    fn open(&self, partition: &str, name: &str) {
+    fn open(&self, partition: &str, name: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"open");
         hasher.update(partition.as_bytes());
-        hasher.update(name.as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        hasher.update(name);
+        *hash = hasher.finalize().to_vec();
     }
 
-    fn remove(&self, partition: &str, name: Option<&str>) {
+    fn remove(&self, partition: &str, name: Option<&[u8]>) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"remove");
         hasher.update(partition.as_bytes());
         if let Some(name) = name {
-            hasher.update(name.as_bytes());
+            hasher.update(name);
         }
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn scan(&self, partition: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"scan");
         hasher.update(partition.as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
-    fn len(&self, partition: &str, name: &str) {
+    fn len(&self, partition: &str, name: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"len");
         hasher.update(partition.as_bytes());
-        hasher.update(name.as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        hasher.update(name);
+        *hash = hasher.finalize().to_vec();
     }
 
-    fn read_at(&self, partition: &str, name: &str, buf: usize, offset: usize) {
+    fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: usize) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"read_at");
         hasher.update(partition.as_bytes());
-        hasher.update(name.as_bytes());
+        hasher.update(name);
         hasher.update(buf.to_be_bytes());
         hasher.update(offset.to_be_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
-    fn write_at(&self, partition: &str, name: &str, buf: &[u8], offset: usize) {
+    fn write_at(&self, partition: &str, name: &[u8], buf: &[u8], offset: usize) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"write_at");
         hasher.update(partition.as_bytes());
-        hasher.update(name.as_bytes());
+        hasher.update(name);
         hasher.update(buf);
         hasher.update(offset.to_be_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
-    fn sync(&self, partition: &str, name: &str) {
+    fn sync(&self, partition: &str, name: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"sync");
         hasher.update(partition.as_bytes());
-        hasher.update(name.as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        hasher.update(name);
+        *hash = hasher.finalize().to_vec();
     }
 
-    fn close(&self, partition: &str, name: &str) {
+    fn close(&self, partition: &str, name: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"close");
         hasher.update(partition.as_bytes());
-        hasher.update(name.as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        hasher.update(name);
+        *hash = hasher.finalize().to_vec();
     }
 
     /// Generate a representation of the current state of the runtime.
@@ -312,7 +313,8 @@ impl Auditor {
     /// This can be used to ensure that logic running on top
     /// of the runtime is interacting deterministically.
     pub fn state(&self) -> String {
-        self.hash.lock().unwrap().clone()
+        let hash = self.hash.lock().unwrap().clone();
+        hex(&hash)
     }
 }
 
@@ -1009,7 +1011,7 @@ impl RngCore for Context {
 impl CryptoRng for Context {}
 
 struct Partition {
-    blobs: HashMap<String, Vec<u8>>,
+    blobs: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 impl Partition {
@@ -1025,7 +1027,7 @@ pub struct Blob {
     executor: Arc<Executor>,
 
     partition: String,
-    name: String,
+    name: Vec<u8>,
 
     // For content to be updated for future opens,
     // it must be synced back to the partition (occurs on
@@ -1034,13 +1036,13 @@ pub struct Blob {
 }
 
 impl Blob {
-    fn new(executor: Arc<Executor>, partition: String, name: String, content: Vec<u8>) -> Self {
+    fn new(executor: Arc<Executor>, partition: String, name: &[u8], content: Vec<u8>) -> Self {
         executor.metrics.open_blobs.inc();
         Self {
             executor,
 
             partition,
-            name,
+            name: name.into(),
 
             content,
         }
@@ -1048,7 +1050,7 @@ impl Blob {
 }
 
 impl crate::Storage<Blob> for Context {
-    async fn open(&mut self, partition: &str, name: &str) -> Result<Blob, Error> {
+    async fn open(&mut self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         self.executor.auditor.open(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
         let partition_entry = partitions
@@ -1058,12 +1060,12 @@ impl crate::Storage<Blob> for Context {
         Ok(Blob::new(
             self.executor.clone(),
             partition.into(),
-            name.into(),
+            name,
             content.clone(),
         ))
     }
 
-    async fn remove(&mut self, partition: &str, name: Option<&str>) -> Result<(), Error> {
+    async fn remove(&mut self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.executor.auditor.remove(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
         match name {
@@ -1073,7 +1075,7 @@ impl crate::Storage<Blob> for Context {
                     .ok_or(Error::PartitionMissing(partition.into()))?
                     .blobs
                     .remove(name)
-                    .ok_or(Error::BlobMissing(partition.into(), name.into()))?;
+                    .ok_or(Error::BlobMissing(partition.into(), hex(name)))?;
             }
             None => {
                 partitions
@@ -1084,7 +1086,7 @@ impl crate::Storage<Blob> for Context {
         Ok(())
     }
 
-    async fn scan(&self, partition: &str) -> Result<Vec<String>, Error> {
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.executor.auditor.scan(partition);
         let partitions = self.executor.partitions.lock().unwrap();
         let partition = partitions
@@ -1155,10 +1157,7 @@ impl crate::Blob for Blob {
         let blob = partition
             .blobs
             .get_mut(&self.name)
-            .ok_or(Error::BlobMissing(
-                self.partition.clone(),
-                self.name.clone(),
-            ))?;
+            .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
         blob.clone_from(&self.content);
         Ok(())
     }

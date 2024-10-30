@@ -11,5 +11,4 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/utils"
 documentation = "https://docs.rs/commonware-utils"
 
 [dependencies]
-bytes = { workspace = true }
 sha2 = { workspace = true }

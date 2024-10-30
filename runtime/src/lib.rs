@@ -157,7 +157,7 @@ where
     fn open(
         &mut self,
         partition: &str,
-        name: &str,
+        name: &[u8],
     ) -> impl Future<Output = Result<B, Error>> + Send;
 
     /// Remove a blob from a given partition.
@@ -166,11 +166,11 @@ where
     fn remove(
         &mut self,
         partition: &str,
-        name: Option<&str>,
+        name: Option<&[u8]>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Return all blobs in a given partition.
-    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
+    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
 }
 
 /// Interface to read and write to a blob.
@@ -355,7 +355,7 @@ mod tests {
     {
         runner.start(async move {
             let partition = "test_partition";
-            let name = "test_blob";
+            let name = b"test_blob";
 
             // Open a new blob
             let mut blob = context
@@ -391,7 +391,7 @@ mod tests {
                 .scan(partition)
                 .await
                 .expect("Failed to scan partition");
-            assert!(blobs.contains(&name.to_string()));
+            assert!(blobs.contains(&name.to_vec()));
 
             // Reopen the blob
             let mut blob = context
@@ -420,7 +420,7 @@ mod tests {
                 .scan(partition)
                 .await
                 .expect("Failed to scan partition");
-            assert!(!blobs.contains(&name.to_string()));
+            assert!(!blobs.contains(&name.to_vec()));
 
             // Remove the partition
             context
@@ -440,7 +440,7 @@ mod tests {
     {
         runner.start(async move {
             let partition = "test_partition";
-            let name = "test_blob_rw";
+            let name = b"test_blob_rw";
 
             // Open a new blob
             let mut blob = context
@@ -490,7 +490,7 @@ mod tests {
     {
         runner.start(async move {
             let partitions = ["partition1", "partition2", "partition3"];
-            let name = "test_blob_rw";
+            let name = b"test_blob_rw";
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
