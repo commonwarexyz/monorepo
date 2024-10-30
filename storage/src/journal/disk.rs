@@ -2,6 +2,7 @@ use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::hex;
+use futures::{stream, Stream};
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     marker::PhantomData,
@@ -58,6 +59,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .await
             .map_err(Error::Runtime)?;
         if bytes_read != 4 {
+            warn!("size missing");
             return Err(Error::BlobCorrupt);
         }
         let size = u32::from_be_bytes(size) as usize;
@@ -66,10 +68,11 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         // Read item
         let mut item = vec![0u8; size];
         let bytes_read = blob
-            .read_at(&mut item, offset + 4)
+            .read_at(&mut item, offset)
             .await
             .map_err(Error::Runtime)?;
         if bytes_read != size {
+            warn!("item missing");
             return Err(Error::BlobCorrupt);
         }
         let offset = offset + size;
@@ -82,11 +85,17 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .await
             .map_err(Error::Runtime)?;
         if bytes_read != 4 {
+            warn!("checksum missing");
             return Err(Error::BlobCorrupt);
         }
         let offset = offset + 4;
         let stored_checksum = u32::from_be_bytes(stored_checksum);
         if checksum != stored_checksum {
+            warn!(
+                expected = checksum,
+                actual = stored_checksum,
+                "checksum mismatch"
+            );
             return Err(Error::BlobCorrupt);
         }
 
@@ -94,43 +103,60 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         Ok((offset, Bytes::from(item)))
     }
 
-    pub async fn replay(&mut self, mut f: impl FnMut(u64, Bytes) -> bool) -> Result<(), Error> {
-        for (index, blob) in self.blobs.iter_mut() {
-            debug!(blob = *index, "replaying blob");
-            let mut cursor = 0;
-            let len = blob.len().await.map_err(Error::Runtime)?;
-            loop {
-                match Self::read(blob, cursor).await {
-                    Ok((new_cursor, item)) => {
-                        trace!(blob = *index, cursor, "replayed item");
-                        if !f(*index, item) {
-                            break;
+    pub fn replay(&mut self) -> impl Stream<Item = Result<(u64, Bytes), Error>> + '_ {
+        stream::try_unfold(
+            (self.blobs.iter_mut(), None::<(&u64, &mut B, usize)>, 0usize),
+            |(mut stream_iter, mut stream_blob, mut stream_offset)| async move {
+                // Select next blob
+                loop {
+                    if let Some((index, blob, len)) = stream_blob {
+                        // Move to next blob if nothing left to read
+                        if stream_offset == len {
+                            stream_blob = None;
+                            continue;
                         }
-                        cursor = new_cursor;
+
+                        // Attempt to read next item
+                        match Self::read(blob, stream_offset).await {
+                            Ok((next_offset, item)) => {
+                                trace!(blob = *index, cursor = stream_offset, "replayed item");
+                                return Ok(Some((
+                                    (*index, item),
+                                    (stream_iter, Some((index, blob, len)), next_offset),
+                                )));
+                            }
+                            Err(Error::BlobCorrupt) => {
+                                // Truncate blob
+                                //
+                                // This is a best-effort attempt to recover from corruption. If there is an unclean
+                                // shutdown, it is possible that some trailing item was not fully written to disk.
+                                warn!(
+                                    blob = *index,
+                                    new_size = stream_offset,
+                                    old_size = len,
+                                    "corruption detected: truncating blob"
+                                );
+                                blob.truncate(stream_offset).await.map_err(Error::Runtime)?;
+                                blob.sync().await.map_err(Error::Runtime)?;
+
+                                // Move to next blob
+                                stream_blob = None;
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    } else if let Some((index, blob)) = stream_iter.next() {
+                        let len = blob.len().await.map_err(Error::Runtime)?;
+                        debug!(blob = *index, len, "replaying blob");
+                        stream_blob = Some((index, blob, len));
+                        stream_offset = 0;
+                        continue;
+                    } else {
+                        // No more blobs
+                        return Ok(None);
                     }
-                    Err(Error::BlobCorrupt) => {
-                        // Truncate blob
-                        //
-                        // This is a best-effort attempt to recover from corruption. If there is an unclean
-                        // shutdown, it is possible that some trailing item was not fully written to disk.
-                        warn!(
-                            blob = *index,
-                            new_size = cursor,
-                            old_size = len,
-                            "corruption detected: truncating blob"
-                        );
-                        blob.truncate(cursor).await.map_err(Error::Runtime)?;
-                        blob.sync().await.map_err(Error::Runtime)?;
-                        break;
-                    }
-                    Err(err) => return Err(err),
                 }
-                if cursor == len {
-                    break;
-                }
-            }
-        }
-        Ok(())
+            },
+        )
     }
 
     pub async fn append(&mut self, index: u64, item: Bytes) -> Result<(), Error> {

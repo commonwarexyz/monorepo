@@ -28,7 +28,8 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
+    use commonware_runtime::{deterministic::Executor, Runner};
+    use futures::{pin_mut, StreamExt};
 
     #[test_traced]
     fn test_journal_append_and_read() {
@@ -68,13 +69,14 @@ mod tests {
 
                 // Replay the journal and collect items
                 let mut items = Vec::new();
-                journal
-                    .replay(|blob_index, item| {
-                        items.push((blob_index, item));
-                        true
-                    })
-                    .await
-                    .expect("Failed to replay journal");
+                let stream = journal.replay();
+                pin_mut!(stream);
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((blob_index, item)) => items.push((blob_index, item)),
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
+                }
 
                 // Verify that the item was replayed correctly
                 assert_eq!(items.len(), 1);

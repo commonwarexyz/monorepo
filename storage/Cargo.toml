@@ -18,6 +18,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
 crc32fast = "1.4.2"
+futures = { workspace = true }
+futures-util = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

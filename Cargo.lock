@@ -483,6 +483,8 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "crc32fast",
+ "futures",
+ "futures-util",
  "thiserror",
  "tracing",
  "tracing-subscriber",
