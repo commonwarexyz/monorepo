@@ -102,6 +102,9 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                     }
                     Err(Error::BlobCorrupt) => {
                         // Truncate blob
+                        //
+                        // This is a best-effort attempt to recover from corruption. If there is an unclean
+                        // shutdown, it is possible that some trailing item was not fully written to disk.
                         warn!(
                             blob = *index,
                             new_size = cursor,
@@ -109,6 +112,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                             "corruption detected: truncating blob"
                         );
                         blob.truncate(cursor).await.map_err(Error::Runtime)?;
+                        blob.sync().await.map_err(Error::Runtime)?;
                         break;
                     }
                     Err(err) => return Err(err),
