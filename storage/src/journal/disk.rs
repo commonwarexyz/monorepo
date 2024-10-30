@@ -76,7 +76,6 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             return Err(Error::BlobCorrupt);
         }
         let offset = offset + size;
-        let checksum = crc32fast::hash(&item);
 
         // Read checksum
         let mut stored_checksum = [0u8; 4];
@@ -88,8 +87,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             warn!("checksum missing");
             return Err(Error::BlobCorrupt);
         }
-        let offset = offset + 4;
         let stored_checksum = u32::from_be_bytes(stored_checksum);
+        let checksum = crc32fast::hash(&item);
         if checksum != stored_checksum {
             warn!(
                 expected = checksum,
@@ -98,6 +97,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             );
             return Err(Error::BlobCorrupt);
         }
+        let offset = offset + 4;
 
         // Return item
         Ok((offset, Bytes::from(item)))
