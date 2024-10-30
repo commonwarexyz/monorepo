@@ -11,3 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
 documentation = "https://docs.rs/commonware-storage"
 
 [dependencies]
+commonware-runtime = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+crc32fast = "1.4.2"
