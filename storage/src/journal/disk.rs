@@ -2,7 +2,10 @@ use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use commonware_utils::hex;
-use std::{collections::BTreeMap, marker::PhantomData};
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    marker::PhantomData,
+};
 use tracing::{debug, warn};
 
 pub struct Journal<B: Blob, E: Storage<B>> {
@@ -127,17 +130,16 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
     pub async fn append(&mut self, index: u64, item: Bytes) -> Result<(), Error> {
         // Get existing blob or create new one
-        let blob = match self.blobs.get_mut(&index) {
-            Some(blob) => blob,
-            None => {
+        let blob = match self.blobs.entry(index) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
                 let name = index.to_be_bytes();
                 let blob = self
                     .runtime
                     .open(&self.cfg.partition, &name)
                     .await
                     .map_err(Error::Runtime)?;
-                self.blobs.insert(index, blob);
-                &mut blob
+                entry.insert(blob)
             }
         };
 
