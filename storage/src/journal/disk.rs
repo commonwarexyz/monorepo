@@ -199,7 +199,11 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             // Check if we should remove next blob
             let index = match self.blobs.first_key_value() {
                 Some((index, _)) => *index,
-                None => return Ok(()),
+                None => {
+                    // If there are no more blobs, we return instead
+                    // of removing the partition.
+                    return Ok(());
+                }
             };
             if index >= min {
                 return Ok(());

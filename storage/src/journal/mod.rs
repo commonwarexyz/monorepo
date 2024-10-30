@@ -186,18 +186,20 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context, cfg)
+            let mut journal = Journal::init(context.clone(), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
             // Replay the journal and collect items
             let mut items = Vec::new();
-            let stream = journal.replay();
-            pin_mut!(stream);
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((blob_index, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+            {
+                let stream = journal.replay();
+                pin_mut!(stream);
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((blob_index, item)) => items.push((blob_index, item)),
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
                 }
             }
 
@@ -207,6 +209,22 @@ mod tests {
             for (item, expected_index) in items.iter().zip(expected_indices.iter()) {
                 assert_eq!(item.0, *expected_index);
             }
+
+            // Prune all blobs
+            journal.prune(6).await.expect("Failed to prune blobs");
+
+            // Close the journal
+            journal.close().await.expect("Failed to close journal");
+
+            // Ensure no remaining blobs exist
+            //
+            // Note: We don't remove the partition, so this does not error
+            // and instead returns an empty list of blobs.
+            assert!(context
+                .scan(&cfg.partition)
+                .await
+                .expect("Failed to list blobs")
+                .is_empty());
         });
     }
 
