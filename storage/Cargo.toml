@@ -1,0 +1,13 @@
+[package]
+name = "commonware-storage"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "TBD"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
+documentation = "https://docs.rs/commonware-storage"
+
+[dependencies]

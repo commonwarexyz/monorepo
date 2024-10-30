@@ -474,6 +474,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-storage"
+version = "0.0.2"
+
+[[package]]
 name = "commonware-utils"
 version = "0.0.2"
 dependencies = [
