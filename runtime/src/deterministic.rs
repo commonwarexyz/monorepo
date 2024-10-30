@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic::{Executor, Config}};
+//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //!
 //! let (executor, runtime, auditor) = Executor::default();
 //! executor.start(async move {

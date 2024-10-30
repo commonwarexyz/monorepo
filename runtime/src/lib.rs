@@ -208,6 +208,7 @@ mod tests {
     use super::*;
     use commonware_macros::select;
     use core::panic;
+    use futures::future::ready;
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::Mutex;
@@ -290,15 +291,15 @@ mod tests {
         result.unwrap();
     }
 
-    fn test_select(runner: impl Runner, context: impl Spawner) {
+    fn test_select(runner: impl Runner) {
         runner.start(async move {
             let output = Mutex::new(0);
             select! {
-                v1 = context.spawn("test", async { 1 }) => {
-                    *output.lock().unwrap() = v1.unwrap();
+                v1 = ready(1) => {
+                    *output.lock().unwrap() = v1;
                 },
-                v2 = context.spawn("test", async { 2 }) => {
-                    *output.lock().unwrap() = v2.unwrap();
+                v2 = ready(2) => {
+                    *output.lock().unwrap() = v2;
                 },
             };
             assert_eq!(*output.lock().unwrap(), 1);
@@ -580,8 +581,8 @@ mod tests {
 
     #[test]
     fn test_deterministic_select() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_select(executor, runtime);
+        let (executor, _, _) = deterministic::Executor::default();
+        test_select(executor);
     }
 
     #[test]
@@ -652,8 +653,8 @@ mod tests {
 
     #[test]
     fn test_tokio_select() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_select(executor, runtime);
+        let (executor, _) = tokio::Executor::default();
+        test_select(executor);
     }
 
     #[test]

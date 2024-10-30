@@ -1,4 +1,25 @@
-//! TBD
+//! An append-only log for storing arbitrary data.
+//!
+//! # Example
+//!
+//! ```rust
+//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_storage::journal::{Journal, Config};
+//!
+//! let (executor, context, _) = Executor::default();
+//! executor.start(async move {
+//!     // Create a journal
+//!     let mut journal = Journal::init(context, Config{
+//!         partition: "partition".to_string()
+//!     }).await.unwrap();
+//!
+//!     // Append data to the journal
+//!     journal.append(1, "data".into()).await.unwrap();
+//!
+//!     // Close the journal
+//!     journal.close().await.unwrap();
+//! });
+//! ```
 
 mod disk;
 

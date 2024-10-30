@@ -9,7 +9,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, tokio::{Config, Executor}};
+//! use commonware_runtime::{Spawner, Runner, tokio::Executor};
 //!
 //! let (executor, runtime) = Executor::default();
 //! executor.start(async move {
