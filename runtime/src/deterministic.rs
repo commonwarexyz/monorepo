@@ -1141,6 +1141,11 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
+    async fn truncate(&mut self, len: usize) -> Result<(), Error> {
+        self.content.truncate(len);
+        Ok(())
+    }
+
     async fn sync(&mut self) -> Result<(), Error> {
         self.executor.auditor.sync(&self.partition, &self.name);
         let mut partitions = self.executor.partitions.lock().unwrap();

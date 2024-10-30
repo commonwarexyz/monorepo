@@ -90,7 +90,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     pub async fn replay(&mut self, f: impl Fn(u64, Bytes) -> bool) -> Result<(), Error> {
         for (index, blob) in self.blobs.iter_mut() {
             debug!(blob = *index, "replaying blob");
-            let cursor = 0;
+            let mut cursor = 0;
             let len = blob.len().await.map_err(Error::Runtime)?;
             loop {
                 match Self::read(blob, cursor).await {

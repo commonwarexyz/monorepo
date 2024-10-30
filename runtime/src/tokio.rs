@@ -622,6 +622,13 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
+    async fn truncate(&mut self, len: usize) -> Result<(), Error> {
+        self.file
+            .set_len(len as u64)
+            .await
+            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), self.name.clone()))
+    }
+
     async fn sync(&mut self) -> Result<(), Error> {
         self.file
             .sync_all()

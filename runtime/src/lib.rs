@@ -52,6 +52,8 @@ pub enum Error {
     BlobOpenFailed(String, String),
     #[error("blob missing: {0}/{1}")]
     BlobMissing(String, String),
+    #[error("blob truncate failed: {0}/{1}")]
+    BlobTruncateFailed(String, String),
     #[error("blob sync failed: {0}/{1}")]
     BlobSyncFailed(String, String),
     #[error("blob close failed: {0}/{1}")]
@@ -190,6 +192,9 @@ pub trait Blob: Send + Sync + 'static {
         buf: &[u8],
         offset: usize,
     ) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// Truncate the blob to the given length.
+    fn truncate(&mut self, len: usize) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Ensure all pending data is durably persisted.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
