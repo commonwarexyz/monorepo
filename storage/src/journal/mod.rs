@@ -39,8 +39,11 @@ pub enum Error {
     BlobCorrupt,
 }
 
+/// Configuration for `journal` storage.
 #[derive(Clone)]
 pub struct Config {
+    /// The `commonware-runtime::Storage` partition to use
+    /// for storing journal blobs.
     pub partition: String,
 }
 
