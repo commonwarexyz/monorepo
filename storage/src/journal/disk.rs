@@ -2,7 +2,7 @@ use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use std::{collections::BTreeMap, marker::PhantomData};
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub struct Journal<B: Blob, E: Storage<B>> {
     runtime: E,
@@ -43,7 +43,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         })
     }
 
-    async fn read(&self, blob: &mut B, offset: usize) -> Result<(usize, Bytes), Error> {
+    async fn read(blob: &mut B, offset: usize) -> Result<(usize, Bytes), Error> {
         // Read item size
         let mut size = [0u8; 4];
         let bytes_read = blob
@@ -51,7 +51,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .await
             .map_err(Error::Runtime)?;
         if bytes_read != 4 {
-            unimplemented!();
+            return Err(Error::BlobCorrupt);
         }
         let size = u32::from_be_bytes(size) as usize;
         let offset = offset + 4;
@@ -63,7 +63,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .await
             .map_err(Error::Runtime)?;
         if bytes_read != size {
-            unimplemented!();
+            return Err(Error::BlobCorrupt);
         }
         let offset = offset + size;
         let checksum = crc32fast::hash(&item);
@@ -75,12 +75,12 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .await
             .map_err(Error::Runtime)?;
         if bytes_read != 4 {
-            unimplemented!();
+            return Err(Error::BlobCorrupt);
         }
         let offset = offset + 4;
         let stored_checksum = u32::from_be_bytes(stored_checksum);
         if checksum != stored_checksum {
-            unimplemented!();
+            return Err(Error::BlobCorrupt);
         }
 
         // Return item
@@ -88,8 +88,35 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     pub async fn replay(&mut self, f: impl Fn(u64, Bytes) -> bool) -> Result<(), Error> {
-        for (index, blob) in &self.blobs {
+        for (index, blob) in self.blobs.iter_mut() {
+            debug!(blob = *index, "replaying blob");
             let cursor = 0;
+            let len = blob.len().await.map_err(Error::Runtime)?;
+            loop {
+                match Self::read(blob, cursor).await {
+                    Ok((new_cursor, item)) => {
+                        if !f(*index, item) {
+                            break;
+                        }
+                        cursor = new_cursor;
+                    }
+                    Err(Error::BlobCorrupt) => {
+                        // Truncate blob
+                        warn!(
+                            blob = *index,
+                            new_size = cursor,
+                            old_size = len,
+                            "corruption detected: truncating blob"
+                        );
+                        blob.truncate(cursor).await.map_err(Error::Runtime)?;
+                        break;
+                    }
+                    Err(err) => return Err(err),
+                }
+                if cursor == len {
+                    break;
+                }
+            }
         }
         Ok(())
     }

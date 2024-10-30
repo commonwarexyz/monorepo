@@ -15,6 +15,8 @@ pub enum Error {
     Runtime(#[from] RError),
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
+    #[error("blob corrupt")]
+    BlobCorrupt,
 }
 
 pub struct Config {
