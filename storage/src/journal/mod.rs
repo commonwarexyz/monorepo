@@ -21,9 +21,8 @@
 //! });
 //! ```
 
-mod disk;
-
-pub use disk::Journal;
+mod storage;
+pub use storage::Journal;
 
 use commonware_runtime::Error as RError;
 use thiserror::Error;

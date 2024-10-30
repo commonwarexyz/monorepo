@@ -9,6 +9,7 @@ use std::{
 };
 use tracing::{debug, trace, warn};
 
+/// Implementation of an append-only log for storing arbitrary data.
 pub struct Journal<B: Blob, E: Storage<B>> {
     runtime: E,
     cfg: Config,
@@ -19,6 +20,11 @@ pub struct Journal<B: Blob, E: Storage<B>> {
 }
 
 impl<B: Blob, E: Storage<B>> Journal<B, E> {
+    /// Initialize a new `journal` instance.
+    ///
+    /// All backing blobs are opened but not read during
+    /// initialization. The `replay` method can be used
+    /// to iterate over all items in the `journal`.
     pub async fn init(mut runtime: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
@@ -35,9 +41,9 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             if name.len() != 8 {
                 return Err(Error::InvalidBlobName(hex(&name)));
             }
-            let blob_index = u64::from_be_bytes(name.try_into().unwrap());
-            debug!(blob = blob_index, "loaded blob");
-            blobs.insert(blob_index, blob);
+            let blob_section = u64::from_be_bytes(name.try_into().unwrap());
+            debug!(blob = blob_section, "loaded blob");
+            blobs.insert(blob_section, blob);
         }
 
         // Create journal instance
@@ -51,6 +57,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         })
     }
 
+    /// Reads an item from the blob at the given offset.
     async fn read(blob: &mut B, offset: usize) -> Result<(usize, Bytes), Error> {
         // Read item size
         let mut size = [0u8; 4];
@@ -103,13 +110,16 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         Ok((offset, Bytes::from(item)))
     }
 
+    /// Returns a stream of all items in the journal.
+    ///
+    /// If any data is found to be corrupt, it will be removed from the journal during this iteration.
     pub fn replay(&mut self) -> impl Stream<Item = Result<(u64, Bytes), Error>> + '_ {
         stream::try_unfold(
             (self.blobs.iter_mut(), None::<(&u64, &mut B, usize)>, 0usize),
             |(mut stream_iter, mut stream_blob, mut stream_offset)| async move {
                 // Select next blob
                 loop {
-                    if let Some((index, blob, len)) = stream_blob {
+                    if let Some((section, blob, len)) = stream_blob {
                         // Move to next blob if nothing left to read
                         if stream_offset == len {
                             stream_blob = None;
@@ -119,10 +129,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                         // Attempt to read next item
                         match Self::read(blob, stream_offset).await {
                             Ok((next_offset, item)) => {
-                                trace!(blob = *index, cursor = stream_offset, "replayed item");
+                                trace!(blob = *section, cursor = stream_offset, "replayed item");
                                 return Ok(Some((
-                                    (*index, item),
-                                    (stream_iter, Some((index, blob, len)), next_offset),
+                                    (*section, item),
+                                    (stream_iter, Some((section, blob, len)), next_offset),
                                 )));
                             }
                             Err(Error::BlobCorrupt) => {
@@ -131,7 +141,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                                 // This is a best-effort attempt to recover from corruption. If there is an unclean
                                 // shutdown, it is possible that some trailing item was not fully written to disk.
                                 warn!(
-                                    blob = *index,
+                                    blob = *section,
                                     new_size = stream_offset,
                                     old_size = len,
                                     "corruption detected: truncating blob"
@@ -144,10 +154,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                             }
                             Err(err) => return Err(err),
                         }
-                    } else if let Some((index, blob)) = stream_iter.next() {
+                    } else if let Some((section, blob)) = stream_iter.next() {
                         let len = blob.len().await.map_err(Error::Runtime)?;
-                        debug!(blob = *index, len, "replaying blob");
-                        stream_blob = Some((index, blob, len));
+                        debug!(blob = *section, len, "replaying blob");
+                        stream_blob = Some((section, blob, len));
                         stream_offset = 0;
                         continue;
                     } else {
@@ -159,12 +169,13 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         )
     }
 
-    pub async fn append(&mut self, index: u64, item: Bytes) -> Result<(), Error> {
+    /// Appends an item to the `journal` in a given `section`.
+    pub async fn append(&mut self, section: u64, item: Bytes) -> Result<(), Error> {
         // Get existing blob or create new one
-        let blob = match self.blobs.entry(index) {
+        let blob = match self.blobs.entry(section) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                let name = index.to_be_bytes();
+                let name = section.to_be_bytes();
                 let blob = self
                     .runtime
                     .open(&self.cfg.partition, &name)
@@ -185,48 +196,51 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         blob.write_at(&buf, cursor).await.map_err(Error::Runtime)
     }
 
-    /// If the blob does not exist, no error will be returned.
-    pub async fn sync(&mut self, index: u64) -> Result<(), Error> {
-        let blob = match self.blobs.get_mut(&index) {
+    /// Ensures that all data in a given `section` is synced to the underlying store.
+    ///
+    /// If the `section` does not exist, no error will be returned.
+    pub async fn sync(&mut self, section: u64) -> Result<(), Error> {
+        let blob = match self.blobs.get_mut(&section) {
             Some(blob) => blob,
             None => return Ok(()),
         };
         blob.sync().await.map_err(Error::Runtime)
     }
 
+    /// Prunes all `sections` less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         loop {
             // Check if we should remove next blob
-            let index = match self.blobs.first_key_value() {
-                Some((index, _)) => *index,
+            let section = match self.blobs.first_key_value() {
+                Some((section, _)) => *section,
                 None => {
                     // If there are no more blobs, we return instead
                     // of removing the partition.
                     return Ok(());
                 }
             };
-            if index >= min {
+            if section >= min {
                 return Ok(());
             }
 
             // Remove and close blob
-            let mut blob = self.blobs.remove(&index).unwrap();
+            let mut blob = self.blobs.remove(&section).unwrap();
             blob.close().await.map_err(Error::Runtime)?;
 
             // Remove blob from storage
             self.runtime
-                .remove(&self.cfg.partition, Some(&index.to_be_bytes()))
+                .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
                 .await
                 .map_err(Error::Runtime)?;
-            debug!(blob = index, "pruned blob");
+            debug!(blob = section, "pruned blob");
         }
     }
 
-    /// Closes all open blobs.
+    /// Closes all open sections.
     pub async fn close(mut self) -> Result<(), Error> {
-        for (index, blob) in self.blobs.iter_mut() {
+        for (section, blob) in self.blobs.iter_mut() {
             blob.close().await.map_err(Error::Runtime)?;
-            debug!(blob = index, "closed blob");
+            debug!(blob = section, "closed blob");
         }
         Ok(())
     }
