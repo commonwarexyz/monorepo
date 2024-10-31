@@ -30,3 +30,8 @@ rand = { workspace = true }
 name="hashmap_iteration"
 harness = false
 path = "src/archive/benches/hashmap_iteration.rs"
+
+[[bench]]
+name="hashmap_load"
+harness = false
+path = "src/archive/benches/hashmap_load.rs"

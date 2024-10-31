@@ -8,7 +8,7 @@ struct MockIndex {
     _next: Option<Box<MockIndex>>,
 }
 
-fn benchmark_map_iteration(c: &mut Criterion) {
+fn benchmark_hashmap_iteration(c: &mut Criterion) {
     for n in &[100_000, 1_000_000, 10_000_000, 100_000_000] {
         for k in [4, 8, 16, 32] {
             c.bench_function(&format!("n={} k={}", n, k), |b| {
@@ -44,6 +44,6 @@ fn benchmark_map_iteration(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_map_iteration
+    targets = benchmark_hashmap_iteration
 }
 criterion_main!(benches);
