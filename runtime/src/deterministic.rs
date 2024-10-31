@@ -1050,7 +1050,7 @@ impl Blob {
 }
 
 impl crate::Storage<Blob> for Context {
-    async fn open(&mut self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         self.executor.auditor.open(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
         let partition_entry = partitions
@@ -1065,7 +1065,7 @@ impl crate::Storage<Blob> for Context {
         ))
     }
 
-    async fn remove(&mut self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.executor.auditor.remove(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
         match name {

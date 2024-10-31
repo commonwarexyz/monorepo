@@ -236,6 +236,7 @@ pub struct Executor {
     cfg: Config,
     metrics: Arc<Metrics>,
     runtime: Runtime,
+    fs: AsyncMutex<()>,
 }
 
 impl Executor {
@@ -251,6 +252,7 @@ impl Executor {
             cfg,
             metrics,
             runtime,
+            fs: AsyncMutex::new(()),
         });
         (
             Runner {
@@ -518,7 +520,10 @@ impl Blob {
 }
 
 impl crate::Storage<Blob> for Context {
-    async fn open(&mut self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+        // Acquire the filesystem lock
+        let _guard = self.executor.fs.lock().await;
+
         // Construct the full path
         let path = self
             .executor
@@ -558,7 +563,11 @@ impl crate::Storage<Blob> for Context {
         ))
     }
 
-    async fn remove(&mut self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        // Acquire the filesystem lock
+        let _guard = self.executor.fs.lock().await;
+
+        // Remove all related files
         let path = self.executor.cfg.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
@@ -574,6 +583,10 @@ impl crate::Storage<Blob> for Context {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        // Acquire the filesystem lock
+        let _guard = self.executor.fs.lock().await;
+
+        // Scan the partition directory
         let path = self.executor.cfg.storage_directory.join(partition);
         let mut entries = fs::read_dir(path)
             .await

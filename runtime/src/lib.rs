@@ -145,6 +145,10 @@ pub trait Stream: Sync + Send + 'static {
 
 /// Interface to interact with storage.
 ///
+///
+/// To support storage implementations that enable concurrent reads and
+/// writes, blobs are responsible for maintaining synchronization.
+///
 /// Storage can be backed by a local filesystem, cloud storage, etc.
 pub trait Storage<B>: Clone + Send + Sync + 'static
 where
@@ -154,17 +158,13 @@ where
     ///
     /// Multiple instances of the same blob can be opened concurrently, however,
     /// writing to the same blob concurrently may lead to undefined behavior.
-    fn open(
-        &mut self,
-        partition: &str,
-        name: &[u8],
-    ) -> impl Future<Output = Result<B, Error>> + Send;
+    fn open(&self, partition: &str, name: &[u8]) -> impl Future<Output = Result<B, Error>> + Send;
 
     /// Remove a blob from a given partition.
     ///
     /// If no `name` is provided, the entire partition is removed.
     fn remove(
-        &mut self,
+        &self,
         partition: &str,
         name: Option<&[u8]>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
@@ -362,7 +362,7 @@ mod tests {
         });
     }
 
-    fn test_storage_operations<B>(runner: impl Runner, mut context: impl Spawner + Storage<B>)
+    fn test_storage_operations<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
     where
         B: Blob,
     {
@@ -447,7 +447,7 @@ mod tests {
         });
     }
 
-    fn test_blob_read_write<B>(runner: impl Runner, mut context: impl Spawner + Storage<B>)
+    fn test_blob_read_write<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
     where
         B: Blob,
     {
@@ -507,10 +507,8 @@ mod tests {
         });
     }
 
-    fn test_many_partition_read_write<B>(
-        runner: impl Runner,
-        mut context: impl Spawner + Storage<B>,
-    ) where
+    fn test_many_partition_read_write<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
+    where
         B: Blob,
     {
         runner.start(async move {

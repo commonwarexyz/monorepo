@@ -25,7 +25,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `journal`.
-    pub async fn init(mut runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match runtime.scan(&cfg.partition).await {
