@@ -9,6 +9,9 @@ use std::{
 };
 use tracing::debug;
 
+/// In the case there are multiple records with the same key, we store them in a linked list.
+///
+/// This is the most memory-efficient way to maintain a multi-map.
 struct Index {
     section: u64,
     offset: usize,
