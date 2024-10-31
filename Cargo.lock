@@ -483,6 +483,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "crc32fast",
+ "criterion",
  "futures",
  "futures-util",
  "thiserror",

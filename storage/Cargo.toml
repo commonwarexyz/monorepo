@@ -23,3 +23,9 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+criterion = "0.5.1"
+
+[[bench]]
+name="hashmap_iteration"
+harness = false
+path = "src/benches/hashmap_iteration.rs"
