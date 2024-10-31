@@ -18,6 +18,8 @@ struct Index {
     next: Option<Box<Index>>,
 }
 
+/// Assumes that all items are spread uniformly across the key space. If that is not the case,
+/// lookups may be O(n) instead of O(1).
 pub struct Archive<C: Capper, B: Blob, E: Storage<B>> {
     journal: Journal<B, E>,
 
