@@ -1,4 +1,4 @@
-use super::{Config, Error};
+use super::{Capper, Config, Error};
 use crate::journal::{Config as JConfig, Journal};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
@@ -12,18 +12,18 @@ struct Index {
     next: Option<Box<Index>>,
 }
 
-pub struct Archive<B: Blob, E: Storage<B>> {
-    cfg: Config,
+pub struct Archive<C: Capper, B: Blob, E: Storage<B>> {
+    cfg: Config<C>,
 
     journal: Journal<B, E>,
 
     // We store the first index of the linked list in the HashMap
     // to significantly reduce the number of random reads we need to do
     // on the heap.
-    keys: HashMap<Vec<u8>, Index>,
+    keys: HashMap<C::Key, Index>,
 }
 
-impl<B: Blob, E: Storage<B>> Archive<B, E> {
+impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
     fn parse_item(mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
         if data.remaining() == 0 {
             return Err(Error::RecordCorrupted);
@@ -36,16 +36,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
         Ok((key, data))
     }
 
-    fn capped_key(key: &[u8], index_key_len: u8) -> Vec<u8> {
-        let index_key_len = index_key_len as usize;
-        if key.len() > index_key_len {
-            key[..index_key_len].to_vec()
-        } else {
-            key.to_vec()
-        }
-    }
-
-    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(runtime: E, cfg: Config<C>) -> Result<Self, Error> {
         // Initialize journal
         let mut journal = Journal::init(
             runtime,
@@ -68,7 +59,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
                 let (key, _) = Self::parse_item(data)?;
 
                 // Create index key
-                let key = Self::capped_key(&key, cfg.index_key_len);
+                let key = cfg.capper.cap(&key);
 
                 // Store index
                 match keys.entry(key) {
@@ -99,30 +90,26 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
 
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Create index key
-        let index_key = Self::capped_key(key, self.cfg.index_key_len);
+        let index_key = self.cfg.capper.cap(key);
 
         // Check if duplicate key
-        if index_key.len() == key.len() && self.keys.contains_key(&index_key) {
-            return Err(Error::DuplicateKey);
-        } else if index_key.len() < key.len() {
-            let mut record = self.keys.get(&index_key);
-            while let Some(index) = record {
-                // Fetch item from disk
-                let item = self
-                    .journal
-                    .get(index.section, index.offset)
-                    .await?
-                    .ok_or(Error::RecordCorrupted)?;
+        let mut record = self.keys.get(&index_key);
+        while let Some(index) = record {
+            // Fetch item from disk
+            let item = self
+                .journal
+                .get(index.section, index.offset)
+                .await?
+                .ok_or(Error::RecordCorrupted)?;
 
-                // Get key from item
-                let (item_key, _) = Self::parse_item(item)?;
-                if key == item_key {
-                    return Err(Error::DuplicateKey);
-                }
-
-                // Move to next index
-                record = index.next.as_deref();
+            // Get key from item
+            let (item_key, _) = Self::parse_item(item)?;
+            if key == item_key {
+                return Err(Error::DuplicateKey);
             }
+
+            // Move to next index
+            record = index.next.as_deref();
         }
 
         // Store item in journal
@@ -156,7 +143,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
 
     pub async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Create index key
-        let index_key = Self::capped_key(key, self.cfg.index_key_len);
+        let index_key = self.cfg.capper.cap(key);
 
         // Fetch index
         let mut record = self.keys.get(&index_key);
