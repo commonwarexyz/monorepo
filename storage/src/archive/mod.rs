@@ -18,5 +18,5 @@ pub enum Error {
 #[derive(Clone)]
 pub struct Config {
     pub partition: String,
-    pub index_key_len: usize,
+    pub index_key_len: u8,
 }

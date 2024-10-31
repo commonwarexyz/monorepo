@@ -173,7 +173,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Appends an item to the `journal` in a given `section`.
-    pub async fn append(&mut self, section: u64, item: Bytes) -> Result<(), Error> {
+    pub async fn append(&mut self, section: u64, item: Bytes) -> Result<usize, Error> {
         // Ensure item is not too large
         let item_len = item.len();
         let len = 4 + item_len + 4;
@@ -205,7 +205,18 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
         // Append item to blob
         let cursor = blob.len().await.map_err(Error::Runtime)?;
-        blob.write_at(&buf, cursor).await.map_err(Error::Runtime)
+        blob.write_at(&buf, cursor).await.map_err(Error::Runtime)?;
+        Ok(cursor)
+    }
+
+    /// Retrieves an item from the `journal` at a given `section` and `offset`.
+    pub async fn get(&mut self, section: u64, offset: usize) -> Result<Option<Bytes>, Error> {
+        let blob = match self.blobs.get_mut(&section) {
+            Some(blob) => blob,
+            None => return Ok(None),
+        };
+        let (_, item) = Self::read(blob, offset).await?;
+        Ok(Some(item))
     }
 
     /// Ensures that all data in a given `section` is synced to the underlying store.
