@@ -3,7 +3,10 @@ use crate::journal::{Config as JConfig, Journal};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
-use std::collections::{hash_map::Entry, HashMap};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    marker::PhantomData,
+};
 use tracing::debug;
 
 struct Index {
@@ -13,14 +16,14 @@ struct Index {
 }
 
 pub struct Archive<C: Capper, B: Blob, E: Storage<B>> {
-    cfg: Config<C>,
-
     journal: Journal<B, E>,
 
     // We store the first index of the linked list in the HashMap
     // to significantly reduce the number of random reads we need to do
     // on the heap.
     keys: HashMap<C::Key, Index>,
+
+    _phantom_c: PhantomData<C>,
 }
 
 impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
@@ -36,7 +39,7 @@ impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
         Ok((key, data))
     }
 
-    pub async fn init(runtime: E, cfg: Config<C>) -> Result<Self, Error> {
+    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
         // Initialize journal
         let mut journal = Journal::init(
             runtime,
@@ -59,7 +62,7 @@ impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
                 let (key, _) = Self::parse_item(data)?;
 
                 // Create index key
-                let key = cfg.capper.cap(&key);
+                let key = C::cap(&key);
 
                 // Store index
                 match keys.entry(key) {
@@ -85,12 +88,16 @@ impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
         debug!(keys = keys.len(), overlaps, "archive initialized");
 
         // Return populated archive
-        Ok(Self { cfg, journal, keys })
+        Ok(Self {
+            journal,
+            keys,
+            _phantom_c: PhantomData,
+        })
     }
 
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Create index key
-        let index_key = self.cfg.capper.cap(key);
+        let index_key = C::cap(key);
 
         // Check if duplicate key
         let mut record = self.keys.get(&index_key);
@@ -143,7 +150,7 @@ impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
 
     pub async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Create index key
-        let index_key = self.cfg.capper.cap(key);
+        let index_key = C::cap(key);
 
         // Fetch index
         let mut record = self.keys.get(&index_key);

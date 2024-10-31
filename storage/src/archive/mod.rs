@@ -16,19 +16,18 @@ pub enum Error {
     DuplicateKey,
 }
 
-pub trait Capper: Clone {
+pub trait Capper {
     type Key: Eq + Hash + Send + Sync;
 
-    fn cap(&self, key: &[u8]) -> Self::Key;
+    fn cap(key: &[u8]) -> Self::Key;
 }
 
-#[derive(Clone)]
-struct DefaultCapper;
+struct EightCap;
 
-impl Capper for DefaultCapper {
+impl Capper for EightCap {
     type Key = [u8; 8];
 
-    fn cap(&self, key: &[u8]) -> Self::Key {
+    fn cap(key: &[u8]) -> Self::Key {
         let mut capped = [0; 8];
         let len = key.len().min(8);
         capped.copy_from_slice(&key[..len]);
@@ -37,7 +36,6 @@ impl Capper for DefaultCapper {
 }
 
 #[derive(Clone)]
-pub struct Config<C: Capper> {
+pub struct Config {
     pub partition: String,
-    pub capper: C,
 }
