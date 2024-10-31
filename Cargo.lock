@@ -486,6 +486,7 @@ dependencies = [
  "criterion",
  "futures",
  "futures-util",
+ "rand",
  "thiserror",
  "tracing",
  "tracing-subscriber",

@@ -94,7 +94,7 @@ mod tests {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -152,7 +152,7 @@ mod tests {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -221,7 +221,7 @@ mod tests {
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((blob_index, item)) => items.push((blob_index, item)),
+                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
@@ -318,7 +318,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -364,7 +364,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -422,7 +422,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -486,7 +486,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -556,7 +556,7 @@ mod tests {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
