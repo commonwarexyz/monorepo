@@ -20,6 +20,8 @@ struct Index {
 
 /// Assumes that all items are spread uniformly across the key space. If that is not the case,
 /// lookups may be O(n) instead of O(1).
+///
+/// If this is not the case, modify the `Capper` implementation to hash keys before returning them.
 pub struct Archive<C: Capper, B: Blob, E: Storage<B>> {
     journal: Journal<B, E>,
 
