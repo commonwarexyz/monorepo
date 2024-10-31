@@ -504,6 +504,9 @@ pub struct Blob {
     partition: String,
     name: Vec<u8>,
 
+    // Files must be seeked prior to any read or write operation and are thus
+    // not safe to concurrently interact with. If we switched to mmaping files
+    // we could remove this lock.
     file: AsyncMutex<fs::File>,
 }
 

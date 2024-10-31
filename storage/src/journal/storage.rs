@@ -62,14 +62,9 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     async fn read(blob: &B, offset: usize) -> Result<(usize, Bytes), Error> {
         // Read item size
         let mut size = [0u8; 4];
-        let bytes_read = blob
-            .read_at(&mut size, offset)
+        blob.read_at(&mut size, offset)
             .await
             .map_err(Error::Runtime)?;
-        if bytes_read != 4 {
-            warn!("size missing");
-            return Err(Error::BlobCorrupt);
-        }
         let size = u32::from_be_bytes(size)
             .try_into()
             .expect("usize too small");
@@ -77,26 +72,16 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
         // Read item
         let mut item = vec![0u8; size];
-        let bytes_read = blob
-            .read_at(&mut item, offset)
+        blob.read_at(&mut item, offset)
             .await
             .map_err(Error::Runtime)?;
-        if bytes_read != size {
-            warn!("item missing");
-            return Err(Error::BlobCorrupt);
-        }
         let offset = offset + size;
 
         // Read checksum
         let mut stored_checksum = [0u8; 4];
-        let bytes_read = blob
-            .read_at(&mut stored_checksum, offset)
+        blob.read_at(&mut stored_checksum, offset)
             .await
             .map_err(Error::Runtime)?;
-        if bytes_read != 4 {
-            warn!("checksum missing");
-            return Err(Error::BlobCorrupt);
-        }
         let stored_checksum = u32::from_be_bytes(stored_checksum);
         let checksum = crc32fast::hash(&item);
         if checksum != stored_checksum {
