@@ -1032,7 +1032,7 @@ pub struct Blob {
     // For content to be updated for future opens,
     // it must be synced back to the partition (occurs on
     // `sync` and `close`).
-    content: Vec<u8>,
+    content: Mutex<Vec<u8>>,
 }
 
 impl Blob {
@@ -1044,7 +1044,7 @@ impl Blob {
             partition,
             name: name.into(),
 
-            content,
+            content: Mutex::new(content),
         }
     }
 }
@@ -1103,21 +1103,23 @@ impl crate::Storage<Blob> for Context {
 
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<usize, Error> {
+        let content = self.content.lock().unwrap();
         self.executor.auditor.len(&self.partition, &self.name);
-        Ok(self.content.len())
+        Ok(content.len())
     }
 
-    async fn read_at(&mut self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
+    async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
+        let content = self.content.lock().unwrap();
         let buf_len = buf.len();
         self.executor
             .auditor
             .read_at(&self.partition, &self.name, buf_len, offset);
-        let content_len = self.content.len();
+        let content_len = content.len();
         if offset >= content_len {
             return Ok(0);
         }
         let len = buf_len.min(content_len - offset);
-        buf[..len].copy_from_slice(&self.content[offset..offset + len]);
+        buf[..len].copy_from_slice(&content[offset..offset + len]);
         self.executor.metrics.storage_reads.inc();
         self.executor
             .metrics
@@ -1126,15 +1128,16 @@ impl crate::Blob for Blob {
         Ok(len)
     }
 
-    async fn write_at(&mut self, buf: &[u8], offset: usize) -> Result<(), Error> {
+    async fn write_at(&self, buf: &[u8], offset: usize) -> Result<(), Error> {
+        let mut content = self.content.lock().unwrap();
         self.executor
             .auditor
             .write_at(&self.partition, &self.name, buf, offset);
         let required = offset + buf.len();
-        if required > self.content.len() {
-            self.content.resize(required, 0);
+        if required > content.len() {
+            content.resize(required, 0);
         }
-        self.content[offset..offset + buf.len()].copy_from_slice(buf);
+        content[offset..offset + buf.len()].copy_from_slice(buf);
         self.executor.metrics.storage_writes.inc();
         self.executor
             .metrics
@@ -1143,12 +1146,14 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
-    async fn truncate(&mut self, len: usize) -> Result<(), Error> {
-        self.content.truncate(len);
+    async fn truncate(&self, len: usize) -> Result<(), Error> {
+        let mut content = self.content.lock().unwrap();
+        content.truncate(len);
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
+        let content = self.content.lock().unwrap();
         self.executor.auditor.sync(&self.partition, &self.name);
         let mut partitions = self.executor.partitions.lock().unwrap();
         let partition = partitions
@@ -1158,11 +1163,11 @@ impl crate::Blob for Blob {
             .blobs
             .get_mut(&self.name)
             .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
-        blob.clone_from(&self.content);
+        blob.clone_from(&content);
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<(), Error> {
+    async fn close(self) -> Result<(), Error> {
         self.executor.auditor.close(&self.partition, &self.name);
         self.sync().await?;
         Ok(())

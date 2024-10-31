@@ -51,6 +51,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     runtime::{Builder, Runtime},
+    sync::Mutex as AsyncMutex,
     task_local,
     time::timeout,
 };
@@ -501,7 +502,7 @@ pub struct Blob {
     partition: String,
     name: Vec<u8>,
 
-    file: fs::File,
+    file: AsyncMutex<fs::File>,
 }
 
 impl Blob {
@@ -511,7 +512,7 @@ impl Blob {
             metrics,
             partition,
             name: name.into(),
-            file,
+            file: AsyncMutex::new(file),
         }
     }
 }
@@ -594,58 +595,52 @@ impl crate::Storage<Blob> for Context {
 
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<usize, Error> {
-        let metadata = self.file.metadata().await.map_err(|_| Error::ReadFailed)?;
+        let file = self.file.lock().await;
+        let metadata = file.metadata().await.map_err(|_| Error::ReadFailed)?;
         let len = metadata.len() as usize;
         Ok(len)
     }
 
-    async fn read_at(&mut self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
-        self.file
-            .seek(SeekFrom::Start(offset as u64))
+    async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
+        let mut file = self.file.lock().await;
+        file.seek(SeekFrom::Start(offset as u64))
             .await
             .map_err(|_| Error::ReadFailed)?;
-        let n = self
-            .file
-            .read_exact(buf)
-            .await
-            .map_err(|_| Error::ReadFailed)?;
+        let n = file.read_exact(buf).await.map_err(|_| Error::ReadFailed)?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(n as u64);
         Ok(n)
     }
 
-    async fn write_at(&mut self, buf: &[u8], offset: usize) -> Result<(), Error> {
-        self.file
-            .seek(SeekFrom::Start(offset as u64))
+    async fn write_at(&self, buf: &[u8], offset: usize) -> Result<(), Error> {
+        let mut file = self.file.lock().await;
+        file.seek(SeekFrom::Start(offset as u64))
             .await
             .map_err(|_| Error::WriteFailed)?;
-        self.file
-            .write_all(buf)
-            .await
-            .map_err(|_| Error::WriteFailed)?;
+        file.write_all(buf).await.map_err(|_| Error::WriteFailed)?;
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(buf.len() as u64);
         Ok(())
     }
 
-    async fn truncate(&mut self, len: usize) -> Result<(), Error> {
-        self.file
-            .set_len(len as u64)
+    async fn truncate(&self, len: usize) -> Result<(), Error> {
+        let file = self.file.lock().await;
+        file.set_len(len as u64)
             .await
             .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.file
-            .sync_all()
+    async fn sync(&self) -> Result<(), Error> {
+        let file = self.file.lock().await;
+        file.sync_all()
             .await
             .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))
     }
 
-    async fn close(&mut self) -> Result<(), Error> {
+    async fn close(self) -> Result<(), Error> {
+        let mut file = self.file.lock().await;
         self.sync().await?;
-        self.file
-            .shutdown()
+        file.shutdown()
             .await
             .map_err(|_| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name)))
     }

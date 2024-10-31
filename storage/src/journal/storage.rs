@@ -59,7 +59,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(blob: &mut B, offset: usize) -> Result<(usize, Bytes), Error> {
+    async fn read(blob: &B, offset: usize) -> Result<(usize, Bytes), Error> {
         // Read item size
         let mut size = [0u8; 4];
         let bytes_read = blob
@@ -210,10 +210,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Retrieves an item from the `journal` at a given `section` and `offset`.
-    ///
-    /// All data returned from the underlying store is verified for integrity.
-    pub async fn get(&mut self, section: u64, offset: usize) -> Result<Option<Bytes>, Error> {
-        let blob = match self.blobs.get_mut(&section) {
+    pub async fn get(&self, section: u64, offset: usize) -> Result<Option<Bytes>, Error> {
+        let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
@@ -224,8 +222,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// Ensures that all data in a given `section` is synced to the underlying store.
     ///
     /// If the `section` does not exist, no error will be returned.
-    pub async fn sync(&mut self, section: u64) -> Result<(), Error> {
-        let blob = match self.blobs.get_mut(&section) {
+    pub async fn sync(&self, section: u64) -> Result<(), Error> {
+        let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(()),
         };
@@ -249,7 +247,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             }
 
             // Remove and close blob
-            let mut blob = self.blobs.remove(&section).unwrap();
+            let blob = self.blobs.remove(&section).unwrap();
             blob.close().await.map_err(Error::Runtime)?;
 
             // Remove blob from storage
@@ -262,8 +260,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Closes all open sections.
-    pub async fn close(mut self) -> Result<(), Error> {
-        for (section, blob) in self.blobs.iter_mut() {
+    pub async fn close(self) -> Result<(), Error> {
+        for (section, blob) in self.blobs.into_iter() {
             blob.close().await.map_err(Error::Runtime)?;
             debug!(blob = section, "closed blob");
         }

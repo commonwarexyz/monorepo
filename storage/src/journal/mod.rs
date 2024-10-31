@@ -266,7 +266,7 @@ mod tests {
 
             // Manually create a blob with an invalid name (not 8 bytes)
             let invalid_blob_name = b"invalid"; // Less than 8 bytes
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, invalid_blob_name)
                 .await
                 .expect("Failed to create blob with invalid name");
@@ -295,7 +295,7 @@ mod tests {
             // Manually create a blob with incomplete size data
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -341,7 +341,7 @@ mod tests {
             // Manually create a blob with missing item data
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -387,7 +387,7 @@ mod tests {
             // Manually create a blob with missing checksum
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -445,7 +445,7 @@ mod tests {
             // Manually create a blob with incorrect checksum
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -535,7 +535,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually corrupt the end of the second blob
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");

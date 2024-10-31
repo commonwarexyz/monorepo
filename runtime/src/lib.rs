@@ -174,6 +174,9 @@ where
 }
 
 /// Interface to read and write to a blob.
+///
+/// To support blob implementations that enable concurrent reads and
+/// writes, blobs are responsible for maintaining synchronization.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Send + Sync + 'static {
     /// Get the length of the blob.
@@ -181,26 +184,23 @@ pub trait Blob: Send + Sync + 'static {
 
     /// Read from the blob at the given offset.
     fn read_at(
-        &mut self,
+        &self,
         buf: &mut [u8],
         offset: usize,
     ) -> impl Future<Output = Result<usize, Error>> + Send;
 
     /// Write to the blob at the given offset.
-    fn write_at(
-        &mut self,
-        buf: &[u8],
-        offset: usize,
-    ) -> impl Future<Output = Result<(), Error>> + Send;
+    fn write_at(&self, buf: &[u8], offset: usize)
+        -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Truncate the blob to the given length.
-    fn truncate(&mut self, len: usize) -> impl Future<Output = Result<(), Error>> + Send;
+    fn truncate(&self, len: usize) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Ensure all pending data is durably persisted.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Close the blob.
-    fn close(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn close(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 #[cfg(test)]
@@ -371,7 +371,7 @@ mod tests {
             let name = b"test_blob";
 
             // Open a new blob
-            let mut blob = context
+            let blob = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -407,7 +407,7 @@ mod tests {
             assert!(blobs.contains(&name.to_vec()));
 
             // Reopen the blob
-            let mut blob = context
+            let blob = context
                 .open(partition, name)
                 .await
                 .expect("Failed to reopen blob");
@@ -456,7 +456,7 @@ mod tests {
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let mut blob = context
+            let blob = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -519,7 +519,7 @@ mod tests {
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let mut blob = context
+                let blob = context
                     .open(partition, name)
                     .await
                     .expect("Failed to open blob");
@@ -540,7 +540,7 @@ mod tests {
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let mut blob = context
+                let blob = context
                     .open(partition, name)
                     .await
                     .expect("Failed to open blob");
