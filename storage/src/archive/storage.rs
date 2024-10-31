@@ -184,7 +184,8 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
         // Prune keys from memory
         //
         // We prefer iterating over all keys in-memory during this infrequent operation to
-        // adding more memory overhead to make this pruning more efficient.
+        // adding more memory overhead to make this pruning more efficient and/or storing
+        // list items in sorted order.
         self.keys.retain(|_, head| {
             // Initialize the cursor
             let mut cursor = Some(head);
