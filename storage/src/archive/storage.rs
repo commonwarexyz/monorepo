@@ -185,33 +185,29 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
         //
         // We prefer iterating over all keys in-memory during this infrequent operation to
         // adding more memory overhead to make this pruning more efficient.
-        self.keys.retain(|_, record| {
-            // Remove items after head
-            let mut link = &mut record.next;
-            while link.is_some() {
-                if link.as_ref().unwrap().section < min {
-                    // Remove this node by skipping it
-                    *link = link.as_mut().unwrap().next.take();
+        self.keys.retain(|_, head| {
+            // Initialize the cursor
+            let mut cursor = Some(head);
+            let mut keep = false;
 
-                    // Skipped node is dropped here
+            // Iterate over the linked list
+            while let Some(item) = cursor {
+                if item.section < min {
+                    if let Some(next) = item.next.take() {
+                        // Replace the current node with the next node
+                        *item = *next;
+                        // Continue from the current node
+                        cursor = Some(item);
+                    } else {
+                        break;
+                    }
                 } else {
                     // Move to the next node
-                    link = &mut link.as_mut().unwrap().next;
+                    cursor = item.next.as_deref_mut();
+                    keep = true;
                 }
             }
-
-            // Now check if the head node needs to be removed
-            if record.section >= min {
-                return true;
-            }
-
-            // Replace the head node with the next node (if one exists)
-            if let Some(next_index) = record.next.take() {
-                *record = *next_index;
-                true
-            } else {
-                false
-            }
+            keep
         });
 
         // Prune journal
