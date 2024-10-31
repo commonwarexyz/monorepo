@@ -293,6 +293,7 @@ mod tests {
 
     fn test_select(runner: impl Runner) {
         runner.start(async move {
+            // Test first branch
             let output = Mutex::new(0);
             select! {
                 v1 = ready(1) => {
@@ -303,6 +304,17 @@ mod tests {
                 },
             };
             assert_eq!(*output.lock().unwrap(), 1);
+
+            // Test second branch
+            select! {
+                v1 = std::future::pending::<i32>() => {
+                    *output.lock().unwrap() = v1;
+                },
+                v2 = ready(2) => {
+                    *output.lock().unwrap() = v2;
+                },
+            };
+            assert_eq!(*output.lock().unwrap(), 2);
         });
     }
 
