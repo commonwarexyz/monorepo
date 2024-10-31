@@ -24,14 +24,13 @@
 mod storage;
 pub use storage::Journal;
 
-use commonware_runtime::Error as RError;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the journal.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("runtime error: {0}")]
-    Runtime(#[from] RError),
+    Runtime(#[from] commonware_runtime::Error),
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
     #[error("blob corrupt")]

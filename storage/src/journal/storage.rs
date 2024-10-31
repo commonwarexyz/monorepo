@@ -116,7 +116,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// Returns a stream of all items in the journal.
     ///
     /// If any data is found to be corrupt, it will be removed from the journal during this iteration.
-    pub fn replay(&mut self) -> impl Stream<Item = Result<(u64, Bytes), Error>> + '_ {
+    pub fn replay(&mut self) -> impl Stream<Item = Result<(u64, usize, Bytes), Error>> + '_ {
         stream::try_unfold(
             (self.blobs.iter_mut(), None::<(&u64, &mut B, usize)>, 0usize),
             |(mut stream_iter, mut stream_blob, mut stream_offset)| async move {
@@ -134,7 +134,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                             Ok((next_offset, item)) => {
                                 trace!(blob = *section, cursor = stream_offset, "replayed item");
                                 return Ok(Some((
-                                    (*section, item),
+                                    (*section, stream_offset, item),
                                     (stream_iter, Some((section, blob, len)), next_offset),
                                 )));
                             }
