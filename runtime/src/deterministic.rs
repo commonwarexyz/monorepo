@@ -1108,24 +1108,23 @@ impl crate::Blob for Blob {
         Ok(content.len())
     }
 
-    async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
+    async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<(), Error> {
         let content = self.content.lock().unwrap();
         let buf_len = buf.len();
         self.executor
             .auditor
             .read_at(&self.partition, &self.name, buf_len, offset);
         let content_len = content.len();
-        if offset >= content_len {
-            return Ok(0);
+        if offset + buf_len > content_len {
+            return Err(Error::ReadFailed);
         }
-        let len = buf_len.min(content_len - offset);
-        buf[..len].copy_from_slice(&content[offset..offset + len]);
+        buf.copy_from_slice(&content[offset..offset + buf_len]);
         self.executor.metrics.storage_reads.inc();
         self.executor
             .metrics
             .storage_read_bandwidth
-            .inc_by(len as u64);
-        Ok(len)
+            .inc_by(buf_len as u64);
+        Ok(())
     }
 
     async fn write_at(&self, buf: &[u8], offset: usize) -> Result<(), Error> {

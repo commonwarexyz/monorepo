@@ -614,15 +614,15 @@ impl crate::Blob for Blob {
         Ok(len)
     }
 
-    async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
+    async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<(), Error> {
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(offset as u64))
             .await
             .map_err(|_| Error::ReadFailed)?;
-        let n = file.read_exact(buf).await.map_err(|_| Error::ReadFailed)?;
+        file.read_exact(buf).await.map_err(|_| Error::ReadFailed)?;
         self.metrics.storage_reads.inc();
-        self.metrics.storage_read_bytes.inc_by(n as u64);
-        Ok(n)
+        self.metrics.storage_read_bytes.inc_by(buf.len() as u64);
+        Ok(())
     }
 
     async fn write_at(&self, buf: &[u8], offset: usize) -> Result<(), Error> {
@@ -680,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_codec_invalid_frame_len() {
-        // Initalize runtime
+        // Initialize runtime
         let (runner, _) = Executor::default();
         runner.start(async move {
             // Create a stream

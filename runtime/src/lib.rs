@@ -187,7 +187,7 @@ pub trait Blob: Send + Sync + 'static {
         &self,
         buf: &mut [u8],
         offset: usize,
-    ) -> impl Future<Output = Result<usize, Error>> + Send;
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Write to the blob at the given offset.
     fn write_at(&self, buf: &[u8], offset: usize)
@@ -473,34 +473,31 @@ mod tests {
 
             // Read data back
             let mut buffer = vec![0u8; 10];
-            let read = blob
-                .read_at(&mut buffer, 0)
+            blob.read_at(&mut buffer, 0)
                 .await
                 .expect("Failed to read data");
-            assert_eq!(read, 10);
             assert_eq!(&buffer[..5], data1);
             assert_eq!(&buffer[5..], data2);
 
             // Read data never written to blob
             let mut buffer = vec![0u8; 10];
-            let read = blob
-                .read_at(&mut buffer, 10)
-                .await
-                .expect("Failed to read data");
-            assert_eq!(read, 0);
-            assert_eq!(&buffer, &[0u8; 10]);
+            let result = blob.read_at(&mut buffer, 10).await;
+            assert!(matches!(result, Err(Error::ReadFailed)));
 
             // Truncate the blob
             blob.truncate(5).await.expect("Failed to truncate blob");
             let length = blob.len().await.expect("Failed to get blob length");
             assert_eq!(length, 5);
-            let mut buffer = vec![0u8; 10];
-            let read = blob
-                .read_at(&mut buffer, 0)
+            let mut buffer = vec![0u8; 5];
+            blob.read_at(&mut buffer, 0)
                 .await
                 .expect("Failed to read data");
-            assert_eq!(read, 5);
             assert_eq!(&buffer[..5], data1);
+
+            // Full read after truncation
+            let mut buffer = vec![0u8; 10];
+            let result = blob.read_at(&mut buffer, 0).await;
+            assert!(matches!(result, Err(Error::ReadFailed)));
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
