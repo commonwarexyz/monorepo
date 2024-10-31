@@ -52,6 +52,8 @@ pub enum Error {
     BlobOpenFailed(String, String),
     #[error("blob missing: {0}/{1}")]
     BlobMissing(String, String),
+    #[error("blob truncate failed: {0}/{1}")]
+    BlobTruncateFailed(String, String),
     #[error("blob sync failed: {0}/{1}")]
     BlobSyncFailed(String, String),
     #[error("blob close failed: {0}/{1}")]
@@ -155,7 +157,7 @@ where
     fn open(
         &mut self,
         partition: &str,
-        name: &str,
+        name: &[u8],
     ) -> impl Future<Output = Result<B, Error>> + Send;
 
     /// Remove a blob from a given partition.
@@ -164,11 +166,11 @@ where
     fn remove(
         &mut self,
         partition: &str,
-        name: Option<&str>,
+        name: Option<&[u8]>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Return all blobs in a given partition.
-    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
+    fn scan(&self, partition: &str) -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
 }
 
 /// Interface to read and write to a blob.
@@ -191,6 +193,9 @@ pub trait Blob: Send + Sync + 'static {
         offset: usize,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
+    /// Truncate the blob to the given length.
+    fn truncate(&mut self, len: usize) -> impl Future<Output = Result<(), Error>> + Send;
+
     /// Ensure all pending data is durably persisted.
     fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
@@ -203,6 +208,7 @@ mod tests {
     use super::*;
     use commonware_macros::select;
     use core::panic;
+    use futures::future::ready;
     use futures::{channel::mpsc, SinkExt, StreamExt};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::Mutex;
@@ -285,18 +291,30 @@ mod tests {
         result.unwrap();
     }
 
-    fn test_select(runner: impl Runner, context: impl Spawner) {
+    fn test_select(runner: impl Runner) {
         runner.start(async move {
+            // Test first branch
             let output = Mutex::new(0);
             select! {
-                v1 = context.spawn("test", async { 1 }) => {
-                    *output.lock().unwrap() = v1.unwrap();
+                v1 = ready(1) => {
+                    *output.lock().unwrap() = v1;
                 },
-                v2 = context.spawn("test", async { 2 }) => {
-                    *output.lock().unwrap() = v2.unwrap();
+                v2 = ready(2) => {
+                    *output.lock().unwrap() = v2;
                 },
             };
             assert_eq!(*output.lock().unwrap(), 1);
+
+            // Test second branch
+            select! {
+                v1 = std::future::pending::<i32>() => {
+                    *output.lock().unwrap() = v1;
+                },
+                v2 = ready(2) => {
+                    *output.lock().unwrap() = v2;
+                },
+            };
+            assert_eq!(*output.lock().unwrap(), 2);
         });
     }
 
@@ -350,7 +368,7 @@ mod tests {
     {
         runner.start(async move {
             let partition = "test_partition";
-            let name = "test_blob";
+            let name = b"test_blob";
 
             // Open a new blob
             let mut blob = context
@@ -386,7 +404,7 @@ mod tests {
                 .scan(partition)
                 .await
                 .expect("Failed to scan partition");
-            assert!(blobs.contains(&name.to_string()));
+            assert!(blobs.contains(&name.to_vec()));
 
             // Reopen the blob
             let mut blob = context
@@ -415,7 +433,7 @@ mod tests {
                 .scan(partition)
                 .await
                 .expect("Failed to scan partition");
-            assert!(!blobs.contains(&name.to_string()));
+            assert!(!blobs.contains(&name.to_vec()));
 
             // Remove the partition
             context
@@ -435,7 +453,7 @@ mod tests {
     {
         runner.start(async move {
             let partition = "test_partition";
-            let name = "test_blob_rw";
+            let name = b"test_blob_rw";
 
             // Open a new blob
             let mut blob = context
@@ -472,6 +490,18 @@ mod tests {
             assert_eq!(read, 0);
             assert_eq!(&buffer, &[0u8; 10]);
 
+            // Truncate the blob
+            blob.truncate(5).await.expect("Failed to truncate blob");
+            let length = blob.len().await.expect("Failed to get blob length");
+            assert_eq!(length, 5);
+            let mut buffer = vec![0u8; 10];
+            let read = blob
+                .read_at(&mut buffer, 0)
+                .await
+                .expect("Failed to read data");
+            assert_eq!(read, 5);
+            assert_eq!(&buffer[..5], data1);
+
             // Close the blob
             blob.close().await.expect("Failed to close blob");
         });
@@ -485,7 +515,7 @@ mod tests {
     {
         runner.start(async move {
             let partitions = ["partition1", "partition2", "partition3"];
-            let name = "test_blob_rw";
+            let name = b"test_blob_rw";
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
@@ -575,8 +605,8 @@ mod tests {
 
     #[test]
     fn test_deterministic_select() {
-        let (executor, runtime, _) = deterministic::Executor::default();
-        test_select(executor, runtime);
+        let (executor, _, _) = deterministic::Executor::default();
+        test_select(executor);
     }
 
     #[test]
@@ -647,8 +677,8 @@ mod tests {
 
     #[test]
     fn test_tokio_select() {
-        let (executor, runtime) = tokio::Executor::default();
-        test_select(executor, runtime);
+        let (executor, _) = tokio::Executor::default();
+        test_select(executor);
     }
 
     #[test]

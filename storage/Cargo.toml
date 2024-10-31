@@ -1,0 +1,25 @@
+[package]
+name = "commonware-storage"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "Persist and retrieve data from an abstract store."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
+documentation = "https://docs.rs/commonware-storage"
+
+[dependencies]
+commonware-macros = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+crc32fast = "1.4.2"
+futures = { workspace = true }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

@@ -462,6 +462,7 @@ version = "0.0.7"
 dependencies = [
  "bytes",
  "commonware-macros",
+ "commonware-utils",
  "futures",
  "governor",
  "prometheus-client",
@@ -474,10 +475,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-utils"
+name = "commonware-storage"
 version = "0.0.2"
 dependencies = [
  "bytes",
+ "commonware-macros",
+ "commonware-runtime",
+ "commonware-utils",
+ "crc32fast",
+ "futures",
+ "futures-util",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-utils"
+version = "0.0.2"
+dependencies = [
  "sha2 0.10.8",
 ]
 
@@ -528,6 +544,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53fe5e26ff1b7aef8bca9c6080520cfb8d9333c7568e1829cef191a9723e5504"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crc32fast"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a97769d94ddab943e4510d138150169a2758b5ef3eb191a9ee688de3e23ef7b3"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
