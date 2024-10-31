@@ -22,16 +22,30 @@ pub trait Capper {
     fn cap(key: &[u8]) -> Self::Key;
 }
 
+fn cap_key<const N: usize>(key: &[u8]) -> [u8; N] {
+    let mut capped = [0; N];
+    let len = key.len().min(N);
+    capped.copy_from_slice(&key[..len]);
+    capped
+}
+
+struct FourCap;
+
+impl Capper for FourCap {
+    type Key = [u8; 4];
+
+    fn cap(key: &[u8]) -> Self::Key {
+        cap_key(key)
+    }
+}
+
 struct EightCap;
 
 impl Capper for EightCap {
     type Key = [u8; 8];
 
     fn cap(key: &[u8]) -> Self::Key {
-        let mut capped = [0; 8];
-        let len = key.len().min(8);
-        capped.copy_from_slice(&key[..len]);
-        capped
+        cap_key(key)
     }
 }
 
