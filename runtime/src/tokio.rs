@@ -652,7 +652,9 @@ impl crate::Blob for Blob {
 
     async fn close(self) -> Result<(), Error> {
         let mut file = self.file.lock().await;
-        self.sync().await?;
+        file.sync_all()
+            .await
+            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
         file.shutdown()
             .await
             .map_err(|_| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name)))
