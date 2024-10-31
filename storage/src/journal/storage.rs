@@ -171,6 +171,14 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
     /// Appends an item to the `journal` in a given `section`.
     pub async fn append(&mut self, section: u64, item: Bytes) -> Result<(), Error> {
+        // Ensure item is not too large
+        let item_len = item.len();
+        let len = 4 + item_len + 4;
+        let item_len = match item_len.try_into() {
+            Ok(len) => len,
+            Err(_) => return Err(Error::ItemTooLarge(item_len)),
+        };
+
         // Get existing blob or create new one
         let blob = match self.blobs.entry(section) {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -185,14 +193,15 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             }
         };
 
-        // Write item
-        let cursor = blob.len().await.map_err(Error::Runtime)?;
-        let len = 4 + item.len() + 4;
+        // Populate buffer
         let mut buf = Vec::with_capacity(len);
-        buf.put_u32(item.len() as u32);
+        buf.put_u32(item_len);
         let checksum = crc32fast::hash(&item);
         buf.put(item);
         buf.put_u32(checksum);
+
+        // Append item to blob
+        let cursor = blob.len().await.map_err(Error::Runtime)?;
         blob.write_at(&buf, cursor).await.map_err(Error::Runtime)
     }
 

@@ -36,6 +36,8 @@ pub enum Error {
     InvalidBlobName(String),
     #[error("blob corrupt")]
     BlobCorrupt,
+    #[error("item too large: size={0}")]
+    ItemTooLarge(usize),
 }
 
 /// Configuration for `journal` storage.
