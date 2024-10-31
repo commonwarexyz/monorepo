@@ -21,7 +21,7 @@ pub struct Archive<B: Blob, E: Storage<B>> {
 }
 
 impl<B: Blob, E: Storage<B>> Archive<B, E> {
-    fn extract_key(mut data: Bytes) -> Result<Vec<u8>, Error> {
+    fn parse_item(mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
         if data.remaining() == 0 {
             return Err(Error::RecordCorrupted);
         }
@@ -30,7 +30,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
             return Err(Error::RecordCorrupted);
         }
         let key = data.copy_to_bytes(key_len);
-        Ok(key.to_vec())
+        Ok((key, data))
     }
 
     fn construct_key(key: &[u8], index_key_len: u8) -> Vec<u8> {
@@ -62,7 +62,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
             while let Some(result) = stream.next().await {
                 // Extract key from record
                 let (index, offset, data) = result?;
-                let key = Self::extract_key(data)?;
+                let (key, _) = Self::parse_item(data)?;
 
                 // Create index key
                 let key = Self::construct_key(&key, cfg.index_key_len);
@@ -112,7 +112,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
                     .ok_or(Error::RecordCorrupted)?;
 
                 // Get key from item
-                let item_key = Self::extract_key(item)?;
+                let (item_key, _) = Self::parse_item(item)?;
                 if key == item_key {
                     return Err(Error::DuplicateKey);
                 }
@@ -126,7 +126,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
         let mut buf = Vec::with_capacity(1 + key.len() + data.len());
         buf.put_u8(key.len() as u8);
         buf.put(key);
-        buf.put(data);
+        buf.put(data); // we don't need to store data len because we already get this from the journal
         let offset = self.journal.append(section, buf.into()).await?;
 
         // Store item in index
@@ -151,8 +151,27 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
         Ok(())
     }
 
-    pub async fn get(&self, _key: &[u8]) -> Result<Option<Bytes>, Error> {
-        unimplemented!()
+    pub async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, Error> {
+        // Create index key
+        let index_key = Self::construct_key(key, self.cfg.index_key_len);
+
+        // Fetch index
+        let record = self.keys.get(&index_key);
+        if let Some(record) = record {
+            // Fetch item from disk
+            let item = self
+                .journal
+                .get(record.section, record.offset)
+                .await?
+                .ok_or(Error::RecordCorrupted)?;
+
+            // Get key from item
+            let (disk_key, value) = Self::parse_item(item)?;
+            if disk_key == key {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn prune(&mut self, _min: u64) -> Result<(), Error> {
