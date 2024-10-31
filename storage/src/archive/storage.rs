@@ -17,6 +17,9 @@ pub struct Archive<B: Blob, E: Storage<B>> {
 
     journal: Journal<B, E>,
 
+    // We store the first index of the linked list in the HashMap
+    // to significantly reduce the number of random reads we need to do
+    // on the heap.
     keys: HashMap<Vec<u8>, Index>,
 }
 
@@ -156,12 +159,12 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
         let index_key = Self::construct_key(key, self.cfg.index_key_len);
 
         // Fetch index
-        let record = self.keys.get(&index_key);
-        if let Some(record) = record {
+        let mut record = self.keys.get(&index_key);
+        while let Some(index) = record {
             // Fetch item from disk
             let item = self
                 .journal
-                .get(record.section, record.offset)
+                .get(index.section, index.offset)
                 .await?
                 .ok_or(Error::RecordCorrupted)?;
 
@@ -170,13 +173,58 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
             if disk_key == key {
                 return Ok(Some(value));
             }
+
+            // Move to next index
+            record = index.next.as_deref();
         }
         Ok(None)
     }
 
-    pub async fn prune(&mut self, _min: u64) -> Result<(), Error> {
-        // TODO: iterate over all keys in-memory (prefer to storing more memory that would
-        // allow for more efficient iteration)
-        unimplemented!()
+    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+        // Prune keys from memory
+        //
+        // We prefer iterating over all keys in-memory to adding more memory
+        // overhead to make this pruning more efficient.
+        self.keys.retain(|_, record| {
+            // Initialize list cursor
+            let mut current = Some(record);
+            let mut prev: Option<&mut Index> = None;
+
+            // Iterate over list
+            while let Some(index) = current {
+                if index.section < min {
+                    if let Some(past) = prev {
+                        // Remove item from middle of list
+                        past.next = index.next.take();
+                        current = past.next.as_deref_mut();
+                    } else {
+                        // Remove head of list
+                        if let Some(next) = index.next.take() {
+                            // If there is a next item, overwrite the head
+                            index.offset = next.offset;
+                            index.section = next.section;
+                            index.next = next.next;
+
+                            // Update our cursor to the new head
+                            current = Some(index);
+                        } else {
+                            // If there is no next, remove the key
+                            return false;
+                        }
+                    }
+                } else {
+                    // Move to the next item
+                    prev = Some(index);
+                    current = index.next.as_deref_mut();
+                }
+            }
+
+            // If we haven't returned yet, that means there is still some
+            // record stored.
+            true
+        });
+
+        // Prune journal
+        self.journal.prune(min).await.map_err(Error::Journal)
     }
 }
