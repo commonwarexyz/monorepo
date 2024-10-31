@@ -254,7 +254,249 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_handling_corrupted_data() {
+    fn test_journal_with_invalid_blob_name() {
+        // Initialize the deterministic runtime
+        let (executor, mut context, _) = Executor::default();
+
+        // Start the test within the executor
+        executor.start(async move {
+            // Create a journal configuration
+            let cfg = Config {
+                partition: "test_partition".into(),
+            };
+
+            // Manually create a blob with an invalid name (not 8 bytes)
+            let invalid_blob_name = b"invalid"; // Less than 8 bytes
+            let mut blob = context
+                .open(&cfg.partition, invalid_blob_name)
+                .await
+                .expect("Failed to create blob with invalid name");
+            blob.close().await.expect("Failed to close blob");
+
+            // Attempt to initialize the journal
+            let result = Journal::init(context, cfg).await;
+
+            // Expect an error
+            assert!(matches!(result, Err(Error::InvalidBlobName(_))));
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_read_size_missing() {
+        // Initialize the deterministic runtime
+        let (executor, mut context, _) = Executor::default();
+
+        // Start the test within the executor
+        executor.start(async move {
+            // Create a journal configuration
+            let cfg = Config {
+                partition: "test_partition".into(),
+            };
+
+            // Manually create a blob with incomplete size data
+            let section = 1u64;
+            let blob_name = section.to_be_bytes();
+            let mut blob = context
+                .open(&cfg.partition, &blob_name)
+                .await
+                .expect("Failed to create blob");
+
+            // Write incomplete size data (less than 4 bytes)
+            let incomplete_data = vec![0x00, 0x01]; // Less than 4 bytes
+            blob.write_at(&incomplete_data, 0)
+                .await
+                .expect("Failed to write incomplete data");
+            blob.close().await.expect("Failed to close blob");
+
+            // Initialize the journal
+            let mut journal = Journal::init(context, cfg)
+                .await
+                .expect("Failed to initialize journal");
+
+            // Attempt to replay the journal
+            let stream = journal.replay();
+            pin_mut!(stream);
+            let mut items = Vec::new();
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Err(err) => panic!("Failed to read item: {}", err),
+                }
+            }
+            assert!(items.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_read_item_missing() {
+        // Initialize the deterministic runtime
+        let (executor, mut context, _) = Executor::default();
+
+        // Start the test within the executor
+        executor.start(async move {
+            // Create a journal configuration
+            let cfg = Config {
+                partition: "test_partition".into(),
+            };
+
+            // Manually create a blob with missing item data
+            let section = 1u64;
+            let blob_name = section.to_be_bytes();
+            let mut blob = context
+                .open(&cfg.partition, &blob_name)
+                .await
+                .expect("Failed to create blob");
+
+            // Write size but no item data
+            let item_size: u32 = 10; // Size of the item
+            blob.write_at(&item_size.to_be_bytes(), 0)
+                .await
+                .expect("Failed to write item size");
+            blob.close().await.expect("Failed to close blob");
+
+            // Initialize the journal
+            let mut journal = Journal::init(context, cfg)
+                .await
+                .expect("Failed to initialize journal");
+
+            // Attempt to replay the journal
+            let stream = journal.replay();
+            pin_mut!(stream);
+            let mut items = Vec::new();
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Err(err) => panic!("Failed to read item: {}", err),
+                }
+            }
+            assert!(items.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_read_checksum_missing() {
+        // Initialize the deterministic runtime
+        let (executor, mut context, _) = Executor::default();
+
+        // Start the test within the executor
+        executor.start(async move {
+            // Create a journal configuration
+            let cfg = Config {
+                partition: "test_partition".into(),
+            };
+
+            // Manually create a blob with missing checksum
+            let section = 1u64;
+            let blob_name = section.to_be_bytes();
+            let mut blob = context
+                .open(&cfg.partition, &blob_name)
+                .await
+                .expect("Failed to create blob");
+
+            // Prepare item data
+            let item_data = b"Test data";
+            let item_size = item_data.len() as u32;
+
+            // Write size
+            let mut offset = 0;
+            blob.write_at(&item_size.to_be_bytes(), offset)
+                .await
+                .expect("Failed to write item size");
+            offset += 4;
+
+            // Write item data
+            blob.write_at(item_data, offset)
+                .await
+                .expect("Failed to write item data");
+            // Do not write checksum (omit it)
+
+            blob.close().await.expect("Failed to close blob");
+
+            // Initialize the journal
+            let mut journal = Journal::init(context, cfg)
+                .await
+                .expect("Failed to initialize journal");
+
+            // Attempt to replay the journal
+            let stream = journal.replay();
+            pin_mut!(stream);
+            let mut items = Vec::new();
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Err(err) => panic!("Failed to read item: {}", err),
+                }
+            }
+            assert!(items.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_read_checksum_mismatch() {
+        // Initialize the deterministic runtime
+        let (executor, mut context, _) = Executor::default();
+
+        // Start the test within the executor
+        executor.start(async move {
+            // Create a journal configuration
+            let cfg = Config {
+                partition: "test_partition".into(),
+            };
+
+            // Manually create a blob with incorrect checksum
+            let section = 1u64;
+            let blob_name = section.to_be_bytes();
+            let mut blob = context
+                .open(&cfg.partition, &blob_name)
+                .await
+                .expect("Failed to create blob");
+
+            // Prepare item data
+            let item_data = b"Test data";
+            let item_size = item_data.len() as u32;
+            let incorrect_checksum: u32 = 0xDEADBEEF;
+
+            // Write size
+            let mut offset = 0;
+            blob.write_at(&item_size.to_be_bytes(), offset)
+                .await
+                .expect("Failed to write item size");
+            offset += 4;
+
+            // Write item data
+            blob.write_at(item_data, offset)
+                .await
+                .expect("Failed to write item data");
+            offset += item_data.len();
+
+            // Write incorrect checksum
+            blob.write_at(&incorrect_checksum.to_be_bytes(), offset)
+                .await
+                .expect("Failed to write incorrect checksum");
+
+            blob.close().await.expect("Failed to close blob");
+
+            // Initialize the journal
+            let mut journal = Journal::init(context, cfg)
+                .await
+                .expect("Failed to initialize journal");
+
+            // Attempt to replay the journal
+            let stream = journal.replay();
+            pin_mut!(stream);
+            let mut items = Vec::new();
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok((blob_index, item)) => items.push((blob_index, item)),
+                    Err(err) => panic!("Failed to read item: {}", err),
+                }
+            }
+            assert!(items.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_handling_truncated_data() {
         // Initialize the deterministic runtime
         let (executor, mut context, _) = Executor::default();
 
@@ -293,17 +535,6 @@ mod tests {
             // Close the journal
             journal.close().await.expect("Failed to close journal");
 
-            // Manually corrupt the blob 1st blob
-            let corrupt_data = vec![0xFF; 10];
-            let mut blob = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
-                .await
-                .expect("Failed to open blob");
-            blob.write_at(&corrupt_data, 0)
-                .await
-                .expect("Failed to corrupt blob");
-            blob.close().await.expect("Failed to close blob");
-
             // Manually corrupt the end of the second blob
             let mut blob = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
@@ -332,11 +563,13 @@ mod tests {
             }
 
             // Verify that only non-corrupted items were replayed
-            assert_eq!(items.len(), 2);
-            assert_eq!(items[0].0, data_items[0].0);
-            assert_eq!(items[0].1, data_items[0].1);
-            assert_eq!(items[1].0, data_items[1].0);
-            assert_eq!(items[1].1, data_items[1].1);
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0].0, 1);
+            assert_eq!(items[0].1, Bytes::from("Valid data"));
+            assert_eq!(items[1].0, data_items[0].0);
+            assert_eq!(items[1].1, data_items[0].1);
+            assert_eq!(items[2].0, data_items[1].0);
+            assert_eq!(items[2].1, data_items[1].1);
         });
     }
 }
