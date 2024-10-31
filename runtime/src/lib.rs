@@ -490,6 +490,18 @@ mod tests {
             assert_eq!(read, 0);
             assert_eq!(&buffer, &[0u8; 10]);
 
+            // Truncate the blob
+            blob.truncate(5).await.expect("Failed to truncate blob");
+            let length = blob.len().await.expect("Failed to get blob length");
+            assert_eq!(length, 5);
+            let mut buffer = vec![0u8; 10];
+            let read = blob
+                .read_at(&mut buffer, 0)
+                .await
+                .expect("Failed to read data");
+            assert_eq!(read, 5);
+            assert_eq!(&buffer[..5], data1);
+
             // Close the blob
             blob.close().await.expect("Failed to close blob");
         });
