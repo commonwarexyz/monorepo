@@ -65,7 +65,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test_partition".into(),
             };
 
             // Initialize the journal
@@ -116,7 +116,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test_partition".into(),
             };
 
             // Initialize the journal
@@ -178,7 +178,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test_partition".into(),
             };
 
             // Initialize the journal
@@ -262,7 +262,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
-                partition: "test_partition".to_string(),
+                partition: "test_partition".into(),
             };
 
             // Initialize the journal

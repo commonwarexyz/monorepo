@@ -38,12 +38,13 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                 .open(&cfg.partition, &name)
                 .await
                 .map_err(Error::Runtime)?;
-            if name.len() != 8 {
-                return Err(Error::InvalidBlobName(hex(&name)));
-            }
-            let blob_section = u64::from_be_bytes(name.try_into().unwrap());
-            debug!(blob = blob_section, "loaded blob");
-            blobs.insert(blob_section, blob);
+            let hex_name = hex(&name);
+            let section = match name.try_into() {
+                Ok(section) => u64::from_be_bytes(section),
+                Err(_) => return Err(Error::InvalidBlobName(hex_name)),
+            };
+            debug!(section, blob = hex_name, "loaded section");
+            blobs.insert(section, blob);
         }
 
         // Create journal instance
@@ -69,7 +70,9 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             warn!("size missing");
             return Err(Error::BlobCorrupt);
         }
-        let size = u32::from_be_bytes(size) as usize;
+        let size = u32::from_be_bytes(size)
+            .try_into()
+            .expect("usize too small");
         let offset = offset + 4;
 
         // Read item
