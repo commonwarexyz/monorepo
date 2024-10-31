@@ -36,7 +36,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
         Ok((key, data))
     }
 
-    fn construct_key(key: &[u8], index_key_len: u8) -> Vec<u8> {
+    fn capped_key(key: &[u8], index_key_len: u8) -> Vec<u8> {
         let index_key_len = index_key_len as usize;
         if key.len() > index_key_len {
             key[..index_key_len].to_vec()
@@ -68,7 +68,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
                 let (key, _) = Self::parse_item(data)?;
 
                 // Create index key
-                let key = Self::construct_key(&key, cfg.index_key_len);
+                let key = Self::capped_key(&key, cfg.index_key_len);
 
                 // Store index
                 match keys.entry(key) {
@@ -99,7 +99,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
 
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Create index key
-        let index_key = Self::construct_key(key, self.cfg.index_key_len);
+        let index_key = Self::capped_key(key, self.cfg.index_key_len);
 
         // Check if duplicate key
         if index_key.len() == key.len() && self.keys.contains_key(&index_key) {
@@ -156,7 +156,7 @@ impl<B: Blob, E: Storage<B>> Archive<B, E> {
 
     pub async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Create index key
-        let index_key = Self::construct_key(key, self.cfg.index_key_len);
+        let index_key = Self::capped_key(key, self.cfg.index_key_len);
 
         // Fetch index
         let mut record = self.keys.get(&index_key);
