@@ -16,40 +16,43 @@ pub enum Error {
     DuplicateKey,
 }
 
-pub trait Capper {
+pub trait Translator: Clone {
     type Key: Eq + Hash + Send + Sync;
 
-    fn cap(key: &[u8]) -> Self::Key;
+    fn transform(&self, key: &[u8]) -> Self::Key;
 }
 
-fn cap_key<const N: usize>(key: &[u8]) -> [u8; N] {
+fn cap<const N: usize>(key: &[u8]) -> [u8; N] {
     let mut capped = [0; N];
     let len = key.len().min(N);
     capped.copy_from_slice(&key[..len]);
     capped
 }
 
+#[derive(Clone)]
 struct FourCap;
 
-impl Capper for FourCap {
+impl Translator for FourCap {
     type Key = [u8; 4];
 
-    fn cap(key: &[u8]) -> Self::Key {
-        cap_key(key)
-    }
-}
-
-struct EightCap;
-
-impl Capper for EightCap {
-    type Key = [u8; 8];
-
-    fn cap(key: &[u8]) -> Self::Key {
-        cap_key(key)
+    fn transform(&self, key: &[u8]) -> Self::Key {
+        cap(key)
     }
 }
 
 #[derive(Clone)]
-pub struct Config {
+struct EightCap;
+
+impl Translator for EightCap {
+    type Key = [u8; 8];
+
+    fn transform(&self, key: &[u8]) -> Self::Key {
+        cap(key)
+    }
+}
+
+#[derive(Clone)]
+pub struct Config<T: Translator> {
     pub partition: String,
+    pub translator: T,
 }

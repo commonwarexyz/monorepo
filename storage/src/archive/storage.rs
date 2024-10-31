@@ -1,12 +1,9 @@
-use super::{Capper, Config, Error};
+use super::{Config, Error, Translator};
 use crate::journal::{Config as JConfig, Journal};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    marker::PhantomData,
-};
+use std::collections::{hash_map::Entry, HashMap};
 use tracing::debug;
 
 /// In the case there are multiple records with the same key, we store them in a linked list.
@@ -22,18 +19,17 @@ struct Index {
 /// lookups may be O(n) instead of O(1).
 ///
 /// If this is not the case, modify the `Capper` implementation to hash keys before returning them.
-pub struct Archive<C: Capper, B: Blob, E: Storage<B>> {
+pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
+    cfg: Config<T>,
     journal: Journal<B, E>,
 
     // We store the first index of the linked list in the HashMap
     // to significantly reduce the number of random reads we need to do
     // on the heap.
-    keys: HashMap<C::Key, Index>,
-
-    _phantom_c: PhantomData<C>,
+    keys: HashMap<T::Key, Index>,
 }
 
-impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
+impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     fn parse_item(mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
         if data.remaining() == 0 {
             return Err(Error::RecordCorrupted);
@@ -46,7 +42,7 @@ impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
         Ok((key, data))
     }
 
-    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(runtime: E, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize journal
         let mut journal = Journal::init(
             runtime,
@@ -58,6 +54,7 @@ impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
         .map_err(Error::Journal)?;
 
         // Initialize keys and run corruption check
+        debug!("initializing archive");
         let mut keys = HashMap::new();
         let mut overlaps: u128 = 0;
         {
@@ -69,7 +66,7 @@ impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
                 let (key, _) = Self::parse_item(data)?;
 
                 // Create index key
-                let key = C::cap(&key);
+                let key = cfg.translator.transform(&key);
 
                 // Store index
                 match keys.entry(key) {
@@ -95,16 +92,12 @@ impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
         debug!(keys = keys.len(), overlaps, "archive initialized");
 
         // Return populated archive
-        Ok(Self {
-            journal,
-            keys,
-            _phantom_c: PhantomData,
-        })
+        Ok(Self { cfg, journal, keys })
     }
 
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Create index key
-        let index_key = C::cap(key);
+        let index_key = self.cfg.translator.transform(key);
 
         // Check if duplicate key
         let mut record = self.keys.get(&index_key);
@@ -157,7 +150,7 @@ impl<C: Capper, B: Blob, E: Storage<B>> Archive<C, B, E> {
 
     pub async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Create index key
-        let index_key = C::cap(key);
+        let index_key = self.cfg.translator.transform(key);
 
         // Fetch index
         let mut record = self.keys.get(&index_key);
