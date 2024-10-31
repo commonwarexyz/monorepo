@@ -11,7 +11,7 @@ struct MockIndex {
 fn benchmark_hashmap_load(c: &mut Criterion) {
     for n in &[100_000, 1_000_000, 10_000_000, 100_000_000] {
         for k in [4, 8, 16, 32] {
-            c.bench_function(&format!("n={} k={}", n, k), |b| {
+            c.bench_function(&format!("load: n={} k={}", n, k), |b| {
                 b.iter(|| {
                     let mut map = HashMap::new();
                     let mut rng = rand::thread_rng();
