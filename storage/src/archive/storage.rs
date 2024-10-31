@@ -15,10 +15,8 @@ struct Index {
     next: Option<Box<Index>>,
 }
 
-/// Assumes that all items are spread uniformly across the key space. If that is not the case,
-/// lookups may be O(n) instead of O(1).
-///
-/// If this is not the case, modify the `Capper` implementation to hash keys before returning them.
+/// Assumes that all added items (indexed by the output of the provided `Translator` are spread
+/// uniformly across the key space. If that is not the case, lookups may be O(n) instead of O(1).
 pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     cfg: Config<T>,
     journal: Journal<B, E>,
