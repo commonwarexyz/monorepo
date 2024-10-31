@@ -210,6 +210,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Retrieves an item from the `journal` at a given `section` and `offset`.
+    ///
+    /// All data returned from the underlying store is verified for integrity.
     pub async fn get(&mut self, section: u64, offset: usize) -> Result<Option<Bytes>, Error> {
         let blob = match self.blobs.get_mut(&section) {
             Some(blob) => blob,
