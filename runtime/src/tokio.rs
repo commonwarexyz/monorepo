@@ -604,7 +604,11 @@ impl crate::Blob for Blob {
             .seek(SeekFrom::Start(offset as u64))
             .await
             .map_err(|_| Error::ReadFailed)?;
-        let n = self.file.read(buf).await.map_err(|_| Error::ReadFailed)?;
+        let n = self
+            .file
+            .read_exact(buf)
+            .await
+            .map_err(|_| Error::ReadFailed)?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(n as u64);
         Ok(n)
