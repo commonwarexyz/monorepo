@@ -77,6 +77,10 @@ mod tests {
         // Test case 3: odd number of bytes
         let h = "0102030";
         assert!(from_hex(h).is_none());
+
+        // Test case 4: invalid hexadecimal character
+        let h = "01g3";
+        assert!(from_hex(h).is_none());
     }
 
     #[test]
