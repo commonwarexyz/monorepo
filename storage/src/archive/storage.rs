@@ -250,38 +250,53 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
             // Remove all keys from the journal
             for key in self.journal_keys.remove(&section).unwrap() {
-                // If already removed (can be duplicates), skip
-                let mut cursor = self.keys.get_mut(&key);
-                if cursor.is_none() {
+                // Find first valid key
+                let head = match self.keys.get_mut(&key) {
+                    Some(head) => head,
+                    None => continue,
+                };
+                let found = loop {
+                    if head.section < min {
+                        keys_pruned += 1;
+                        match head.next {
+                            Some(ref mut next) => {
+                                head.section = next.section;
+                                head.offset = next.offset;
+                                head.next = next.next.take();
+                            }
+                            None => {
+                                break false;
+                            }
+                        }
+                    } else {
+                        break true;
+                    }
+                };
+                if !found {
+                    entries_pruned += 1;
+                    self.keys.remove(&key);
                     continue;
                 }
 
-                // Iterate over the linked list
-                let mut keep = false;
-                while let Some(item) = cursor {
-                    if item.section < min {
-                        keys_pruned += 1;
-                        if let Some(next) = item.next.take() {
-                            // Replace the current node with the next node
-                            *item = *next;
-
-                            // Continue from the current node
-                            cursor = Some(item);
-                        } else {
-                            // TODO: set previous node pointer to None
-                            break;
-                        }
-                    } else {
-                        // Move to the next node
-                        cursor = item.next.as_deref_mut();
-                        keep = true;
+                // Update rest of list (examining current.next for correctness
+                // to comply with borrow checker)
+                let mut cursor = head;
+                loop {
+                    // If next is empty, stop
+                    if cursor.next.is_none() {
+                        break;
                     }
-                }
 
-                // If there are no longer items for this key, remove it
-                if !keep {
-                    entries_pruned += 1;
-                    self.keys.remove(&key);
+                    // If next is valid, set current to next
+                    let next_section = cursor.next.as_ref().unwrap().section;
+                    if next_section >= min {
+                        cursor = cursor.next.as_mut().unwrap();
+                        continue;
+                    }
+
+                    // If next is invalid, set current.next to next.next
+                    cursor.next = cursor.next.as_mut().unwrap().next.take();
+                    keys_pruned += 1;
                 }
             }
             debug!(section, entries_pruned, keys_pruned, "pruned keys");

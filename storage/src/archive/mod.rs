@@ -496,7 +496,6 @@ mod tests {
                         .expect("Data not found");
                     assert_eq!(retrieved, data);
                 } else {
-                    debug!(?key, section, "pruned key");
                     let retrieved = archive.get(&key).await.expect("Failed to get data");
                     assert!(retrieved.is_none());
                 }
