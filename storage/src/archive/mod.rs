@@ -18,7 +18,7 @@ pub enum Error {
 }
 
 pub trait Translator: Clone {
-    type Key: Eq + Hash + Send + Sync;
+    type Key: Eq + Hash + Send + Sync + Clone;
 
     fn transform(&self, key: &[u8]) -> Self::Key;
 }

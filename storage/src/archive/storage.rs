@@ -3,7 +3,7 @@ use crate::journal::{Config as JConfig, Journal};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
 
 /// In the case there are multiple records with the same key, we store them in a linked list.
@@ -25,6 +25,13 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     // to significantly reduce the number of random reads we need to do
     // on the heap.
     keys: HashMap<T::Key, Index>,
+
+    // We store a vector of keys for each journal section for fast pruning (to
+    // avoid a global iteration of values and/or re-reading a journal from disk).
+    //
+    // There may be duplicate keys in the vector but we don't expect the number
+    // of duplicates to be significant.
+    journal_keys: BTreeMap<u64, Vec<T::Key>>,
 }
 
 impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
@@ -54,6 +61,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Initialize keys and run corruption check
         debug!("initializing archive");
         let mut keys = HashMap::new();
+        let mut journal_keys = BTreeMap::new();
         let mut overlaps: u128 = 0;
         {
             let stream = journal.replay();
@@ -67,7 +75,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 let key = cfg.translator.transform(&key);
 
                 // Store index
-                match keys.entry(key) {
+                match keys.entry(key.clone()) {
                     Entry::Occupied(entry) => {
                         let entry: &mut Index = entry.into_mut();
                         entry.next = Some(Box::new(Index {
@@ -85,12 +93,20 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                         });
                     }
                 };
+
+                // Store key in journal_keys
+                journal_keys.entry(index).or_insert_with(Vec::new).push(key);
             }
         }
         debug!(keys = keys.len(), overlaps, "archive initialized");
 
         // Return populated archive
-        Ok(Self { cfg, journal, keys })
+        Ok(Self {
+            cfg,
+            journal,
+            keys,
+            journal_keys,
+        })
     }
 
     /// Put only ensures uniqueness of keys within the same section.
@@ -131,7 +147,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let offset = self.journal.append(section, buf.into()).await?;
 
         // Store item in index
-        let entry = self.keys.entry(index_key);
+        let entry = self.keys.entry(index_key.clone());
         match entry {
             Entry::Occupied(entry) => {
                 let entry: &mut Index = entry.into_mut();
@@ -149,6 +165,12 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 });
             }
         }
+
+        // Store key in journal_keys
+        self.journal_keys
+            .entry(section)
+            .or_default()
+            .push(index_key);
         Ok(())
     }
 
@@ -179,37 +201,47 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Prune keys from memory
-        //
-        // We prefer iterating over all keys in-memory during this infrequent operation to
-        // adding more memory overhead to make this pruning more efficient and/or storing
-        // list items in sorted order.
-        self.keys.retain(|_, head| {
-            // Initialize the cursor
-            let mut cursor = Some(head);
-            let mut keep = false;
+        loop {
+            // Get next section to prune
+            let mut pruned = 0;
+            let section = match self.journal_keys.first_key_value() {
+                Some((section, _)) if *section < min => *section,
+                _ => break,
+            };
 
-            // Iterate over the linked list
-            while let Some(item) = cursor {
-                if item.section < min {
-                    if let Some(next) = item.next.take() {
-                        // Replace the current node with the next node
-                        *item = *next;
-                        // Continue from the current node
-                        cursor = Some(item);
+            // Remove all keys from the journal
+            for key in self.journal_keys.remove(&section).unwrap() {
+                let mut cursor = self.keys.get_mut(&key);
+                let mut keep = false;
+
+                // Iterate over the linked list
+                while let Some(item) = cursor {
+                    if item.section < min {
+                        if let Some(next) = item.next.take() {
+                            // Replace the current node with the next node
+                            *item = *next;
+                            // Continue from the current node
+                            cursor = Some(item);
+                        } else {
+                            break;
+                        }
                     } else {
-                        break;
+                        // Move to the next node
+                        cursor = item.next.as_deref_mut();
+                        keep = true;
                     }
-                } else {
-                    // Move to the next node
-                    cursor = item.next.as_deref_mut();
-                    keep = true;
+                }
+
+                // If there are no longer items for this key, remove it
+                if !keep {
+                    self.keys.remove(&key);
+                    pruned += 1;
                 }
             }
-            keep
-        });
+            debug!(section, pruned, "pruned keys");
+        }
 
-        // Prune journal
+        // Prune journal to same place
         self.journal.prune(min).await.map_err(Error::Journal)
     }
 }
