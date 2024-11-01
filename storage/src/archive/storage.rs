@@ -250,7 +250,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
             // Remove all keys from the journal
             for key in self.journal_keys.remove(&section).unwrap() {
-                // Find first valid key
+                // Find new head, updating current head in-place to avoid map modification
                 let head = match self.keys.get_mut(&key) {
                     Some(head) => head,
                     None => continue,
@@ -272,14 +272,15 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                         break true;
                     }
                 };
+
+                // If there is no valid head, remove key
                 if !found {
                     entries_pruned += 1;
                     self.keys.remove(&key);
                     continue;
                 }
 
-                // Update rest of list (examining current.next for correctness
-                // to comply with borrow checker)
+                // Keep valid post-head entries
                 let mut cursor = head;
                 loop {
                     // If next is empty, stop
@@ -287,16 +288,18 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                         break;
                     }
 
-                    // If next is valid, set current to next
+                    // Get next section without maintaining a reference to next
                     let next_section = cursor.next.as_ref().unwrap().section;
-                    if next_section >= min {
-                        cursor = cursor.next.as_mut().unwrap();
+
+                    // If next is invalid skip it, set current.next to next.next
+                    if next_section < min {
+                        cursor.next = cursor.next.as_mut().unwrap().next.take();
+                        keys_pruned += 1;
                         continue;
                     }
 
-                    // If next is invalid, set current.next to next.next
-                    cursor.next = cursor.next.as_mut().unwrap().next.take();
-                    keys_pruned += 1;
+                    // If next is valid, set current to next
+                    cursor = cursor.next.as_mut().unwrap();
                 }
             }
             debug!(section, entries_pruned, keys_pruned, "pruned keys");
