@@ -67,6 +67,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -118,6 +119,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -180,6 +182,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -264,6 +267,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -292,6 +296,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -338,6 +343,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -384,6 +390,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -442,6 +449,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -506,6 +514,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
