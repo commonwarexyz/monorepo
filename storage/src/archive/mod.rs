@@ -57,7 +57,7 @@ mod tests {
     use prometheus_client::registry::Registry;
     use rand::Rng;
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         sync::{Arc, Mutex},
     };
     use tracing::debug;
@@ -430,7 +430,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             // Insert multiple keys across different sections
-            let mut keys = HashMap::new();
+            let mut keys = BTreeMap::new();
             while keys.len() < num_keys {
                 let mut key = [0u8; 32];
                 context.fill(&mut key);
@@ -496,6 +496,7 @@ mod tests {
                         .expect("Data not found");
                     assert_eq!(retrieved, data);
                 } else {
+                    debug!(?key, section, "pruned key");
                     let retrieved = archive.get(&key).await.expect("Failed to get data");
                     assert!(retrieved.is_none());
                 }

@@ -68,10 +68,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 let (key, _) = Self::parse_item(data)?;
 
                 // Create index key
-                let key = cfg.translator.transform(&key);
+                let index_key = cfg.translator.transform(&key);
 
                 // Store index
-                match keys.entry(key.clone()) {
+                match keys.entry(index_key.clone()) {
                     Entry::Occupied(entry) => {
                         let entry: &mut Index = entry.into_mut();
                         entry.next = Some(Box::new(Index {
@@ -91,7 +91,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 };
 
                 // Store key in journal_keys
-                journal_keys.entry(index).or_insert_with(Vec::new).push(key);
+                journal_keys
+                    .entry(index)
+                    .or_insert_with(Vec::new)
+                    .push(index_key);
             }
             debug!(keys = keys.len(), overlaps, "archive initialized");
         }
@@ -238,7 +241,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Remove pruned keys from index
         loop {
             // Get next section to prune
-            let mut pruned = 0;
+            let mut keys_pruned = 0;
+            let mut entries_pruned = 0;
             let section = match self.journal_keys.first_key_value() {
                 Some((section, _)) if *section < min => *section,
                 _ => break,
@@ -246,13 +250,17 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
             // Remove all keys from the journal
             for key in self.journal_keys.remove(&section).unwrap() {
+                // If already removed (can be duplicates), skip
                 let mut cursor = self.keys.get_mut(&key);
-                let mut keep = false;
+                if cursor.is_none() {
+                    continue;
+                }
 
                 // Iterate over the linked list
+                let mut keep = false;
                 while let Some(item) = cursor {
                     if item.section < min {
-                        pruned += 1;
+                        keys_pruned += 1;
                         if let Some(next) = item.next.take() {
                             // Replace the current node with the next node
                             *item = *next;
@@ -260,6 +268,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                             // Continue from the current node
                             cursor = Some(item);
                         } else {
+                            // TODO: set previous node pointer to None
                             break;
                         }
                     } else {
@@ -271,11 +280,12 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
                 // If there are no longer items for this key, remove it
                 if !keep {
+                    entries_pruned += 1;
                     self.keys.remove(&key);
                 }
             }
-            debug!(section, pruned, "pruned keys");
-            self.keys_tracked.dec_by(pruned as i64);
+            debug!(section, entries_pruned, keys_pruned, "pruned keys");
+            self.keys_tracked.dec_by(keys_pruned as i64);
         }
 
         // Prune journal to same place
