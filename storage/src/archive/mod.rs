@@ -55,9 +55,13 @@ mod tests {
     use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::registry::Registry;
-    use std::sync::{Arc, Mutex};
+    use rand::Rng;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
     use tracing::debug;
-    use translator::FourCap;
+    use translator::{EightCap, FourCap, TwoCap};
 
     #[test_traced]
     fn test_archive_put_get() {
@@ -387,6 +391,113 @@ mod tests {
                     assert!(retrieved.is_none());
                 } else {
                     assert_eq!(retrieved.expect("Data not found"), data);
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_archive_many_keys_and_restart() {
+        // Configure test
+        let num_keys = 100_000;
+        let num_partitions = 10;
+
+        // Initialize the deterministic runtime
+        let (executor, mut context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
+
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let cfg = Config {
+                registry: registry.clone(),
+                translator: TwoCap,
+                pending_writes: 10,
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            // Insert multiple keys across different sections
+            let mut keys = HashMap::new();
+            while keys.len() < num_keys {
+                let mut key = [0u8; 32];
+                context.fill(&mut key);
+                let section = context.gen_range(0..num_partitions);
+                let mut data = [0u8; 1024];
+                context.fill(&mut data);
+                let data = Bytes::from(data.to_vec());
+                archive
+                    .put(section, &key, data.clone())
+                    .await
+                    .expect("Failed to put data");
+                keys.insert(key, (section, data));
+            }
+
+            // Ensure all keys can be retrieved
+            for (key, (_, data)) in &keys {
+                let retrieved = archive
+                    .get(key)
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, data);
+            }
+
+            // Close the archive
+            archive.close().await.expect("Failed to close archive");
+
+            // Reinitialize the archive
+            let journal = Journal::init(
+                context.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+            let mut archive = Archive::init(journal, cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            // Ensure all keys can be retrieved
+            for (key, (_, data)) in &keys {
+                let retrieved = archive
+                    .get(key)
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, data);
+            }
+
+            // Prune first half of partitions
+            let min = num_partitions / 2;
+            archive.prune(min).await.expect("Failed to prune");
+
+            // Ensure all keys can be retrieved that haven't been pruned
+            for (key, (section, data)) in keys {
+                if section >= min {
+                    let retrieved = archive
+                        .get(&key)
+                        .await
+                        .expect("Failed to get data")
+                        .expect("Data not found");
+                    assert_eq!(retrieved, data);
+                } else {
+                    let retrieved = archive.get(&key).await.expect("Failed to get data");
+                    assert!(retrieved.is_none());
                 }
             }
         });
