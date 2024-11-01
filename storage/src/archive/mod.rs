@@ -1,6 +1,7 @@
 //! TBD
 
-pub mod storage;
+mod storage;
+pub use storage::Archive;
 pub mod translator;
 
 use prometheus_client::registry::Registry;
@@ -43,4 +44,313 @@ pub struct Config<T: Translator> {
     ///
     /// If set to 0, the journal will be synced each time a new item is stored.
     pub pending_writes: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::{Config as JournalConfig, Journal};
+    use bytes::Bytes;
+    use commonware_macros::test_traced;
+    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
+    use futures::{pin_mut, StreamExt};
+    use prometheus_client::registry::Registry;
+    use std::sync::{Arc, Mutex};
+    use tracing::debug;
+    use translator::FourCap;
+
+    #[test_traced]
+    fn test_archive_put_get() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
+
+            // Initialize storage using the runtime's Storage
+            let storage = context.clone();
+
+            // Create a config with FourCap translator and pending_writes = 10
+            let cfg = Config {
+                registry: registry.clone(),
+                translator: FourCap,
+                pending_writes: 10,
+            };
+
+            // Initialize an empty journal
+            let journal = Journal::init(
+                storage.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            let section = 1u64;
+            let key = b"testkey";
+            let data = Bytes::from("testdata");
+
+            // Put the key-data pair
+            archive
+                .put(section, key, data.clone())
+                .await
+                .expect("Failed to put data");
+
+            // Get the data back
+            let retrieved = archive
+                .get(key)
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data);
+        });
+    }
+
+    #[test_traced]
+    fn test_archive_duplicate_key() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
+
+            // Initialize storage using the runtime's Storage
+            let storage = context.clone();
+
+            // Create a config with FourCap translator and pending_writes = 10
+            let cfg = Config {
+                registry: registry.clone(),
+                translator: FourCap,
+                pending_writes: 10,
+            };
+
+            // Initialize an empty journal
+            let journal = Journal::init(
+                storage.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            let section = 1u64;
+            let key = b"duplicate";
+            let data1 = Bytes::from("data1");
+            let data2 = Bytes::from("data2");
+
+            // Put the key-data pair
+            archive
+                .put(section, key, data1.clone())
+                .await
+                .expect("Failed to put data");
+
+            // Put the key-data pair again
+            let result = archive.put(section, key, data2.clone()).await;
+            assert!(matches!(result, Err(Error::DuplicateKey)));
+
+            // Get the data back
+            let retrieved = archive
+                .get(key)
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data1);
+        });
+    }
+
+    #[test_traced]
+    fn test_archive_get_nonexistent_key() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
+
+            // Initialize storage using the runtime's Storage
+            let storage = context.clone();
+
+            // Create a config with FourCap translator and pending_writes = 10
+            let cfg = Config {
+                registry: registry.clone(),
+                translator: FourCap,
+                pending_writes: 10,
+            };
+
+            // Initialize an empty journal
+            let journal = Journal::init(
+                storage.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            // Attempt to get a key that doesn't exist
+            let key = b"nonexistent";
+            let retrieved = archive.get(key).await.expect("Failed to get data");
+            assert!(retrieved.is_none());
+        });
+    }
+
+    #[test_traced]
+    fn test_archive_overlapping_key() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
+
+            // Initialize storage using the runtime's Storage
+            let storage = context.clone();
+
+            // Create a config with FourCap translator and pending_writes = 10
+            let cfg = Config {
+                registry: registry.clone(),
+                translator: FourCap,
+                pending_writes: 10,
+            };
+
+            // Initialize an empty journal
+            let journal = Journal::init(
+                storage.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            let section = 1u64;
+            let key1 = b"keys1";
+            let data1 = Bytes::from("data1");
+            let key2 = b"keys2";
+            let data2 = Bytes::from("data2");
+
+            // Put the key-data pair
+            archive
+                .put(section, key1, data1.clone())
+                .await
+                .expect("Failed to put data");
+
+            // Put the key-data pair
+            archive
+                .put(section, key2, data2.clone())
+                .await
+                .expect("Failed to put data");
+
+            // Get the data back
+            let retrieved = archive
+                .get(key1)
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data1);
+
+            // Get the data back
+            let retrieved = archive
+                .get(key2)
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data2);
+        });
+    }
+
+    #[test_traced]
+    fn test_archive_overlapping_key_multiple_sections() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
+
+            // Initialize storage using the runtime's Storage
+            let storage = context.clone();
+
+            // Create a config with FourCap translator and pending_writes = 10
+            let cfg = Config {
+                registry: registry.clone(),
+                translator: FourCap,
+                pending_writes: 10,
+            };
+
+            // Initialize an empty journal
+            let journal = Journal::init(
+                storage.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            let section1 = 1u64;
+            let key1 = b"keys1";
+            let data1 = Bytes::from("data1");
+            let section2 = 2u64;
+            let key2 = b"keys2";
+            let data2 = Bytes::from("data2");
+
+            // Put the key-data pair
+            archive
+                .put(section1, key1, data1.clone())
+                .await
+                .expect("Failed to put data");
+
+            // Put the key-data pair
+            archive
+                .put(section2, key2, data2.clone())
+                .await
+                .expect("Failed to put data");
+
+            // Get the data back
+            let retrieved = archive
+                .get(key1)
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data1);
+
+            // Get the data back
+            let retrieved = archive
+                .get(key2)
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data2);
+        });
+    }
 }

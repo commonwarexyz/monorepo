@@ -140,24 +140,19 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Check if duplicate key
         let mut record = self.keys.get(&index_key);
         while let Some(index) = record {
-            // Check if same section
-            if index.section != section {
-                continue;
+            // Check key from disk if in same section
+            if index.section == section {
+                let item = self
+                    .journal
+                    .get(index.section, index.offset)
+                    .await?
+                    .ok_or(Error::RecordCorrupted)?;
+                let (item_key, _) = Self::parse_item(item)?;
+                if key == item_key {
+                    return Err(Error::DuplicateKey);
+                }
+                self.unnecessary_reads.inc();
             }
-
-            // Fetch item from disk
-            let item = self
-                .journal
-                .get(index.section, index.offset)
-                .await?
-                .ok_or(Error::RecordCorrupted)?;
-
-            // Get key from item
-            let (item_key, _) = Self::parse_item(item)?;
-            if key == item_key {
-                return Err(Error::DuplicateKey);
-            }
-            self.unnecessary_reads.inc();
 
             // Move to next index
             record = index.next.as_deref();

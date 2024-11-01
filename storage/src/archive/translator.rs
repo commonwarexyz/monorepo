@@ -8,7 +8,7 @@ fn cap<const N: usize>(key: &[u8]) -> [u8; N] {
 }
 
 #[derive(Clone)]
-struct FourCap;
+pub struct FourCap;
 
 impl Translator for FourCap {
     type Key = [u8; 4];
@@ -19,7 +19,7 @@ impl Translator for FourCap {
 }
 
 #[derive(Clone)]
-struct EightCap;
+pub struct EightCap;
 
 impl Translator for EightCap {
     type Key = [u8; 8];
