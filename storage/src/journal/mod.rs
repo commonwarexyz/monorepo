@@ -44,6 +44,7 @@ pub enum Error {
 /// Configuration for `journal` storage.
 #[derive(Clone)]
 pub struct Config {
+    /// Registry for metrics.
     pub registry: Arc<Mutex<Registry>>,
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.

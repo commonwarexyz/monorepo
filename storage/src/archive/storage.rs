@@ -16,8 +16,6 @@ struct Index {
     next: Option<Box<Index>>,
 }
 
-/// Assumes that all added items (indexed by the output of the provided `Translator` are spread
-/// uniformly across the key space. If that is not the case, lookups may be O(n) instead of O(1).
 pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     cfg: Config<T>,
     journal: Journal<B, E>,
@@ -33,6 +31,9 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     // There may be duplicate keys in the vector but we don't expect the number
     // of duplicates to be significant.
     journal_keys: BTreeMap<u64, Vec<T::Key>>,
+
+    // Track the number of writes pending for a section to determine when to sync.
+    pending_writes: HashMap<u64, usize>,
 
     keys_tracked: Gauge,
     unnecessary_reads: Counter,
@@ -124,6 +125,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             journal,
             keys,
             journal_keys,
+            pending_writes: HashMap::new(),
             keys_tracked,
             unnecessary_reads,
             gets,
@@ -186,6 +188,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                     next: None,
                 });
             }
+        }
+
+        // Update pending writes
+        let pending_writes = self.pending_writes.entry(section).or_default();
+        if *pending_writes + 1 > self.cfg.pending_writes {
+            self.journal.sync(section).await.map_err(Error::Journal)?;
+            *pending_writes = 0;
         }
 
         // Store key in journal_keys
@@ -276,5 +285,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Prune journal to same place
         self.journal.prune(min).await.map_err(Error::Journal)
+    }
+
+    pub async fn close(self) -> Result<(), Error> {
+        self.journal.close().await.map_err(Error::Journal)
     }
 }
