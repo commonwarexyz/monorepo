@@ -5,11 +5,14 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_storage::journal::{Journal, Config};
+//! use prometheus_client::registry::Registry;
+//! use std::sync::{Arc, Mutex};
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config{
+//!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         partition: "partition".to_string()
 //!     }).await.unwrap();
 //!
@@ -35,8 +38,8 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
-    #[error("blob corrupt")]
-    BlobCorrupt,
+    #[error("checksum mismatch: expected={0} actual={1}")]
+    ChecksumMismatch(u32, u32),
     #[error("item too large: size={0}")]
     ItemTooLarge(usize),
 }

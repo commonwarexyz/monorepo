@@ -98,12 +98,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         let stored_checksum = u32::from_be_bytes(stored_checksum);
         let checksum = crc32fast::hash(&item);
         if checksum != stored_checksum {
-            warn!(
-                expected = checksum,
-                actual = stored_checksum,
-                "checksum mismatch"
-            );
-            return Err(Error::BlobCorrupt);
+            return Err(Error::ChecksumMismatch(checksum, stored_checksum));
         }
         let offset = offset + 4;
 
@@ -136,7 +131,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                                     (stream_iter, Some((section, blob, len)), next_offset),
                                 )));
                             }
-                            Err(Error::BlobCorrupt) => {
+                            Err(Error::ChecksumMismatch(_, _))
+                            | Err(Error::Runtime(RError::InsufficientLength)) => {
                                 // Truncate blob
                                 //
                                 // This is a best-effort attempt to recover from corruption. If there is an unclean
