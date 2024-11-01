@@ -61,6 +61,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
     use futures::{pin_mut, StreamExt};
+    use prometheus_client::encoding::text::encode;
 
     #[test_traced]
     fn test_journal_append_and_read() {
@@ -69,13 +70,11 @@ mod tests {
 
         // Start the test within the executor
         executor.start(async move {
-            // Create a journal configuration
+            // Initialize the journal
             let cfg = Config {
                 registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
-
-            // Initialize the journal
             let index = 1u64;
             let data = Bytes::from("Test data");
             let mut journal = Journal::init(context.clone(), cfg.clone())
@@ -88,11 +87,20 @@ mod tests {
                 .await
                 .expect("Failed to append data");
 
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 1"));
+
             // Close the journal
             journal.close().await.expect("Failed to close journal");
 
             // Re-initialize the journal to simulate a restart
-            let mut journal = Journal::init(context, cfg)
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "test_partition".into(),
+            };
+            let mut journal = Journal::init(context, cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
 
@@ -111,6 +119,11 @@ mod tests {
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].0, index);
             assert_eq!(items[0].1, data);
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 1"));
         });
     }
 
@@ -146,6 +159,12 @@ mod tests {
                     .expect("Failed to append data");
                 journal.sync(*index).await.expect("Failed to sync blob");
             }
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 3"));
+            assert!(buffer.contains("synced_total 4"));
 
             // Close the journal
             journal.close().await.expect("Failed to close journal");
@@ -215,6 +234,11 @@ mod tests {
 
             // Prune blobs with indices less than 3
             journal.prune(3).await.expect("Failed to prune blobs");
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("pruned_total 2"));
 
             // Close the journal
             journal.close().await.expect("Failed to close journal");
