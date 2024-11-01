@@ -58,6 +58,8 @@ pub enum Error {
     BlobSyncFailed(String, String),
     #[error("blob close failed: {0}/{1}")]
     BlobCloseFailed(String, String),
+    #[error("blob read past length: {0}/{1}")]
+    BlobReadPastLength(usize, usize),
 }
 
 /// Interface that any task scheduler must implement to start
@@ -554,6 +556,27 @@ mod tests {
         });
     }
 
+    fn test_blob_read_past_length<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
+    where
+        B: Blob,
+    {
+        runner.start(async move {
+            let partition = "test_partition";
+            let name = b"test_blob_rw";
+
+            // Open a new blob
+            let blob = context
+                .open(partition, name)
+                .await
+                .expect("Failed to open blob");
+
+            // Read data past file length
+            let mut buffer = vec![0u8; 10];
+            let result = blob.read_at(&mut buffer, 0).await;
+            assert!(matches!(result, Err(Error::BlobReadPastLength(_, _))));
+        })
+    }
+
     #[test]
     fn test_deterministic_future() {
         let (runner, _, _) = deterministic::Executor::default();
@@ -629,6 +652,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_blob_read_past_length() {
+        let (executor, runtime, _) = deterministic::Executor::default();
+        test_blob_read_past_length(executor, runtime);
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
@@ -698,5 +727,11 @@ mod tests {
     fn test_tokio_many_partition_read_write() {
         let (executor, runtime) = tokio::Executor::default();
         test_many_partition_read_write(executor, runtime);
+    }
+
+    #[test]
+    fn test_tokio_blob_read_past_length() {
+        let (executor, runtime) = tokio::Executor::default();
+        test_blob_read_past_length(executor, runtime);
     }
 }
