@@ -93,6 +93,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(Self { cfg, journal, keys })
     }
 
+    /// Put only ensures uniqueness of keys within the same section.
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Create index key
         let index_key = self.cfg.translator.transform(key);
@@ -100,6 +101,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Check if duplicate key
         let mut record = self.keys.get(&index_key);
         while let Some(index) = record {
+            // Check if same section
+            if index.section != section {
+                continue;
+            }
+
             // Fetch item from disk
             let item = self
                 .journal
@@ -146,7 +152,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    pub async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, Error> {
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Create index key
         let index_key = self.cfg.translator.transform(key);
 
