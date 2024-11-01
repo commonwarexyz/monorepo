@@ -52,16 +52,14 @@ mod tests {
     use crate::journal::{Config as JournalConfig, Journal};
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
-    use futures::{pin_mut, StreamExt};
+    use commonware_runtime::{deterministic::Executor, Runner};
     use prometheus_client::registry::Registry;
     use rand::Rng;
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::BTreeMap,
         sync::{Arc, Mutex},
     };
-    use tracing::debug;
-    use translator::{EightCap, FourCap, TwoCap};
+    use translator::{FourCap, TwoCap};
 
     #[test_traced]
     fn test_archive_put_get() {
