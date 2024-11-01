@@ -473,6 +473,10 @@ mod tests {
                 .await
                 .expect("Failed to write data2");
 
+            // Assert that length tracks pending data
+            let length = blob.len().await.expect("Failed to get blob length");
+            assert_eq!(length, 10);
+
             // Read data back
             let mut buffer = vec![0u8; 10];
             blob.read_at(&mut buffer, 0)
@@ -481,10 +485,13 @@ mod tests {
             assert_eq!(&buffer[..5], data1);
             assert_eq!(&buffer[5..], data2);
 
-            // Read data never written to blob
-            let mut buffer = vec![0u8; 10];
-            let result = blob.read_at(&mut buffer, 10).await;
-            assert!(matches!(result, Err(Error::ReadFailed)));
+            // Rewrite data without affecting length
+            let data3 = b"Store";
+            blob.write_at(data3, 5)
+                .await
+                .expect("Failed to write data3");
+            let length = blob.len().await.expect("Failed to get blob length");
+            assert_eq!(length, 10);
 
             // Truncate the blob
             blob.truncate(5).await.expect("Failed to truncate blob");
@@ -499,7 +506,7 @@ mod tests {
             // Full read after truncation
             let mut buffer = vec![0u8; 10];
             let result = blob.read_at(&mut buffer, 0).await;
-            assert!(matches!(result, Err(Error::ReadFailed)));
+            assert!(matches!(result, Err(Error::InsufficientLength)));
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
