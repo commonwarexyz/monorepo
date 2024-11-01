@@ -34,9 +34,9 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     // of duplicates to be significant.
     journal_keys: BTreeMap<u64, Vec<T::Key>>,
 
-    journals_tracked: Gauge,
     keys_tracked: Gauge,
     unnecessary_reads: Counter,
+    gets: Counter,
 }
 
 impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
@@ -96,16 +96,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
 
         // Initialize metrics
-        let journals_tracked = Gauge::default();
         let keys_tracked = Gauge::default();
         let unnecessary_reads = Counter::default();
+        let gets = Counter::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
-            registry.register(
-                "journals_tracked",
-                "Number of journals tracked by the archive",
-                journals_tracked.clone(),
-            );
             registry.register(
                 "keys_tracked",
                 "Number of keys tracked by the archive",
@@ -116,6 +111,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 "Number of unnecessary reads performed by the archive",
                 unnecessary_reads.clone(),
             );
+            registry.register(
+                "gets",
+                "Number of gets performed by the archive",
+                gets.clone(),
+            );
         }
 
         // Return populated archive
@@ -124,9 +124,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             journal,
             keys,
             journal_keys,
-            journals_tracked,
             keys_tracked,
             unnecessary_reads,
+            gets,
         })
     }
 
@@ -196,11 +196,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Update metrics
         self.keys_tracked.inc();
-        self.journals_tracked.set(self.journal_keys.len() as i64);
         Ok(())
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
+        // Update metrics
+        self.gets.inc();
+
         // Create index key
         let index_key = self.cfg.translator.transform(key);
 
@@ -271,7 +273,6 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             debug!(section, pruned, "pruned keys");
             self.keys_tracked.dec_by(pruned as i64);
         }
-        self.journals_tracked.set(self.journal_keys.len() as i64);
 
         // Prune journal to same place
         self.journal.prune(min).await.map_err(Error::Journal)

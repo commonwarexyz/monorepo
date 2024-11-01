@@ -3,10 +3,8 @@ use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::hex;
 use futures::{stream, Stream};
-use std::{
-    collections::{btree_map::Entry, BTreeMap},
-    marker::PhantomData,
-};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{debug, trace, warn};
 
 /// Implementation of an append-only log for storing arbitrary data.
@@ -16,7 +14,9 @@ pub struct Journal<B: Blob, E: Storage<B>> {
 
     blobs: BTreeMap<u64, B>,
 
-    _phantom_b: PhantomData<B>,
+    tracked: Gauge,
+    synced: Counter,
+    pruned: Counter,
 }
 
 impl<B: Blob, E: Storage<B>> Journal<B, E> {
@@ -47,14 +47,27 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             blobs.insert(section, blob);
         }
 
+        // Initialize metrics
+        let tracked = Gauge::default();
+        let synced = Counter::default();
+        let pruned = Counter::default();
+        {
+            let mut registry = cfg.registry.lock().unwrap();
+            registry.register("tracked", "Number of journals", tracked.clone());
+            registry.register("synced", "Number of syncs", synced.clone());
+            registry.register("pruned", "Number of journals pruned", pruned.clone());
+        }
+        tracked.set(blobs.len() as i64);
+
         // Create journal instance
         Ok(Self {
             runtime,
             cfg,
 
             blobs,
-
-            _phantom_b: PhantomData,
+            tracked,
+            synced,
+            pruned,
         })
     }
 
@@ -177,6 +190,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                     .open(&self.cfg.partition, &name)
                     .await
                     .map_err(Error::Runtime)?;
+                self.tracked.inc();
                 entry.insert(blob)
             }
         };
@@ -212,6 +226,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             Some(blob) => blob,
             None => return Ok(()),
         };
+        self.synced.inc();
         blob.sync().await.map_err(Error::Runtime)
     }
 
@@ -241,6 +256,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                 .await
                 .map_err(Error::Runtime)?;
             debug!(blob = section, "pruned blob");
+            self.tracked.dec();
+            self.pruned.inc();
         }
     }
 
