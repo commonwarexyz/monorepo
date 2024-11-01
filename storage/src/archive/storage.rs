@@ -1,9 +1,10 @@
 use super::{Config, Error, Translator};
-use crate::journal::{Config as JConfig, Journal};
+use crate::journal::Journal;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
-use std::collections::{hash_map::Entry, HashMap};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
 
 /// In the case there are multiple records with the same key, we store them in a linked list.
@@ -15,8 +16,6 @@ struct Index {
     next: Option<Box<Index>>,
 }
 
-/// Assumes that all added items (indexed by the output of the provided `Translator` are spread
-/// uniformly across the key space. If that is not the case, lookups may be O(n) instead of O(1).
 pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     cfg: Config<T>,
     journal: Journal<B, E>,
@@ -25,6 +24,20 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     // to significantly reduce the number of random reads we need to do
     // on the heap.
     keys: HashMap<T::Key, Index>,
+
+    // We store a vector of keys for each journal section for fast pruning (to
+    // avoid a global iteration of values and/or re-reading a journal from disk).
+    //
+    // There may be duplicate keys in the vector but we don't expect the number
+    // of duplicates to be significant.
+    journal_keys: BTreeMap<u64, Vec<T::Key>>,
+
+    // Track the number of writes pending for a section to determine when to sync.
+    pending_writes: HashMap<u64, usize>,
+
+    keys_tracked: Gauge,
+    unnecessary_reads: Counter,
+    gets: Counter,
 }
 
 impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
@@ -40,22 +53,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok((key, data))
     }
 
-    pub async fn init(runtime: E, cfg: Config<T>) -> Result<Self, Error> {
-        // Initialize journal
-        let mut journal = Journal::init(
-            runtime,
-            JConfig {
-                partition: cfg.partition.clone(),
-            },
-        )
-        .await
-        .map_err(Error::Journal)?;
-
+    pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize keys and run corruption check
-        debug!("initializing archive");
         let mut keys = HashMap::new();
+        let mut journal_keys = BTreeMap::new();
         let mut overlaps: u128 = 0;
         {
+            debug!("initializing archive");
             let stream = journal.replay();
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
@@ -67,7 +71,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 let key = cfg.translator.transform(&key);
 
                 // Store index
-                match keys.entry(key) {
+                match keys.entry(key.clone()) {
                     Entry::Occupied(entry) => {
                         let entry: &mut Index = entry.into_mut();
                         entry.next = Some(Box::new(Index {
@@ -85,14 +89,50 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                         });
                     }
                 };
+
+                // Store key in journal_keys
+                journal_keys.entry(index).or_insert_with(Vec::new).push(key);
             }
+            debug!(keys = keys.len(), overlaps, "archive initialized");
         }
-        debug!(keys = keys.len(), overlaps, "archive initialized");
+
+        // Initialize metrics
+        let keys_tracked = Gauge::default();
+        let unnecessary_reads = Counter::default();
+        let gets = Counter::default();
+        {
+            let mut registry = cfg.registry.lock().unwrap();
+            registry.register(
+                "keys_tracked",
+                "Number of keys tracked by the archive",
+                keys_tracked.clone(),
+            );
+            registry.register(
+                "unnecessary_reads",
+                "Number of unnecessary reads performed by the archive",
+                unnecessary_reads.clone(),
+            );
+            registry.register(
+                "gets",
+                "Number of gets performed by the archive",
+                gets.clone(),
+            );
+        }
 
         // Return populated archive
-        Ok(Self { cfg, journal, keys })
+        Ok(Self {
+            cfg,
+            journal,
+            keys,
+            journal_keys,
+            pending_writes: HashMap::new(),
+            keys_tracked,
+            unnecessary_reads,
+            gets,
+        })
     }
 
+    /// Put only ensures uniqueness of keys within the same section.
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Create index key
         let index_key = self.cfg.translator.transform(key);
@@ -100,6 +140,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Check if duplicate key
         let mut record = self.keys.get(&index_key);
         while let Some(index) = record {
+            // Check if same section
+            if index.section != section {
+                continue;
+            }
+
             // Fetch item from disk
             let item = self
                 .journal
@@ -112,6 +157,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             if key == item_key {
                 return Err(Error::DuplicateKey);
             }
+            self.unnecessary_reads.inc();
 
             // Move to next index
             record = index.next.as_deref();
@@ -125,7 +171,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let offset = self.journal.append(section, buf.into()).await?;
 
         // Store item in index
-        let entry = self.keys.entry(index_key);
+        let entry = self.keys.entry(index_key.clone());
         match entry {
             Entry::Occupied(entry) => {
                 let entry: &mut Index = entry.into_mut();
@@ -143,10 +189,29 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 });
             }
         }
+
+        // Update pending writes
+        let pending_writes = self.pending_writes.entry(section).or_default();
+        if *pending_writes + 1 > self.cfg.pending_writes {
+            self.journal.sync(section).await.map_err(Error::Journal)?;
+            *pending_writes = 0;
+        }
+
+        // Store key in journal_keys
+        self.journal_keys
+            .entry(section)
+            .or_default()
+            .push(index_key);
+
+        // Update metrics
+        self.keys_tracked.inc();
         Ok(())
     }
 
-    pub async fn get(&mut self, key: &[u8]) -> Result<Option<Bytes>, Error> {
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
+        // Update metrics
+        self.gets.inc();
+
         // Create index key
         let index_key = self.cfg.translator.transform(key);
 
@@ -165,6 +230,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             if disk_key == key {
                 return Ok(Some(value));
             }
+            self.unnecessary_reads.inc();
 
             // Move to next index
             record = index.next.as_deref();
@@ -173,37 +239,55 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Prune keys from memory
-        //
-        // We prefer iterating over all keys in-memory during this infrequent operation to
-        // adding more memory overhead to make this pruning more efficient and/or storing
-        // list items in sorted order.
-        self.keys.retain(|_, head| {
-            // Initialize the cursor
-            let mut cursor = Some(head);
-            let mut keep = false;
+        // Remove pruned keys from index
+        loop {
+            // Get next section to prune
+            let mut pruned = 0;
+            let section = match self.journal_keys.first_key_value() {
+                Some((section, _)) if *section < min => *section,
+                _ => break,
+            };
 
-            // Iterate over the linked list
-            while let Some(item) = cursor {
-                if item.section < min {
-                    if let Some(next) = item.next.take() {
-                        // Replace the current node with the next node
-                        *item = *next;
-                        // Continue from the current node
-                        cursor = Some(item);
+            // Remove all keys from the journal
+            for key in self.journal_keys.remove(&section).unwrap() {
+                let mut cursor = self.keys.get_mut(&key);
+                let mut keep = false;
+
+                // Iterate over the linked list
+                while let Some(item) = cursor {
+                    if item.section < min {
+                        if let Some(next) = item.next.take() {
+                            // Replace the current node with the next node
+                            *item = *next;
+                            pruned += 1;
+
+                            // Continue from the current node
+                            cursor = Some(item);
+                        } else {
+                            break;
+                        }
                     } else {
-                        break;
+                        // Move to the next node
+                        cursor = item.next.as_deref_mut();
+                        keep = true;
                     }
-                } else {
-                    // Move to the next node
-                    cursor = item.next.as_deref_mut();
-                    keep = true;
+                }
+
+                // If there are no longer items for this key, remove it
+                if !keep {
+                    self.keys.remove(&key);
+                    pruned += 1;
                 }
             }
-            keep
-        });
+            debug!(section, pruned, "pruned keys");
+            self.keys_tracked.dec_by(pruned as i64);
+        }
 
-        // Prune journal
+        // Prune journal to same place
         self.journal.prune(min).await.map_err(Error::Journal)
+    }
+
+    pub async fn close(self) -> Result<(), Error> {
+        self.journal.close().await.map_err(Error::Journal)
     }
 }

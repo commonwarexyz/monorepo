@@ -3,10 +3,8 @@ use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::hex;
 use futures::{stream, Stream};
-use std::{
-    collections::{btree_map::Entry, BTreeMap},
-    marker::PhantomData,
-};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{debug, trace, warn};
 
 /// Implementation of an append-only log for storing arbitrary data.
@@ -16,7 +14,9 @@ pub struct Journal<B: Blob, E: Storage<B>> {
 
     blobs: BTreeMap<u64, B>,
 
-    _phantom_b: PhantomData<B>,
+    tracked: Gauge,
+    synced: Counter,
+    pruned: Counter,
 }
 
 impl<B: Blob, E: Storage<B>> Journal<B, E> {
@@ -25,7 +25,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
     /// to iterate over all items in the `journal`.
-    pub async fn init(mut runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
         let stored_blobs = match runtime.scan(&cfg.partition).await {
@@ -47,29 +47,37 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             blobs.insert(section, blob);
         }
 
+        // Initialize metrics
+        let tracked = Gauge::default();
+        let synced = Counter::default();
+        let pruned = Counter::default();
+        {
+            let mut registry = cfg.registry.lock().unwrap();
+            registry.register("tracked", "Number of journals", tracked.clone());
+            registry.register("synced", "Number of syncs", synced.clone());
+            registry.register("pruned", "Number of journals pruned", pruned.clone());
+        }
+        tracked.set(blobs.len() as i64);
+
         // Create journal instance
         Ok(Self {
             runtime,
             cfg,
 
             blobs,
-
-            _phantom_b: PhantomData,
+            tracked,
+            synced,
+            pruned,
         })
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(blob: &mut B, offset: usize) -> Result<(usize, Bytes), Error> {
+    async fn read(blob: &B, offset: usize) -> Result<(usize, Bytes), Error> {
         // Read item size
         let mut size = [0u8; 4];
-        let bytes_read = blob
-            .read_at(&mut size, offset)
+        blob.read_at(&mut size, offset)
             .await
             .map_err(Error::Runtime)?;
-        if bytes_read != 4 {
-            warn!("size missing");
-            return Err(Error::BlobCorrupt);
-        }
         let size = u32::from_be_bytes(size)
             .try_into()
             .expect("usize too small");
@@ -77,35 +85,20 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
         // Read item
         let mut item = vec![0u8; size];
-        let bytes_read = blob
-            .read_at(&mut item, offset)
+        blob.read_at(&mut item, offset)
             .await
             .map_err(Error::Runtime)?;
-        if bytes_read != size {
-            warn!("item missing");
-            return Err(Error::BlobCorrupt);
-        }
         let offset = offset + size;
 
         // Read checksum
         let mut stored_checksum = [0u8; 4];
-        let bytes_read = blob
-            .read_at(&mut stored_checksum, offset)
+        blob.read_at(&mut stored_checksum, offset)
             .await
             .map_err(Error::Runtime)?;
-        if bytes_read != 4 {
-            warn!("checksum missing");
-            return Err(Error::BlobCorrupt);
-        }
         let stored_checksum = u32::from_be_bytes(stored_checksum);
         let checksum = crc32fast::hash(&item);
         if checksum != stored_checksum {
-            warn!(
-                expected = checksum,
-                actual = stored_checksum,
-                "checksum mismatch"
-            );
-            return Err(Error::BlobCorrupt);
+            return Err(Error::ChecksumMismatch(checksum, stored_checksum));
         }
         let offset = offset + 4;
 
@@ -138,7 +131,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                                     (stream_iter, Some((section, blob, len)), next_offset),
                                 )));
                             }
-                            Err(Error::BlobCorrupt) => {
+                            Err(Error::ChecksumMismatch(_, _))
+                            | Err(Error::Runtime(RError::InsufficientLength)) => {
                                 // Truncate blob
                                 //
                                 // This is a best-effort attempt to recover from corruption. If there is an unclean
@@ -192,6 +186,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                     .open(&self.cfg.partition, &name)
                     .await
                     .map_err(Error::Runtime)?;
+                self.tracked.inc();
                 entry.insert(blob)
             }
         };
@@ -210,10 +205,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Retrieves an item from the `journal` at a given `section` and `offset`.
-    ///
-    /// All data returned from the underlying store is verified for integrity.
-    pub async fn get(&mut self, section: u64, offset: usize) -> Result<Option<Bytes>, Error> {
-        let blob = match self.blobs.get_mut(&section) {
+    pub async fn get(&self, section: u64, offset: usize) -> Result<Option<Bytes>, Error> {
+        let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
@@ -224,11 +217,12 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// Ensures that all data in a given `section` is synced to the underlying store.
     ///
     /// If the `section` does not exist, no error will be returned.
-    pub async fn sync(&mut self, section: u64) -> Result<(), Error> {
-        let blob = match self.blobs.get_mut(&section) {
+    pub async fn sync(&self, section: u64) -> Result<(), Error> {
+        let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(()),
         };
+        self.synced.inc();
         blob.sync().await.map_err(Error::Runtime)
     }
 
@@ -249,7 +243,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             }
 
             // Remove and close blob
-            let mut blob = self.blobs.remove(&section).unwrap();
+            let blob = self.blobs.remove(&section).unwrap();
             blob.close().await.map_err(Error::Runtime)?;
 
             // Remove blob from storage
@@ -258,12 +252,14 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                 .await
                 .map_err(Error::Runtime)?;
             debug!(blob = section, "pruned blob");
+            self.tracked.dec();
+            self.pruned.inc();
         }
     }
 
     /// Closes all open sections.
-    pub async fn close(mut self) -> Result<(), Error> {
-        for (section, blob) in self.blobs.iter_mut() {
+    pub async fn close(self) -> Result<(), Error> {
+        for (section, blob) in self.blobs.into_iter() {
             blob.close().await.map_err(Error::Runtime)?;
             debug!(blob = section, "closed blob");
         }

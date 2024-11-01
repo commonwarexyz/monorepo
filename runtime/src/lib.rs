@@ -58,6 +58,8 @@ pub enum Error {
     BlobSyncFailed(String, String),
     #[error("blob close failed: {0}/{1}")]
     BlobCloseFailed(String, String),
+    #[error("insufficient length")]
+    InsufficientLength,
 }
 
 /// Interface that any task scheduler must implement to start
@@ -145,6 +147,10 @@ pub trait Stream: Sync + Send + 'static {
 
 /// Interface to interact with storage.
 ///
+///
+/// To support storage implementations that enable concurrent reads and
+/// writes, blobs are responsible for maintaining synchronization.
+///
 /// Storage can be backed by a local filesystem, cloud storage, etc.
 pub trait Storage<B>: Clone + Send + Sync + 'static
 where
@@ -154,17 +160,13 @@ where
     ///
     /// Multiple instances of the same blob can be opened concurrently, however,
     /// writing to the same blob concurrently may lead to undefined behavior.
-    fn open(
-        &mut self,
-        partition: &str,
-        name: &[u8],
-    ) -> impl Future<Output = Result<B, Error>> + Send;
+    fn open(&self, partition: &str, name: &[u8]) -> impl Future<Output = Result<B, Error>> + Send;
 
     /// Remove a blob from a given partition.
     ///
     /// If no `name` is provided, the entire partition is removed.
     fn remove(
-        &mut self,
+        &self,
         partition: &str,
         name: Option<&[u8]>,
     ) -> impl Future<Output = Result<(), Error>> + Send;
@@ -174,33 +176,33 @@ where
 }
 
 /// Interface to read and write to a blob.
+///
+/// To support blob implementations that enable concurrent reads and
+/// writes, blobs are responsible for maintaining synchronization.
 #[allow(clippy::len_without_is_empty)]
-pub trait Blob: Send + Sync + 'static {
+pub trait Blob: Clone + Send + Sync + 'static {
     /// Get the length of the blob.
     fn len(&self) -> impl Future<Output = Result<usize, Error>> + Send;
 
     /// Read from the blob at the given offset.
     fn read_at(
-        &mut self,
+        &self,
         buf: &mut [u8],
-        offset: usize,
-    ) -> impl Future<Output = Result<usize, Error>> + Send;
-
-    /// Write to the blob at the given offset.
-    fn write_at(
-        &mut self,
-        buf: &[u8],
         offset: usize,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
+    /// Write to the blob at the given offset.
+    fn write_at(&self, buf: &[u8], offset: usize)
+        -> impl Future<Output = Result<(), Error>> + Send;
+
     /// Truncate the blob to the given length.
-    fn truncate(&mut self, len: usize) -> impl Future<Output = Result<(), Error>> + Send;
+    fn truncate(&self, len: usize) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Ensure all pending data is durably persisted.
-    fn sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Close the blob.
-    fn close(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
+    fn close(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 #[cfg(test)]
@@ -362,7 +364,7 @@ mod tests {
         });
     }
 
-    fn test_storage_operations<B>(runner: impl Runner, mut context: impl Spawner + Storage<B>)
+    fn test_storage_operations<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
     where
         B: Blob,
     {
@@ -371,7 +373,7 @@ mod tests {
             let name = b"test_blob";
 
             // Open a new blob
-            let mut blob = context
+            let blob = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -407,7 +409,7 @@ mod tests {
             assert!(blobs.contains(&name.to_vec()));
 
             // Reopen the blob
-            let mut blob = context
+            let blob = context
                 .open(partition, name)
                 .await
                 .expect("Failed to reopen blob");
@@ -447,7 +449,7 @@ mod tests {
         });
     }
 
-    fn test_blob_read_write<B>(runner: impl Runner, mut context: impl Spawner + Storage<B>)
+    fn test_blob_read_write<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
     where
         B: Blob,
     {
@@ -456,7 +458,7 @@ mod tests {
             let name = b"test_blob_rw";
 
             // Open a new blob
-            let mut blob = context
+            let blob = context
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
@@ -471,46 +473,48 @@ mod tests {
                 .await
                 .expect("Failed to write data2");
 
+            // Assert that length tracks pending data
+            let length = blob.len().await.expect("Failed to get blob length");
+            assert_eq!(length, 10);
+
             // Read data back
             let mut buffer = vec![0u8; 10];
-            let read = blob
-                .read_at(&mut buffer, 0)
+            blob.read_at(&mut buffer, 0)
                 .await
                 .expect("Failed to read data");
-            assert_eq!(read, 10);
             assert_eq!(&buffer[..5], data1);
             assert_eq!(&buffer[5..], data2);
 
-            // Read data never written to blob
-            let mut buffer = vec![0u8; 10];
-            let read = blob
-                .read_at(&mut buffer, 10)
+            // Rewrite data without affecting length
+            let data3 = b"Store";
+            blob.write_at(data3, 5)
                 .await
-                .expect("Failed to read data");
-            assert_eq!(read, 0);
-            assert_eq!(&buffer, &[0u8; 10]);
+                .expect("Failed to write data3");
+            let length = blob.len().await.expect("Failed to get blob length");
+            assert_eq!(length, 10);
 
             // Truncate the blob
             blob.truncate(5).await.expect("Failed to truncate blob");
             let length = blob.len().await.expect("Failed to get blob length");
             assert_eq!(length, 5);
-            let mut buffer = vec![0u8; 10];
-            let read = blob
-                .read_at(&mut buffer, 0)
+            let mut buffer = vec![0u8; 5];
+            blob.read_at(&mut buffer, 0)
                 .await
                 .expect("Failed to read data");
-            assert_eq!(read, 5);
             assert_eq!(&buffer[..5], data1);
+
+            // Full read after truncation
+            let mut buffer = vec![0u8; 10];
+            let result = blob.read_at(&mut buffer, 0).await;
+            assert!(matches!(result, Err(Error::InsufficientLength)));
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
         });
     }
 
-    fn test_many_partition_read_write<B>(
-        runner: impl Runner,
-        mut context: impl Spawner + Storage<B>,
-    ) where
+    fn test_many_partition_read_write<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
+    where
         B: Blob,
     {
         runner.start(async move {
@@ -519,7 +523,7 @@ mod tests {
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let mut blob = context
+                let blob = context
                     .open(partition, name)
                     .await
                     .expect("Failed to open blob");
@@ -540,7 +544,7 @@ mod tests {
 
             for (additional, partition) in partitions.iter().enumerate() {
                 // Open a new blob
-                let mut blob = context
+                let blob = context
                     .open(partition, name)
                     .await
                     .expect("Failed to open blob");
@@ -557,6 +561,38 @@ mod tests {
                 blob.close().await.expect("Failed to close blob");
             }
         });
+    }
+
+    fn test_blob_read_past_length<B>(runner: impl Runner, context: impl Spawner + Storage<B>)
+    where
+        B: Blob,
+    {
+        runner.start(async move {
+            let partition = "test_partition";
+            let name = b"test_blob_rw";
+
+            // Open a new blob
+            let blob = context
+                .open(partition, name)
+                .await
+                .expect("Failed to open blob");
+
+            // Read data past file length (empty file)
+            let mut buffer = vec![0u8; 10];
+            let result = blob.read_at(&mut buffer, 0).await;
+            assert!(matches!(result, Err(Error::InsufficientLength)));
+
+            // Write data to the blob
+            let data = b"Hello, Storage!";
+            blob.write_at(data, 0)
+                .await
+                .expect("Failed to write to blob");
+
+            // Read data past file length (non-empty file)
+            let mut buffer = vec![0u8; 20];
+            let result = blob.read_at(&mut buffer, 0).await;
+            assert!(matches!(result, Err(Error::InsufficientLength)));
+        })
     }
 
     #[test]
@@ -634,6 +670,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_blob_read_past_length() {
+        let (executor, runtime, _) = deterministic::Executor::default();
+        test_blob_read_past_length(executor, runtime);
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
@@ -703,5 +745,11 @@ mod tests {
     fn test_tokio_many_partition_read_write() {
         let (executor, runtime) = tokio::Executor::default();
         test_many_partition_read_write(executor, runtime);
+    }
+
+    #[test]
+    fn test_tokio_blob_read_past_length() {
+        let (executor, runtime) = tokio::Executor::default();
+        test_blob_read_past_length(executor, runtime);
     }
 }

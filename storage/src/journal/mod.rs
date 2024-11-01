@@ -5,11 +5,14 @@
 //! ```rust
 //! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //! use commonware_storage::journal::{Journal, Config};
+//! use prometheus_client::registry::Registry;
+//! use std::sync::{Arc, Mutex};
 //!
 //! let (executor, context, _) = Executor::default();
 //! executor.start(async move {
 //!     // Create a journal
 //!     let mut journal = Journal::init(context, Config{
+//!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         partition: "partition".to_string()
 //!     }).await.unwrap();
 //!
@@ -24,6 +27,8 @@
 mod storage;
 pub use storage::Journal;
 
+use prometheus_client::registry::Registry;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the journal.
@@ -33,8 +38,8 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
-    #[error("blob corrupt")]
-    BlobCorrupt,
+    #[error("checksum mismatch: expected={0} actual={1}")]
+    ChecksumMismatch(u32, u32),
     #[error("item too large: size={0}")]
     ItemTooLarge(usize),
 }
@@ -42,6 +47,8 @@ pub enum Error {
 /// Configuration for `journal` storage.
 #[derive(Clone)]
 pub struct Config {
+    /// Registry for metrics.
+    pub registry: Arc<Mutex<Registry>>,
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.
     pub partition: String,
@@ -64,6 +71,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -115,6 +123,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -177,6 +186,7 @@ mod tests {
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -255,18 +265,19 @@ mod tests {
     #[test_traced]
     fn test_journal_with_invalid_blob_name() {
         // Initialize the deterministic runtime
-        let (executor, mut context, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
             // Manually create a blob with an invalid name (not 8 bytes)
             let invalid_blob_name = b"invalid"; // Less than 8 bytes
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, invalid_blob_name)
                 .await
                 .expect("Failed to create blob with invalid name");
@@ -283,19 +294,20 @@ mod tests {
     #[test_traced]
     fn test_journal_read_size_missing() {
         // Initialize the deterministic runtime
-        let (executor, mut context, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
             // Manually create a blob with incomplete size data
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -329,19 +341,20 @@ mod tests {
     #[test_traced]
     fn test_journal_read_item_missing() {
         // Initialize the deterministic runtime
-        let (executor, mut context, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
             // Manually create a blob with missing item data
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -375,19 +388,20 @@ mod tests {
     #[test_traced]
     fn test_journal_read_checksum_missing() {
         // Initialize the deterministic runtime
-        let (executor, mut context, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
             // Manually create a blob with missing checksum
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -433,19 +447,20 @@ mod tests {
     #[test_traced]
     fn test_journal_read_checksum_mismatch() {
         // Initialize the deterministic runtime
-        let (executor, mut context, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
             // Manually create a blob with incorrect checksum
             let section = 1u64;
             let blob_name = section.to_be_bytes();
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, &blob_name)
                 .await
                 .expect("Failed to create blob");
@@ -497,12 +512,13 @@ mod tests {
     #[test_traced]
     fn test_journal_handling_truncated_data() {
         // Initialize the deterministic runtime
-        let (executor, mut context, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
 
         // Start the test within the executor
         executor.start(async move {
             // Create a journal configuration
             let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
                 partition: "test_partition".into(),
             };
 
@@ -535,7 +551,7 @@ mod tests {
             journal.close().await.expect("Failed to close journal");
 
             // Manually corrupt the end of the second blob
-            let mut blob = context
+            let blob = context
                 .open(&cfg.partition, &2u64.to_be_bytes())
                 .await
                 .expect("Failed to open blob");
