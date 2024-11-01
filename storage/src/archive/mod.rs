@@ -67,19 +67,9 @@ mod tests {
             // Create a registry for metrics
             let registry = Arc::new(Mutex::new(Registry::default()));
 
-            // Initialize storage using the runtime's Storage
-            let storage = context.clone();
-
-            // Create a config with FourCap translator and pending_writes = 10
-            let cfg = Config {
-                registry: registry.clone(),
-                translator: FourCap,
-                pending_writes: 10,
-            };
-
             // Initialize an empty journal
             let journal = Journal::init(
-                storage.clone(),
+                context,
                 JournalConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
@@ -89,6 +79,11 @@ mod tests {
             .expect("Failed to initialize journal");
 
             // Initialize the archive
+            let cfg = Config {
+                registry,
+                translator: FourCap,
+                pending_writes: 10,
+            };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
@@ -121,19 +116,9 @@ mod tests {
             // Create a registry for metrics
             let registry = Arc::new(Mutex::new(Registry::default()));
 
-            // Initialize storage using the runtime's Storage
-            let storage = context.clone();
-
-            // Create a config with FourCap translator and pending_writes = 10
-            let cfg = Config {
-                registry: registry.clone(),
-                translator: FourCap,
-                pending_writes: 10,
-            };
-
             // Initialize an empty journal
             let journal = Journal::init(
-                storage.clone(),
+                context,
                 JournalConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
@@ -143,6 +128,11 @@ mod tests {
             .expect("Failed to initialize journal");
 
             // Initialize the archive
+            let cfg = Config {
+                registry,
+                translator: FourCap,
+                pending_writes: 10,
+            };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
@@ -180,19 +170,9 @@ mod tests {
             // Create a registry for metrics
             let registry = Arc::new(Mutex::new(Registry::default()));
 
-            // Initialize storage using the runtime's Storage
-            let storage = context.clone();
-
-            // Create a config with FourCap translator and pending_writes = 10
-            let cfg = Config {
-                registry: registry.clone(),
-                translator: FourCap,
-                pending_writes: 10,
-            };
-
             // Initialize an empty journal
             let journal = Journal::init(
-                storage.clone(),
+                context,
                 JournalConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
@@ -202,6 +182,11 @@ mod tests {
             .expect("Failed to initialize journal");
 
             // Initialize the archive
+            let cfg = Config {
+                registry,
+                translator: FourCap,
+                pending_writes: 10,
+            };
             let archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
@@ -221,19 +206,9 @@ mod tests {
             // Create a registry for metrics
             let registry = Arc::new(Mutex::new(Registry::default()));
 
-            // Initialize storage using the runtime's Storage
-            let storage = context.clone();
-
-            // Create a config with FourCap translator and pending_writes = 10
-            let cfg = Config {
-                registry: registry.clone(),
-                translator: FourCap,
-                pending_writes: 10,
-            };
-
             // Initialize an empty journal
             let journal = Journal::init(
-                storage.clone(),
+                context,
                 JournalConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
@@ -243,6 +218,11 @@ mod tests {
             .expect("Failed to initialize journal");
 
             // Initialize the archive
+            let cfg = Config {
+                registry,
+                translator: FourCap,
+                pending_writes: 10,
+            };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
@@ -291,19 +271,9 @@ mod tests {
             // Create a registry for metrics
             let registry = Arc::new(Mutex::new(Registry::default()));
 
-            // Initialize storage using the runtime's Storage
-            let storage = context.clone();
-
-            // Create a config with FourCap translator and pending_writes = 10
-            let cfg = Config {
-                registry: registry.clone(),
-                translator: FourCap,
-                pending_writes: 10,
-            };
-
             // Initialize an empty journal
             let journal = Journal::init(
-                storage.clone(),
+                context,
                 JournalConfig {
                     registry: registry.clone(),
                     partition: "test_partition".into(),
@@ -313,6 +283,11 @@ mod tests {
             .expect("Failed to initialize journal");
 
             // Initialize the archive
+            let cfg = Config {
+                registry,
+                translator: FourCap,
+                pending_writes: 10,
+            };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
