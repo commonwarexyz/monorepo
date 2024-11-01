@@ -288,6 +288,17 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
+    fn truncate(&self, partition: &str, name: &[u8], size: usize) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"truncate");
+        hasher.update(partition.as_bytes());
+        hasher.update(name);
+        hasher.update(size.to_be_bytes());
+        *hash = hasher.finalize().to_vec();
+    }
+
     fn sync(&self, partition: &str, name: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
@@ -1116,17 +1127,17 @@ impl crate::Storage<Blob> for Context {
 
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<usize, Error> {
-        let content = self.content.read().unwrap();
         self.executor.auditor.len(&self.partition, &self.name);
+        let content = self.content.read().unwrap();
         Ok(content.len())
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<(), Error> {
-        let content = self.content.read().unwrap();
         let buf_len = buf.len();
         self.executor
             .auditor
             .read_at(&self.partition, &self.name, buf_len, offset);
+        let content = self.content.read().unwrap();
         let content_len = content.len();
         if offset + buf_len > content_len {
             return Err(Error::ReadFailed);
@@ -1141,10 +1152,10 @@ impl crate::Blob for Blob {
     }
 
     async fn write_at(&self, buf: &[u8], offset: usize) -> Result<(), Error> {
-        let mut content = self.content.write().unwrap();
         self.executor
             .auditor
             .write_at(&self.partition, &self.name, buf, offset);
+        let mut content = self.content.write().unwrap();
         let required = offset + buf.len();
         if required > content.len() {
             content.resize(required, 0);
@@ -1159,6 +1170,9 @@ impl crate::Blob for Blob {
     }
 
     async fn truncate(&self, len: usize) -> Result<(), Error> {
+        self.executor
+            .auditor
+            .truncate(&self.partition, &self.name, len);
         let mut content = self.content.write().unwrap();
         content.truncate(len);
         Ok(())
