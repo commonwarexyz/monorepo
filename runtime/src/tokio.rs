@@ -507,7 +507,7 @@ pub struct Blob {
     // Files must be seeked prior to any read or write operation and are thus
     // not safe to concurrently interact with. If we switched to mmaping files
     // we could remove this lock.
-    file: AsyncMutex<fs::File>,
+    file: Arc<AsyncMutex<fs::File>>,
 }
 
 impl Blob {
@@ -517,7 +517,20 @@ impl Blob {
             metrics,
             partition,
             name: name.into(),
-            file: AsyncMutex::new(file),
+            file: Arc::new(AsyncMutex::new(file)),
+        }
+    }
+}
+
+impl Clone for Blob {
+    fn clone(&self) -> Self {
+        // We implement `Clone` manually to ensure the `open_blobs` gauge is updated.
+        self.metrics.open_blobs.inc();
+        Self {
+            metrics: self.metrics.clone(),
+            partition: self.partition.clone(),
+            name: self.name.clone(),
+            file: self.file.clone(),
         }
     }
 }

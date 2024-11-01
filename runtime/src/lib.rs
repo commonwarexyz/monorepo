@@ -178,7 +178,7 @@ where
 /// To support blob implementations that enable concurrent reads and
 /// writes, blobs are responsible for maintaining synchronization.
 #[allow(clippy::len_without_is_empty)]
-pub trait Blob: Send + Sync + 'static {
+pub trait Blob: Clone + Send + Sync + 'static {
     /// Get the length of the blob.
     fn len(&self) -> impl Future<Output = Result<usize, Error>> + Send;
 
