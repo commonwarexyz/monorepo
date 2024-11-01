@@ -570,8 +570,19 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
 
-            // Read data past file length
+            // Read data past file length (empty file)
             let mut buffer = vec![0u8; 10];
+            let result = blob.read_at(&mut buffer, 0).await;
+            assert!(matches!(result, Err(Error::BlobReadPastLength(_, _))));
+
+            // Write data to the blob
+            let data = b"Hello, Storage!";
+            blob.write_at(data, 0)
+                .await
+                .expect("Failed to write to blob");
+
+            // Read data past file length (non-empty file)
+            let mut buffer = vec![0u8; 20];
             let result = blob.read_at(&mut buffer, 0).await;
             assert!(matches!(result, Err(Error::BlobReadPastLength(_, _))));
         })
