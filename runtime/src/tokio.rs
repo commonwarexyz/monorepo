@@ -507,17 +507,26 @@ pub struct Blob {
     // Files must be seeked prior to any read or write operation and are thus
     // not safe to concurrently interact with. If we switched to mmaping files
     // we could remove this lock.
-    file: Arc<AsyncMutex<fs::File>>,
+    //
+    // We also track the virtual file size because metadata isn't updated until
+    // the file is synced (not to mention it is a lot less fs calls).
+    file: Arc<AsyncMutex<(fs::File, u64)>>,
 }
 
 impl Blob {
-    fn new(metrics: Arc<Metrics>, partition: String, name: &[u8], file: fs::File) -> Self {
+    fn new(
+        metrics: Arc<Metrics>,
+        partition: String,
+        name: &[u8],
+        file: fs::File,
+        len: u64,
+    ) -> Self {
         metrics.open_blobs.inc();
         Self {
             metrics,
             partition,
             name: name.into(),
-            file: Arc::new(AsyncMutex::new(file)),
+            file: Arc::new(AsyncMutex::new((file, len))),
         }
     }
 }
@@ -570,12 +579,16 @@ impl crate::Storage<Blob> for Context {
         // Set the maximum buffer size
         file.set_max_buf_size(self.executor.cfg.maximum_buffer_size);
 
+        // Get the file length
+        let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+
         // Construct the blob
         Ok(Blob::new(
             self.executor.metrics.clone(),
             partition.into(),
             name,
             file,
+            len,
         ))
     }
 
@@ -624,62 +637,83 @@ impl crate::Storage<Blob> for Context {
 
 impl crate::Blob for Blob {
     async fn len(&self) -> Result<usize, Error> {
-        let file = self.file.lock().await;
-        let metadata = file.metadata().await.map_err(|_| Error::ReadFailed)?;
-        let len = metadata.len() as usize;
-        Ok(len)
+        let (_, len) = *self.file.lock().await;
+        Ok(len as usize)
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<(), Error> {
         // Ensure the read is within bounds
         let mut file = self.file.lock().await;
-        let metadata = file.metadata().await.map_err(|_| Error::ReadFailed)?;
-        let len = metadata.len() as usize;
-        if offset + buf.len() > len {
+        if offset + buf.len() > file.1 as usize {
             return Err(Error::InsufficientLength);
         }
 
         // Perform the read
-        file.seek(SeekFrom::Start(offset as u64))
+        file.0
+            .seek(SeekFrom::Start(offset as u64))
             .await
             .map_err(|_| Error::ReadFailed)?;
-        file.read_exact(buf).await.map_err(|_| Error::ReadFailed)?;
+        file.0
+            .read_exact(buf)
+            .await
+            .map_err(|_| Error::ReadFailed)?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(buf.len() as u64);
         Ok(())
     }
 
     async fn write_at(&self, buf: &[u8], offset: usize) -> Result<(), Error> {
+        // Perform the write
         let mut file = self.file.lock().await;
-        file.seek(SeekFrom::Start(offset as u64))
+        file.0
+            .seek(SeekFrom::Start(offset as u64))
             .await
             .map_err(|_| Error::WriteFailed)?;
-        file.write_all(buf).await.map_err(|_| Error::WriteFailed)?;
+        file.0
+            .write_all(buf)
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+
+        // Update the virtual file size
+        let max_len = (offset + buf.len()) as u64;
+        if max_len > file.1 {
+            file.1 = max_len;
+        }
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(buf.len() as u64);
         Ok(())
     }
 
     async fn truncate(&self, len: usize) -> Result<(), Error> {
-        let file = self.file.lock().await;
-        file.set_len(len as u64)
+        // Perform the truncate
+        let mut file = self.file.lock().await;
+        let len = len as u64;
+        file.0
+            .set_len(len)
             .await
-            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))
+            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
+
+        // Update the virtual file size
+        file.1 = len;
+        Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
         let file = self.file.lock().await;
-        file.sync_all()
+        file.0
+            .sync_all()
             .await
             .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))
     }
 
     async fn close(self) -> Result<(), Error> {
         let mut file = self.file.lock().await;
-        file.sync_all()
+        file.0
+            .sync_all()
             .await
             .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
-        file.shutdown()
+        file.0
+            .shutdown()
             .await
             .map_err(|_| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name)))
     }
