@@ -24,6 +24,8 @@
 mod storage;
 pub use storage::Journal;
 
+use prometheus_client::registry::Registry;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the journal.
@@ -42,6 +44,7 @@ pub enum Error {
 /// Configuration for `journal` storage.
 #[derive(Clone)]
 pub struct Config {
+    pub registry: Arc<Mutex<Registry>>,
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.
     pub partition: String,

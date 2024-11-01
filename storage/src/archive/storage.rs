@@ -1,8 +1,9 @@
 use super::{Config, Error, Translator};
-use crate::journal::{Config as JConfig, Journal};
+use crate::journal::Journal;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
 
@@ -32,6 +33,10 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     // There may be duplicate keys in the vector but we don't expect the number
     // of duplicates to be significant.
     journal_keys: BTreeMap<u64, Vec<T::Key>>,
+
+    journals_tracked: Gauge,
+    keys_tracked: Gauge,
+    unnecessary_reads: Counter,
 }
 
 impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
@@ -47,23 +52,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok((key, data))
     }
 
-    pub async fn init(runtime: E, cfg: Config<T>) -> Result<Self, Error> {
-        // Initialize journal
-        let mut journal = Journal::init(
-            runtime,
-            JConfig {
-                partition: cfg.partition.clone(),
-            },
-        )
-        .await
-        .map_err(Error::Journal)?;
-
+    pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize keys and run corruption check
-        debug!("initializing archive");
         let mut keys = HashMap::new();
         let mut journal_keys = BTreeMap::new();
         let mut overlaps: u128 = 0;
         {
+            debug!("initializing archive");
             let stream = journal.replay();
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
@@ -97,8 +92,31 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 // Store key in journal_keys
                 journal_keys.entry(index).or_insert_with(Vec::new).push(key);
             }
+            debug!(keys = keys.len(), overlaps, "archive initialized");
         }
-        debug!(keys = keys.len(), overlaps, "archive initialized");
+
+        // Initialize metrics
+        let journals_tracked = Gauge::default();
+        let keys_tracked = Gauge::default();
+        let unnecessary_reads = Counter::default();
+        {
+            let mut registry = cfg.registry.lock().unwrap();
+            registry.register(
+                "journals_tracked",
+                "Number of journals tracked by the archive",
+                journals_tracked.clone(),
+            );
+            registry.register(
+                "keys_tracked",
+                "Number of keys tracked by the archive",
+                keys_tracked.clone(),
+            );
+            registry.register(
+                "unnecessary_reads",
+                "Number of unnecessary reads performed by the archive",
+                unnecessary_reads.clone(),
+            );
+        }
 
         // Return populated archive
         Ok(Self {
@@ -106,6 +124,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             journal,
             keys,
             journal_keys,
+            journals_tracked,
+            keys_tracked,
+            unnecessary_reads,
         })
     }
 
@@ -134,6 +155,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             if key == item_key {
                 return Err(Error::DuplicateKey);
             }
+            self.unnecessary_reads.inc();
 
             // Move to next index
             record = index.next.as_deref();
@@ -171,6 +193,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             .entry(section)
             .or_default()
             .push(index_key);
+
+        // Update metrics
+        self.keys_tracked.inc();
+        self.journals_tracked.set(self.journal_keys.len() as i64);
         Ok(())
     }
 
@@ -193,6 +219,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             if disk_key == key {
                 return Ok(Some(value));
             }
+            self.unnecessary_reads.inc();
 
             // Move to next index
             record = index.next.as_deref();
@@ -201,6 +228,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+        // Remove pruned keys from index
         loop {
             // Get next section to prune
             let mut pruned = 0;
@@ -220,6 +248,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                         if let Some(next) = item.next.take() {
                             // Replace the current node with the next node
                             *item = *next;
+                            pruned += 1;
+
                             // Continue from the current node
                             cursor = Some(item);
                         } else {
@@ -239,7 +269,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 }
             }
             debug!(section, pruned, "pruned keys");
+            self.keys_tracked.dec_by(pruned as i64);
         }
+        self.journals_tracked.set(self.journal_keys.len() as i64);
 
         // Prune journal to same place
         self.journal.prune(min).await.map_err(Error::Journal)

@@ -17,14 +17,15 @@ commonware-utils = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
-crc32fast = "1.4.2"
 futures = { workspace = true }
 futures-util = { workspace = true }
+prometheus-client = { workspace = true }
+crc32fast = "1.4.2"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
-criterion = "0.5.1"
 rand = { workspace = true }
+criterion = { workspace = true } 
 
 [[bench]]
 name="hashmap_iteration"

@@ -3,7 +3,11 @@
 pub mod storage;
 pub mod translator;
 
-use std::hash::Hash;
+use prometheus_client::registry::Registry;
+use std::{
+    hash::Hash,
+    sync::{Arc, Mutex},
+};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the journal.
@@ -25,6 +29,6 @@ pub trait Translator: Clone {
 
 #[derive(Clone)]
 pub struct Config<T: Translator> {
-    pub partition: String,
+    pub registry: Arc<Mutex<Registry>>,
     pub translator: T,
 }
