@@ -328,4 +328,67 @@ mod tests {
             assert_eq!(retrieved, data2);
         });
     }
+
+    #[test_traced]
+    fn test_archive_prune_keys() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
+
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let cfg = Config {
+                registry: registry.clone(),
+                translator: FourCap,
+                pending_writes: 10,
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            // Insert multiple keys across different sections
+            let keys = vec![
+                (1u64, "key1-blah", Bytes::from("data1")),
+                (2u64, "key2-blah", Bytes::from("data2")),
+                (3u64, "key3-blah", Bytes::from("data3")),
+                (3u64, "key3-blah-again", Bytes::from("data3-again")),
+                (4u64, "key4-blah", Bytes::from("data4")),
+            ];
+
+            for (section, key, data) in &keys {
+                archive
+                    .put(*section, key.as_bytes(), data.clone())
+                    .await
+                    .expect("Failed to put data");
+            }
+
+            // Prune sections less than 3
+            archive.prune(3).await.expect("Failed to prune");
+
+            // Ensure keys 1 and 2 are no longer present
+            for (section, key, data) in keys {
+                let retrieved = archive
+                    .get(key.as_bytes())
+                    .await
+                    .expect("Failed to get data");
+                if section < 3 {
+                    assert!(retrieved.is_none());
+                } else {
+                    assert_eq!(retrieved.expect("Data not found"), data);
+                }
+            }
+        });
+    }
 }
