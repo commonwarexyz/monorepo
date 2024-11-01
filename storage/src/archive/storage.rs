@@ -187,7 +187,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Update pending writes
         let pending_writes = self.pending_writes.entry(section).or_default();
-        if *pending_writes + 1 > self.cfg.pending_writes {
+        *pending_writes += 1;
+        if *pending_writes > self.cfg.pending_writes {
             self.journal.sync(section).await.map_err(Error::Journal)?;
             *pending_writes = 0;
         }
@@ -251,10 +252,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 // Iterate over the linked list
                 while let Some(item) = cursor {
                     if item.section < min {
+                        pruned += 1;
                         if let Some(next) = item.next.take() {
                             // Replace the current node with the next node
                             *item = *next;
-                            pruned += 1;
 
                             // Continue from the current node
                             cursor = Some(item);
@@ -271,7 +272,6 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 // If there are no longer items for this key, remove it
                 if !keep {
                     self.keys.remove(&key);
-                    pruned += 1;
                 }
             }
             debug!(section, pruned, "pruned keys");
