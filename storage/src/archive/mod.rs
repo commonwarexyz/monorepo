@@ -53,7 +53,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Runner};
-    use prometheus_client::registry::Registry;
+    use prometheus_client::{encoding::text::encode, registry::Registry};
     use rand::Rng;
     use std::{
         collections::BTreeMap,
@@ -107,6 +107,13 @@ mod tests {
                 .expect("Failed to get data")
                 .expect("Data not found");
             assert_eq!(retrieved, data);
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 1"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
+            assert!(buffer.contains("gets_total 1"));
         });
     }
 
@@ -161,6 +168,13 @@ mod tests {
                 .expect("Failed to get data")
                 .expect("Data not found");
             assert_eq!(retrieved, data1);
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 1"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
+            assert!(buffer.contains("gets_total 1"));
         });
     }
 
@@ -197,6 +211,13 @@ mod tests {
             let key = b"nonexistent";
             let retrieved = archive.get(key).await.expect("Failed to get data");
             assert!(retrieved.is_none());
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 0"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
+            assert!(buffer.contains("gets_total 1"));
         });
     }
 
@@ -262,6 +283,13 @@ mod tests {
                 .expect("Failed to get data")
                 .expect("Data not found");
             assert_eq!(retrieved, data2);
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 2"));
+            assert!(buffer.contains("unnecessary_reads_total 2"));
+            assert!(buffer.contains("gets_total 2"));
         });
     }
 
@@ -376,6 +404,11 @@ mod tests {
                     .expect("Failed to put data");
             }
 
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 5"));
+
             // Prune sections less than 3
             archive.prune(3).await.expect("Failed to prune");
 
@@ -391,6 +424,11 @@ mod tests {
                     assert_eq!(retrieved.expect("Data not found"), data);
                 }
             }
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 3"));
         });
     }
 
