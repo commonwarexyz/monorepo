@@ -282,17 +282,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
                 // Keep valid post-head entries
                 let mut cursor = head;
-                loop {
-                    // If next is empty, stop
-                    if cursor.next.is_none() {
-                        break;
-                    }
-
-                    // Get next section without maintaining a reference to next
-                    let next_section = cursor.next.as_ref().unwrap().section;
-
-                    // If next is invalid skip it, set current.next to next.next
-                    if next_section < min {
+                while let Some(next) = cursor.next.as_ref().map(|next| next.section) {
+                    // If next is invalid, skip it
+                    if next < min {
                         cursor.next = cursor.next.as_mut().unwrap().next.take();
                         keys_pruned += 1;
                         continue;
