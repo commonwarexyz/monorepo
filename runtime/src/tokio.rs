@@ -631,7 +631,15 @@ impl crate::Blob for Blob {
     }
 
     async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<(), Error> {
+        // Ensure the read is within bounds
         let mut file = self.file.lock().await;
+        let metadata = file.metadata().await.map_err(|_| Error::ReadFailed)?;
+        let len = metadata.len() as usize;
+        if offset + buf.len() > len {
+            return Err(Error::InsufficientLength);
+        }
+
+        // Perform the read
         file.seek(SeekFrom::Start(offset as u64))
             .await
             .map_err(|_| Error::ReadFailed)?;

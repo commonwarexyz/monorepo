@@ -58,8 +58,8 @@ pub enum Error {
     BlobSyncFailed(String, String),
     #[error("blob close failed: {0}/{1}")]
     BlobCloseFailed(String, String),
-    #[error("blob read past length: {0}/{1}")]
-    BlobReadPastLength(usize, usize),
+    #[error("insufficient length")]
+    InsufficientLength,
 }
 
 /// Interface that any task scheduler must implement to start
@@ -573,7 +573,7 @@ mod tests {
             // Read data past file length (empty file)
             let mut buffer = vec![0u8; 10];
             let result = blob.read_at(&mut buffer, 0).await;
-            assert!(matches!(result, Err(Error::BlobReadPastLength(_, _))));
+            assert!(matches!(result, Err(Error::InsufficientLength)));
 
             // Write data to the blob
             let data = b"Hello, Storage!";
@@ -584,7 +584,7 @@ mod tests {
             // Read data past file length (non-empty file)
             let mut buffer = vec![0u8; 20];
             let result = blob.read_at(&mut buffer, 0).await;
-            assert!(matches!(result, Err(Error::BlobReadPastLength(_, _))));
+            assert!(matches!(result, Err(Error::InsufficientLength)));
         })
     }
 

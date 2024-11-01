@@ -1140,7 +1140,7 @@ impl crate::Blob for Blob {
         let content = self.content.read().unwrap();
         let content_len = content.len();
         if offset + buf_len > content_len {
-            return Err(Error::ReadFailed);
+            return Err(Error::InsufficientLength);
         }
         buf.copy_from_slice(&content[offset..offset + buf_len]);
         self.executor.metrics.storage_reads.inc();
