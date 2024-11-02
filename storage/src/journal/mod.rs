@@ -177,23 +177,41 @@ mod tests {
                 .expect("Failed to re-initialize journal");
 
             // Replay the journal and collect items
-            let mut items = Vec::new();
-            let stream = journal.replay(None);
-            pin_mut!(stream);
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+            for limit in [None, Some(100)].iter() {
+                let mut items = Vec::new();
+                {
+                    let stream = journal.replay(*limit);
+                    pin_mut!(stream);
+                    while let Some(result) = stream.next().await {
+                        match result {
+                            Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                            Err(err) => panic!("Failed to read item: {}", err),
+                        }
+                    }
+                }
+
+                // Verify that all items were replayed correctly
+                assert_eq!(items.len(), data_items.len());
+                for ((expected_index, expected_data), (actual_index, actual_data)) in
+                    data_items.iter().zip(items.iter())
+                {
+                    assert_eq!(actual_index, expected_index);
+                    assert_eq!(actual_data, expected_data);
                 }
             }
 
-            // Verify that all items were replayed correctly
-            assert_eq!(items.len(), data_items.len());
-            for ((expected_index, expected_data), (actual_index, actual_data)) in
-                data_items.iter().zip(items.iter())
+            // Replay just first bytes
             {
-                assert_eq!(actual_index, expected_index);
-                assert_eq!(actual_data, expected_data);
+                let stream = journal.replay(Some(4));
+                pin_mut!(stream);
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((_, _, item)) => {
+                            assert_eq!(item, Bytes::from("Data"));
+                        }
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
+                }
             }
         });
     }
