@@ -260,13 +260,19 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Retrieves an item from the `journal` at a given `section` and `offset`.
-    pub async fn get(&self, section: u64, offset: usize) -> Result<Option<Bytes>, Error> {
+    pub async fn get(
+        &self,
+        section: u64,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> Result<Option<Bytes>, Error> {
         self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
-        let (_, item) = Self::read(blob, offset, None, None).await?;
+        let blob_len = blob.len().await.map_err(Error::Runtime)?;
+        let (_, item) = Self::read(blob, offset, Some(blob_len), limit).await?;
         Ok(Some(item))
     }
 

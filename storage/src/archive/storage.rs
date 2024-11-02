@@ -189,7 +189,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             if section == cursor.section {
                 let item = self
                     .journal
-                    .get(cursor.section, cursor.offset)
+                    .get(cursor.section, cursor.offset, Some(self.cfg.key_len + 4))
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
                 let item_key = Self::parse_key(self.cfg.key_len, item)?;
@@ -240,8 +240,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Store item in journal
         let mut buf = Vec::with_capacity(1 + key.len() + data.len());
-        buf.put_u8(key.len() as u8);
         buf.put(key);
+        buf.put_u32(crc32fast::hash(key));
         buf.put(data); // we don't need to store data len because we already get this from the journal
         let offset = self.journal.append(section, buf.into()).await?;
 
@@ -299,7 +299,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 // Fetch item from disk
                 let item = self
                     .journal
-                    .get(head.section, head.offset)
+                    .get(head.section, head.offset, None)
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
 
