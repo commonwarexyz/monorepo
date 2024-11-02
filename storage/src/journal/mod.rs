@@ -42,6 +42,8 @@ pub enum Error {
     ChecksumMismatch(u32, u32),
     #[error("item too large: size={0}")]
     ItemTooLarge(usize),
+    #[error("already pruned to section: {0}")]
+    AlreadyPrunedToSection(u64),
 }
 
 /// Configuration for `journal` storage.
@@ -234,6 +236,14 @@ mod tests {
 
             // Prune blobs with indices less than 3
             journal.prune(3).await.expect("Failed to prune blobs");
+
+            // Prune again with a section less than the previous one
+            let result = journal.prune(2).await;
+            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
+
+            // Prune again with the same section
+            let result = journal.prune(3).await;
+            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
 
             // Check metrics
             let mut buffer = String::new();

@@ -21,7 +21,7 @@ pub enum Error {
     #[error("duplicate key found during replay")]
     DuplicateKey,
     #[error("already pruned to section: {0}")]
-    AlreadyPrunedSection(u64),
+    AlreadyPrunedToSection(u64),
 }
 
 pub trait Translator: Clone {
@@ -435,11 +435,11 @@ mod tests {
 
             // Try to prune older section
             let result = archive.prune(2).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedSection(3))));
+            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
 
             // Try to prune current section again
             let result = archive.prune(3).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedSection(3))));
+            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
 
             // Trigger lazy removal of keys
             archive

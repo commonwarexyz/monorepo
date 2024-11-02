@@ -12,6 +12,8 @@ pub struct Journal<B: Blob, E: Storage<B>> {
     runtime: E,
     cfg: Config,
 
+    oldest_allowed: Option<u64>,
+
     blobs: BTreeMap<u64, B>,
 
     tracked: Gauge,
@@ -64,11 +66,22 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             runtime,
             cfg,
 
+            oldest_allowed: None,
+
             blobs,
             tracked,
             synced,
             pruned,
         })
+    }
+
+    fn prune_guard(&self, section: u64, inclusive: bool) -> Result<(), Error> {
+        if let Some(oldest_allowed) = self.oldest_allowed {
+            if section < oldest_allowed || (inclusive && section <= oldest_allowed) {
+                return Err(Error::AlreadyPrunedToSection(oldest_allowed));
+            }
+        }
+        Ok(())
     }
 
     /// Reads an item from the blob at the given offset.
@@ -168,6 +181,9 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
     /// Appends an item to the `journal` in a given `section`.
     pub async fn append(&mut self, section: u64, item: Bytes) -> Result<usize, Error> {
+        // Check last pruned
+        self.prune_guard(section, false)?;
+
         // Ensure item is not too large
         let item_len = item.len();
         let len = 4 + item_len + 4;
@@ -206,6 +222,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
     /// Retrieves an item from the `journal` at a given `section` and `offset`.
     pub async fn get(&self, section: u64, offset: usize) -> Result<Option<Bytes>, Error> {
+        self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
@@ -218,6 +235,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     ///
     /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
+        self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(()),
@@ -228,18 +246,14 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
     /// Prunes all `sections` less than `min`.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        loop {
-            // Check if we should remove next blob
-            let section = match self.blobs.first_key_value() {
-                Some((section, _)) => *section,
-                None => {
-                    // If there are no more blobs, we return instead
-                    // of removing the partition.
-                    return Ok(());
-                }
-            };
+        // Check if we already ran this prune
+        self.prune_guard(min, true)?;
+
+        // Prune any blobs that are smaller than the minimum
+        while let Some((&section, _)) = self.blobs.first_key_value() {
+            // Stop pruning if we reach the minimum
             if section >= min {
-                return Ok(());
+                break;
             }
 
             // Remove and close blob
@@ -255,6 +269,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             self.tracked.dec();
             self.pruned.inc();
         }
+
+        // Update oldest allowed
+        self.oldest_allowed = Some(min);
+        Ok(())
     }
 
     /// Closes all open sections.

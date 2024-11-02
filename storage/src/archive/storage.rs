@@ -211,7 +211,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if section < oldest_allowed {
-            return Err(Error::AlreadyPrunedSection(oldest_allowed));
+            return Err(Error::AlreadyPrunedToSection(oldest_allowed));
         }
 
         // Check for existing key in the same section (and clean up any useless
@@ -299,7 +299,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Upset pruning marker
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if min <= oldest_allowed {
-            return Err(Error::AlreadyPrunedSection(oldest_allowed));
+            return Err(Error::AlreadyPrunedToSection(oldest_allowed));
         }
 
         // Prune journal
