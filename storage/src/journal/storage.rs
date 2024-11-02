@@ -155,9 +155,16 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     ///
     /// If any data is found to be corrupt, it will be removed from the journal during this iteration.
     ///
-    /// If `limit` is provided, the stream will only read up to `limit` bytes of each item. Notably,
+    /// # Limit
+    ///
+    /// If `limit` is provided, the stream will only read up to `limit` bytes of each item. Consequently,
     /// this means we will not compute a checksum of the entire data and it is up to the caller to deal
     /// with the consequences of this.
+    ///
+    /// Reading `limit` bytes and skipping ahead to a future location in a blob is the theoretically optimal
+    /// way to read only what is required from storage, however, different storage implementations may take
+    /// the opportunity to readahead past what is required (needlessly). If the underlying storage can be tuned
+    /// for random access prior to invoking replay, it may lead to less IO.
     pub fn replay(
         &mut self,
         limit: Option<usize>,
