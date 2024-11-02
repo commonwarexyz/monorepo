@@ -94,6 +94,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry,
+                key_len: 8,
                 translator: FourCap,
                 pending_writes: 10,
             };
@@ -102,7 +103,7 @@ mod tests {
                 .expect("Failed to initialize archive");
 
             let section = 1u64;
-            let key = b"testkey";
+            let key = b"testkeyy";
             let data = Bytes::from("testdata");
 
             // Put the key-data pair
@@ -150,6 +151,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry,
+                key_len: 8,
                 translator: FourCap,
                 pending_writes: 10,
             };
@@ -211,6 +213,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry,
+                key_len: 8,
                 translator: FourCap,
                 pending_writes: 10,
             };
@@ -254,6 +257,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry,
+                key_len: 8,
                 translator: FourCap,
                 pending_writes: 10,
             };
@@ -326,6 +330,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry,
+                key_len: 8,
                 translator: FourCap,
                 pending_writes: 10,
             };
@@ -392,6 +397,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry: registry.clone(),
+                key_len: 8,
                 translator: FourCap,
                 pending_writes: 10,
             };
@@ -490,6 +496,7 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry: registry.clone(),
+                key_len: 8,
                 translator: TwoCap,
                 pending_writes: 10,
             };
