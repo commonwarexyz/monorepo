@@ -22,6 +22,8 @@ pub enum Error {
     DuplicateKey,
     #[error("already pruned to section: {0}")]
     AlreadyPrunedToSection(u64),
+    #[error("invalid key length")]
+    InvalidKeyLength,
 }
 
 pub trait Translator: Clone {
@@ -35,6 +37,13 @@ pub trait Translator: Clone {
 pub struct Config<T: Translator> {
     /// Registry for metrics.
     pub registry: Arc<Mutex<Registry>>,
+
+    /// Length of each key in bytes.
+    ///
+    /// The `Archive` assumes that all keys are of the same length. This
+    /// trick is used to store data more efficiently on disk and to substantially
+    /// reduce the number of disk reads during initialization.
+    pub key_len: usize,
 
     /// Logic to transform keys into their index representation.
     ///

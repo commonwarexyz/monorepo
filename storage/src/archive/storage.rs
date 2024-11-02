@@ -208,6 +208,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
     /// Only check for equality at provided section
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
+        // Check key length
+        if key.len() != self.cfg.key_len {
+            return Err(Error::InvalidKeyLength);
+        }
+
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if section < oldest_allowed {
@@ -261,6 +266,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
+        // Check key length
+        if key.len() != self.cfg.key_len {
+            return Err(Error::InvalidKeyLength);
+        }
+
         // Update metrics
         self.gets.inc();
 

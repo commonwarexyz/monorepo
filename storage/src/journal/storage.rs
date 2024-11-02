@@ -85,7 +85,12 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(blob: &B, offset: usize) -> Result<(usize, Bytes), Error> {
+    async fn read(
+        blob: &B,
+        offset: usize,
+        blob_len: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<(usize, Bytes), Error> {
         // Read item size
         let mut size = [0u8; 4];
         blob.read_at(&mut size, offset)
@@ -95,6 +100,33 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .try_into()
             .expect("usize too small");
         let offset = offset + 4;
+
+        // If we are just reading the limit, return it without computing entire checksum
+        if let Some(limit) = limit {
+            if limit < size {
+                // Check if blob is too short before performing limited read
+                //
+                // This is a heuristic to avoid returning data that isn't fully written (more common
+                // than byte corruption).
+                let projected_offset = offset + size + 4;
+                if let Some(blob_len) = blob_len {
+                    if projected_offset > blob_len {
+                        return Err(Error::Runtime(RError::InsufficientLength));
+                    }
+                }
+
+                // If limit < size, we do an "unsafe" read where we don't check the checksum
+                let mut item = vec![0u8; limit];
+                blob.read_at(&mut item, offset)
+                    .await
+                    .map_err(Error::Runtime)?;
+
+                // We still set the offset to be what the item would've been
+                return Ok((projected_offset, Bytes::from(item)));
+            }
+
+            // If limit >= size, we just do a normal read
+        }
 
         // Read item
         let mut item = vec![0u8; size];
@@ -122,10 +154,17 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// Returns a stream of all items in the journal.
     ///
     /// If any data is found to be corrupt, it will be removed from the journal during this iteration.
-    pub fn replay(&mut self) -> impl Stream<Item = Result<(u64, usize, Bytes), Error>> + '_ {
+    ///
+    /// If `limit` is provided, the stream will only read up to `limit` bytes of each item. Notably,
+    /// this means we will not compute a checksum of the entire data and it is up to the caller to deal
+    /// with the consequences of this.
+    pub fn replay(
+        &mut self,
+        limit: Option<usize>,
+    ) -> impl Stream<Item = Result<(u64, usize, Bytes), Error>> + '_ {
         stream::try_unfold(
             (self.blobs.iter_mut(), None::<(&u64, &mut B, usize)>, 0usize),
-            |(mut stream_iter, mut stream_blob, mut stream_offset)| async move {
+            move |(mut stream_iter, mut stream_blob, mut stream_offset)| async move {
                 // Select next blob
                 loop {
                     if let Some((section, blob, len)) = stream_blob {
@@ -136,7 +175,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                         }
 
                         // Attempt to read next item
-                        match Self::read(blob, stream_offset).await {
+                        match Self::read(blob, stream_offset, Some(len), limit).await {
                             Ok((next_offset, item)) => {
                                 trace!(blob = *section, cursor = stream_offset, "replayed item");
                                 return Ok(Some((
@@ -227,7 +266,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             Some(blob) => blob,
             None => return Ok(None),
         };
-        let (_, item) = Self::read(blob, offset).await?;
+        let (_, item) = Self::read(blob, offset, None, None).await?;
         Ok(Some(item))
     }
 
