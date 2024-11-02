@@ -343,8 +343,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_journal_read_size_missing() {
+    fn journal_read_size_missing(limit: Option<usize>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
 
@@ -377,7 +376,7 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(None);
+            let stream = journal.replay(limit);
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -391,7 +390,16 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_read_item_missing() {
+    fn test_journal_read_size_missing_no_limit() {
+        journal_read_size_missing(None);
+    }
+
+    #[test_traced]
+    fn test_journal_read_size_missing_with_limit() {
+        journal_read_size_missing(Some(1));
+    }
+
+    fn journal_read_item_missing(limit: Option<usize>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
 
@@ -424,7 +432,7 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(None);
+            let stream = journal.replay(limit);
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -435,6 +443,16 @@ mod tests {
             }
             assert!(items.is_empty());
         });
+    }
+
+    #[test_traced]
+    fn test_journal_read_item_missing_no_limit() {
+        journal_read_item_missing(None);
+    }
+
+    #[test_traced]
+    fn test_journal_read_item_missing_with_limit() {
+        journal_read_item_missing(Some(1));
     }
 
     #[test_traced]
