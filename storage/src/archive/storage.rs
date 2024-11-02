@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::{hash_map::Entry, BTreeMap, HashMap};
+use std::collections::{hash_map::Entry, HashMap};
 use tracing::debug;
 
 /// In the case there are multiple records with the same key, we store them in a linked list.
@@ -27,17 +27,11 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     // on the heap.
     keys: HashMap<T::Key, Index>,
 
-    // We store a vector of keys for each journal section for fast pruning (to
-    // avoid a global iteration of values and/or re-reading a journal from disk).
-    //
-    // There may be duplicate keys in the vector but we don't expect the number
-    // of duplicates to be significant.
-    journal_keys: BTreeMap<u64, Vec<T::Key>>,
-
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: HashMap<u64, usize>,
 
     keys_tracked: Gauge,
+    keys_pruned: Counter,
     unnecessary_reads: Counter,
     gets: Counter,
 }
@@ -58,7 +52,6 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut keys = HashMap::new();
-        let mut journal_keys = BTreeMap::new();
         let mut overlaps: u128 = 0;
         {
             debug!("initializing archive");
@@ -91,18 +84,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                         });
                     }
                 };
-
-                // Store key in journal_keys
-                journal_keys
-                    .entry(index)
-                    .or_insert_with(Vec::new)
-                    .push(index_key);
             }
             debug!(keys = keys.len(), overlaps, "archive initialized");
         }
 
         // Initialize metrics
         let keys_tracked = Gauge::default();
+        let keys_pruned = Counter::default();
         let unnecessary_reads = Counter::default();
         let gets = Counter::default();
         {
@@ -112,6 +100,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 "Number of keys tracked by the archive",
                 keys_tracked.clone(),
             );
+            registry.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
             registry.register(
                 "unnecessary_reads",
                 "Number of unnecessary reads performed by the archive",
@@ -130,42 +119,65 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             journal,
             oldest_allowed: None,
             keys,
-            journal_keys,
             pending_writes: HashMap::new(),
             keys_tracked,
+            keys_pruned,
             unnecessary_reads,
             gets,
         })
     }
 
-    /// Put only ensures uniqueness of keys within the same section.
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Check last pruned
-        if let Some(oldest_allowed) = self.oldest_allowed {
-            if section < oldest_allowed {
-                return Err(Error::AlreadyPrunedSection(oldest_allowed));
-            }
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
+        if section < oldest_allowed {
+            return Err(Error::AlreadyPrunedSection(oldest_allowed));
         }
 
         // Create index key
         let index_key = self.cfg.translator.transform(key);
 
+        // Find head
+        let mut head = match self.keys.get_mut(&index_key) {
+            Some(head) => head,
+            None => return Ok(None),
+        };
+        let found = loop {
+            if head.section < oldest_allowed {
+                match head.next {
+                    Some(ref mut next) => {
+                        head.section = next.section;
+                        head.offset = next.offset;
+                        head.next = next.next.take();
+                    }
+                    None => {
+                        break false;
+                    }
+                }
+            } else {
+                break true;
+            }
+        };
+        if !found {
+            self.keys.remove(&index_key);
+            return Ok(None);
+        }
+
         // Check if duplicate key
         let mut record = self.keys.get(&index_key);
         while let Some(index) = record {
-            // Check key from disk if in same section
-            if index.section == section {
-                let item = self
-                    .journal
-                    .get(index.section, index.offset)
-                    .await?
-                    .ok_or(Error::RecordCorrupted)?;
-                let (item_key, _) = Self::parse_item(item)?;
-                if key == item_key {
-                    return Err(Error::DuplicateKey);
-                }
-                self.unnecessary_reads.inc();
+            // Check if
+
+            let item = self
+                .journal
+                .get(index.section, index.offset)
+                .await?
+                .ok_or(Error::RecordCorrupted)?;
+            let (item_key, _) = Self::parse_item(item)?;
+            if key == item_key {
+                return Err(Error::DuplicateKey);
             }
+            self.unnecessary_reads.inc();
 
             // Move to next index
             record = index.next.as_deref();
@@ -206,12 +218,6 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             *pending_writes = 0;
         }
 
-        // Store key in journal_keys
-        self.journal_keys
-            .entry(section)
-            .or_default()
-            .push(index_key);
-
         // Update metrics
         self.keys_tracked.inc();
         Ok(())
@@ -226,11 +232,20 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Fetch index
         let mut record = self.keys.get(&index_key);
-        while let Some(index) = record {
+        let min_allowed = self.oldest_allowed.unwrap_or(0);
+        while let Some(head) = record {
+            // Check if item has been pruned
+            //
+            // We only cleanup the index during `put` to continue allowing concurrent
+            // reads.
+            if head.section < min_allowed {
+                continue;
+            }
+
             // Fetch item from disk
             let item = self
                 .journal
-                .get(index.section, index.offset)
+                .get(head.section, head.offset)
                 .await?
                 .ok_or(Error::RecordCorrupted)?;
 
@@ -242,17 +257,16 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             self.unnecessary_reads.inc();
 
             // Move to next index
-            record = index.next.as_deref();
+            record = head.next.as_deref();
         }
         Ok(None)
     }
 
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Upset pruning marker
-        if let Some(oldest_allowed) = self.oldest_allowed {
-            if min <= oldest_allowed {
-                return Err(Error::AlreadyPrunedSection(oldest_allowed));
-            }
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
+        if min <= oldest_allowed {
+            return Err(Error::AlreadyPrunedSection(oldest_allowed));
         }
 
         // Remove pruned keys from index
