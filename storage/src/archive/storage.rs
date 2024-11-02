@@ -294,6 +294,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(None)
     }
 
+    /// Calling `prune` on a section that has already been pruned will return an error.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Upset pruning marker
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
