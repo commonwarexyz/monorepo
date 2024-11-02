@@ -127,7 +127,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         })
     }
 
-    async fn clean_and_check(
+    /// Checks if there exists a duplicate key in the provided section.
+    ///
+    /// If any records exist that are older than the oldest allowed section, they are pruned.
+    async fn check_existing(
         &mut self,
         section: u64,
         key: &[u8],
@@ -211,9 +214,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             return Err(Error::AlreadyPrunedSection(oldest_allowed));
         }
 
-        // Prune useless keys and check for duplicates
+        // Check for existing key in the same section (and clean up any useless
+        // entries)
         let index_key = self.cfg.translator.transform(key);
-        self.clean_and_check(section, key, &index_key, oldest_allowed)
+        self.check_existing(section, key, &index_key, oldest_allowed)
             .await?;
 
         // Store item in journal
@@ -267,10 +271,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let mut record = self.keys.get(&index_key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         while let Some(head) = record {
-            // Check if section is valid
-            //
-            // We only cleanup the index during `put` to continue allowing concurrent
-            // reads.
+            // Check for data if section is valid
             if head.section >= min_allowed {
                 // Fetch item from disk
                 let item = self
