@@ -431,7 +431,28 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 3"));
+            assert!(buffer.contains("keys_tracked 5")); // have not lazily removed keys yet
+            assert!(buffer.contains("keys_pruned_total 0"));
+
+            // Try to prune older section
+            let result = archive.prune(2).await;
+            assert!(matches!(result, Err(Error::AlreadyPrunedSection(3))));
+
+            // Try to prune current section again
+            let result = archive.prune(3).await;
+            assert!(matches!(result, Err(Error::AlreadyPrunedSection(3))));
+
+            // Trigger lazy removal of keys
+            archive
+                .put(3, "key2-blah-2".as_bytes(), Bytes::from("data2-2"))
+                .await
+                .expect("Failed to put data");
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 5")); // lazily remove one, add one
+            assert!(buffer.contains("keys_pruned_total 1"));
         });
     }
 

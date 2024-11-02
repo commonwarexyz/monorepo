@@ -129,6 +129,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
     async fn clean_and_check(
         &mut self,
+        section: u64,
         key: &[u8],
         index_key: &T::Key,
         oldest_allowed: u64,
@@ -169,16 +170,18 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let mut cursor = head;
         loop {
             // Check if key is a match
-            let item = self
-                .journal
-                .get(cursor.section, cursor.offset)
-                .await?
-                .ok_or(Error::RecordCorrupted)?;
-            let (item_key, _) = Self::parse_item(item)?;
-            if key == item_key {
-                return Err(Error::DuplicateKey);
+            if section == cursor.section {
+                let item = self
+                    .journal
+                    .get(cursor.section, cursor.offset)
+                    .await?
+                    .ok_or(Error::RecordCorrupted)?;
+                let (item_key, _) = Self::parse_item(item)?;
+                if key == item_key {
+                    return Err(Error::DuplicateKey);
+                }
+                self.unnecessary_reads.inc();
             }
-            self.unnecessary_reads.inc();
 
             // Set next and continue
             if let Some(next) = cursor.next.as_ref().map(|next| next.section) {
@@ -200,6 +203,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
     }
 
+    /// Only check for equality at provided section
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
@@ -209,7 +213,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Prune useless keys and check for duplicates
         let index_key = self.cfg.translator.transform(key);
-        self.clean_and_check(key, &index_key, oldest_allowed)
+        self.clean_and_check(section, key, &index_key, oldest_allowed)
             .await?;
 
         // Store item in journal
@@ -263,27 +267,25 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let mut record = self.keys.get(&index_key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         while let Some(head) = record {
-            // Check if item has been pruned
+            // Check if section is valid
             //
             // We only cleanup the index during `put` to continue allowing concurrent
             // reads.
-            if head.section < min_allowed {
-                continue;
-            }
+            if head.section >= min_allowed {
+                // Fetch item from disk
+                let item = self
+                    .journal
+                    .get(head.section, head.offset)
+                    .await?
+                    .ok_or(Error::RecordCorrupted)?;
 
-            // Fetch item from disk
-            let item = self
-                .journal
-                .get(head.section, head.offset)
-                .await?
-                .ok_or(Error::RecordCorrupted)?;
-
-            // Get key from item
-            let (disk_key, value) = Self::parse_item(item)?;
-            if disk_key == key {
-                return Ok(Some(value));
+                // Get key from item
+                let (disk_key, value) = Self::parse_item(item)?;
+                if disk_key == key {
+                    return Ok(Some(value));
+                }
+                self.unnecessary_reads.inc();
             }
-            self.unnecessary_reads.inc();
 
             // Move to next index
             record = head.next.as_deref();
