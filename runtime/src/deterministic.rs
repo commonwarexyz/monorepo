@@ -1209,6 +1209,7 @@ impl Drop for Blob {
 mod tests {
     use super::*;
     use crate::{utils::run_tasks, Runner, Spawner};
+    use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
@@ -1233,7 +1234,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced("TRACE")]
     fn test_different_seeds_different_order() {
         let output1 = run_with_seed(12345);
         let output2 = run_with_seed(54321);
