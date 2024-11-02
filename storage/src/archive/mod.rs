@@ -528,7 +528,7 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal");
-            let mut archive = Archive::init(journal, cfg)
+            let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
@@ -560,6 +560,12 @@ mod tests {
                     assert!(retrieved.is_none());
                 }
             }
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 100000")); // have not lazily removed keys yet
+            assert!(buffer.contains("keys_pruned_total 0"));
         });
     }
 }
