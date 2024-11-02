@@ -37,18 +37,6 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
 }
 
 impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
-    fn parse_item(mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
-        if data.remaining() == 0 {
-            return Err(Error::RecordCorrupted);
-        }
-        let key_len = data.get_u8() as usize;
-        if data.remaining() < key_len {
-            return Err(Error::RecordCorrupted);
-        }
-        let key = data.copy_to_bytes(key_len);
-        Ok((key, data))
-    }
-
     pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut keys = HashMap::new();
@@ -125,6 +113,18 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             unnecessary_reads,
             gets,
         })
+    }
+
+    fn parse_item(mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
+        if data.remaining() == 0 {
+            return Err(Error::RecordCorrupted);
+        }
+        let key_len = data.get_u8() as usize;
+        if data.remaining() < key_len {
+            return Err(Error::RecordCorrupted);
+        }
+        let key = data.copy_to_bytes(key_len);
+        Ok((key, data))
     }
 
     /// Checks if there exists a duplicate key in the provided section.
