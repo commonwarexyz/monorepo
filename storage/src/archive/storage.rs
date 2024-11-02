@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::{hash_map::Entry, BTreeMap, HashMap};
+use std::collections::{hash_map::Entry, HashMap};
 use tracing::debug;
 
 /// In the case there are multiple records with the same key, we store them in a linked list.
@@ -20,22 +20,18 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     cfg: Config<T>,
     journal: Journal<B, E>,
 
+    oldest_allowed: Option<u64>,
+
     // We store the first index of the linked list in the HashMap
     // to significantly reduce the number of random reads we need to do
     // on the heap.
     keys: HashMap<T::Key, Index>,
 
-    // We store a vector of keys for each journal section for fast pruning (to
-    // avoid a global iteration of values and/or re-reading a journal from disk).
-    //
-    // There may be duplicate keys in the vector but we don't expect the number
-    // of duplicates to be significant.
-    journal_keys: BTreeMap<u64, Vec<T::Key>>,
-
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: HashMap<u64, usize>,
 
     keys_tracked: Gauge,
+    keys_pruned: Counter,
     unnecessary_reads: Counter,
     gets: Counter,
 }
@@ -56,7 +52,6 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut keys = HashMap::new();
-        let mut journal_keys = BTreeMap::new();
         let mut overlaps: u128 = 0;
         {
             debug!("initializing archive");
@@ -89,18 +84,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                         });
                     }
                 };
-
-                // Store key in journal_keys
-                journal_keys
-                    .entry(index)
-                    .or_insert_with(Vec::new)
-                    .push(index_key);
             }
             debug!(keys = keys.len(), overlaps, "archive initialized");
         }
 
         // Initialize metrics
         let keys_tracked = Gauge::default();
+        let keys_pruned = Counter::default();
         let unnecessary_reads = Counter::default();
         let gets = Counter::default();
         {
@@ -110,6 +100,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 "Number of keys tracked by the archive",
                 keys_tracked.clone(),
             );
+            registry.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
             registry.register(
                 "unnecessary_reads",
                 "Number of unnecessary reads performed by the archive",
@@ -126,28 +117,66 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(Self {
             cfg,
             journal,
+            oldest_allowed: None,
             keys,
-            journal_keys,
             pending_writes: HashMap::new(),
             keys_tracked,
+            keys_pruned,
             unnecessary_reads,
             gets,
         })
     }
 
-    /// Put only ensures uniqueness of keys within the same section.
-    pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
-        // Create index key
-        let index_key = self.cfg.translator.transform(key);
+    /// Checks if there exists a duplicate key in the provided section.
+    ///
+    /// If any records exist that are older than the oldest allowed section, they are pruned.
+    async fn check_existing(
+        &mut self,
+        section: u64,
+        key: &[u8],
+        index_key: &T::Key,
+        oldest_allowed: u64,
+    ) -> Result<(), Error> {
+        // Find head
+        let head = match self.keys.get_mut(index_key) {
+            Some(head) => head,
+            None => return Ok(()),
+        };
 
-        // Check if duplicate key
-        let mut record = self.keys.get(&index_key);
-        while let Some(index) = record {
-            // Check key from disk if in same section
-            if index.section == section {
+        // Find new head, updating current head in-place to avoid map modification
+        let found = loop {
+            if head.section < oldest_allowed {
+                self.keys_pruned.inc();
+                self.keys_tracked.dec();
+                match head.next {
+                    Some(ref mut next) => {
+                        head.section = next.section;
+                        head.offset = next.offset;
+                        head.next = next.next.take();
+                    }
+                    None => {
+                        break false;
+                    }
+                }
+            } else {
+                break true;
+            }
+        };
+
+        // If there is no valid head, remove key
+        if !found {
+            self.keys.remove(index_key);
+            return Ok(());
+        }
+
+        // Keep valid post-head entries
+        let mut cursor = head;
+        loop {
+            // Check if key is a match
+            if section == cursor.section {
                 let item = self
                     .journal
-                    .get(index.section, index.offset)
+                    .get(cursor.section, cursor.offset)
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
                 let (item_key, _) = Self::parse_item(item)?;
@@ -157,9 +186,39 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 self.unnecessary_reads.inc();
             }
 
-            // Move to next index
-            record = index.next.as_deref();
+            // Set next and continue
+            if let Some(next) = cursor.next.as_ref().map(|next| next.section) {
+                // If next is invalid, skip it
+                if next < oldest_allowed {
+                    self.keys_pruned.inc();
+                    self.keys_tracked.dec();
+                    cursor.next = cursor.next.as_mut().unwrap().next.take();
+                    continue;
+                }
+
+                // If next is valid, set current to next
+                cursor = cursor.next.as_mut().unwrap();
+                continue;
+            }
+
+            // There is no next, we are done
+            return Ok(());
         }
+    }
+
+    /// Only check for equality at provided section
+    pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
+        // Check last pruned
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
+        if section < oldest_allowed {
+            return Err(Error::AlreadyPrunedSection(oldest_allowed));
+        }
+
+        // Check for existing key in the same section (and clean up any useless
+        // entries)
+        let index_key = self.cfg.translator.transform(key);
+        self.check_existing(section, key, &index_key, oldest_allowed)
+            .await?;
 
         // Store item in journal
         let mut buf = Vec::with_capacity(1 + key.len() + data.len());
@@ -196,12 +255,6 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             *pending_writes = 0;
         }
 
-        // Store key in journal_keys
-        self.journal_keys
-            .entry(section)
-            .or_default()
-            .push(index_key);
-
         // Update metrics
         self.keys_tracked.inc();
         Ok(())
@@ -216,90 +269,46 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Fetch index
         let mut record = self.keys.get(&index_key);
-        while let Some(index) = record {
-            // Fetch item from disk
-            let item = self
-                .journal
-                .get(index.section, index.offset)
-                .await?
-                .ok_or(Error::RecordCorrupted)?;
+        let min_allowed = self.oldest_allowed.unwrap_or(0);
+        while let Some(head) = record {
+            // Check for data if section is valid
+            if head.section >= min_allowed {
+                // Fetch item from disk
+                let item = self
+                    .journal
+                    .get(head.section, head.offset)
+                    .await?
+                    .ok_or(Error::RecordCorrupted)?;
 
-            // Get key from item
-            let (disk_key, value) = Self::parse_item(item)?;
-            if disk_key == key {
-                return Ok(Some(value));
+                // Get key from item
+                let (disk_key, value) = Self::parse_item(item)?;
+                if disk_key == key {
+                    return Ok(Some(value));
+                }
+                self.unnecessary_reads.inc();
             }
-            self.unnecessary_reads.inc();
 
             // Move to next index
-            record = index.next.as_deref();
+            record = head.next.as_deref();
         }
         Ok(None)
     }
 
+    /// Calling `prune` on a section that has already been pruned will return an error.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Remove pruned keys from index
-        loop {
-            // Get next section to prune
-            let mut keys_pruned = 0;
-            let mut entries_pruned = 0;
-            let section = match self.journal_keys.first_key_value() {
-                Some((section, _)) if *section < min => *section,
-                _ => break,
-            };
-
-            // Remove all keys from the journal
-            for key in self.journal_keys.remove(&section).unwrap() {
-                // Find new head, updating current head in-place to avoid map modification
-                let head = match self.keys.get_mut(&key) {
-                    Some(head) => head,
-                    None => continue,
-                };
-                let found = loop {
-                    if head.section < min {
-                        keys_pruned += 1;
-                        match head.next {
-                            Some(ref mut next) => {
-                                head.section = next.section;
-                                head.offset = next.offset;
-                                head.next = next.next.take();
-                            }
-                            None => {
-                                break false;
-                            }
-                        }
-                    } else {
-                        break true;
-                    }
-                };
-
-                // If there is no valid head, remove key
-                if !found {
-                    entries_pruned += 1;
-                    self.keys.remove(&key);
-                    continue;
-                }
-
-                // Keep valid post-head entries
-                let mut cursor = head;
-                while let Some(next) = cursor.next.as_ref().map(|next| next.section) {
-                    // If next is invalid, skip it
-                    if next < min {
-                        cursor.next = cursor.next.as_mut().unwrap().next.take();
-                        keys_pruned += 1;
-                        continue;
-                    }
-
-                    // If next is valid, set current to next
-                    cursor = cursor.next.as_mut().unwrap();
-                }
-            }
-            debug!(section, entries_pruned, keys_pruned, "pruned keys");
-            self.keys_tracked.dec_by(keys_pruned as i64);
+        // Upset pruning marker
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
+        if min <= oldest_allowed {
+            return Err(Error::AlreadyPrunedSection(oldest_allowed));
         }
 
-        // Prune journal to same place
-        self.journal.prune(min).await.map_err(Error::Journal)
+        // Prune journal
+        self.journal.prune(min).await.map_err(Error::Journal)?;
+
+        // Update last pruned (to prevent reads from
+        // pruned sections)
+        self.oldest_allowed = Some(min);
+        Ok(())
     }
 
     pub async fn close(self) -> Result<(), Error> {
