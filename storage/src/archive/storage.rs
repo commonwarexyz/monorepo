@@ -43,12 +43,12 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let mut overlaps: u128 = 0;
         {
             debug!("initializing archive");
-            let stream = journal.replay();
+            let stream = journal.replay(Some(cfg.key_len + 4));
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
                 let (index, offset, data) = result?;
-                let (key, _) = Self::parse_item(data)?;
+                let key = Self::parse_key(cfg.key_len, data)?;
 
                 // Create index key
                 let index_key = cfg.translator.transform(&key);
@@ -115,15 +115,28 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         })
     }
 
-    fn parse_item(mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
-        if data.remaining() == 0 {
-            return Err(Error::RecordCorrupted);
-        }
-        let key_len = data.get_u8() as usize;
-        if data.remaining() < key_len {
+    fn parse_key(key_len: usize, mut data: Bytes) -> Result<Bytes, Error> {
+        if data.remaining() != key_len + 4 {
             return Err(Error::RecordCorrupted);
         }
         let key = data.copy_to_bytes(key_len);
+        let checksum = data.get_u32();
+        if checksum != crc32fast::hash(&key) {
+            return Err(Error::RecordCorrupted);
+        }
+        Ok(key)
+    }
+
+    fn parse_item(key_len: usize, mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
+        if data.remaining() < key_len + 4 {
+            return Err(Error::RecordCorrupted);
+        }
+        let key = data.copy_to_bytes(key_len);
+
+        // We don't need to compute checksum here as the underlying journal
+        // already performs this check for us.
+        data.get_u32();
+
         Ok((key, data))
     }
 
@@ -179,7 +192,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                     .get(cursor.section, cursor.offset)
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
-                let (item_key, _) = Self::parse_item(item)?;
+                let item_key = Self::parse_key(self.cfg.key_len, item)?;
                 if key == item_key {
                     return Err(Error::DuplicateKey);
                 }
@@ -291,7 +304,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                     .ok_or(Error::RecordCorrupted)?;
 
                 // Get key from item
-                let (disk_key, value) = Self::parse_item(item)?;
+                let (disk_key, value) = Self::parse_item(self.cfg.key_len, item)?;
                 if disk_key == key {
                     return Ok(Some(value));
                 }
