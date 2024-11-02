@@ -20,6 +20,8 @@ pub enum Error {
     RecordCorrupted,
     #[error("duplicate key found during replay")]
     DuplicateKey,
+    #[error("already pruned to section: {0}")]
+    AlreadyPrunedSection(u64),
 }
 
 pub trait Translator: Clone {

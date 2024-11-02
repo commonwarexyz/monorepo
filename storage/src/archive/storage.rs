@@ -20,6 +20,8 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     cfg: Config<T>,
     journal: Journal<B, E>,
 
+    oldest_allowed: Option<u64>,
+
     // We store the first index of the linked list in the HashMap
     // to significantly reduce the number of random reads we need to do
     // on the heap.
@@ -126,6 +128,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(Self {
             cfg,
             journal,
+            oldest_allowed: None,
             keys,
             journal_keys,
             pending_writes: HashMap::new(),
@@ -137,6 +140,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
     /// Put only ensures uniqueness of keys within the same section.
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
+        // Check last pruned
+        if let Some(oldest_allowed) = self.oldest_allowed {
+            if section < oldest_allowed {
+                return Err(Error::AlreadyPrunedSection(oldest_allowed));
+            }
+        }
+
         // Create index key
         let index_key = self.cfg.translator.transform(key);
 
@@ -238,6 +248,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+        // Upset pruning marker
+        if let Some(oldest_allowed) = self.oldest_allowed {
+            if min <= oldest_allowed {
+                return Err(Error::AlreadyPrunedSection(oldest_allowed));
+            }
+        }
+
         // Remove pruned keys from index
         loop {
             // Get next section to prune
@@ -299,7 +316,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
 
         // Prune journal to same place
-        self.journal.prune(min).await.map_err(Error::Journal)
+        self.journal.prune(min).await.map_err(Error::Journal)?;
+
+        // Update last pruned
+        self.oldest_allowed = Some(min);
+        Ok(())
     }
 
     pub async fn close(self) -> Result<(), Error> {
