@@ -127,23 +127,23 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         })
     }
 
-    pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
-        // Check last pruned
-        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
-        if section < oldest_allowed {
-            return Err(Error::AlreadyPrunedSection(oldest_allowed));
-        }
-
-        // Create index key
-        let index_key = self.cfg.translator.transform(key);
-
+    async fn clean_and_check(
+        &mut self,
+        key: &[u8],
+        index_key: &T::Key,
+        oldest_allowed: u64,
+    ) -> Result<(), Error> {
         // Find head
-        let mut head = match self.keys.get_mut(&index_key) {
+        let head = match self.keys.get_mut(index_key) {
             Some(head) => head,
-            None => return Ok(None),
+            None => return Ok(()),
         };
+
+        // Find new head, updating current head in-place to avoid map modification
         let found = loop {
             if head.section < oldest_allowed {
+                self.keys_pruned.inc();
+                self.keys_tracked.dec();
                 match head.next {
                     Some(ref mut next) => {
                         head.section = next.section;
@@ -158,19 +158,20 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 break true;
             }
         };
+
+        // If there is no valid head, remove key
         if !found {
-            self.keys.remove(&index_key);
-            return Ok(None);
+            self.keys.remove(index_key);
+            return Ok(());
         }
 
-        // Check if duplicate key
-        let mut record = self.keys.get(&index_key);
-        while let Some(index) = record {
-            // Check if
-
+        // Keep valid post-head entries
+        let mut cursor = head;
+        loop {
+            // Check if key is a match
             let item = self
                 .journal
-                .get(index.section, index.offset)
+                .get(cursor.section, cursor.offset)
                 .await?
                 .ok_or(Error::RecordCorrupted)?;
             let (item_key, _) = Self::parse_item(item)?;
@@ -179,9 +180,37 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             }
             self.unnecessary_reads.inc();
 
-            // Move to next index
-            record = index.next.as_deref();
+            // Set next and continue
+            if let Some(next) = cursor.next.as_ref().map(|next| next.section) {
+                // If next is invalid, skip it
+                if next < oldest_allowed {
+                    self.keys_pruned.inc();
+                    self.keys_tracked.dec();
+                    cursor.next = cursor.next.as_mut().unwrap().next.take();
+                    continue;
+                }
+
+                // If next is valid, set current to next
+                cursor = cursor.next.as_mut().unwrap();
+                continue;
+            }
+
+            // There is no next, we are done
+            return Ok(());
         }
+    }
+
+    pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
+        // Check last pruned
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
+        if section < oldest_allowed {
+            return Err(Error::AlreadyPrunedSection(oldest_allowed));
+        }
+
+        // Prune useless keys and check for duplicates
+        let index_key = self.cfg.translator.transform(key);
+        self.clean_and_check(key, &index_key, oldest_allowed)
+            .await?;
 
         // Store item in journal
         let mut buf = Vec::with_capacity(1 + key.len() + data.len());
@@ -269,70 +298,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             return Err(Error::AlreadyPrunedSection(oldest_allowed));
         }
 
-        // Remove pruned keys from index
-        loop {
-            // Get next section to prune
-            let mut keys_pruned = 0;
-            let mut entries_pruned = 0;
-            let section = match self.journal_keys.first_key_value() {
-                Some((section, _)) if *section < min => *section,
-                _ => break,
-            };
-
-            // Remove all keys from the journal
-            for key in self.journal_keys.remove(&section).unwrap() {
-                // Find new head, updating current head in-place to avoid map modification
-                let head = match self.keys.get_mut(&key) {
-                    Some(head) => head,
-                    None => continue,
-                };
-                let found = loop {
-                    if head.section < min {
-                        keys_pruned += 1;
-                        match head.next {
-                            Some(ref mut next) => {
-                                head.section = next.section;
-                                head.offset = next.offset;
-                                head.next = next.next.take();
-                            }
-                            None => {
-                                break false;
-                            }
-                        }
-                    } else {
-                        break true;
-                    }
-                };
-
-                // If there is no valid head, remove key
-                if !found {
-                    entries_pruned += 1;
-                    self.keys.remove(&key);
-                    continue;
-                }
-
-                // Keep valid post-head entries
-                let mut cursor = head;
-                while let Some(next) = cursor.next.as_ref().map(|next| next.section) {
-                    // If next is invalid, skip it
-                    if next < min {
-                        cursor.next = cursor.next.as_mut().unwrap().next.take();
-                        keys_pruned += 1;
-                        continue;
-                    }
-
-                    // If next is valid, set current to next
-                    cursor = cursor.next.as_mut().unwrap();
-                }
-            }
-            debug!(section, entries_pruned, keys_pruned, "pruned keys");
-            self.keys_tracked.dec_by(keys_pruned as i64);
-        }
-
-        // Prune journal to same place
+        // Prune journal
         self.journal.prune(min).await.map_err(Error::Journal)?;
 
-        // Update last pruned
+        // Update last pruned (to prevent reads from
+        // pruned sections)
         self.oldest_allowed = Some(min);
         Ok(())
     }
