@@ -1208,7 +1208,7 @@ impl Drop for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::run_tasks, Runner};
+    use crate::{utils::run_tasks, Runner, Spawner};
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
@@ -1303,5 +1303,20 @@ mod tests {
             ..Config::default()
         };
         let (_, _, _) = Executor::init(cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "root task cannot be spawned")]
+    fn test_spawn_root_task() {
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            let _ = context
+                .spawn(ROOT_TASK, async move {
+                    // This task should never run
+                    panic!("root task should not run");
+                })
+                .await;
+            panic!("root task should not be spawned");
+        });
     }
 }
