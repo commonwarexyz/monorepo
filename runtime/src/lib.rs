@@ -211,9 +211,12 @@ mod tests {
     use commonware_macros::select;
     use core::panic;
     use futures::future::ready;
+    use futures::join;
     use futures::{channel::mpsc, SinkExt, StreamExt};
+    use prometheus_client::encoding::text::encode;
+    use prometheus_client::registry::Registry;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use utils::reschedule;
 
     fn test_error_future(runner: impl Runner) {
@@ -595,6 +598,74 @@ mod tests {
         })
     }
 
+    fn test_blob_clone_and_concurrent_read<B>(
+        runner: impl Runner,
+        context: impl Spawner + Storage<B>,
+    ) where
+        B: Blob,
+    {
+        runner.start(async move {
+            let partition = "test_partition";
+            let name = b"test_blob_rw";
+
+            // Open a new blob
+            let blob = context
+                .open(partition, name)
+                .await
+                .expect("Failed to open blob");
+
+            // Write data to the blob
+            let data = b"Hello, Storage!";
+            blob.write_at(data, 0)
+                .await
+                .expect("Failed to write to blob");
+
+            // Sync the blob
+            blob.sync().await.expect("Failed to sync blob");
+
+            // Read data from the blob in clone
+            let check1 = context.spawn("test", {
+                let blob = blob.clone();
+                async move {
+                    let mut buffer = vec![0u8; data.len()];
+                    blob.read_at(&mut buffer, 0)
+                        .await
+                        .expect("Failed to read from blob");
+                    assert_eq!(&buffer, data);
+                }
+            });
+            let check2 = context.spawn("test", {
+                let blob = blob.clone();
+                async move {
+                    let mut buffer = vec![0u8; data.len()];
+                    blob.read_at(&mut buffer, 0)
+                        .await
+                        .expect("Failed to read from blob");
+                    assert_eq!(&buffer, data);
+                }
+            });
+
+            // Wait for both reads to complete
+            let result = join!(check1, check2);
+            assert!(result.0.is_ok());
+            assert!(result.1.is_ok());
+
+            // Read data from the blob
+            let mut buffer = vec![0u8; data.len()];
+            blob.read_at(&mut buffer, 0)
+                .await
+                .expect("Failed to read from blob");
+            assert_eq!(&buffer, data);
+
+            // Get blob length
+            let length = blob.len().await.expect("Failed to get blob length");
+            assert_eq!(length, data.len());
+
+            // Close the blob
+            blob.close().await.expect("Failed to close blob");
+        });
+    }
+
     #[test]
     fn test_deterministic_future() {
         let (runner, _, _) = deterministic::Executor::default();
@@ -676,6 +747,22 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_blob_clone_and_concurrent_read() {
+        // Run test
+        let cfg = deterministic::Config {
+            registry: Arc::new(Mutex::new(Registry::default())),
+            ..Default::default()
+        };
+        let (executor, runtime, _) = deterministic::Executor::init(cfg.clone());
+        test_blob_clone_and_concurrent_read(executor, runtime);
+
+        // Ensure no blobs still open
+        let mut buffer = String::new();
+        encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+        assert!(buffer.contains("open_blobs 0"));
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
@@ -751,5 +838,21 @@ mod tests {
     fn test_tokio_blob_read_past_length() {
         let (executor, runtime) = tokio::Executor::default();
         test_blob_read_past_length(executor, runtime);
+    }
+
+    #[test]
+    fn test_tokio_blob_clone_and_concurrent_read() {
+        // Run test
+        let cfg = tokio::Config {
+            registry: Arc::new(Mutex::new(Registry::default())),
+            ..Default::default()
+        };
+        let (executor, runtime) = tokio::Executor::init(cfg.clone());
+        test_blob_clone_and_concurrent_read(executor, runtime);
+
+        // Ensure no blobs still open
+        let mut buffer = String::new();
+        encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+        assert!(buffer.contains("open_blobs 0"));
     }
 }
