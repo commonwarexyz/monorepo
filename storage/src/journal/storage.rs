@@ -260,6 +260,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Retrieves an item from the `journal` at a given `section` and `offset`.
+    ///
+    /// If `limit` is provided, only the first `limit` bytes of the item will be read
+    /// and returned. Consequently, this returned data cannot be verified for integrity
+    /// and it is up to the caller to deal with the consequences of this.
     pub async fn get(
         &self,
         section: u64,
@@ -271,8 +275,11 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             Some(blob) => blob,
             None => return Ok(None),
         };
-        let blob_len = blob.len().await.map_err(Error::Runtime)?;
-        let (_, item) = Self::read(blob, offset, Some(blob_len), limit).await?;
+        let blob_len = match limit {
+            Some(_) => Some(blob.len().await.map_err(Error::Runtime)?),
+            None => None,
+        };
+        let (_, item) = Self::read(blob, offset, blob_len, limit).await?;
         Ok(Some(item))
     }
 
