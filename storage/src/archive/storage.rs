@@ -241,6 +241,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Store item in journal
         let mut buf = Vec::with_capacity(1 + key.len() + data.len());
         buf.put(key);
+        // We store the checksum of the key because we employ partial reads from
+        // the journal, which aren't verified before returning to the archive.
         buf.put_u32(crc32fast::hash(key));
         buf.put(data); // we don't need to store data len because we already get this from the journal
         let offset = self.journal.append(section, buf.into()).await?;
