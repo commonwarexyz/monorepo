@@ -161,7 +161,6 @@ mod tests {
 
             // Put the key-data pair again
             let result = archive.put(section, key, data2.clone()).await;
-            println!("{:?}", result);
             assert!(matches!(result, Err(Error::DuplicateKey)));
 
             // Get the data back
