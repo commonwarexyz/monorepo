@@ -86,7 +86,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(blob: &B, offset: usize) -> Result<(usize, Bytes), Error> {
+    async fn read(blob: &B, offset: usize) -> Result<(usize, usize, Bytes), Error> {
         // Read item size
         let mut size = [0u8; 4];
         blob.read_at(&mut size, offset)
@@ -117,19 +117,23 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
         // Return item
-        Ok((offset, Bytes::from(item)))
+        Ok((offset, size, Bytes::from(item)))
     }
 
-    /// Read `exact` bytes from the blob at the given offset.
+    /// Read `prefix` bytes from the blob at the given offset.
     ///
     /// # Warning
     ///
     /// This method bypasses the checksum verification and the caller is responsible for ensuring
     /// the integrity of any data read. If `exact` exceeds the size of an item (and runs over the blob
     /// length), it will lead to unintentional truncation of data.
-    async fn read_exact(blob: &B, offset: usize, exact: usize) -> Result<(usize, Bytes), Error> {
-        // Read item size and first `exact` bytes
-        let mut buf = vec![0u8; 4 + exact];
+    async fn read_prefix(
+        blob: &B,
+        offset: usize,
+        prefix: usize,
+    ) -> Result<(usize, usize, Bytes), Error> {
+        // Read item size and first `prefix` bytes
+        let mut buf = vec![0u8; 4 + prefix];
         blob.read_at(&mut buf, offset)
             .await
             .map_err(Error::Runtime)?;
@@ -153,7 +157,51 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .ok_or(Error::OffsetOverflow)?
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?;
-        Ok((offset, item_prefix))
+        Ok((offset, size, item_prefix))
+    }
+
+    /// Read an item from the blob assuming it is of `exact` length. This method verifies the
+    /// checksum of the item.
+    ///
+    /// # Warning
+    ///
+    /// This method assumes the caller knows the exact size of the item (either because
+    /// they store fixed-size items or they previously indexed the size). If an incorrect
+    /// `exact` is provided, the method will likely return an error (as integrity is verified).
+    async fn read_exact(blob: &B, offset: usize, exact: usize) -> Result<(usize, Bytes), Error> {
+        // Read all of the item into one buffer
+        let mut buf = vec![0u8; 4 + exact + 4];
+        blob.read_at(&mut buf, offset)
+            .await
+            .map_err(Error::Runtime)?;
+
+        // Check size
+        let size = u32::from_be_bytes(buf[..4].try_into().unwrap())
+            .try_into()
+            .map_err(|_| Error::UsizeTooSmall)?;
+        if size != exact {
+            return Err(Error::UnexpectedSize(size, exact));
+        }
+
+        // Get item
+        let item = Bytes::from(buf[4..4 + exact].to_vec());
+
+        // Verify integrity
+        let stored_checksum = u32::from_be_bytes(buf[4 + exact..].try_into().unwrap());
+        let checksum = crc32fast::hash(&item);
+        if checksum != stored_checksum {
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
+        }
+
+        // Return item
+        let offset = offset
+            .checked_add(4)
+            .ok_or(Error::OffsetOverflow)?
+            .checked_add(exact)
+            .ok_or(Error::OffsetOverflow)?
+            .checked_add(4)
+            .ok_or(Error::OffsetOverflow)?;
+        Ok((offset, item))
     }
 
     /// Returns an unordered stream of all items in the journal.
@@ -169,21 +217,21 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// speed up the replay process if the underlying storage supports concurrent reads across different
     /// blobs.
     ///
-    /// # Exact
+    /// # Prefix
     ///
-    /// If `exact` is provided, the stream will only read up to `exact` bytes of each item. Consequently,
+    /// If `prefix` is provided, the stream will only read up to `prefix` bytes of each item. Consequently,
     /// this means we will not compute a checksum of the entire data and it is up to the caller to deal
     /// with the consequences of this.
     ///
-    /// Reading `exact` bytes and skipping ahead to a future location in a blob is the theoretically optimal
+    /// Reading `prefix` bytes and skipping ahead to a future location in a blob is the theoretically optimal
     /// way to read only what is required from storage, however, different storage implementations may take
     /// the opportunity to readahead past what is required (needlessly). If the underlying storage can be tuned
     /// for random access prior to invoking replay, it may lead to less IO.
     pub async fn replay(
         &mut self,
         concurrency: usize,
-        exact: Option<usize>,
-    ) -> Result<impl Stream<Item = Result<(u64, usize, Bytes), Error>> + '_, Error> {
+        prefix: Option<usize>,
+    ) -> Result<impl Stream<Item = Result<(u64, usize, usize, Bytes), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
@@ -201,14 +249,17 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                         if offset == len {
                             return None;
                         }
-                        let read = match exact {
-                            Some(exact) => Self::read_exact(blob, offset, exact).await,
+                        let read = match prefix {
+                            Some(prefix) => Self::read_prefix(blob, offset, prefix).await,
                             None => Self::read(blob, offset).await,
                         };
                         match read {
-                            Ok((next_offset, item)) => {
+                            Ok((next_offset, full_item_size, item)) => {
                                 trace!(blob = section, cursor = offset, "replayed item");
-                                Some((Ok((section, offset, item)), (section, blob, next_offset)))
+                                Some((
+                                    Ok((section, offset, full_item_size, item)),
+                                    (section, blob, next_offset),
+                                ))
                             }
                             Err(Error::ChecksumMismatch(expected, found)) => {
                                 // If we encounter corruption, we don't try to fix it.
@@ -288,11 +339,30 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         Ok(cursor)
     }
 
+    /// Retrieves the first `prefix` bytes of an item from the `journal` at a given `section` and `offset`.
+    ///
+    /// This method bypasses the checksum verification and the caller is responsible for ensuring
+    /// the integrity of any data read.
+    pub async fn get_prefix(
+        &self,
+        section: u64,
+        offset: usize,
+        prefix: usize,
+    ) -> Result<Option<Bytes>, Error> {
+        self.prune_guard(section, false)?;
+        let blob = match self.blobs.get(&section) {
+            Some(blob) => blob,
+            None => return Ok(None),
+        };
+        let (_, _, item) = Self::read_prefix(blob, offset, prefix).await?;
+        Ok(Some(item))
+    }
+
     /// Retrieves an item from the `journal` at a given `section` and `offset`.
     ///
-    /// If `exact` is provided, only the first `exact` bytes of the item will be read
-    /// and returned. Consequently, this returned data cannot be verified for integrity
-    /// and it is up to the caller to deal with the consequences of this.
+    /// If `exact` is provided, it is assumed the item is of size `exact` (which allows
+    /// the item to be read in a single read). If `exact` is provided, the checksum of the
+    /// data is still verified.
     pub async fn get(
         &self,
         section: u64,
@@ -304,10 +374,15 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             Some(blob) => blob,
             None => return Ok(None),
         };
-        let (_, item) = match exact {
-            Some(exact) => Self::read_exact(blob, offset, exact).await?,
-            None => Self::read(blob, offset).await?,
-        };
+
+        // If we have an exact size, we can read the item in one go.
+        if let Some(exact) = exact {
+            let (_, item) = Self::read_exact(blob, offset, exact).await?;
+            return Ok(Some(item));
+        }
+
+        // Perform a multi-op read.
+        let (_, _, item) = Self::read(blob, offset).await?;
         Ok(Some(item))
     }
 

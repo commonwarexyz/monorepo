@@ -99,6 +99,8 @@ pub enum Error {
     UsizeTooSmall,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("unexpected size: expected={0} actual={1}")]
+    UnexpectedSize(usize, usize),
 }
 
 /// Configuration for `journal` storage.
@@ -171,7 +173,10 @@ mod tests {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, full_len, item)) => {
+                        assert_eq!(full_len, item.len());
+                        items.push((blob_index, item))
+                    }
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -245,7 +250,10 @@ mod tests {
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                        Ok((blob_index, _, full_len, item)) => {
+                            assert_eq!(full_len, item.len());
+                            items.push((blob_index, item))
+                        }
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
@@ -269,8 +277,9 @@ mod tests {
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((_, _, item)) => {
+                        Ok((_, _, full_len, item)) => {
                             assert_eq!(item, Bytes::from("Data"));
+                            assert!(full_len > item.len());
                         }
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
@@ -349,7 +358,7 @@ mod tests {
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
@@ -450,7 +459,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -510,7 +519,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -582,7 +591,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -650,7 +659,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => {
                         assert!(matches!(err, Error::ChecksumMismatch(_, _)));
                         return;
@@ -727,7 +736,7 @@ mod tests {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }

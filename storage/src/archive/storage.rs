@@ -13,6 +13,7 @@ use tracing::debug;
 struct Index {
     section: u64,
     offset: usize,
+    len: usize,
     next: Option<Box<Index>>,
 }
 
@@ -49,7 +50,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
-                let (index, offset, data) = result?;
+                let (index, offset, full_data_len, data) = result?;
                 let key = Self::parse_key(cfg.key_len, data)?;
 
                 // Create index key
@@ -62,6 +63,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                         entry.next = Some(Box::new(Index {
                             section: index,
                             offset,
+                            len: full_data_len,
                             next: entry.next.take(),
                         }));
                         overlaps += 1;
@@ -70,6 +72,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                         entry.insert(Index {
                             section: index,
                             offset,
+                            len: full_data_len,
                             next: None,
                         });
                     }
@@ -191,7 +194,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             if section == cursor.section {
                 let item = self
                     .journal
-                    .get(cursor.section, cursor.offset, Some(self.cfg.key_len + 4))
+                    .get_prefix(cursor.section, cursor.offset, self.cfg.key_len + 4)
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
                 let item_key = Self::parse_key(self.cfg.key_len, item)?;
@@ -241,7 +244,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             .await?;
 
         // Store item in journal
-        let mut buf = Vec::with_capacity(1 + key.len() + data.len());
+        let buf_len = key.len() + 4 + data.len();
+        let mut buf = Vec::with_capacity(buf_len);
         buf.put(key);
         // We store the checksum of the key because we employ partial reads from
         // the journal, which aren't verified before returning to the archive.
@@ -257,6 +261,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 entry.next = Some(Box::new(Index {
                     section,
                     offset,
+                    len: buf_len,
                     next: entry.next.take(),
                 }));
             }
@@ -264,6 +269,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 entry.insert(Index {
                     section,
                     offset,
+                    len: buf_len,
                     next: None,
                 });
             }
@@ -303,7 +309,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 // Fetch item from disk
                 let item = self
                     .journal
-                    .get(head.section, head.offset, None)
+                    .get(head.section, head.offset, Some(head.len))
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
 
