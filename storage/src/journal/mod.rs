@@ -48,8 +48,16 @@
 //! ## Skip Reads
 //!
 //! Some applications may only want to read the first `n` bytes of each item. This can be achieved by providing
-//! an `exact` parameter to the `replay` method. If `exact` is provided, the `journal` will only return the first
-//! `exact` bytes of each item and "skip ahead" to the next item (computing the offset using the read `size` value).
+//! a `prefix` parameter to the `replay` method. If `prefix` is provided, the `journal` will only return the first
+//! `prefix` bytes of each item and "skip ahead" to the next item (computing the offset using the read `size` value).
+//! Word of warning, however, reading only the `prefix` bytes of an item makes it impossible to compute the checksum
+//! of an item. It is up to the caller to ensure these reads are safe.
+//!
+//! # Exact Reads
+//!
+//! To allow for items to be fetched in a single disk operation (most optimal), `journal` allows callers to specify
+//! an `exact` parameter to the `get` method. This `exact` parameter must be cached by the caller (provided during `replay`)
+//! and usage of an incorrect `exact` value will result in undefined behavior.
 //!
 //! # Example
 //!
