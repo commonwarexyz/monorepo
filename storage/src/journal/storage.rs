@@ -93,15 +93,15 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .map_err(Error::Runtime)?;
         let size = u32::from_be_bytes(size)
             .try_into()
-            .expect("usize too small");
-        let offset = offset + 4;
+            .map_err(|_| Error::UsizeTooSmall)?;
+        let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
         // Read item
         let mut item = vec![0u8; size];
         blob.read_at(&mut item, offset)
             .await
             .map_err(Error::Runtime)?;
-        let offset = offset + size;
+        let offset = offset.checked_add(size).ok_or(Error::OffsetOverflow)?;
 
         // Read checksum
         let mut stored_checksum = [0u8; 4];
@@ -113,7 +113,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
-        let offset = offset + 4;
+        let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
         // Return item
         Ok((offset, Bytes::from(item)))
@@ -124,7 +124,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// # Warning
     ///
     /// This method bypasses the checksum verification and the caller is responsible for ensuring
-    /// the integrity of any data read.
+    /// the integrity of any data read. If `exact` exceeds the size of an item (and runs over the blob
+    /// length), it will lead to unintentional truncation of data.
     async fn read_exact(blob: &B, offset: usize, exact: usize) -> Result<(usize, Bytes), Error> {
         // Read item size and first `exact` bytes
         let mut buf = vec![0u8; 4 + exact];
@@ -132,21 +133,34 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .await
             .map_err(Error::Runtime)?;
 
-        // If size is smaller than `exact`, this is an invalid read and we should
-        // return an error.
-        let size = u32::from_be_bytes(buf[..4].try_into().unwrap()) as usize;
-        if size < exact {
-            return Err(Error::ItemTooSmall(size, exact));
-        }
+        // Get item size to compute next offset
+        let size = u32::from_be_bytes(buf[..4].try_into().unwrap())
+            .try_into()
+            .map_err(|_| Error::UsizeTooSmall)?;
 
-        // Return item
-        let projected_offset = offset + 4 + size + 4;
-        Ok((projected_offset, Bytes::from(buf[4..].to_vec())))
+        // Get item prefix
+        //
+        // We don't compute the checksum here nor do we verify that the bytes
+        // requested is less than the item size.
+        let item_prefix = Bytes::from(buf[4..].to_vec());
+
+        // Compute next offset
+        let offset = offset
+            .checked_add(4)
+            .ok_or(Error::OffsetOverflow)?
+            .checked_add(size)
+            .ok_or(Error::OffsetOverflow)?
+            .checked_add(4)
+            .ok_or(Error::OffsetOverflow)?;
+        Ok((offset, item_prefix))
     }
 
     /// Returns an unordered stream of all items in the journal.
     ///
-    /// If any data is found to be corrupt, it will be removed from the journal during this iteration.
+    /// # Repair
+    ///
+    /// If any trailing data is found (i.e. misaligned entries), the journal will be truncated
+    /// to the last valid item.
     ///
     /// # Concurrency
     ///
@@ -154,13 +168,13 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// speed up the replay process if the underlying storage supports concurrent reads across different
     /// blobs.
     ///
-    /// # Limit
+    /// # Exact
     ///
-    /// If `limit` is provided, the stream will only read up to `limit` bytes of each item. Consequently,
+    /// If `exact` is provided, the stream will only read up to `exact` bytes of each item. Consequently,
     /// this means we will not compute a checksum of the entire data and it is up to the caller to deal
     /// with the consequences of this.
     ///
-    /// Reading `limit` bytes and skipping ahead to a future location in a blob is the theoretically optimal
+    /// Reading `exact` bytes and skipping ahead to a future location in a blob is the theoretically optimal
     /// way to read only what is required from storage, however, different storage implementations may take
     /// the opportunity to readahead past what is required (needlessly). If the underlying storage can be tuned
     /// for random access prior to invoking replay, it may lead to less IO.

@@ -44,8 +44,10 @@ pub enum Error {
     ItemTooLarge(usize),
     #[error("already pruned to section: {0}")]
     AlreadyPrunedToSection(u64),
-    #[error("item smaller than requested read: size={0} requested={1}")]
-    ItemTooSmall(usize, usize),
+    #[error("usize too small")]
+    UsizeTooSmall,
+    #[error("offset overflow")]
+    OffsetOverflow,
 }
 
 /// Configuration for `journal` storage.
