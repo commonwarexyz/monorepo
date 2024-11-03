@@ -10,7 +10,7 @@
 //!
 //! The `Archive` stores data in the following format:
 //!
-//! //! ```text
+//! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
 //! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |    ...    |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
@@ -59,6 +59,41 @@
 //! To enable single operation reads, the `Archive` caches the length of each item in its in-memory index. While
 //! it increases the footprint per key stored, the benefit of only ever performing a single operation to read a key (when
 //! there are no conflicts) is worth the tradeoff.
+//!
+//! # Example
+//!
+//! ```rust
+//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_storage::{journal::{Journal, Config as JournalConfig}, archive::{Archive, Config, translator::FourCap}};
+//! use prometheus_client::registry::Registry;
+//! use std::sync::{Arc, Mutex};
+//!
+//! let (executor, context, _) = Executor::default();
+//! executor.start(async move {
+//!     // Create a journal
+//!     let cfg = JournalConfig {
+//!         registry: Arc::new(Mutex::new(Registry::default())),
+//!         partition: "partition".to_string()
+//!     };
+//!     let journal = Journal::init(context, cfg).await.unwrap();
+//!
+//!     // Create an archive
+//!     let cfg = Config {
+//!         registry: Arc::new(Mutex::new(Registry::default())),
+//!         key_len: 8,
+//!         translator: FourCap,
+//!         pending_writes: 10,
+//!         replay_concurrency: 4,
+//!     };
+//!     let mut archive = Archive::init(journal, cfg).await.unwrap();
+//!
+//!     // Put a key
+//!     archive.put(1, b"test-key", "data".into(), false).await.unwrap();
+//!
+//!     // Close the archive (also closes the journal)
+//!     archive.close().await.unwrap();
+//! });
+//! ```
 
 mod storage;
 pub use storage::Archive;
