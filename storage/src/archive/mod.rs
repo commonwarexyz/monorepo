@@ -42,7 +42,7 @@ pub struct Config<T: Translator> {
     ///
     /// The `Archive` assumes that all keys are of the same length. This
     /// trick is used to store data more efficiently on disk and to substantially
-    /// reduce the number of disk reads during initialization.
+    /// reduce the number of IO during initialization.
     pub key_len: usize,
 
     /// Logic to transform keys into their index representation.
