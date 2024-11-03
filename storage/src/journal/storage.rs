@@ -151,7 +151,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         Ok((offset, Bytes::from(item)))
     }
 
-    /// Returns a stream of all items in the journal.
+    /// Returns an unordered stream of all items in the journal.
     ///
     /// If any data is found to be corrupt, it will be removed from the journal during this iteration.
     ///
@@ -183,45 +183,41 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .map(|(&section, blob)| (section, blob))
             .collect();
 
-        // Replay all blobs concurrently
+        // Replay all blobs concurrently and stream items as they are read (to avoid
+        // occupying too much memory with buffered data)
         stream::iter(blobs)
             .map(move |(section, blob)| async move {
-                // Collect all items in blob
-                let mut offset = 0;
-                let len = blob.len().await.map_err(Error::Runtime)?;
-                let mut items = Vec::new();
-                loop {
-                    // Require the blob to be exactly as long as we expect to exit the loop
-                    if offset == len {
-                        break;
-                    }
-
-                    // Read next item (optionally just to `limit`)
-                    match Self::read(blob, offset, Some(len), limit).await {
-                        Ok((next_offset, item)) => {
-                            trace!(blob = section, cursor = offset, "replayed item");
-                            items.push(Ok((section, offset, item)));
-                            offset = next_offset;
+                futures::stream::unfold(
+                    (section, blob, 0),
+                    move |(section, blob, offset)| async move {
+                        let len = blob.len().await.map_err(Error::Runtime).ok()?;
+                        if offset == len {
+                            return None;
                         }
-                        Err(Error::ChecksumMismatch(_, _))
-                        | Err(Error::Runtime(RError::InsufficientLength)) => {
-                            warn!(
-                                blob = section,
-                                new_size = offset,
-                                old_size = len,
-                                "corruption detected: truncating blob"
-                            );
-                            blob.truncate(offset).await.map_err(Error::Runtime)?;
-                            blob.sync().await.map_err(Error::Runtime)?;
-                            break;
+                        match Self::read(blob, offset, Some(len), limit).await {
+                            Ok((next_offset, item)) => {
+                                trace!(blob = section, cursor = offset, "replayed item");
+                                Some((Ok((section, offset, item)), (section, blob, next_offset)))
+                            }
+                            Err(Error::ChecksumMismatch(_, _))
+                            | Err(Error::Runtime(RError::InsufficientLength)) => {
+                                warn!(
+                                    blob = section,
+                                    new_size = offset,
+                                    old_size = len,
+                                    "corruption detected: truncating blob"
+                                );
+                                blob.truncate(offset).await.map_err(Error::Runtime).ok()?;
+                                blob.sync().await.map_err(Error::Runtime).ok()?;
+                                None
+                            }
+                            Err(err) => Some((Err(err), (section, blob, offset))),
                         }
-                        Err(err) => return Err(err),
-                    }
-                }
-                Ok(items.into_iter())
+                    },
+                )
             })
-            .buffered(concurrency)
-            .flat_map(|res| stream::iter(res.into_iter().flatten()))
+            .buffer_unordered(concurrency)
+            .flatten()
     }
 
     /// Appends an item to the `journal` in a given `section`.
