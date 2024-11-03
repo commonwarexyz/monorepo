@@ -43,7 +43,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let mut overlaps: u128 = 0;
         {
             debug!("initializing archive");
-            let stream = journal.replay(Some(cfg.key_len + 4));
+            let stream = journal.replay(cfg.replay_concurrency, Some(cfg.key_len + 4));
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record

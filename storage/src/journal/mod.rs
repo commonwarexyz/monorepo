@@ -108,7 +108,7 @@ mod tests {
 
             // Replay the journal and collect items
             let mut items = Vec::new();
-            let stream = journal.replay(None);
+            let stream = journal.replay(1, None);
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -180,7 +180,7 @@ mod tests {
             for limit in [None, Some(100)].iter() {
                 let mut items = Vec::new();
                 {
-                    let stream = journal.replay(*limit);
+                    let stream = journal.replay(2, *limit);
                     pin_mut!(stream);
                     while let Some(result) = stream.next().await {
                         match result {
@@ -202,7 +202,7 @@ mod tests {
 
             // Replay just first bytes
             {
-                let stream = journal.replay(Some(4));
+                let stream = journal.replay(2, Some(4));
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -279,7 +279,7 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::new();
             {
-                let stream = journal.replay(None);
+                let stream = journal.replay(1, None);
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -376,7 +376,7 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(limit);
+            let stream = journal.replay(1, limit);
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -432,7 +432,7 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(limit);
+            let stream = journal.replay(1, limit);
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -501,7 +501,7 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(None);
+            let stream = journal.replay(1, None);
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -566,7 +566,7 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay(None);
+            let stream = journal.replay(1, None);
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -638,7 +638,7 @@ mod tests {
 
             // Attempt to replay the journal
             let mut items = Vec::new();
-            let stream = journal.replay(None);
+            let stream = journal.replay(1, None);
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {

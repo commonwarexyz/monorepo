@@ -55,6 +55,9 @@ pub struct Config<T: Translator> {
     ///
     /// If set to 0, the journal will be synced each time a new item is stored.
     pub pending_writes: usize,
+
+    /// The number of blobs to replay concurrently.
+    pub replay_concurrency: usize,
 }
 
 #[cfg(test)]
@@ -97,6 +100,7 @@ mod tests {
                 key_len: 7,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -154,6 +158,7 @@ mod tests {
                 key_len: 8,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -205,6 +210,7 @@ mod tests {
                 key_len: 9,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -267,6 +273,7 @@ mod tests {
                 key_len: 11,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let archive = Archive::init(journal, cfg.clone())
                 .await
@@ -311,6 +318,7 @@ mod tests {
                 key_len: 5,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -384,6 +392,7 @@ mod tests {
                 key_len: 5,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -451,6 +460,7 @@ mod tests {
                 key_len: 9,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -550,6 +560,7 @@ mod tests {
                 key_len: 32,
                 translator: TwoCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await

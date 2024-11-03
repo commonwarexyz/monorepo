@@ -2,7 +2,7 @@ use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::hex;
-use futures::{stream, Stream};
+use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{debug, trace, warn};
@@ -155,6 +155,12 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     ///
     /// If any data is found to be corrupt, it will be removed from the journal during this iteration.
     ///
+    /// # Concurrency
+    ///
+    /// The `concurrency` parameter controls how many blobs are replayed concurrently. This can dramatically
+    /// speed up the replay process if the underlying storage supports concurrent reads across different
+    /// blobs.
+    ///
     /// # Limit
     ///
     /// If `limit` is provided, the stream will only read up to `limit` bytes of each item. Consequently,
@@ -167,62 +173,55 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// for random access prior to invoking replay, it may lead to less IO.
     pub fn replay(
         &mut self,
+        concurrency: usize,
         limit: Option<usize>,
     ) -> impl Stream<Item = Result<(u64, usize, Bytes), Error>> + '_ {
-        stream::try_unfold(
-            (self.blobs.iter_mut(), None::<(&u64, &mut B, usize)>, 0usize),
-            move |(mut stream_iter, mut stream_blob, mut stream_offset)| async move {
-                // Select next blob
+        // Collect all blobs to replay
+        let blobs: Vec<(u64, &mut B)> = self
+            .blobs
+            .iter_mut()
+            .map(|(&section, blob)| (section, blob))
+            .collect();
+
+        // Replay all blobs concurrently
+        stream::iter(blobs)
+            .map(move |(section, blob)| async move {
+                // Collect all items in blob
+                let mut offset = 0;
+                let len = blob.len().await.map_err(Error::Runtime)?;
+                let mut items = Vec::new();
                 loop {
-                    if let Some((section, blob, len)) = stream_blob {
-                        // Move to next blob if nothing left to read
-                        if stream_offset == len {
-                            stream_blob = None;
-                            continue;
-                        }
+                    // Require the blob to be exactly as long as we expect to exit the loop
+                    if offset == len {
+                        break;
+                    }
 
-                        // Attempt to read next item
-                        match Self::read(blob, stream_offset, Some(len), limit).await {
-                            Ok((next_offset, item)) => {
-                                trace!(blob = *section, cursor = stream_offset, "replayed item");
-                                return Ok(Some((
-                                    (*section, stream_offset, item),
-                                    (stream_iter, Some((section, blob, len)), next_offset),
-                                )));
-                            }
-                            Err(Error::ChecksumMismatch(_, _))
-                            | Err(Error::Runtime(RError::InsufficientLength)) => {
-                                // Truncate blob
-                                //
-                                // This is a best-effort attempt to recover from corruption. If there is an unclean
-                                // shutdown, it is possible that some trailing item was not fully written to disk.
-                                warn!(
-                                    blob = *section,
-                                    new_size = stream_offset,
-                                    old_size = len,
-                                    "corruption detected: truncating blob"
-                                );
-                                blob.truncate(stream_offset).await.map_err(Error::Runtime)?;
-                                blob.sync().await.map_err(Error::Runtime)?;
-
-                                // Move to next blob
-                                stream_blob = None;
-                            }
-                            Err(err) => return Err(err),
+                    // Read next item (optionally just to `limit`)
+                    match Self::read(blob, offset, Some(len), limit).await {
+                        Ok((next_offset, item)) => {
+                            trace!(blob = section, cursor = offset, "replayed item");
+                            items.push(Ok((section, offset, item)));
+                            offset = next_offset;
                         }
-                    } else if let Some((section, blob)) = stream_iter.next() {
-                        let len = blob.len().await.map_err(Error::Runtime)?;
-                        debug!(blob = *section, len, "replaying blob");
-                        stream_blob = Some((section, blob, len));
-                        stream_offset = 0;
-                        continue;
-                    } else {
-                        // No more blobs
-                        return Ok(None);
+                        Err(Error::ChecksumMismatch(_, _))
+                        | Err(Error::Runtime(RError::InsufficientLength)) => {
+                            warn!(
+                                blob = section,
+                                new_size = offset,
+                                old_size = len,
+                                "corruption detected: truncating blob"
+                            );
+                            blob.truncate(offset).await.map_err(Error::Runtime)?;
+                            blob.sync().await.map_err(Error::Runtime)?;
+                            break;
+                        }
+                        Err(err) => return Err(err),
                     }
                 }
-            },
-        )
+                Ok(items.into_iter())
+            })
+            .buffered(concurrency)
+            .flat_map(|res| stream::iter(res.into_iter().flatten()))
     }
 
     /// Appends an item to the `journal` in a given `section`.
