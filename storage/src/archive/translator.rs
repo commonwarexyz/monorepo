@@ -1,5 +1,6 @@
 use super::Translator;
 
+/// Cap the key to a fixed length.
 fn cap<const N: usize>(key: &[u8]) -> [u8; N] {
     let mut capped = [0; N];
     let len = key.len().min(N);
@@ -7,6 +8,7 @@ fn cap<const N: usize>(key: &[u8]) -> [u8; N] {
     capped
 }
 
+/// A translator that caps the key to two bytes.
 #[derive(Clone)]
 pub struct TwoCap;
 
@@ -18,6 +20,7 @@ impl Translator for TwoCap {
     }
 }
 
+/// A translator that caps the key to four bytes.
 #[derive(Clone)]
 pub struct FourCap;
 
@@ -29,6 +32,7 @@ impl Translator for FourCap {
     }
 }
 
+/// A translator that caps the key to eight bytes.
 #[derive(Clone)]
 pub struct EightCap;
 

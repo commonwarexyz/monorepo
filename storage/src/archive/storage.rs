@@ -17,6 +17,7 @@ struct Index {
     next: Option<Box<Index>>,
 }
 
+/// Implementation of a write-once key-value store.
 pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     cfg: Config<T>,
     journal: Journal<B, E>,
@@ -40,6 +41,10 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
 }
 
 impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
+    /// Initialize a new `archive` instance.
+    ///
+    /// The in-memory index for `archive` is populated during this call
+    /// by replaying the journal.
     pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut keys = HashMap::new();
@@ -236,9 +241,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
     }
 
-    /// Only check for equality at provided section
+    /// Store a key-value pair in the archive. Keys are assumed to be unique.
     ///
-    /// If `force_sync` is true, the archive will wait to return until the journal has been synced.
+    /// If the key already exists (at a given `section`), an error is returned. If the same key
+    /// is stored multiple times in different sections, any value may be returned.
+    ///
+    /// If `force_sync` is true, the archive will wait to return until the
+    /// journal has been synced.
     pub async fn put(
         &mut self,
         section: u64,
@@ -309,6 +318,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
+    /// Retrieve a value from the archive.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Check key length
         if key.len() != self.cfg.key_len {
@@ -388,6 +398,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(false)
     }
 
+    /// Prune the archive to the provided section.
+    ///
     /// Calling `prune` on a section that has already been pruned will return an error.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Upset pruning marker
@@ -405,6 +417,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
+    /// Close the archive (and underlying journal).
     pub async fn close(self) -> Result<(), Error> {
         self.journal.close().await.map_err(Error::Journal)
     }

@@ -106,7 +106,7 @@ use std::{
 };
 use thiserror::Error;
 
-/// Errors that can occur when interacting with the journal.
+/// Errors that can occur when interacting with the archive.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("journal error: {0}")]
@@ -121,9 +121,15 @@ pub enum Error {
     InvalidKeyLength,
 }
 
+/// Translate keys into an internal representation used in the `Archive`'s
+/// in-memory index.
+///
+/// If invoking `transform` on keys results in many conflicts, the performance
+/// of the `Archive` will degrade substantially.
 pub trait Translator: Clone {
     type Key: Eq + Hash + Send + Sync + Clone;
 
+    /// Transform a key into its internal representation.
     fn transform(&self, key: &[u8]) -> Self::Key;
 }
 
