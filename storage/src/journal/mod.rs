@@ -1,5 +1,64 @@
 //! An append-only log for storing arbitrary data.
 //!
+//! `journal` is an append-only log for storing arbitrary data on disk with
+//! the ability to serve checksummed data by an arbitrary offset. It can be used
+//! on its own to persist streams of data for later replay (serving as a backing store
+//! for some in-memory data structure) or as a building block for a more complex
+//! construction that prescribes some meaning to offsets in the log.
+//!
+//! # Format
+//!
+//! Data stored in the journal is persisted in one of many `Blobs` within a caller-provided
+//! `partition`. The particular blob in which data is stored is identified by a `section`
+//! number. Within a blob, data is appended to the end of each blob in chunks of the following
+//! format:
+//!
+//! ```text
+//! +---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 |    ...    | 8 | 9 |10 |11 |
+//! +---+---+---+---+---+---+---+---+---+---+---+
+//! |   Size (u32)  |   Data    |    C(u32)     |
+//! +---+---+---+---+---+---+---+---+---+---+---+
+//!
+//! C = CRC32(Data)
+//! ```
+//!
+//! _To ensure data returned by `journal` is correct, a checksum (CRC32) is stored at the end of
+//! each item. If the checksum of the read data does not match the stored checksum, an error is
+//! returned._
+//!
+//! # Sync
+//!
+//! Data written to the `journal` may not be immediately persisted to `Storage`. It is up to the caller
+//! to determine when to force pending data to be written to `Storage` using the `sync` method. When calling
+//! `close`, all pending data is automatically synced and any open blobs are closed.
+//!
+//! # Pruning
+//!
+//! All data appended to `journal` must be assigned to some `section` (u64). This assignment
+//! allows the caller to prune data from the `journal` by specifying a minimum `section` number. This could
+//! be used, for example, by some blockchain application to prune old blocks from disk.
+//!
+//! # Replay
+//!
+//! During application initialization, it is very common to replay data from the `journal` to recover
+//! some in-memory state. The `journal` is heavily optimized for this pattern and provides a `replay` method
+//! that iterates over multiple `sections` concurrently.
+//!
+//! ## Skip Reads
+//!
+//! Some applications may only want to read the first `n` bytes of each item. This can be achieved by providing
+//! a `prefix` parameter to the `replay` method. If `prefix` is provided, the `journal` will only return the first
+//! `prefix` bytes of each item and "skip ahead" to the next item (computing the offset using the read `size` value).
+//! Word of warning, however, reading only the `prefix` bytes of an item makes it impossible to compute the checksum
+//! of an item. It is up to the caller to ensure these reads are safe.
+//!
+//! # Exact Reads
+//!
+//! To allow for items to be fetched in a single disk operation (most optimal), `journal` allows callers to specify
+//! an `exact` parameter to the `get` method. This `exact` parameter must be cached by the caller (provided during `replay`)
+//! and usage of an incorrect `exact` value will result in undefined behavior.
+//!
 //! # Example
 //!
 //! ```rust
@@ -48,6 +107,8 @@ pub enum Error {
     UsizeTooSmall,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("unexpected size: expected={0} actual={1}")]
+    UnexpectedSize(usize, usize),
 }
 
 /// Configuration for `journal` storage.
@@ -55,6 +116,7 @@ pub enum Error {
 pub struct Config {
     /// Registry for metrics.
     pub registry: Arc<Mutex<Registry>>,
+
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.
     pub partition: String,
@@ -119,7 +181,10 @@ mod tests {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, full_len, item)) => {
+                        assert_eq!(full_len, item.len());
+                        items.push((blob_index, item))
+                    }
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -193,7 +258,10 @@ mod tests {
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                        Ok((blob_index, _, full_len, item)) => {
+                            assert_eq!(full_len, item.len());
+                            items.push((blob_index, item))
+                        }
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
@@ -217,8 +285,9 @@ mod tests {
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((_, _, item)) => {
+                        Ok((_, _, full_len, item)) => {
                             assert_eq!(item, Bytes::from("Data"));
+                            assert!(full_len > item.len());
                         }
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
@@ -297,7 +366,7 @@ mod tests {
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
-                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                        Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
                 }
@@ -398,7 +467,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -458,7 +527,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -530,7 +599,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }
@@ -598,7 +667,7 @@ mod tests {
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => {
                         assert!(matches!(err, Error::ChecksumMismatch(_, _)));
                         return;
@@ -675,7 +744,7 @@ mod tests {
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                    Ok((blob_index, _, _, item)) => items.push((blob_index, item)),
                     Err(err) => panic!("Failed to read item: {}", err),
                 }
             }

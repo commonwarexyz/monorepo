@@ -1,4 +1,99 @@
-//! TBD
+//! A write-once key-value store optimized for throughput and low-latency reads.
+//!
+//! `archive` is a key-value store meant for workloads where data at a given key
+//! is written once and read many times. Data is stored in `journal` (an append-only
+//! log) and truncated representations of keys are indexed in memory (using a caller-provided
+//! `Translator`) to enable single read operation lookups over the entire store. Notably, this
+//! design does not require compaction nor on-disk indexes.
+//!
+//! # Format
+//!
+//! The `Archive` stores data in the following format:
+//!
+//! ```text
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |    ...    |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! | Key (Fixed Size)  |    C(u32)     |   Data    |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//!
+//! C = CRC32(Data)
+//! ```
+//!
+//! _To ensure keys fetched using `Journal::get_prefix` are correctly read, the key is checksummed
+//! within the `Journal` entry (although the entire entry is also checksummed)._
+//!
+//! # Uniqueness
+//!
+//! `Archive` assumes all keys stored are unique and only ever associated with a single `section`. If
+//! the same key is written to multiple sections, there is no guarantee which value will be returned. If the
+//! same key is written to the same section, the `Archive` will return an error. The `Archive` can be
+//! checked for the existence of a key using the `has` method.
+//!
+//! # Conflicts
+//!
+//! Because a truncated representation of a key is only ever stored in memory, it is possible
+//! that two keys will be represented by the same truncated key. To resolve this case, the `Archive`
+//! must check the persisted form of all conflicting keys to ensure data from the correct key is returned.
+//! If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
+//! uses a truncated representation that means keys on average have many conflicts, performance will degrade.
+//!
+//! # Sync
+//!
+//! The `Archive` flushes writes in `section` to `Storage` after `pending_writes`. If the caller
+//! requires durability on a particular write, they can `force_sync` when calling the `put` method.
+//!
+//! # Pruning
+//!
+//! The `Archive` supports pruning up to a minimum `section` using the `prune` method. After `prune` is called
+//! on a `section`, all interaction with a section less than the pruned section will return an error.
+//!
+//! ## Lazy Index Cleanup
+//!
+//! To avoid either a full iteration of the in-memory index, storing an additional in-memory index per `section`,
+//! or replaying a `section` of the journal, the `Archive` lazily cleans up the in-memory index after pruning. When
+//! a key is stored that overlaps with a pruned key, the pruned key is removed from the in-memory index.
+//!
+//! # Single Operation Reads
+//!
+//! To enable single operation reads, the `Archive` caches the length of each item in its in-memory index. While
+//! it increases the footprint per key stored, the benefit of only ever performing a single operation to read a key (when
+//! there are no conflicts) is worth the tradeoff.
+//!
+//! # Example
+//!
+//! ```rust
+//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_storage::{journal::{Journal, Config as JournalConfig}, archive::{Archive, Config, translator::FourCap}};
+//! use prometheus_client::registry::Registry;
+//! use std::sync::{Arc, Mutex};
+//!
+//! let (executor, context, _) = Executor::default();
+//! executor.start(async move {
+//!     // Create a journal
+//!     let cfg = JournalConfig {
+//!         registry: Arc::new(Mutex::new(Registry::default())),
+//!         partition: "partition".to_string()
+//!     };
+//!     let journal = Journal::init(context, cfg).await.unwrap();
+//!
+//!     // Create an archive
+//!     let cfg = Config {
+//!         registry: Arc::new(Mutex::new(Registry::default())),
+//!         key_len: 8,
+//!         translator: FourCap,
+//!         pending_writes: 10,
+//!         replay_concurrency: 4,
+//!     };
+//!     let mut archive = Archive::init(journal, cfg).await.unwrap();
+//!
+//!     // Put a key
+//!     archive.put(1, b"test-key", "data".into(), false).await.unwrap();
+//!
+//!     // Close the archive (also closes the journal)
+//!     archive.close().await.unwrap();
+//! });
+//! ```
 
 mod storage;
 pub use storage::Archive;
@@ -11,7 +106,7 @@ use std::{
 };
 use thiserror::Error;
 
-/// Errors that can occur when interacting with the journal.
+/// Errors that can occur when interacting with the archive.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("journal error: {0}")]
@@ -26,9 +121,15 @@ pub enum Error {
     InvalidKeyLength,
 }
 
+/// Translate keys into an internal representation used in the `Archive`'s
+/// in-memory index.
+///
+/// If invoking `transform` on keys results in many conflicts, the performance
+/// of the `Archive` will degrade substantially.
 pub trait Translator: Clone {
     type Key: Eq + Hash + Send + Sync + Clone;
 
+    /// Transform a key into its internal representation.
     fn transform(&self, key: &[u8]) -> Self::Key;
 }
 
@@ -56,7 +157,7 @@ pub struct Config<T: Translator> {
     /// If set to 0, the journal will be synced each time a new item is stored.
     pub pending_writes: usize,
 
-    /// The number of blobs to replay concurrently.
+    /// The number of blobs to replay concurrently on initialization.
     pub replay_concurrency: usize,
 }
 
@@ -110,11 +211,19 @@ mod tests {
             let key = b"testkey";
             let data = Bytes::from("testdata");
 
+            // Has the key
+            let has = archive.has(key).await.expect("Failed to check key");
+            assert!(!has);
+
             // Put the key-data pair
             archive
-                .put(section, key, data.clone())
+                .put(section, key, data.clone(), false)
                 .await
                 .expect("Failed to put data");
+
+            // Has the key
+            let has = archive.has(key).await.expect("Failed to check key");
+            assert!(has);
 
             // Get the data back
             let retrieved = archive
@@ -130,6 +239,24 @@ mod tests {
             assert!(buffer.contains("keys_tracked 1"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 1"));
+            assert!(buffer.contains("has_total 2"));
+            assert!(buffer.contains("syncs_total 0"));
+
+            // Force a sync
+            let key = b"testkex";
+            archive
+                .put(section, key, data.clone(), true)
+                .await
+                .expect("failed to put and sync data");
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 2"));
+            assert!(buffer.contains("unnecessary_reads_total 1"));
+            assert!(buffer.contains("gets_total 1"));
+            assert!(buffer.contains("has_total 2"));
+            assert!(buffer.contains("syncs_total 1"));
         });
     }
 
@@ -169,11 +296,15 @@ mod tests {
             let data = Bytes::from("invaliddata");
 
             // Put the key-data pair
-            let result = archive.put(section, key, data).await;
+            let result = archive.put(section, key, data, false).await;
             assert!(matches!(result, Err(Error::InvalidKeyLength)));
 
             // Get the data back
             let result = archive.get(key).await;
+            assert!(matches!(result, Err(Error::InvalidKeyLength)));
+
+            // Has the key
+            let result = archive.has(key).await;
             assert!(matches!(result, Err(Error::InvalidKeyLength)));
 
             // Check metrics
@@ -223,12 +354,12 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(section, key, data1.clone())
+                .put(section, key, data1.clone(), false)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair again
-            let result = archive.put(section, key, data2.clone()).await;
+            let result = archive.put(section, key, data2.clone(), false).await;
             assert!(matches!(result, Err(Error::DuplicateKey)));
 
             // Get the data back
@@ -332,13 +463,13 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(section, key1, data1.clone())
+                .put(section, key1, data1.clone(), false)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive
-                .put(section, key2, data2.clone())
+                .put(section, key2, data2.clone(), false)
                 .await
                 .expect("Failed to put data");
 
@@ -407,13 +538,13 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(section1, key1, data1.clone())
+                .put(section1, key1, data1.clone(), false)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive
-                .put(section2, key2, data2.clone())
+                .put(section2, key2, data2.clone(), false)
                 .await
                 .expect("Failed to put data");
 
@@ -477,7 +608,7 @@ mod tests {
 
             for (section, key, data) in &keys {
                 archive
-                    .put(*section, key.as_bytes(), data.clone())
+                    .put(*section, key.as_bytes(), data.clone(), false)
                     .await
                     .expect("Failed to put data");
             }
@@ -519,7 +650,7 @@ mod tests {
 
             // Trigger lazy removal of keys
             archive
-                .put(3, "key2-blfh".as_bytes(), Bytes::from("data2-2"))
+                .put(3, "key2-blfh".as_bytes(), Bytes::from("data2-2"), false)
                 .await
                 .expect("Failed to put data");
 
@@ -576,7 +707,7 @@ mod tests {
                 context.fill(&mut data);
                 let data = Bytes::from(data.to_vec());
                 archive
-                    .put(section, &key, data.clone())
+                    .put(section, &key, data.clone(), false)
                     .await
                     .expect("Failed to put data");
                 keys.insert(key, (section, data));
@@ -591,6 +722,12 @@ mod tests {
                     .expect("Data not found");
                 assert_eq!(retrieved, data);
             }
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 100000"));
+            assert!(!buffer.contains("syncs_total 0"));
 
             // Close the archive
             archive.close().await.expect("Failed to close archive");
