@@ -56,7 +56,7 @@ pub struct Config<T: Translator> {
     /// If set to 0, the journal will be synced each time a new item is stored.
     pub pending_writes: usize,
 
-    /// The number of blobs to replay concurrently.
+    /// The number of blobs to replay concurrently on initialization.
     pub replay_concurrency: usize,
 }
 

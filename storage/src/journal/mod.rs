@@ -1,5 +1,31 @@
 //! An append-only log for storing arbitrary data.
 //!
+//! `journal` is an append-only log for storing arbitrary data on disk without
+//! the ability to lookup data by offset. It can be used on its own to persist
+//! streams of data for later replay (serving as a backing store for some
+//! in-memory data structure) or as a building block for a more complex construction
+//! that assigns some meaning to offsets in the log.
+//!
+//! # Format
+//!
+//! Data stored in the journal is persisted in some `Blob` within a caller-provided
+//! `partition`. Each blob is identified by a u64 `section` number. With a blob,
+//! data is appended to the end of each blob in chunks of the following format:
+//!
+//! ```text
+//! +---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 |    ...    | 8 | 9 |10 |11 |
+//! +---+---+---+---+---+---+---+---+---+---+---+
+//! |   Size (u32)  |   Data    |    C(u32)     |
+//! +---+---+---+---+---+---+---+---+---+---+---+
+//!
+//! C = CRC32(Data)
+//! ```
+//!
+//! # Pruning
+//!
+//! # Replay
+//!
 //! # Example
 //!
 //! ```rust
@@ -55,6 +81,7 @@ pub enum Error {
 pub struct Config {
     /// Registry for metrics.
     pub registry: Arc<Mutex<Registry>>,
+
     /// The `commonware-runtime::Storage` partition to use
     /// for storing journal blobs.
     pub partition: String,
