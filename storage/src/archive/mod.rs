@@ -22,6 +22,8 @@ pub enum Error {
     DuplicateKey,
     #[error("already pruned to section: {0}")]
     AlreadyPrunedToSection(u64),
+    #[error("invalid key length")]
+    InvalidKeyLength,
 }
 
 pub trait Translator: Clone {
@@ -36,6 +38,13 @@ pub struct Config<T: Translator> {
     /// Registry for metrics.
     pub registry: Arc<Mutex<Registry>>,
 
+    /// Length of each key in bytes.
+    ///
+    /// The `Archive` assumes that all keys are of the same length. This
+    /// trick is used to store data more efficiently on disk and to substantially
+    /// reduce the number of IO during initialization.
+    pub key_len: usize,
+
     /// Logic to transform keys into their index representation.
     ///
     /// The `Archive` assumes that all internal keys are spread uniformly across the key space.
@@ -46,6 +55,9 @@ pub struct Config<T: Translator> {
     ///
     /// If set to 0, the journal will be synced each time a new item is stored.
     pub pending_writes: usize,
+
+    /// The number of blobs to replay concurrently.
+    pub replay_concurrency: usize,
 }
 
 #[cfg(test)]
@@ -85,8 +97,10 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry,
+                key_len: 7,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -120,6 +134,58 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_archive_invalid_key_length() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
+
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context,
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let cfg = Config {
+                registry,
+                key_len: 8,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            let section = 1u64;
+            let key = b"invalidkey";
+            let data = Bytes::from("invaliddata");
+
+            // Put the key-data pair
+            let result = archive.put(section, key, data).await;
+            assert!(matches!(result, Err(Error::InvalidKeyLength)));
+
+            // Get the data back
+            let result = archive.get(key).await;
+            assert!(matches!(result, Err(Error::InvalidKeyLength)));
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 0"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
+            assert!(buffer.contains("gets_total 0"));
+        });
+    }
+
+    #[test_traced]
     fn test_archive_duplicate_key() {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
@@ -141,8 +207,10 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry,
+                key_len: 9,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -202,8 +270,10 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry,
+                key_len: 11,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let archive = Archive::init(journal, cfg.clone())
                 .await
@@ -245,8 +315,10 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry,
+                key_len: 5,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -317,8 +389,10 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry,
+                key_len: 5,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -383,8 +457,10 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry: registry.clone(),
+                key_len: 9,
                 translator: FourCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -395,7 +471,7 @@ mod tests {
                 (1u64, "key1-blah", Bytes::from("data1")),
                 (2u64, "key2-blah", Bytes::from("data2")),
                 (3u64, "key3-blah", Bytes::from("data3")),
-                (3u64, "key3-blah-again", Bytes::from("data3-again")),
+                (3u64, "key3-bleh", Bytes::from("data3-again")),
                 (4u64, "key4-blah", Bytes::from("data4")),
             ];
 
@@ -443,7 +519,7 @@ mod tests {
 
             // Trigger lazy removal of keys
             archive
-                .put(3, "key2-blah-2".as_bytes(), Bytes::from("data2-2"))
+                .put(3, "key2-blfh".as_bytes(), Bytes::from("data2-2"))
                 .await
                 .expect("Failed to put data");
 
@@ -481,8 +557,10 @@ mod tests {
             // Initialize the archive
             let cfg = Config {
                 registry: registry.clone(),
+                key_len: 32,
                 translator: TwoCap,
                 pending_writes: 10,
+                replay_concurrency: 4,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await

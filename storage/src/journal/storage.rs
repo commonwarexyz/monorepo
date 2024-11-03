@@ -2,7 +2,7 @@ use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::hex;
-use futures::{stream, Stream};
+use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{debug, trace, warn};
@@ -93,15 +93,15 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .map_err(Error::Runtime)?;
         let size = u32::from_be_bytes(size)
             .try_into()
-            .expect("usize too small");
-        let offset = offset + 4;
+            .map_err(|_| Error::UsizeTooSmall)?;
+        let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
         // Read item
         let mut item = vec![0u8; size];
         blob.read_at(&mut item, offset)
             .await
             .map_err(Error::Runtime)?;
-        let offset = offset + size;
+        let offset = offset.checked_add(size).ok_or(Error::OffsetOverflow)?;
 
         // Read checksum
         let mut stored_checksum = [0u8; 4];
@@ -111,72 +111,139 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         let stored_checksum = u32::from_be_bytes(stored_checksum);
         let checksum = crc32fast::hash(&item);
         if checksum != stored_checksum {
-            return Err(Error::ChecksumMismatch(checksum, stored_checksum));
+            return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
-        let offset = offset + 4;
+        let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
         // Return item
         Ok((offset, Bytes::from(item)))
     }
 
-    /// Returns a stream of all items in the journal.
+    /// Read `exact` bytes from the blob at the given offset.
     ///
-    /// If any data is found to be corrupt, it will be removed from the journal during this iteration.
-    pub fn replay(&mut self) -> impl Stream<Item = Result<(u64, usize, Bytes), Error>> + '_ {
-        stream::try_unfold(
-            (self.blobs.iter_mut(), None::<(&u64, &mut B, usize)>, 0usize),
-            |(mut stream_iter, mut stream_blob, mut stream_offset)| async move {
-                // Select next blob
-                loop {
-                    if let Some((section, blob, len)) = stream_blob {
-                        // Move to next blob if nothing left to read
-                        if stream_offset == len {
-                            stream_blob = None;
-                            continue;
-                        }
+    /// # Warning
+    ///
+    /// This method bypasses the checksum verification and the caller is responsible for ensuring
+    /// the integrity of any data read. If `exact` exceeds the size of an item (and runs over the blob
+    /// length), it will lead to unintentional truncation of data.
+    async fn read_exact(blob: &B, offset: usize, exact: usize) -> Result<(usize, Bytes), Error> {
+        // Read item size and first `exact` bytes
+        let mut buf = vec![0u8; 4 + exact];
+        blob.read_at(&mut buf, offset)
+            .await
+            .map_err(Error::Runtime)?;
 
-                        // Attempt to read next item
-                        match Self::read(blob, stream_offset).await {
+        // Get item size to compute next offset
+        let size = u32::from_be_bytes(buf[..4].try_into().unwrap())
+            .try_into()
+            .map_err(|_| Error::UsizeTooSmall)?;
+
+        // Get item prefix
+        //
+        // We don't compute the checksum here nor do we verify that the bytes
+        // requested is less than the item size.
+        let item_prefix = Bytes::from(buf[4..].to_vec());
+
+        // Compute next offset
+        let offset = offset
+            .checked_add(4)
+            .ok_or(Error::OffsetOverflow)?
+            .checked_add(size)
+            .ok_or(Error::OffsetOverflow)?
+            .checked_add(4)
+            .ok_or(Error::OffsetOverflow)?;
+        Ok((offset, item_prefix))
+    }
+
+    /// Returns an unordered stream of all items in the journal.
+    ///
+    /// # Repair
+    ///
+    /// If any trailing data is found (i.e. misaligned entries), the journal will be truncated
+    /// to the last valid item.
+    ///
+    /// # Concurrency
+    ///
+    /// The `concurrency` parameter controls how many blobs are replayed concurrently. This can dramatically
+    /// speed up the replay process if the underlying storage supports concurrent reads across different
+    /// blobs.
+    ///
+    /// # Exact
+    ///
+    /// If `exact` is provided, the stream will only read up to `exact` bytes of each item. Consequently,
+    /// this means we will not compute a checksum of the entire data and it is up to the caller to deal
+    /// with the consequences of this.
+    ///
+    /// Reading `exact` bytes and skipping ahead to a future location in a blob is the theoretically optimal
+    /// way to read only what is required from storage, however, different storage implementations may take
+    /// the opportunity to readahead past what is required (needlessly). If the underlying storage can be tuned
+    /// for random access prior to invoking replay, it may lead to less IO.
+    pub async fn replay(
+        &mut self,
+        concurrency: usize,
+        exact: Option<usize>,
+    ) -> Result<impl Stream<Item = Result<(u64, usize, Bytes), Error>> + '_, Error> {
+        // Collect all blobs to replay
+        let mut blobs = Vec::with_capacity(self.blobs.len());
+        for (section, blob) in self.blobs.iter() {
+            let len = blob.len().await.map_err(Error::Runtime)?;
+            blobs.push((*section, blob, len));
+        }
+
+        // Replay all blobs concurrently and stream items as they are read (to avoid
+        // occupying too much memory with buffered data)
+        Ok(stream::iter(blobs)
+            .map(move |(section, blob, len)| async move {
+                stream::unfold(
+                    (section, blob, 0),
+                    move |(section, blob, offset)| async move {
+                        if offset == len {
+                            return None;
+                        }
+                        let read = match exact {
+                            Some(exact) => Self::read_exact(blob, offset, exact).await,
+                            None => Self::read(blob, offset).await,
+                        };
+                        match read {
                             Ok((next_offset, item)) => {
-                                trace!(blob = *section, cursor = stream_offset, "replayed item");
-                                return Ok(Some((
-                                    (*section, stream_offset, item),
-                                    (stream_iter, Some((section, blob, len)), next_offset),
-                                )));
+                                trace!(blob = section, cursor = offset, "replayed item");
+                                Some((Ok((section, offset, item)), (section, blob, next_offset)))
                             }
-                            Err(Error::ChecksumMismatch(_, _))
-                            | Err(Error::Runtime(RError::InsufficientLength)) => {
-                                // Truncate blob
-                                //
-                                // This is a best-effort attempt to recover from corruption. If there is an unclean
-                                // shutdown, it is possible that some trailing item was not fully written to disk.
+                            Err(Error::ChecksumMismatch(expected, found)) => {
+                                // If we encounter corruption, we don't try to fix it.
                                 warn!(
-                                    blob = *section,
-                                    new_size = stream_offset,
-                                    old_size = len,
-                                    "corruption detected: truncating blob"
+                                    blob = section,
+                                    cursor = offset,
+                                    expected,
+                                    found,
+                                    "corruption detected"
                                 );
-                                blob.truncate(stream_offset).await.map_err(Error::Runtime)?;
-                                blob.sync().await.map_err(Error::Runtime)?;
-
-                                // Move to next blob
-                                stream_blob = None;
+                                Some((
+                                    Err(Error::ChecksumMismatch(expected, found)),
+                                    (section, blob, offset),
+                                ))
                             }
-                            Err(err) => return Err(err),
+                            Err(Error::Runtime(RError::InsufficientLength)) => {
+                                // If we encounter trailing bytes, we prune to the last
+                                // valid item. This can happen during an unclean file close (where
+                                // pending data is not fully synced to disk).
+                                warn!(
+                                    blob = section,
+                                    new_size = offset,
+                                    old_size = len,
+                                    "trailing bytes detected: truncating"
+                                );
+                                blob.truncate(offset).await.map_err(Error::Runtime).ok()?;
+                                blob.sync().await.map_err(Error::Runtime).ok()?;
+                                None
+                            }
+                            Err(err) => Some((Err(err), (section, blob, offset))),
                         }
-                    } else if let Some((section, blob)) = stream_iter.next() {
-                        let len = blob.len().await.map_err(Error::Runtime)?;
-                        debug!(blob = *section, len, "replaying blob");
-                        stream_blob = Some((section, blob, len));
-                        stream_offset = 0;
-                        continue;
-                    } else {
-                        // No more blobs
-                        return Ok(None);
-                    }
-                }
-            },
-        )
+                    },
+                )
+            })
+            .buffer_unordered(concurrency)
+            .flatten())
     }
 
     /// Appends an item to the `journal` in a given `section`.
@@ -221,13 +288,25 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Retrieves an item from the `journal` at a given `section` and `offset`.
-    pub async fn get(&self, section: u64, offset: usize) -> Result<Option<Bytes>, Error> {
+    ///
+    /// If `exact` is provided, only the first `exact` bytes of the item will be read
+    /// and returned. Consequently, this returned data cannot be verified for integrity
+    /// and it is up to the caller to deal with the consequences of this.
+    pub async fn get(
+        &self,
+        section: u64,
+        offset: usize,
+        exact: Option<usize>,
+    ) -> Result<Option<Bytes>, Error> {
         self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
-        let (_, item) = Self::read(blob, offset).await?;
+        let (_, item) = match exact {
+            Some(exact) => Self::read_exact(blob, offset, exact).await?,
+            None => Self::read(blob, offset).await?,
+        };
         Ok(Some(item))
     }
 

@@ -37,30 +37,20 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
 }
 
 impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
-    fn parse_item(mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
-        if data.remaining() == 0 {
-            return Err(Error::RecordCorrupted);
-        }
-        let key_len = data.get_u8() as usize;
-        if data.remaining() < key_len {
-            return Err(Error::RecordCorrupted);
-        }
-        let key = data.copy_to_bytes(key_len);
-        Ok((key, data))
-    }
-
     pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize keys and run corruption check
         let mut keys = HashMap::new();
         let mut overlaps: u128 = 0;
         {
             debug!("initializing archive");
-            let stream = journal.replay();
+            let stream = journal
+                .replay(cfg.replay_concurrency, Some(cfg.key_len + 4))
+                .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
                 let (index, offset, data) = result?;
-                let (key, _) = Self::parse_item(data)?;
+                let key = Self::parse_key(cfg.key_len, data)?;
 
                 // Create index key
                 let index_key = cfg.translator.transform(&key);
@@ -127,6 +117,31 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         })
     }
 
+    fn parse_key(key_len: usize, mut data: Bytes) -> Result<Bytes, Error> {
+        if data.remaining() != key_len + 4 {
+            return Err(Error::RecordCorrupted);
+        }
+        let key = data.copy_to_bytes(key_len);
+        let checksum = data.get_u32();
+        if checksum != crc32fast::hash(&key) {
+            return Err(Error::RecordCorrupted);
+        }
+        Ok(key)
+    }
+
+    fn parse_item(key_len: usize, mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
+        if data.remaining() < key_len + 4 {
+            return Err(Error::RecordCorrupted);
+        }
+        let key = data.copy_to_bytes(key_len);
+
+        // We don't need to compute checksum here as the underlying journal
+        // already performs this check for us.
+        data.get_u32();
+
+        Ok((key, data))
+    }
+
     /// Checks if there exists a duplicate key in the provided section.
     ///
     /// If any records exist that are older than the oldest allowed section, they are pruned.
@@ -176,10 +191,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             if section == cursor.section {
                 let item = self
                     .journal
-                    .get(cursor.section, cursor.offset)
+                    .get(cursor.section, cursor.offset, Some(self.cfg.key_len + 4))
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
-                let (item_key, _) = Self::parse_item(item)?;
+                let item_key = Self::parse_key(self.cfg.key_len, item)?;
                 if key == item_key {
                     return Err(Error::DuplicateKey);
                 }
@@ -208,6 +223,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
     /// Only check for equality at provided section
     pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
+        // Check key length
+        if key.len() != self.cfg.key_len {
+            return Err(Error::InvalidKeyLength);
+        }
+
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if section < oldest_allowed {
@@ -222,8 +242,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Store item in journal
         let mut buf = Vec::with_capacity(1 + key.len() + data.len());
-        buf.put_u8(key.len() as u8);
         buf.put(key);
+        // We store the checksum of the key because we employ partial reads from
+        // the journal, which aren't verified before returning to the archive.
+        buf.put_u32(crc32fast::hash(key));
         buf.put(data); // we don't need to store data len because we already get this from the journal
         let offset = self.journal.append(section, buf.into()).await?;
 
@@ -261,6 +283,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
+        // Check key length
+        if key.len() != self.cfg.key_len {
+            return Err(Error::InvalidKeyLength);
+        }
+
         // Update metrics
         self.gets.inc();
 
@@ -276,12 +303,12 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 // Fetch item from disk
                 let item = self
                     .journal
-                    .get(head.section, head.offset)
+                    .get(head.section, head.offset, None)
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
 
                 // Get key from item
-                let (disk_key, value) = Self::parse_item(item)?;
+                let (disk_key, value) = Self::parse_item(self.cfg.key_len, item)?;
                 if disk_key == key {
                     return Ok(Some(value));
                 }

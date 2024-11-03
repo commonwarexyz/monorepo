@@ -44,6 +44,10 @@ pub enum Error {
     ItemTooLarge(usize),
     #[error("already pruned to section: {0}")]
     AlreadyPrunedToSection(u64),
+    #[error("usize too small")]
+    UsizeTooSmall,
+    #[error("offset overflow")]
+    OffsetOverflow,
 }
 
 /// Configuration for `journal` storage.
@@ -108,7 +112,10 @@ mod tests {
 
             // Replay the journal and collect items
             let mut items = Vec::new();
-            let stream = journal.replay();
+            let stream = journal
+                .replay(1, None)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
@@ -178,12 +185,17 @@ mod tests {
 
             // Replay the journal and collect items
             let mut items = Vec::new();
-            let stream = journal.replay();
-            pin_mut!(stream);
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok((blob_index, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+            {
+                let stream = journal
+                    .replay(2, None)
+                    .await
+                    .expect("unable to setup replay");
+                pin_mut!(stream);
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((blob_index, _, item)) => items.push((blob_index, item)),
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
                 }
             }
 
@@ -194,6 +206,23 @@ mod tests {
             {
                 assert_eq!(actual_index, expected_index);
                 assert_eq!(actual_data, expected_data);
+            }
+
+            // Replay just first bytes
+            {
+                let stream = journal
+                    .replay(2, Some(4))
+                    .await
+                    .expect("unable to setup replay");
+                pin_mut!(stream);
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok((_, _, item)) => {
+                            assert_eq!(item, Bytes::from("Data"));
+                        }
+                        Err(err) => panic!("Failed to read item: {}", err),
+                    }
+                }
             }
         });
     }
@@ -261,7 +290,10 @@ mod tests {
             // Replay the journal and collect items
             let mut items = Vec::new();
             {
-                let stream = journal.replay();
+                let stream = journal
+                    .replay(1, None)
+                    .await
+                    .expect("unable to setup replay");
                 pin_mut!(stream);
                 while let Some(result) = stream.next().await {
                     match result {
@@ -325,8 +357,7 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_journal_read_size_missing() {
+    fn journal_read_size_missing(exact: Option<usize>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
 
@@ -359,7 +390,10 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay();
+            let stream = journal
+                .replay(1, exact)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -373,7 +407,16 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_journal_read_item_missing() {
+    fn test_journal_read_size_missing_no_exact() {
+        journal_read_size_missing(None);
+    }
+
+    #[test_traced]
+    fn test_journal_read_size_missing_with_exact() {
+        journal_read_size_missing(Some(1));
+    }
+
+    fn journal_read_item_missing(exact: Option<usize>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
 
@@ -406,7 +449,11 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay();
+            let stream = journal
+                .replay(1, exact)
+                .await
+                .expect("unable to setup replay");
+
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -417,6 +464,16 @@ mod tests {
             }
             assert!(items.is_empty());
         });
+    }
+
+    #[test_traced]
+    fn test_journal_read_item_missing_no_exact() {
+        journal_read_item_missing(None);
+    }
+
+    #[test_traced]
+    fn test_journal_read_item_missing_with_exact() {
+        journal_read_item_missing(Some(1));
     }
 
     #[test_traced]
@@ -465,7 +522,10 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay();
+            let stream = journal
+                .replay(1, None)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
@@ -530,16 +590,22 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
-            let stream = journal.replay();
+            let stream = journal
+                .replay(1, None)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             let mut items = Vec::new();
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((blob_index, _, item)) => items.push((blob_index, item)),
-                    Err(err) => panic!("Failed to read item: {}", err),
+                    Err(err) => {
+                        assert!(matches!(err, Error::ChecksumMismatch(_, _)));
+                        return;
+                    }
                 }
             }
-            assert!(items.is_empty());
+            panic!("expected checksum mismatch error");
         });
     }
 
@@ -602,7 +668,10 @@ mod tests {
 
             // Attempt to replay the journal
             let mut items = Vec::new();
-            let stream = journal.replay();
+            let stream = journal
+                .replay(1, None)
+                .await
+                .expect("unable to setup replay");
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 match result {
