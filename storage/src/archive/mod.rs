@@ -1,4 +1,10 @@
-//! TBD
+//! A write-once key-value store optimized for throughput and low-latency reads.
+//!
+//! `archive` is a key-value store meant for workloads where data at a given key
+//! is written once and read many times. Data is stored in `journal` (an append-only
+//! log) and truncated representations of keys are indexed in memory (using a caller-provided
+//! `Translator`) to enable single-read lookups over the entire store. Notably, this
+//! design does not require compaction or on-disk indexes to offer such performance.
 
 mod storage;
 pub use storage::Archive;

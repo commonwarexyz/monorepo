@@ -75,6 +75,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         })
     }
 
+    /// Ensures that a pruned section is not accessed.
     fn prune_guard(&self, section: u64, inclusive: bool) -> Result<(), Error> {
         if let Some(oldest_allowed) = self.oldest_allowed {
             if section < oldest_allowed || (inclusive && section <= oldest_allowed) {
