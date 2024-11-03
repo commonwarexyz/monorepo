@@ -35,6 +35,7 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     keys_pruned: Counter,
     unnecessary_reads: Counter,
     gets: Counter,
+    syncs: Counter,
 }
 
 impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
@@ -86,6 +87,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let keys_pruned = Counter::default();
         let unnecessary_reads = Counter::default();
         let gets = Counter::default();
+        let syncs = Counter::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
             registry.register(
@@ -104,6 +106,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 "Number of gets performed by the archive",
                 gets.clone(),
             );
+            registry.register(
+                "syncs",
+                "Number of syncs called by the archive",
+                syncs.clone(),
+            );
         }
 
         // Return populated archive
@@ -117,6 +124,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             keys_pruned,
             unnecessary_reads,
             gets,
+            syncs,
         })
     }
 
@@ -225,7 +233,15 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     /// Only check for equality at provided section
-    pub async fn put(&mut self, section: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
+    ///
+    /// If `force_sync` is true, the archive will wait to return until the journal has been synced.
+    pub async fn put(
+        &mut self,
+        section: u64,
+        key: &[u8],
+        data: Bytes,
+        force_sync: bool,
+    ) -> Result<(), Error> {
         // Check key length
         if key.len() != self.cfg.key_len {
             return Err(Error::InvalidKeyLength);
@@ -278,9 +294,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Update pending writes
         let pending_writes = self.pending_writes.entry(section).or_default();
         *pending_writes += 1;
-        if *pending_writes > self.cfg.pending_writes {
+        if *pending_writes > self.cfg.pending_writes || force_sync {
             self.journal.sync(section).await.map_err(Error::Journal)?;
             *pending_writes = 0;
+            self.syncs.inc();
         }
 
         // Update metrics

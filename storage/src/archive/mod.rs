@@ -3,8 +3,36 @@
 //! `archive` is a key-value store meant for workloads where data at a given key
 //! is written once and read many times. Data is stored in `journal` (an append-only
 //! log) and truncated representations of keys are indexed in memory (using a caller-provided
-//! `Translator`) to enable single-read lookups over the entire store. Notably, this
-//! design does not require compaction or on-disk indexes to offer such performance.
+//! `Translator`) to enable single read operation lookups over the entire store. Notably, this
+//! design does not require compaction nor on-disk indexes.
+//!
+//! # Format
+//!
+//! The `Archive` stores data in the following format:
+//!
+//! //! ```text
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |    ...    |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! | Key (Fixed Size)  |    C(u32)     |   Data    |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//!
+//! C = CRC32(Data)
+//! ```
+//!
+//! _To ensure keys fetched using `Journal::get_prefix` are correctly read, the key is checksummed
+//! within the `Journal` entry (although the entire entry is also checksummed)._
+//!
+//! # Sync
+//!
+//! The `Archive` flushes writes in `section` to `Storage` after `pending_writes`. If the caller
+//! requires durability on a particular write, they can call `sync` on a given section.
+//!
+//! # Pruning
+//!
+//! ## Lazy Index Cleanup
+//!
+//! # Single Operation Reads
 
 mod storage;
 pub use storage::Archive;
@@ -118,7 +146,7 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(section, key, data.clone())
+                .put(section, key, data.clone(), false)
                 .await
                 .expect("Failed to put data");
 
@@ -136,6 +164,22 @@ mod tests {
             assert!(buffer.contains("keys_tracked 1"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 1"));
+            assert!(buffer.contains("syncs_total 0"));
+
+            // Force a sync
+            let key = b"testkex";
+            archive
+                .put(section, key, data.clone(), true)
+                .await
+                .expect("failed to put and sync data");
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 2"));
+            assert!(buffer.contains("unnecessary_reads_total 1"));
+            assert!(buffer.contains("gets_total 1"));
+            assert!(buffer.contains("syncs_total 1"));
         });
     }
 
@@ -175,7 +219,7 @@ mod tests {
             let data = Bytes::from("invaliddata");
 
             // Put the key-data pair
-            let result = archive.put(section, key, data).await;
+            let result = archive.put(section, key, data, false).await;
             assert!(matches!(result, Err(Error::InvalidKeyLength)));
 
             // Get the data back
@@ -229,12 +273,12 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(section, key, data1.clone())
+                .put(section, key, data1.clone(), false)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair again
-            let result = archive.put(section, key, data2.clone()).await;
+            let result = archive.put(section, key, data2.clone(), false).await;
             assert!(matches!(result, Err(Error::DuplicateKey)));
 
             // Get the data back
@@ -338,13 +382,13 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(section, key1, data1.clone())
+                .put(section, key1, data1.clone(), false)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive
-                .put(section, key2, data2.clone())
+                .put(section, key2, data2.clone(), false)
                 .await
                 .expect("Failed to put data");
 
@@ -413,13 +457,13 @@ mod tests {
 
             // Put the key-data pair
             archive
-                .put(section1, key1, data1.clone())
+                .put(section1, key1, data1.clone(), false)
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive
-                .put(section2, key2, data2.clone())
+                .put(section2, key2, data2.clone(), false)
                 .await
                 .expect("Failed to put data");
 
@@ -483,7 +527,7 @@ mod tests {
 
             for (section, key, data) in &keys {
                 archive
-                    .put(*section, key.as_bytes(), data.clone())
+                    .put(*section, key.as_bytes(), data.clone(), false)
                     .await
                     .expect("Failed to put data");
             }
@@ -525,7 +569,7 @@ mod tests {
 
             // Trigger lazy removal of keys
             archive
-                .put(3, "key2-blfh".as_bytes(), Bytes::from("data2-2"))
+                .put(3, "key2-blfh".as_bytes(), Bytes::from("data2-2"), false)
                 .await
                 .expect("Failed to put data");
 
@@ -582,7 +626,7 @@ mod tests {
                 context.fill(&mut data);
                 let data = Bytes::from(data.to_vec());
                 archive
-                    .put(section, &key, data.clone())
+                    .put(section, &key, data.clone(), false)
                     .await
                     .expect("Failed to put data");
                 keys.insert(key, (section, data));
@@ -597,6 +641,12 @@ mod tests {
                     .expect("Data not found");
                 assert_eq!(retrieved, data);
             }
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("keys_tracked 100000"));
+            assert!(!buffer.contains("syncs_total 0"));
 
             // Close the archive
             archive.close().await.expect("Failed to close archive");
