@@ -23,16 +23,42 @@
 //! _To ensure keys fetched using `Journal::get_prefix` are correctly read, the key is checksummed
 //! within the `Journal` entry (although the entire entry is also checksummed)._
 //!
+//! # Uniqueness
+//!
+//! `Archive` assumes all keys stored are unique and only ever associated with a single `section`. If
+//! the same key is written to multiple sections, there is no guarantee which value will be returned. If the
+//! same key is written to the same section, the `Archive` will return an error. The `Archive` can be
+//! checked for the existence of a key using the `has` method.
+//!
+//! # Conflicts
+//!
+//! Because a truncated representation of a key is only ever stored in memory, it is possible
+//! that two keys will be represented by the same truncated key. To resolve this case, the `Archive`
+//! must check the persisted form of all conflicting keys to ensure data from the correct key is returned.
+//! If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
+//! uses a truncated representation that means keys on average have many conflicts, performance will degrade.
+//!
 //! # Sync
 //!
 //! The `Archive` flushes writes in `section` to `Storage` after `pending_writes`. If the caller
-//! requires durability on a particular write, they can call `sync` on a given section.
+//! requires durability on a particular write, they can `force_sync` when calling the `put` method.
 //!
 //! # Pruning
 //!
+//! The `Archive` supports pruning up to a minimum `section` using the `prune` method. After `prune` is called
+//! on a `section`, all interaction with a section less than the pruned section will return an error.
+//!
 //! ## Lazy Index Cleanup
 //!
+//! To avoid either a full iteration of the in-memory index, storing an additional in-memory index per `section`,
+//! or replaying a `section` of the journal, the `Archive` lazily cleans up the in-memory index after pruning. When
+//! a key is stored that overlaps with a pruned key, the pruned key is removed from the in-memory index.
+//!
 //! # Single Operation Reads
+//!
+//! To enable single operation reads, the `Archive` caches the length of each item in its in-memory index. While
+//! it increases the footprint per key stored, the benefit of only ever performing a single operation to read a key (when
+//! there are no conflicts) is worth the tradeoff.
 
 mod storage;
 pub use storage::Archive;
@@ -144,11 +170,19 @@ mod tests {
             let key = b"testkey";
             let data = Bytes::from("testdata");
 
+            // Has the key
+            let has = archive.has(key).await.expect("Failed to check key");
+            assert!(!has);
+
             // Put the key-data pair
             archive
                 .put(section, key, data.clone(), false)
                 .await
                 .expect("Failed to put data");
+
+            // Has the key
+            let has = archive.has(key).await.expect("Failed to check key");
+            assert!(has);
 
             // Get the data back
             let retrieved = archive
@@ -164,6 +198,7 @@ mod tests {
             assert!(buffer.contains("keys_tracked 1"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 1"));
+            assert!(buffer.contains("has_total 2"));
             assert!(buffer.contains("syncs_total 0"));
 
             // Force a sync
@@ -179,6 +214,7 @@ mod tests {
             assert!(buffer.contains("keys_tracked 2"));
             assert!(buffer.contains("unnecessary_reads_total 1"));
             assert!(buffer.contains("gets_total 1"));
+            assert!(buffer.contains("has_total 2"));
             assert!(buffer.contains("syncs_total 1"));
         });
     }
@@ -224,6 +260,10 @@ mod tests {
 
             // Get the data back
             let result = archive.get(key).await;
+            assert!(matches!(result, Err(Error::InvalidKeyLength)));
+
+            // Has the key
+            let result = archive.has(key).await;
             assert!(matches!(result, Err(Error::InvalidKeyLength)));
 
             // Check metrics

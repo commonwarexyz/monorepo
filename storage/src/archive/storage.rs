@@ -35,6 +35,7 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     keys_pruned: Counter,
     unnecessary_reads: Counter,
     gets: Counter,
+    has: Counter,
     syncs: Counter,
 }
 
@@ -87,6 +88,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let keys_pruned = Counter::default();
         let unnecessary_reads = Counter::default();
         let gets = Counter::default();
+        let has = Counter::default();
         let syncs = Counter::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
@@ -106,6 +108,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 "Number of gets performed by the archive",
                 gets.clone(),
             );
+            registry.register("has", "Number of has performed by the archive", has.clone());
             registry.register(
                 "syncs",
                 "Number of syncs called by the archive",
@@ -124,6 +127,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             keys_pruned,
             unnecessary_reads,
             gets,
+            has,
             syncs,
         })
     }
@@ -342,6 +346,46 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             record = head.next.as_deref();
         }
         Ok(None)
+    }
+
+    /// Check if a key exists in the archive.
+    pub async fn has(&self, key: &[u8]) -> Result<bool, Error> {
+        // Check key length
+        if key.len() != self.cfg.key_len {
+            return Err(Error::InvalidKeyLength);
+        }
+
+        // Update metrics
+        self.has.inc();
+
+        // Create index key
+        let index_key = self.cfg.translator.transform(key);
+
+        // Fetch index
+        let mut record = self.keys.get(&index_key);
+        let min_allowed = self.oldest_allowed.unwrap_or(0);
+        while let Some(head) = record {
+            // Check for data if section is valid
+            if head.section >= min_allowed {
+                // Fetch item from disk
+                let item = self
+                    .journal
+                    .get_prefix(head.section, head.offset, self.cfg.key_len + 4)
+                    .await?
+                    .ok_or(Error::RecordCorrupted)?;
+
+                // Get key from item
+                let item_key = Self::parse_key(self.cfg.key_len, item)?;
+                if key == item_key {
+                    return Ok(true);
+                }
+                self.unnecessary_reads.inc();
+            }
+
+            // Move to next index
+            record = head.next.as_deref();
+        }
+        Ok(false)
     }
 
     /// Calling `prune` on a section that has already been pruned will return an error.
