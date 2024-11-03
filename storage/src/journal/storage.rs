@@ -187,7 +187,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         // occupying too much memory with buffered data)
         stream::iter(blobs)
             .map(move |(section, blob)| async move {
-                futures::stream::unfold(
+                stream::unfold(
                     (section, blob, 0),
                     move |(section, blob, offset)| async move {
                         let len = blob.len().await.map_err(Error::Runtime).ok()?;
