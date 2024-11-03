@@ -1,16 +1,17 @@
 //! An append-only log for storing arbitrary data.
 //!
-//! `journal` is an append-only log for storing arbitrary data on disk without
-//! the ability to lookup data by offset. It can be used on its own to persist
-//! streams of data for later replay (serving as a backing store for some
-//! in-memory data structure) or as a building block for a more complex construction
-//! that assigns some meaning to offsets in the log.
+//! `journal` is an append-only log for storing arbitrary data on disk with
+//! the ability to serve checksummed data by an arbitrary offset. It can be used
+//! on its own to persist streams of data for later replay (serving as a backing store
+//! for some in-memory data structure) or as a building block for a more complex
+//! construction that prescribes some meaning to offsets in the log.
 //!
 //! # Format
 //!
-//! Data stored in the journal is persisted in some `Blob` within a caller-provided
-//! `partition`. Each blob is identified by a u64 `section` number. With a blob,
-//! data is appended to the end of each blob in chunks of the following format:
+//! Data stored in the journal is persisted in one of many `Blobs` within a caller-provided
+//! `partition`. The particular blob in which data is stored is identified by a `section`
+//! number. Within a blob, data is appended to the end of each blob in chunks of the following
+//! format:
 //!
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+
@@ -22,9 +23,33 @@
 //! C = CRC32(Data)
 //! ```
 //!
+//! _To ensure data returned by `journal` is correct, a checksum (CRC32) is stored at the end of
+//! each item. If the checksum of the read data does not match the stored checksum, an error is
+//! returned._
+//!
+//! # Sync
+//!
+//! Data written to the `journal` may not be immediately persisted to `Storage`. It is up to the caller
+//! to determine when to force pending data to be written to `Storage` using the `sync` method. When calling
+//! `close`, all pending data is automatically synced and any open blobs are closed.
+//!
 //! # Pruning
 //!
+//! All data appended to `journal` must be assigned to some `section` (u64). This assignment
+//! allows the caller to prune data from the `journal` by specifying a minimum `section` number. This could
+//! be used, for example, by some blockchain application to prune old blocks from disk.
+//!
 //! # Replay
+//!
+//! During application initialization, it is very common to replay data from the `journal` to recover
+//! some in-memory state. The `journal` is heavily optimized for this pattern and provides a `replay` method
+//! that iterates over multiple `sections` concurrently.
+//!
+//! ## Skip Reads
+//!
+//! Some applications may only want to read the first `n` bytes of each item. This can be achieved by providing
+//! an `exact` parameter to the `replay` method. If `exact` is provided, the `journal` will only return the first
+//! `exact` bytes of each item and "skip ahead" to the next item (computing the offset using the read `size` value).
 //!
 //! # Example
 //!
