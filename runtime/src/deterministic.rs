@@ -1180,6 +1180,13 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        // Create new content for partition
+        //
+        // Doing this first means we don't need to hold both the content
+        // lock and the partition lock at the same time.
+        let new_content = self.content.read().unwrap().clone();
+
+        // Update partition content
         self.executor.auditor.sync(&self.partition, &self.name);
         let mut partitions = self.executor.partitions.lock().unwrap();
         let partition = partitions
@@ -1189,7 +1196,7 @@ impl crate::Blob for Blob {
             .blobs
             .get_mut(&self.name)
             .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
-        content.clone_from(&*self.content.read().unwrap());
+        *content = new_content;
         Ok(())
     }
 
