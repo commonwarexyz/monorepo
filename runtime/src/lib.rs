@@ -60,6 +60,8 @@ pub enum Error {
     BlobCloseFailed(String, String),
     #[error("insufficient length")]
     InsufficientLength,
+    #[error("offset overflow")]
+    OffsetOverflow,
 }
 
 /// Interface that any task scheduler must implement to start
@@ -182,21 +184,20 @@ where
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Get the length of the blob.
-    fn len(&self) -> impl Future<Output = Result<usize, Error>> + Send;
+    fn len(&self) -> impl Future<Output = Result<u64, Error>> + Send;
 
     /// Read from the blob at the given offset.
     fn read_at(
         &self,
         buf: &mut [u8],
-        offset: usize,
+        offset: u64,
     ) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Write to the blob at the given offset.
-    fn write_at(&self, buf: &[u8], offset: usize)
-        -> impl Future<Output = Result<(), Error>> + Send;
+    fn write_at(&self, buf: &[u8], offset: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Truncate the blob to the given length.
-    fn truncate(&self, len: usize) -> impl Future<Output = Result<(), Error>> + Send;
+    fn truncate(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
@@ -399,7 +400,7 @@ mod tests {
 
             // Get blob length
             let length = blob.len().await.expect("Failed to get blob length");
-            assert_eq!(length, data.len());
+            assert_eq!(length, data.len() as u64);
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
@@ -537,7 +538,7 @@ mod tests {
                 blob.write_at(data1, 0)
                     .await
                     .expect("Failed to write data1");
-                blob.write_at(data2, 5 + additional)
+                blob.write_at(data2, 5 + additional as u64)
                     .await
                     .expect("Failed to write data2");
 
@@ -659,7 +660,7 @@ mod tests {
 
             // Get blob length
             let length = blob.len().await.expect("Failed to get blob length");
-            assert_eq!(length, data.len());
+            assert_eq!(length, data.len() as u64);
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");

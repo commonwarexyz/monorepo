@@ -264,7 +264,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: usize) {
+    fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -276,7 +276,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn write_at(&self, partition: &str, name: &[u8], buf: &[u8], offset: usize) {
+    fn write_at(&self, partition: &str, name: &[u8], buf: &[u8], offset: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -288,7 +288,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn truncate(&self, partition: &str, name: &[u8], size: usize) {
+    fn truncate(&self, partition: &str, name: &[u8], size: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -1126,17 +1126,18 @@ impl crate::Storage<Blob> for Context {
 }
 
 impl crate::Blob for Blob {
-    async fn len(&self) -> Result<usize, Error> {
+    async fn len(&self) -> Result<u64, Error> {
         self.executor.auditor.len(&self.partition, &self.name);
         let content = self.content.read().unwrap();
-        Ok(content.len())
+        Ok(content.len() as u64)
     }
 
-    async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<(), Error> {
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         let buf_len = buf.len();
         self.executor
             .auditor
             .read_at(&self.partition, &self.name, buf_len, offset);
+        let offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
         let content = self.content.read().unwrap();
         let content_len = content.len();
         if offset + buf_len > content_len {
@@ -1151,10 +1152,11 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
-    async fn write_at(&self, buf: &[u8], offset: usize) -> Result<(), Error> {
+    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
         self.executor
             .auditor
             .write_at(&self.partition, &self.name, buf, offset);
+        let offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
         let mut content = self.content.write().unwrap();
         let required = offset + buf.len();
         if required > content.len() {
@@ -1169,10 +1171,11 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
-    async fn truncate(&self, len: usize) -> Result<(), Error> {
+    async fn truncate(&self, len: u64) -> Result<(), Error> {
         self.executor
             .auditor
             .truncate(&self.partition, &self.name, len);
+        let len = len.try_into().map_err(|_| Error::OffsetOverflow)?;
         let mut content = self.content.write().unwrap();
         content.truncate(len);
         Ok(())
