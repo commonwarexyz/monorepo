@@ -27,6 +27,12 @@
 //! each item. If the checksum of the read data does not match the stored checksum, an error is
 //! returned._
 //!
+//! # Offset Alignment
+//!
+//! In practice, `journal` users won't store `u64::MAX` bytes of data in a given `section`. To reduce
+//! the memory requirement for interacting with the journal, offsets are thus `u32` (4 bytes vs 8 bytes)
+//! and aligned to 64 bytes. This means that the maximum size of any section is `u32::MAX * 64` bytes (~270 GB).
+//!
 //! # Sync
 //!
 //! Data written to the `journal` may not be immediately persisted to `Storage`. It is up to the caller

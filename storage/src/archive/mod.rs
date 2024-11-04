@@ -35,8 +35,26 @@
 //! Because a truncated representation of a key is only ever stored in memory, it is possible
 //! that two keys will be represented by the same truncated key. To resolve this case, the `Archive`
 //! must check the persisted form of all conflicting keys to ensure data from the correct key is returned.
+//! To handle this requirement, the `Archive` keeps a linked list of all keys with the same truncated prefix:
+//!
+//! ```rust
+//! struct Index {
+//!     section: u64,
+//!     offset: u32,
+//!     len: u32,
+//!
+//!     next: Option<Box<Index>>,
+//! }
+//! ```
+//!
+//! _To avoid random heap reads in the common case, the in-memory index directly stores the first item
+//! in the linked list instead of a pointer to the first item._
+//!
 //! If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
 //! uses a truncated representation that means keys on average have many conflicts, performance will degrade.
+//!
+//! All of this means that the memory overhead per key is `truncated(key).len() + 24` bytes (where `24` is
+//! the size of the `Index` struct).
 //!
 //! # Sync
 //!
