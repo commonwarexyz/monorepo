@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 struct MockIndex {
     _section: u64,
-    _offset: usize,
+    _offset: u32,
+    _len: u32,
     _next: Option<Box<MockIndex>>,
 }
 
@@ -14,7 +15,7 @@ fn benchmark_hashmap_load_fixed(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     // Perform all random ops
-                    let mut vec: Vec<([u8; 4], u64, usize)> = Vec::with_capacity(n);
+                    let mut vec: Vec<([u8; 4], u64, u32, u32)> = Vec::with_capacity(n);
                     let mut rng = rand::thread_rng();
 
                     // Populate vec with dummy data
@@ -22,7 +23,8 @@ fn benchmark_hashmap_load_fixed(c: &mut Criterion) {
                         let key: [u8; 4] = rng.gen();
                         let section = rng.gen();
                         let offset = rng.gen();
-                        vec.push((key, section, offset));
+                        let len = rng.gen();
+                        vec.push((key, section, offset, len));
                     }
                     vec
                 },
@@ -30,10 +32,11 @@ fn benchmark_hashmap_load_fixed(c: &mut Criterion) {
                     let mut map = HashMap::new();
 
                     // Populate the HashMap with dummy data
-                    for (key, section, offset) in v {
+                    for (key, section, offset, len) in v {
                         let value = MockIndex {
                             _section: section,
                             _offset: offset,
+                            _len: len,
                             _next: None,
                         };
                         map.insert(key, value);

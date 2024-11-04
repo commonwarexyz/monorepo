@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 struct MockIndex {
     section: u64,
-    _offset: usize,
+    _offset: u32,
+    _len: u32,
     _next: Option<Box<MockIndex>>,
 }
 
@@ -23,6 +24,7 @@ fn benchmark_hashmap_iteration(c: &mut Criterion) {
                             let value = MockIndex {
                                 section: rng.gen(),
                                 _offset: rng.gen(),
+                                _len: rng.gen(),
                                 _next: None,
                             };
                             map.insert(key, value);
