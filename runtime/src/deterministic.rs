@@ -1034,8 +1034,6 @@ impl Partition {
 }
 
 /// Implementation of [`crate::Blob`] for the `deterministic` runtime.
-///
-/// TODO: explain how design works with clones.
 pub struct Blob {
     executor: Arc<Executor>,
 

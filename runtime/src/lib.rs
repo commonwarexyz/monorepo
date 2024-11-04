@@ -181,6 +181,12 @@ where
 ///
 /// To support blob implementations that enable concurrent reads and
 /// writes, blobs are responsible for maintaining synchronization.
+///
+/// Cloning a blob is similar to wrapping a single file descriptor in
+/// a lock whereas opening a new blob (of the same name) is similar to
+/// opening a new file descriptor. If multiple blobs are opened with the same
+/// name, they are not expected to coordinate access to underlying storage
+/// and writing to both is undefined behavior.
 #[allow(clippy::len_without_is_empty)]
 pub trait Blob: Clone + Send + Sync + 'static {
     /// Get the length of the blob.
