@@ -158,7 +158,7 @@ where
 ///
 /// To minimize the overhead of tracking outstanding waiters (which only return once),
 /// it is recommended to pin an instance of `Waiter` to the stack and
-/// waiting on a reference to it (i.e. `&mut waiter`) instead of
+/// wait on a reference to it (i.e. `&mut waiter`) instead of
 /// cloning it multiple times in a given task (i.e. in each iteration
 /// of a loop).
 pub type Waiter = Shared<oneshot::Receiver<()>>;
@@ -188,9 +188,9 @@ pub type Waiter = Shared<oneshot::Receiver<()>>;
 /// ## Advanced Usage
 ///
 /// While `Futures::Shared` is efficient, there is still meaningful overhead
-/// to cloning it excessively (i.e. in each iteration of a loop). To avoid
+/// to cloning it (i.e. in each iteration of a loop). To avoid
 /// a performance regression from introducing `Signaler`, it is recommended
-/// to pin the "waiter" to the stack and to wait on a reference to it.
+/// to pin the `Waiter` to the stack and to wait on a reference to it.
 ///
 /// ```rust
 /// use commonware_macros::select;
