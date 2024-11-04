@@ -199,7 +199,7 @@ pub struct Config<T: Translator> {
     pub replay_concurrency: usize,
 
     /// Optional compression level (using `zstd`) to apply to data before storing.
-    compression: Option<u8>,
+    pub compression: Option<u8>,
 }
 
 #[cfg(test)]
