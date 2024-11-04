@@ -115,6 +115,7 @@
 //!         translator: FourCap,
 //!         pending_writes: 10,
 //!         replay_concurrency: 4,
+//!         compression: Some(3),
 //!     };
 //!     let mut archive = Archive::init(journal, cfg).await.unwrap();
 //!
