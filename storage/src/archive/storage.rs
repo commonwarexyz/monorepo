@@ -9,11 +9,13 @@ use tracing::debug;
 
 /// In the case there are multiple records with the same key, we store them in a linked list.
 ///
-/// This is the most memory-efficient way to maintain a multi-map.
+/// This is the most memory-efficient way to maintain a multi-map (24 bytes per entry, not including
+/// the key used to lookup a given index).
 struct Index {
     section: u64,
-    offset: usize,
-    len: usize,
+    offset: u32,
+    len: u32,
+
     next: Option<Box<Index>>,
 }
 
@@ -145,11 +147,18 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         })
     }
 
-    fn parse_key(key_len: usize, mut data: Bytes) -> Result<Bytes, Error> {
-        if data.remaining() != key_len + 4 {
+    fn verify_key(&self, key: &[u8]) -> Result<(), Error> {
+        if key.len() != self.cfg.key_len as usize {
+            return Err(Error::InvalidKeyLength);
+        }
+        Ok(())
+    }
+
+    fn parse_key(key_len: u32, mut data: Bytes) -> Result<Bytes, Error> {
+        if data.remaining() != key_len as usize + 4 {
             return Err(Error::RecordCorrupted);
         }
-        let key = data.copy_to_bytes(key_len);
+        let key = data.copy_to_bytes(key_len as usize);
         let checksum = data.get_u32();
         if checksum != crc32fast::hash(&key) {
             return Err(Error::RecordCorrupted);
@@ -157,11 +166,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(key)
     }
 
-    fn parse_item(key_len: usize, mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
-        if data.remaining() < key_len + 4 {
+    fn parse_item(key_len: u32, mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
+        if data.remaining() < key_len as usize + 4 {
             return Err(Error::RecordCorrupted);
         }
-        let key = data.copy_to_bytes(key_len);
+        let key = data.copy_to_bytes(key_len as usize);
 
         // We don't need to compute checksum here as the underlying journal
         // already performs this check for us.
@@ -264,9 +273,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         force_sync: bool,
     ) -> Result<(), Error> {
         // Check key length
-        if key.len() != self.cfg.key_len {
-            return Err(Error::InvalidKeyLength);
-        }
+        self.verify_key(key)?;
 
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
@@ -281,7 +288,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             .await?;
 
         // Store item in journal
-        let buf_len = key.len() + 4 + data.len();
+        let buf_len = key
+            .len()
+            .checked_add(4)
+            .and_then(|len| len.checked_add(data.len()))
+            .ok_or(Error::RecordTooLarge)?;
         let mut buf = Vec::with_capacity(buf_len);
         buf.put(key);
         // We store the checksum of the key because we employ partial reads from
@@ -298,7 +309,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 entry.next = Some(Box::new(Index {
                     section,
                     offset,
-                    len: buf_len,
+                    len: buf_len as u32,
                     next: entry.next.take(),
                 }));
             }
@@ -306,7 +317,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 entry.insert(Index {
                     section,
                     offset,
-                    len: buf_len,
+                    len: buf_len as u32,
                     next: None,
                 });
             }
@@ -329,9 +340,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Retrieve a value from the archive.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Check key length
-        if key.len() != self.cfg.key_len {
-            return Err(Error::InvalidKeyLength);
-        }
+        self.verify_key(key)?;
 
         // Update metrics
         self.gets.inc();
@@ -369,9 +378,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Check if a key exists in the archive.
     pub async fn has(&self, key: &[u8]) -> Result<bool, Error> {
         // Check key length
-        if key.len() != self.cfg.key_len {
-            return Err(Error::InvalidKeyLength);
-        }
+        self.verify_key(key)?;
 
         // Update metrics
         self.has.inc();

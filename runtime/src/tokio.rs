@@ -636,21 +636,21 @@ impl crate::Storage<Blob> for Context {
 }
 
 impl crate::Blob for Blob {
-    async fn len(&self) -> Result<usize, Error> {
+    async fn len(&self) -> Result<u64, Error> {
         let (_, len) = *self.file.lock().await;
-        Ok(len as usize)
+        Ok(len)
     }
 
-    async fn read_at(&self, buf: &mut [u8], offset: usize) -> Result<(), Error> {
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         // Ensure the read is within bounds
         let mut file = self.file.lock().await;
-        if offset + buf.len() > file.1 as usize {
+        if offset + buf.len() as u64 > file.1 {
             return Err(Error::InsufficientLength);
         }
 
         // Perform the read
         file.0
-            .seek(SeekFrom::Start(offset as u64))
+            .seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::ReadFailed)?;
         file.0
@@ -662,11 +662,11 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
-    async fn write_at(&self, buf: &[u8], offset: usize) -> Result<(), Error> {
+    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
         // Perform the write
         let mut file = self.file.lock().await;
         file.0
-            .seek(SeekFrom::Start(offset as u64))
+            .seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::WriteFailed)?;
         file.0
@@ -675,7 +675,7 @@ impl crate::Blob for Blob {
             .map_err(|_| Error::WriteFailed)?;
 
         // Update the virtual file size
-        let max_len = (offset + buf.len()) as u64;
+        let max_len = offset + buf.len() as u64;
         if max_len > file.1 {
             file.1 = max_len;
         }
@@ -684,10 +684,9 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
-    async fn truncate(&self, len: usize) -> Result<(), Error> {
+    async fn truncate(&self, len: u64) -> Result<(), Error> {
         // Perform the truncate
         let mut file = self.file.lock().await;
-        let len = len as u64;
         file.0
             .set_len(len)
             .await

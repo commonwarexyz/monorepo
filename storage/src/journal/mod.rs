@@ -1,17 +1,17 @@
 //! An append-only log for storing arbitrary data.
 //!
-//! `journal` is an append-only log for storing arbitrary data on disk with
-//! the ability to serve checksummed data by an arbitrary offset. It can be used
+//! `Journal` is an append-only log for storing arbitrary data on disk with
+//! the support for serving checksummed data by an arbitrary offset. It can be used
 //! on its own to persist streams of data for later replay (serving as a backing store
 //! for some in-memory data structure) or as a building block for a more complex
 //! construction that prescribes some meaning to offsets in the log.
 //!
 //! # Format
 //!
-//! Data stored in the journal is persisted in one of many `Blobs` within a caller-provided
-//! `partition`. The particular blob in which data is stored is identified by a `section`
-//! number. Within a blob, data is appended to the end of each blob in chunks of the following
-//! format:
+//! Data stored in `Journal` is persisted in one of many `Blobs` within a caller-provided
+//! `partition`. The particular `Blob` in which data is stored is identified by a `section`
+//! number (`u64`). Within a `section`, data is appended to the end of each `Blob` in chunks of
+//! the following format:
 //!
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+
@@ -23,41 +23,58 @@
 //! C = CRC32(Data)
 //! ```
 //!
-//! _To ensure data returned by `journal` is correct, a checksum (CRC32) is stored at the end of
+//! _To ensure data returned by `Journal` is correct, a checksum (CRC32) is stored at the end of
 //! each item. If the checksum of the read data does not match the stored checksum, an error is
-//! returned._
+//! returned. This checksum is only verified when data is accessed and not at startup (which
+//! would require reading all data in `Journal`)._
+//!
+//! # Open Blobs
+//!
+//! `Journal` uses 1 `Blob` per `section` to store data. All `Blobs` in a given `partition` are
+//! kept open during the lifetime of `Journal`. If the caller wishes to bound the number of open
+//! `Blobs`, they should group data into fewer `sections` and/or prune unused `sections`.
+//!
+//! # Offset Alignment
+//!
+//! In practice, `Journal` users won't store `u64::MAX` bytes of data in a given `section` (the max
+//! `Offset` provided by `Blob`). To reduce the memory usage for tracking offsets within `Journal`, offsets
+//! are thus `u32` (4 bytes) and aligned to 16 bytes. This means that the maximum size of any `section`
+//! is `u32::MAX * 17 = ~70GB` bytes (the last offset item can store up to `u32::MAX` bytes). If more data
+//! is written to a `section` past this max, an `OffsetOverflow` error is returned.
 //!
 //! # Sync
 //!
-//! Data written to the `journal` may not be immediately persisted to `Storage`. It is up to the caller
+//! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
 //! to determine when to force pending data to be written to `Storage` using the `sync` method. When calling
 //! `close`, all pending data is automatically synced and any open blobs are closed.
 //!
 //! # Pruning
 //!
-//! All data appended to `journal` must be assigned to some `section` (u64). This assignment
-//! allows the caller to prune data from the `journal` by specifying a minimum `section` number. This could
-//! be used, for example, by some blockchain application to prune old blocks from disk.
+//! All data appended to `Journal` must be assigned to some `section` (`u64`). This assignment
+//! allows the caller to prune data from `Journal` by specifying a minimum `section` number. This could
+//! be used, for example, by some blockchain application to prune old blocks.
 //!
 //! # Replay
 //!
-//! During application initialization, it is very common to replay data from the `journal` to recover
-//! some in-memory state. The `journal` is heavily optimized for this pattern and provides a `replay` method
-//! that iterates over multiple `sections` concurrently.
+//! During application initialization, it is very common to replay data from `Journal` to recover
+//! some in-memory state. `Journal` is heavily optimized for this pattern and provides a `replay` method
+//! that iterates over multiple `sections` concurrently in a single stream.
 //!
 //! ## Skip Reads
 //!
-//! Some applications may only want to read the first `n` bytes of each item. This can be achieved by providing
-//! a `prefix` parameter to the `replay` method. If `prefix` is provided, the `journal` will only return the first
-//! `prefix` bytes of each item and "skip ahead" to the next item (computing the offset using the read `size` value).
-//! Word of warning, however, reading only the `prefix` bytes of an item makes it impossible to compute the checksum
-//! of an item. It is up to the caller to ensure these reads are safe.
+//! Some applications may only want to read the first `n` bytes of each item during `replay`. This can be
+//! done by providing a `prefix` parameter to the `replay` method. If `prefix` is provided, `Journal` will only
+//! return the first `prefix` bytes of each item and "skip ahead" to the next item (computing the offset
+//! using the read `size` value).
+//!
+//! _Reading only the `prefix` bytes of an item makes it impossible to compute the checksum
+//! of an item. It is up to the caller to ensure these reads are safe._
 //!
 //! # Exact Reads
 //!
-//! To allow for items to be fetched in a single disk operation (most optimal), `journal` allows callers to specify
-//! an `exact` parameter to the `get` method. This `exact` parameter must be cached by the caller (provided during `replay`)
-//! and usage of an incorrect `exact` value will result in undefined behavior.
+//! To allow for items to be fetched in a single disk operation, `Journal` allows callers to specify
+//! an `exact` parameter to the `get` method. This `exact` parameter must be cached by the caller (provided
+//! during `replay`) and usage of an incorrect `exact` value will result in undefined behavior.
 //!
 //! # Example
 //!
@@ -108,10 +125,10 @@ pub enum Error {
     #[error("offset overflow")]
     OffsetOverflow,
     #[error("unexpected size: expected={0} actual={1}")]
-    UnexpectedSize(usize, usize),
+    UnexpectedSize(u32, u32),
 }
 
-/// Configuration for `journal` storage.
+/// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config {
     /// Registry for metrics.
@@ -127,7 +144,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
+    use commonware_runtime::{deterministic::Executor, Blob, Error as RError, Runner, Storage};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::encoding::text::encode;
 
@@ -182,7 +199,7 @@ mod tests {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((blob_index, _, full_len, item)) => {
-                        assert_eq!(full_len, item.len());
+                        assert_eq!(full_len as usize, item.len());
                         items.push((blob_index, item))
                     }
                     Err(err) => panic!("Failed to read item: {}", err),
@@ -259,7 +276,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((blob_index, _, full_len, item)) => {
-                            assert_eq!(full_len, item.len());
+                            assert_eq!(full_len as usize, item.len());
                             items.push((blob_index, item))
                         }
                         Err(err) => panic!("Failed to read item: {}", err),
@@ -287,7 +304,7 @@ mod tests {
                     match result {
                         Ok((_, _, full_len, item)) => {
                             assert_eq!(item, Bytes::from("Data"));
-                            assert!(full_len > item.len());
+                            assert!(full_len as usize > item.len());
                         }
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
@@ -426,7 +443,7 @@ mod tests {
         });
     }
 
-    fn journal_read_size_missing(exact: Option<usize>) {
+    fn journal_read_size_missing(exact: Option<u32>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
 
@@ -485,7 +502,7 @@ mod tests {
         journal_read_size_missing(Some(1));
     }
 
-    fn journal_read_item_missing(exact: Option<usize>) {
+    fn journal_read_item_missing(exact: Option<u32>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
 
@@ -591,6 +608,8 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
+            //
+            // This will truncate the leftover bytes from our manual write.
             let stream = journal
                 .replay(1, None)
                 .await
@@ -644,7 +663,7 @@ mod tests {
             blob.write_at(item_data, offset)
                 .await
                 .expect("Failed to write item data");
-            offset += item_data.len();
+            offset += item_data.len() as u64;
 
             // Write incorrect checksum
             blob.write_at(&incorrect_checksum.to_be_bytes(), offset)
@@ -757,6 +776,110 @@ mod tests {
             assert_eq!(items[1].1, data_items[0].1);
             assert_eq!(items[2].0, data_items[1].0);
             assert_eq!(items[2].1, data_items[1].1);
+        });
+    }
+
+    // Define `MockBlob` that returns an offset length that should overflow
+    #[derive(Clone)]
+    struct MockBlob {
+        len: u64,
+    }
+
+    impl Blob for MockBlob {
+        async fn len(&self) -> Result<u64, commonware_runtime::Error> {
+            // Return a length that will cause offset overflow
+            Ok(self.len)
+        }
+
+        async fn read_at(&self, _buf: &mut [u8], _offset: u64) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn write_at(&self, _buf: &[u8], _offset: u64) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn truncate(&self, _len: u64) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn close(self) -> Result<(), RError> {
+            Ok(())
+        }
+    }
+
+    // Define `MockStorage` that returns `MockBlob`
+    #[derive(Clone)]
+    struct MockStorage {
+        len: u64,
+    }
+
+    impl Storage<MockBlob> for MockStorage {
+        async fn open(&self, _partition: &str, _name: &[u8]) -> Result<MockBlob, RError> {
+            Ok(MockBlob { len: self.len })
+        }
+
+        async fn remove(&self, _partition: &str, _name: Option<&[u8]>) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn scan(&self, _partition: &str) -> Result<Vec<Vec<u8>>, RError> {
+            Ok(vec![])
+        }
+    }
+
+    // Define the `INDEX_ALIGNMENT` again explicitly to ensure we catch any accidental
+    // changes to the value
+    const INDEX_ALIGNMENT: u64 = 16;
+
+    #[test_traced]
+    fn test_journal_large_offset() {
+        // Initialize the deterministic runtime
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            // Create journal
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "partition".to_string(),
+            };
+            let runtime = MockStorage {
+                len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
+            };
+            let mut journal = Journal::init(runtime, cfg).await.unwrap();
+
+            // Append data
+            let data = Bytes::from("Test data");
+            let result = journal
+                .append(1, data)
+                .await
+                .expect("Failed to append data");
+            assert_eq!(result, u32::MAX);
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_offset_overflow() {
+        // Initialize the deterministic runtime
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            // Create journal
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "partition".to_string(),
+            };
+            let runtime = MockStorage {
+                len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
+            };
+            let mut journal = Journal::init(runtime, cfg).await.unwrap();
+
+            // Append data
+            let data = Bytes::from("Test data");
+            let result = journal.append(1, data).await;
+            assert!(matches!(result, Err(Error::OffsetOverflow)));
         });
     }
 }

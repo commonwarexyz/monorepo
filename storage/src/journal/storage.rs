@@ -7,6 +7,8 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{debug, trace, warn};
 
+const ITEM_ALIGNMENT: u64 = 16;
+
 /// Implementation of an append-only log for storing arbitrary data.
 pub struct Journal<B: Blob, E: Storage<B>> {
     runtime: E,
@@ -19,6 +21,18 @@ pub struct Journal<B: Blob, E: Storage<B>> {
     tracked: Gauge,
     synced: Counter,
     pruned: Counter,
+}
+
+/// Computes the next offset for an item using the underlying `u64`
+/// offset of `Blob`.
+fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
+    let overage = offset % ITEM_ALIGNMENT;
+    if overage != 0 {
+        offset += ITEM_ALIGNMENT - overage;
+    }
+    let offset = offset / ITEM_ALIGNMENT;
+    let aligned_offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
+    Ok(aligned_offset)
 }
 
 impl<B: Blob, E: Storage<B>> Journal<B, E> {
@@ -86,23 +100,24 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(blob: &B, offset: usize) -> Result<(usize, usize, Bytes), Error> {
+    async fn read(blob: &B, offset: u32) -> Result<(u32, u32, Bytes), Error> {
         // Read item size
+        let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut size = [0u8; 4];
         blob.read_at(&mut size, offset)
             .await
             .map_err(Error::Runtime)?;
-        let size = u32::from_be_bytes(size)
-            .try_into()
-            .map_err(|_| Error::UsizeTooSmall)?;
+        let size = u32::from_be_bytes(size);
         let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
         // Read item
-        let mut item = vec![0u8; size];
+        let mut item = vec![0u8; size as usize];
         blob.read_at(&mut item, offset)
             .await
             .map_err(Error::Runtime)?;
-        let offset = offset.checked_add(size).ok_or(Error::OffsetOverflow)?;
+        let offset = offset
+            .checked_add(size as u64)
+            .ok_or(Error::OffsetOverflow)?;
 
         // Read checksum
         let mut stored_checksum = [0u8; 4];
@@ -116,8 +131,11 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         }
         let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
+        // Compute next offset
+        let aligned_offset = compute_next_offset(offset)?;
+
         // Return item
-        Ok((offset, size, Bytes::from(item)))
+        Ok((aligned_offset, size, Bytes::from(item)))
     }
 
     /// Read `prefix` bytes from the blob at the given offset.
@@ -127,21 +145,16 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// This method bypasses the checksum verification and the caller is responsible for ensuring
     /// the integrity of any data read. If `exact` exceeds the size of an item (and runs over the blob
     /// length), it will lead to unintentional truncation of data.
-    async fn read_prefix(
-        blob: &B,
-        offset: usize,
-        prefix: usize,
-    ) -> Result<(usize, usize, Bytes), Error> {
+    async fn read_prefix(blob: &B, offset: u32, prefix: u32) -> Result<(u32, u32, Bytes), Error> {
         // Read item size and first `prefix` bytes
-        let mut buf = vec![0u8; 4 + prefix];
+        let offset = offset as u64 * ITEM_ALIGNMENT;
+        let mut buf = vec![0u8; 4 + prefix as usize];
         blob.read_at(&mut buf, offset)
             .await
             .map_err(Error::Runtime)?;
 
         // Get item size to compute next offset
-        let size = u32::from_be_bytes(buf[..4].try_into().unwrap())
-            .try_into()
-            .map_err(|_| Error::UsizeTooSmall)?;
+        let size = u32::from_be_bytes(buf[..4].try_into().unwrap());
 
         // Get item prefix
         //
@@ -153,11 +166,14 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         let offset = offset
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?
-            .checked_add(size)
+            .checked_add(size as u64)
             .ok_or(Error::OffsetOverflow)?
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?;
-        Ok((offset, size, item_prefix))
+        let aligned_offset = compute_next_offset(offset)?;
+
+        // Return item
+        Ok((aligned_offset, size, item_prefix))
     }
 
     /// Read an item from the blob assuming it is of `exact` length. This method verifies the
@@ -168,48 +184,53 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// This method assumes the caller knows the exact size of the item (either because
     /// they store fixed-size items or they previously indexed the size). If an incorrect
     /// `exact` is provided, the method will likely return an error (as integrity is verified).
-    async fn read_exact(blob: &B, offset: usize, exact: usize) -> Result<(usize, Bytes), Error> {
+    async fn read_exact(blob: &B, offset: u32, exact: u32) -> Result<(u32, Bytes), Error> {
         // Read all of the item into one buffer
-        let mut buf = vec![0u8; 4 + exact + 4];
+        let offset = offset as u64 * ITEM_ALIGNMENT;
+        let mut buf = vec![0u8; 4 + exact as usize + 4];
         blob.read_at(&mut buf, offset)
             .await
             .map_err(Error::Runtime)?;
 
         // Check size
-        let size = u32::from_be_bytes(buf[..4].try_into().unwrap())
-            .try_into()
-            .map_err(|_| Error::UsizeTooSmall)?;
+        let size = u32::from_be_bytes(buf[..4].try_into().unwrap());
         if size != exact {
             return Err(Error::UnexpectedSize(size, exact));
         }
 
         // Get item
-        let item = Bytes::from(buf[4..4 + exact].to_vec());
+        let item = Bytes::from(buf[4..4 + exact as usize].to_vec());
 
         // Verify integrity
-        let stored_checksum = u32::from_be_bytes(buf[4 + exact..].try_into().unwrap());
+        let stored_checksum = u32::from_be_bytes(buf[4 + exact as usize..].try_into().unwrap());
         let checksum = crc32fast::hash(&item);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
 
-        // Return item
+        // Compute next offset
         let offset = offset
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?
-            .checked_add(exact)
+            .checked_add(exact as u64)
             .ok_or(Error::OffsetOverflow)?
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?;
-        Ok((offset, item))
+        let aligned_offset = compute_next_offset(offset)?;
+
+        // Return item
+        Ok((aligned_offset, item))
     }
 
     /// Returns an unordered stream of all items in the journal.
     ///
     /// # Repair
     ///
+    /// If any corrupted data is found, the stream will return an error.
+    ///
     /// If any trailing data is found (i.e. misaligned entries), the journal will be truncated
-    /// to the last valid item.
+    /// to the last valid item. For this reason, it is recommended to call `replay` before
+    /// calling `append` (as data added to trailing bytes will fail checksum after restart).
     ///
     /// # Concurrency
     ///
@@ -230,13 +251,14 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     pub async fn replay(
         &mut self,
         concurrency: usize,
-        prefix: Option<usize>,
-    ) -> Result<impl Stream<Item = Result<(u64, usize, usize, Bytes), Error>> + '_, Error> {
+        prefix: Option<u32>,
+    ) -> Result<impl Stream<Item = Result<(u64, u32, u32, Bytes), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
             let len = blob.len().await.map_err(Error::Runtime)?;
-            blobs.push((*section, blob, len));
+            let aligned_len = compute_next_offset(len)?;
+            blobs.push((*section, blob, aligned_len));
         }
 
         // Replay all blobs concurrently and stream items as they are read (to avoid
@@ -244,7 +266,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         Ok(stream::iter(blobs)
             .map(move |(section, blob, len)| async move {
                 stream::unfold(
-                    (section, blob, 0),
+                    (section, blob, 0u32),
                     move |(section, blob, offset)| async move {
                         if offset == len {
                             return None;
@@ -254,10 +276,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                             None => Self::read(blob, offset).await,
                         };
                         match read {
-                            Ok((next_offset, full_item_size, item)) => {
-                                trace!(blob = section, cursor = offset, "replayed item");
+                            Ok((next_offset, item_size, item)) => {
+                                trace!(blob = section, cursor = offset, len, "replayed item");
                                 Some((
-                                    Ok((section, offset, full_item_size, item)),
+                                    Ok((section, offset, item_size, item)),
                                     (section, blob, next_offset),
                                 ))
                             }
@@ -285,7 +307,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                                     old_size = len,
                                     "trailing bytes detected: truncating"
                                 );
-                                blob.truncate(offset).await.map_err(Error::Runtime).ok()?;
+                                blob.truncate(offset as u64 * ITEM_ALIGNMENT)
+                                    .await
+                                    .map_err(Error::Runtime)
+                                    .ok()?;
                                 blob.sync().await.map_err(Error::Runtime).ok()?;
                                 None
                             }
@@ -299,7 +324,15 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Appends an item to the `journal` in a given `section`.
-    pub async fn append(&mut self, section: u64, item: Bytes) -> Result<usize, Error> {
+    ///
+    /// # Warning
+    ///
+    /// If there exist trailing bytes in the `Blob` of a particular `section` and
+    /// `replay` is not called before this, it is likely that subsequent data added
+    /// to the `Blob` will be considered corrupted (as the trailing bytes will fail
+    /// the checksum verification). It is recommended to call `replay` before calling
+    /// `append` to prevent this.
+    pub async fn append(&mut self, section: u64, item: Bytes) -> Result<u32, Error> {
         // Check last pruned
         self.prune_guard(section, false)?;
 
@@ -335,8 +368,12 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
         // Append item to blob
         let cursor = blob.len().await.map_err(Error::Runtime)?;
-        blob.write_at(&buf, cursor).await.map_err(Error::Runtime)?;
-        Ok(cursor)
+        let offset = compute_next_offset(cursor)?;
+        blob.write_at(&buf, offset as u64 * ITEM_ALIGNMENT)
+            .await
+            .map_err(Error::Runtime)?;
+        trace!(blob = section, previous_len = len, offset, "appended item");
+        Ok(offset)
     }
 
     /// Retrieves the first `prefix` bytes of an item from the `journal` at a given `section` and `offset`.
@@ -346,8 +383,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     pub async fn get_prefix(
         &self,
         section: u64,
-        offset: usize,
-        prefix: usize,
+        offset: u32,
+        prefix: u32,
     ) -> Result<Option<Bytes>, Error> {
         self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {
@@ -366,8 +403,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     pub async fn get(
         &self,
         section: u64,
-        offset: usize,
-        exact: Option<usize>,
+        offset: u32,
+        exact: Option<u32>,
     ) -> Result<Option<Bytes>, Error> {
         self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {
