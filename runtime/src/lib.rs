@@ -237,6 +237,7 @@ mod tests {
     use prometheus_client::encoding::text::encode;
     use prometheus_client::registry::Registry;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::pin::pin;
     use std::sync::{Arc, Mutex};
     use utils::reschedule;
 
@@ -687,7 +688,7 @@ mod tests {
         });
     }
 
-    fn test_shutdown(runner: impl Runner, context: impl Spawner) {
+    fn test_shutdown(runner: impl Runner, context: impl Spawner + Clock) {
         runner.start(async move {
             // Spawn a task that waits for signal
             let before = context.spawn("before", {
@@ -697,16 +698,33 @@ mod tests {
                 }
             });
 
-            // Signal the task
-            context.stop();
-
             // Spawn a task after stop is called
             let after = context.spawn("after", {
                 let context = context.clone();
                 async move {
-                    context.stopped().await;
+                    // Pin the future to the stack to avoid grabbing/dropping on each loop
+                    let mut stopper = pin!(context.stopped());
+
+                    // Wait for stop signal
+                    loop {
+                        select! {
+                            _ = &mut stopper => {
+                                // Stopper resolved
+                                break;
+                            },
+                            _ = context.sleep(Duration::from_millis(10)) => {
+                                // Continue waiting
+                            },
+                        }
+                    }
                 }
             });
+
+            // Sleep for a bit before stopping
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Signal the task
+            context.stop();
 
             // Ensure both tasks complete
             let result = join!(before, after);
