@@ -321,6 +321,11 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Appends an item to the `journal` in a given `section`.
+    ///
+    /// If there exist trailing bytes in the `Blob` of a particular `section` and
+    /// `replay` is not called before this, it is likely that subsequent data added
+    /// to the `Blob` will be considered corrupted (as the trailing bytes will fail
+    /// the checksum verification).
     pub async fn append(&mut self, section: u64, item: Bytes) -> Result<u32, Error> {
         // Check last pruned
         self.prune_guard(section, false)?;

@@ -608,6 +608,8 @@ mod tests {
                 .expect("Failed to initialize journal");
 
             // Attempt to replay the journal
+            //
+            // This will truncate the leftover bytes from our manual write.
             let stream = journal
                 .replay(1, None)
                 .await
