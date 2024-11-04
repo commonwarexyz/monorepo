@@ -75,6 +75,13 @@ pub trait Runner {
         F::Output: Send + 'static;
 }
 
+/// Resolves as soon as `stop` is called by any task on the `Spawner`.
+///
+/// To minimize the overhead of tracking outstanding waiters, it is
+/// recommended to pin an instance of `Waiter` to the stack and
+/// waiting on a reference to it (i.e. `&mut waiter`) instead of
+/// cloning it multiple times in a given task (i.e. in each iteration
+/// of a loop).
 pub type Waiter = Shared<oneshot::Receiver<()>>;
 
 /// Interface that any task scheduler must implement to spawn
@@ -105,8 +112,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Returns an instance of a `Waiter` that resolves when `stop` is called by
     /// any task.
     ///
-    /// While it is possible to clone `Waiter` frequently (i.e. each iteration of a loop),
-    /// it is recommended to clone it sparingly and to wait on a pinned reference to it.
+    /// If `stop` has already been called, the returned `Waiter` will resolve immediately.
     fn stopped(&self) -> Waiter;
 }
 
