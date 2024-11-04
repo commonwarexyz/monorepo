@@ -7,18 +7,18 @@ use crate::{Runner, Spawner};
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::{
     channel::oneshot,
+    future::Shared,
     stream::{AbortHandle, Abortable},
     FutureExt,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use std::{
     any::Any,
-    collections::HashMap,
     future::Future,
     panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Mutex, Once, RwLock},
-    task::{Context, Poll, Waker},
+    sync::{Arc, Once},
+    task::{Context, Poll},
 };
 use tracing::error;
 
@@ -154,55 +154,35 @@ where
     }
 }
 
-struct StopperInner {
-    waiting: HashMap<u128, Waker>,
-    stopped: bool,
+/// Coordinates a one-time signal across many tasks.
+pub struct Signaler {
+    tx: Option<oneshot::Sender<()>>,
+    rx: Shared<oneshot::Receiver<()>>,
 }
 
-struct Stopper {
-    inner: Arc<Mutex<StopperInner>>,
-}
-
-impl Stopper {
-    pub fn stop(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.stopped = true;
-        for (_, waker) in inner.waiting.drain() {
-            waker.wake();
+impl Signaler {
+    pub fn new() -> Self {
+        let (tx, rx) = oneshot::channel();
+        Self {
+            tx: Some(tx),
+            rx: rx.shared(),
         }
     }
 
-    pub fn is_stopped(&self, id: u128) -> impl Future<Output = ()> + Send + 'static {
-        Waiter {
-            id,
-            stopper: self.inner.clone(),
+    pub fn signal(&mut self) {
+        if let Some(stop_tx) = self.tx.take() {
+            let _ = stop_tx.send(());
         }
+    }
+
+    pub fn signaled(&self) -> Shared<oneshot::Receiver<()>> {
+        self.rx.clone()
     }
 }
 
-struct Waiter {
-    id: u128,
-    stopper: Arc<Mutex<StopperInner>>,
-}
-
-impl Future for Waiter {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let mut stopper = self.stopper.lock().unwrap();
-        if stopper.stopped {
-            Poll::Ready(())
-        } else {
-            stopper.waiting.insert(self.id, cx.waker().clone());
-            Poll::Pending
-        }
-    }
-}
-
-impl Drop for Waiter {
-    fn drop(&mut self) {
-        let mut stopper = self.stopper.lock().unwrap();
-        stopper.waiting.remove(&self.id);
+impl Default for Signaler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

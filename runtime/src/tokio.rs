@@ -23,7 +23,7 @@
 //! });
 //! ```
 
-use crate::{Clock, Error, Handle};
+use crate::{utils::Signaler, Clock, Error, Handle};
 use bytes::Bytes;
 use commonware_utils::{from_hex, hex};
 use futures::{
@@ -43,7 +43,7 @@ use std::{
     io::SeekFrom,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, SystemTime},
 };
 use tokio::{
@@ -237,6 +237,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     runtime: Runtime,
     fs: AsyncMutex<()>,
+    stopper: RwLock<Signaler>,
 }
 
 impl Executor {
@@ -253,6 +254,7 @@ impl Executor {
             metrics,
             runtime,
             fs: AsyncMutex::new(()),
+            stopper: RwLock::new(Signaler::new()),
         });
         (
             Runner {
@@ -322,6 +324,15 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
         self.executor.runtime.spawn(f);
         handle
+    }
+
+    fn stop(&self) {
+        self.executor.stopper.write().unwrap().signal();
+    }
+
+    async fn stopped(&self) {
+        let waiter = self.executor.stopper.read().unwrap().signaled();
+        let _ = waiter.await;
     }
 }
 

@@ -16,7 +16,7 @@ pub mod mocks;
 pub mod tokio;
 
 mod utils;
-pub use utils::{reschedule, Handle};
+pub use utils::{reschedule, Handle, Signaler};
 
 use bytes::Bytes;
 use std::{
@@ -90,6 +90,12 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
+
+    /// Signals the runtime to should stop execution and cleanup.
+    fn stop(&self);
+
+    /// Returns a future that resolves when the runtime has stopped.
+    fn stopped(&self) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// Interface that any task scheduler must implement to provide

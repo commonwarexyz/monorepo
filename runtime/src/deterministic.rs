@@ -22,7 +22,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{Clock, Error, Handle};
+use crate::{utils::Signaler, Clock, Error, Handle};
 use bytes::Bytes;
 use commonware_utils::hex;
 use futures::{
@@ -432,6 +432,7 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
+    stopper: RwLock<Signaler>,
 }
 
 impl Executor {
@@ -463,6 +464,7 @@ impl Executor {
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
+            stopper: RwLock::new(Signaler::new()),
         });
         (
             Runner {
@@ -722,6 +724,15 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init(f, gauge, false);
         Tasks::register(&self.executor.tasks, &label, false, Box::pin(f));
         handle
+    }
+
+    fn stop(&self) {
+        self.executor.stopper.write().unwrap().signal();
+    }
+
+    async fn stopped(&self) {
+        let waiter = self.executor.stopper.read().unwrap().signaled();
+        let _ = waiter.await;
     }
 }
 
