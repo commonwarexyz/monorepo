@@ -26,8 +26,7 @@ use crate::{utils::Signaler, Clock, Error, Handle, Waiter};
 use bytes::Bytes;
 use commonware_utils::hex;
 use futures::{
-    channel::{mpsc, oneshot},
-    future::Shared,
+    channel::mpsc,
     task::{waker_ref, ArcWake},
     SinkExt, StreamExt,
 };
@@ -450,7 +449,7 @@ pub struct Executor {
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
     stopper: Mutex<Signaler>,
-    stopper_waiter: Shared<oneshot::Receiver<()>>,
+    stopper_waiter: Waiter,
 }
 
 impl Executor {

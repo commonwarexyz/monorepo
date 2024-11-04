@@ -27,8 +27,6 @@ use crate::{utils::Signaler, Clock, Error, Handle, Waiter};
 use bytes::Bytes;
 use commonware_utils::{from_hex, hex};
 use futures::{
-    channel::oneshot,
-    future::Shared,
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
@@ -240,7 +238,7 @@ pub struct Executor {
     runtime: Runtime,
     fs: AsyncMutex<()>,
     stopper: Mutex<Signaler>,
-    stopper_waiter: Shared<oneshot::Receiver<()>>,
+    stopper_waiter: Waiter,
 }
 
 impl Executor {

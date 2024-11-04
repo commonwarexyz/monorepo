@@ -154,6 +154,15 @@ where
     }
 }
 
+/// A one-time signal that can be awaited by many tasks.
+///
+/// To minimize the overhead of tracking outstanding waiters (which only return once),
+/// it is recommended to pin an instance of `Waiter` to the stack and
+/// waiting on a reference to it (i.e. `&mut waiter`) instead of
+/// cloning it multiple times in a given task (i.e. in each iteration
+/// of a loop).
+pub type Waiter = Shared<oneshot::Receiver<()>>;
+
 /// Coordinates a one-time signal across many tasks.
 ///
 /// # Example
@@ -231,7 +240,7 @@ impl Signaler {
     /// Create a new `Signaler`.
     ///
     /// Returns a `Signaler` and a future that will resolve when the `Signaler` is signaled.
-    pub fn new() -> (Self, Shared<oneshot::Receiver<()>>) {
+    pub fn new() -> (Self, Waiter) {
         let (tx, rx) = oneshot::channel();
         (Self { tx: Some(tx) }, rx.shared())
     }

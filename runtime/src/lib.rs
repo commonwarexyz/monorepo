@@ -16,8 +16,7 @@ pub mod mocks;
 pub mod tokio;
 
 mod utils;
-use futures::{channel::oneshot, future::Shared};
-pub use utils::{reschedule, Handle, Signaler};
+pub use utils::{reschedule, Handle, Signaler, Waiter};
 
 use bytes::Bytes;
 use std::{
@@ -74,15 +73,6 @@ pub trait Runner {
         F: Future + Send + 'static,
         F::Output: Send + 'static;
 }
-
-/// Resolves as soon as `stop` is called by any task on the `Spawner`.
-///
-/// To minimize the overhead of tracking outstanding waiters, it is
-/// recommended to pin an instance of `Waiter` to the stack and
-/// waiting on a reference to it (i.e. `&mut waiter`) instead of
-/// cloning it multiple times in a given task (i.e. in each iteration
-/// of a loop).
-pub type Waiter = Shared<oneshot::Receiver<()>>;
 
 /// Interface that any task scheduler must implement to spawn
 /// sub-tasks in a given root task.
@@ -244,9 +234,7 @@ mod tests {
     use super::*;
     use commonware_macros::select;
     use core::panic;
-    use futures::future::ready;
-    use futures::join;
-    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
     use prometheus_client::encoding::text::encode;
     use prometheus_client::registry::Registry;
     use std::panic::{catch_unwind, AssertUnwindSafe};
