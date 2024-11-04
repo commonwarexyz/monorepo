@@ -187,6 +187,9 @@ pub trait Blob: Clone + Send + Sync + 'static {
     fn len(&self) -> impl Future<Output = Result<u64, Error>> + Send;
 
     /// Read from the blob at the given offset.
+    ///
+    /// `read_at` does not return the number of bytes read because it
+    /// only returns once the entire buffer has been filled.
     fn read_at(
         &self,
         buf: &mut [u8],
