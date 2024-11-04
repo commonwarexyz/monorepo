@@ -25,10 +25,10 @@ tracing = { workspace = true }
 prost = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true } 
+zstd = { workspace = true }
 x25519-dalek = "2"
 chacha20poly1305 = "0.10"
 bitvec = "1"
-zstd = "0.13"
 
 [build-dependencies]
 prost-build = { workspace = true } 

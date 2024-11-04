@@ -20,6 +20,7 @@ bytes = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
 prometheus-client = { workspace = true }
+zstd = { workspace = true }
 crc32fast = "1.4.2"
 
 [dev-dependencies]

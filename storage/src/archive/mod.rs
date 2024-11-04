@@ -85,6 +85,12 @@
 //! benefit of only ever performing a single operation to read a key (when there are no conflicts) is worth the
 //! tradeoff.
 //!
+//! # Compression
+//!
+//! `Archive` supports compressing data before storing it on disk. This can be enabled by setting the `compression`
+//! field in the `Config` struct to a valid `zstd` compression level. This setting can be changed between initializations
+//! of `Archive`, however, it must remain populated if any data was written with compression enabled.
+//!
 //! # Example
 //!
 //! ```rust
@@ -146,6 +152,10 @@ pub enum Error {
     InvalidKeyLength,
     #[error("record too large")]
     RecordTooLarge,
+    #[error("compression failed")]
+    CompressionFailed,
+    #[error("decompression failed")]
+    DecompressionFailed,
 }
 
 /// Translate keys into an internal representation used in `Archive`'s
@@ -186,6 +196,9 @@ pub struct Config<T: Translator> {
 
     /// The number of blobs to replay concurrently on initialization.
     pub replay_concurrency: usize,
+
+    /// Optional compression level (using `zstd`) to apply to data before storing.
+    compression: Option<u8>,
 }
 
 #[cfg(test)]
@@ -203,8 +216,7 @@ mod tests {
     };
     use translator::{FourCap, TwoCap};
 
-    #[test_traced]
-    fn test_archive_put_get() {
+    fn test_archive_put_get(compression: Option<u8>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
         executor.start(async move {
@@ -229,6 +241,7 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                compression,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -290,6 +303,89 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_archive_put_get_no_compression() {
+        test_archive_put_get(None);
+    }
+
+    #[test_traced]
+    fn test_archive_put_get_compression() {
+        test_archive_put_get(Some(3));
+    }
+
+    #[test_traced]
+    fn test_archive_compression_then_none() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context.clone(),
+                JournalConfig {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                key_len: 7,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: Some(3),
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            // Put the key-data pair
+            let section = 1u64;
+            let key = b"testkey";
+            let data = Bytes::from("testdata");
+            archive
+                .put(section, key, data.clone(), false)
+                .await
+                .expect("Failed to put data");
+
+            // Close the archive
+            archive.close().await.expect("Failed to close archive");
+
+            // Initialize the archive again without compression
+            let journal = Journal::init(
+                context,
+                JournalConfig {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                key_len: 7,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+            };
+            let archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            // Get the data back
+            let retrieved = archive
+                .get(key)
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_ne!(retrieved, data);
+        });
+    }
+
+    #[test_traced]
     fn test_archive_invalid_key_length() {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
@@ -315,6 +411,7 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                compression: None,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -369,6 +466,7 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                compression: None,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -414,6 +512,7 @@ mod tests {
                     translator: FourCap,
                     pending_writes: 10,
                     replay_concurrency: 4,
+                    compression: None,
                 },
             )
             .await
@@ -454,6 +553,7 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                compression: None,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -518,6 +618,7 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                compression: None,
             };
             let archive = Archive::init(journal, cfg.clone())
                 .await
@@ -564,6 +665,7 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                compression: None,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -639,6 +741,7 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                compression: None,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -707,6 +810,7 @@ mod tests {
                 translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                compression: None,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -807,6 +911,7 @@ mod tests {
                 translator: TwoCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
+                compression: None,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await

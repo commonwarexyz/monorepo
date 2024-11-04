@@ -6,6 +6,7 @@ use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
+use zstd::bulk::{compress, decompress};
 
 /// In the case there are multiple records with the same key, we store them in a linked list.
 ///
@@ -288,6 +289,15 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let index_key = self.cfg.translator.transform(key);
         self.check(section, key, &index_key, oldest_allowed).await?;
 
+        // If compression is enabled, compress the data before storing it.
+        let data = if let Some(level) = self.cfg.compression {
+            compress(&data, level as i32)
+                .map_err(|_| Error::CompressionFailed)?
+                .into()
+        } else {
+            data
+        };
+
         // Store item in journal
         let buf_len = key
             .len()
@@ -363,11 +373,19 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                     .ok_or(Error::RecordCorrupted)?;
 
                 // Get key from item
-                let (disk_key, value) = Self::parse_item(self.cfg.key_len, item)?;
-                if disk_key == key {
-                    return Ok(Some(value));
+                let (disk_key, mut value) = Self::parse_item(self.cfg.key_len, item)?;
+                if disk_key != key {
+                    self.unnecessary_item_reads.inc();
+                    continue;
                 }
-                self.unnecessary_item_reads.inc();
+
+                // If compression is enabled, decompress the data before returning.
+                if self.cfg.compression.is_some() {
+                    value = decompress(&value, u32::MAX as usize)
+                        .map_err(|_| Error::DecompressionFailed)?
+                        .into();
+                }
+                return Ok(Some(value));
             }
 
             // Move to next index
