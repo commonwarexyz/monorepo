@@ -420,6 +420,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Upset pruning marker
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if min <= oldest_allowed {
+            // Unlike in `put`, we want to return an error if we try to prune the same
+            // section twice. In `put`, we just want to make sure we don't return
+            // anything that has already been pruned (`< oldest_allowed`).
             return Err(Error::AlreadyPrunedToSection(oldest_allowed));
         }
 
