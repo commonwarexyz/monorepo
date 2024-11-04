@@ -297,7 +297,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                                     (section, blob, offset),
                                 ))
                             }
-                            Err(Error::Runtime(RError::InsufficientLength)) => {
+                            Err(Error::Runtime(RError::BlobInsufficientLength)) => {
                                 // If we encounter trailing bytes, we prune to the last
                                 // valid item. This can happen during an unclean file close (where
                                 // pending data is not fully synced to disk).

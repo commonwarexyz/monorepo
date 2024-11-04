@@ -645,7 +645,7 @@ impl crate::Blob for Blob {
         // Ensure the read is within bounds
         let mut file = self.file.lock().await;
         if offset + buf.len() as u64 > file.1 {
-            return Err(Error::InsufficientLength);
+            return Err(Error::BlobInsufficientLength);
         }
 
         // Perform the read

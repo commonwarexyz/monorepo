@@ -58,8 +58,8 @@ pub enum Error {
     BlobSyncFailed(String, String),
     #[error("blob close failed: {0}/{1}")]
     BlobCloseFailed(String, String),
-    #[error("insufficient length")]
-    InsufficientLength,
+    #[error("blob insufficient length")]
+    BlobInsufficientLength,
     #[error("offset overflow")]
     OffsetOverflow,
 }
@@ -510,7 +510,7 @@ mod tests {
             // Full read after truncation
             let mut buffer = vec![0u8; 10];
             let result = blob.read_at(&mut buffer, 0).await;
-            assert!(matches!(result, Err(Error::InsufficientLength)));
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
 
             // Close the blob
             blob.close().await.expect("Failed to close blob");
@@ -584,7 +584,7 @@ mod tests {
             // Read data past file length (empty file)
             let mut buffer = vec![0u8; 10];
             let result = blob.read_at(&mut buffer, 0).await;
-            assert!(matches!(result, Err(Error::InsufficientLength)));
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
 
             // Write data to the blob
             let data = b"Hello, Storage!";
@@ -595,7 +595,7 @@ mod tests {
             // Read data past file length (non-empty file)
             let mut buffer = vec![0u8; 20];
             let result = blob.read_at(&mut buffer, 0).await;
-            assert!(matches!(result, Err(Error::InsufficientLength)));
+            assert!(matches!(result, Err(Error::BlobInsufficientLength)));
         })
     }
 
