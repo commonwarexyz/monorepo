@@ -1,6 +1,12 @@
 use super::Translator;
 
 /// Cap the key to a fixed length.
+///
+/// # Behavior
+///
+/// - If input is shorter than `N`, the output is zero-padded.
+/// - If input is longer than `N`, the output is truncated.
+/// - If input is exactly `N`, the output is identical.
 fn cap<const N: usize>(key: &[u8]) -> [u8; N] {
     let mut capped = [0; N];
     let len = key.len().min(N);
