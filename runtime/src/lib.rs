@@ -91,7 +91,12 @@ pub trait Spawner: Clone + Send + Sync + 'static {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
 
-    /// Signals the runtime to should stop execution and cleanup.
+    /// Signals the runtime to stop execution and that all outstanding tasks
+    /// should perform any required cleanup and exit. This method is idempotent and
+    /// can be called multiple times.
+    ///
+    /// This method does not actually kill any tasks but rather signals to them, using
+    /// `stopped`, that they should exit.
     fn stop(&self);
 
     /// Returns a future that resolves when the runtime has stopped.

@@ -156,7 +156,6 @@ where
 
 /// Coordinates a one-time signal across many tasks.
 ///
-///
 /// # Example
 ///
 /// ```rust
