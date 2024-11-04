@@ -226,8 +226,11 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     ///
     /// # Repair
     ///
+    /// If any corrupted data is found, the stream will return an error.
+    ///
     /// If any trailing data is found (i.e. misaligned entries), the journal will be truncated
-    /// to the last valid item.
+    /// to the last valid item. For this reason, it is recommended to call `replay` before
+    /// calling `append` (as data added to trailing bytes will fail checksum after restart).
     ///
     /// # Concurrency
     ///
@@ -322,10 +325,13 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
     /// Appends an item to the `journal` in a given `section`.
     ///
+    /// # Warning
+    ///
     /// If there exist trailing bytes in the `Blob` of a particular `section` and
     /// `replay` is not called before this, it is likely that subsequent data added
     /// to the `Blob` will be considered corrupted (as the trailing bytes will fail
-    /// the checksum verification).
+    /// the checksum verification). It is recommended to call `replay` before calling
+    /// `append` to prevent this.
     pub async fn append(&mut self, section: u64, item: Bytes) -> Result<u32, Error> {
         // Check last pruned
         self.prune_guard(section, false)?;
