@@ -373,19 +373,19 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                     .ok_or(Error::RecordCorrupted)?;
 
                 // Get key from item
-                let (disk_key, mut value) = Self::parse_item(self.cfg.key_len, item)?;
-                if disk_key != key {
-                    self.unnecessary_item_reads.inc();
-                    continue;
+                let (disk_key, value) = Self::parse_item(self.cfg.key_len, item)?;
+                if disk_key == key {
+                    // If compression is enabled, decompress the data before returning.
+                    if self.cfg.compression.is_some() {
+                        return Ok(Some(
+                            decompress(&value, u32::MAX as usize)
+                                .map_err(|_| Error::DecompressionFailed)?
+                                .into(),
+                        ));
+                    }
+                    return Ok(Some(value));
                 }
-
-                // If compression is enabled, decompress the data before returning.
-                if self.cfg.compression.is_some() {
-                    value = decompress(&value, u32::MAX as usize)
-                        .map_err(|_| Error::DecompressionFailed)?
-                        .into();
-                }
-                return Ok(Some(value));
+                self.unnecessary_item_reads.inc();
             }
 
             // Move to next index
