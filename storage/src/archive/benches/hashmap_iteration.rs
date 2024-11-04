@@ -17,17 +17,18 @@ fn benchmark_hashmap_iteration(c: &mut Criterion) {
                     || {
                         let mut map = HashMap::with_capacity(n);
                         let mut rng = rand::thread_rng();
+                        let mut key = vec![0; k];
 
                         // Populate the HashMap with dummy data
                         for _ in 0..n {
-                            let key: Vec<u8> = (0..k).map(|_| rng.gen()).collect();
+                            rng.fill(&mut key[..]);
                             let value = MockIndex {
                                 section: rng.gen(),
                                 _offset: rng.gen(),
                                 _len: rng.gen(),
                                 _next: None,
                             };
-                            map.insert(key, value);
+                            map.insert(key.clone(), value);
                         }
                         map
                     },

@@ -18,14 +18,15 @@ fn benchmark_hashmap_load(c: &mut Criterion) {
                         // Perform all random ops
                         let mut vec: Vec<(Vec<u8>, u64, u32, u32)> = Vec::with_capacity(n);
                         let mut rng = rand::thread_rng();
+                        let mut key = vec![0; k];
 
                         // Populate vec with dummy data
                         for _ in 0..n {
-                            let key: Vec<u8> = (0..k).map(|_| rng.gen()).collect();
+                            rng.fill(&mut key[..]);
                             let section = rng.gen();
                             let offset = rng.gen();
                             let len = rng.gen();
-                            vec.push((key, section, offset, len));
+                            vec.push((key.clone(), section, offset, len));
                         }
                         vec
                     },
