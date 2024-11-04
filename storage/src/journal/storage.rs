@@ -7,7 +7,7 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{debug, trace, warn};
 
-const ITEM_ALIGNMENT: u64 = 64;
+const ITEM_ALIGNMENT: u64 = 16;
 
 /// Implementation of an append-only log for storing arbitrary data.
 pub struct Journal<B: Blob, E: Storage<B>> {

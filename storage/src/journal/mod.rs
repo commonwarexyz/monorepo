@@ -37,7 +37,8 @@
 //!
 //! In practice, `journal` users won't store `u64::MAX` bytes of data in a given `section`. To reduce
 //! the memory requirement for interacting with the journal, offsets are thus `u32` (4 bytes vs 8 bytes)
-//! and aligned to 64 bytes. This means that the maximum size of any section is `u32::MAX * 64` bytes (~270 GB).
+//! and aligned to 16 bytes. This means that the maximum size of any section is `u32::MAX * 17 = ~70GB`
+//! bytes (the last offset item can store up to `u32::MAX` bytes).
 //!
 //! # Sync
 //!
@@ -827,7 +828,7 @@ mod tests {
 
     // Define the `INDEX_ALIGNMENT` again explicitly to ensure we catch any accidental
     // changes to the value
-    const INDEX_ALIGNMENT: u64 = 64;
+    const INDEX_ALIGNMENT: u64 = 16;
 
     #[test_traced]
     fn test_journal_large_offset() {
