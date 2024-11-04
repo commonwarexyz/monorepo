@@ -86,23 +86,23 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(blob: &B, offset: usize) -> Result<(usize, usize, Bytes), Error> {
+    async fn read(blob: &B, offset: u64) -> Result<(u64, u32, Bytes), Error> {
         // Read item size
         let mut size = [0u8; 4];
         blob.read_at(&mut size, offset)
             .await
             .map_err(Error::Runtime)?;
-        let size = u32::from_be_bytes(size)
-            .try_into()
-            .map_err(|_| Error::UsizeTooSmall)?;
+        let size = u32::from_be_bytes(size);
         let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
         // Read item
-        let mut item = vec![0u8; size];
+        let mut item = vec![0u8; size as usize];
         blob.read_at(&mut item, offset)
             .await
             .map_err(Error::Runtime)?;
-        let offset = offset.checked_add(size).ok_or(Error::OffsetOverflow)?;
+        let offset = offset
+            .checked_add(size as u64)
+            .ok_or(Error::OffsetOverflow)?;
 
         // Read checksum
         let mut stored_checksum = [0u8; 4];
@@ -127,21 +127,15 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// This method bypasses the checksum verification and the caller is responsible for ensuring
     /// the integrity of any data read. If `exact` exceeds the size of an item (and runs over the blob
     /// length), it will lead to unintentional truncation of data.
-    async fn read_prefix(
-        blob: &B,
-        offset: usize,
-        prefix: usize,
-    ) -> Result<(usize, usize, Bytes), Error> {
+    async fn read_prefix(blob: &B, offset: u64, prefix: u32) -> Result<(u64, u32, Bytes), Error> {
         // Read item size and first `prefix` bytes
-        let mut buf = vec![0u8; 4 + prefix];
+        let mut buf = vec![0u8; 4 + prefix as usize];
         blob.read_at(&mut buf, offset)
             .await
             .map_err(Error::Runtime)?;
 
         // Get item size to compute next offset
-        let size = u32::from_be_bytes(buf[..4].try_into().unwrap())
-            .try_into()
-            .map_err(|_| Error::UsizeTooSmall)?;
+        let size = u32::from_be_bytes(buf[..4].try_into().unwrap());
 
         // Get item prefix
         //
@@ -153,7 +147,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         let offset = offset
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?
-            .checked_add(size)
+            .checked_add(size as u64)
             .ok_or(Error::OffsetOverflow)?
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?;
@@ -168,26 +162,24 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// This method assumes the caller knows the exact size of the item (either because
     /// they store fixed-size items or they previously indexed the size). If an incorrect
     /// `exact` is provided, the method will likely return an error (as integrity is verified).
-    async fn read_exact(blob: &B, offset: usize, exact: usize) -> Result<(usize, Bytes), Error> {
+    async fn read_exact(blob: &B, offset: u64, exact: u32) -> Result<(u64, Bytes), Error> {
         // Read all of the item into one buffer
-        let mut buf = vec![0u8; 4 + exact + 4];
+        let mut buf = vec![0u8; 4 + exact as usize + 4];
         blob.read_at(&mut buf, offset)
             .await
             .map_err(Error::Runtime)?;
 
         // Check size
-        let size = u32::from_be_bytes(buf[..4].try_into().unwrap())
-            .try_into()
-            .map_err(|_| Error::UsizeTooSmall)?;
+        let size = u32::from_be_bytes(buf[..4].try_into().unwrap());
         if size != exact {
             return Err(Error::UnexpectedSize(size, exact));
         }
 
         // Get item
-        let item = Bytes::from(buf[4..4 + exact].to_vec());
+        let item = Bytes::from(buf[4..4 + exact as usize].to_vec());
 
         // Verify integrity
-        let stored_checksum = u32::from_be_bytes(buf[4 + exact..].try_into().unwrap());
+        let stored_checksum = u32::from_be_bytes(buf[4 + exact as usize..].try_into().unwrap());
         let checksum = crc32fast::hash(&item);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
@@ -197,7 +189,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         let offset = offset
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?
-            .checked_add(exact)
+            .checked_add(exact as u64)
             .ok_or(Error::OffsetOverflow)?
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?;
@@ -230,8 +222,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     pub async fn replay(
         &mut self,
         concurrency: usize,
-        prefix: Option<usize>,
-    ) -> Result<impl Stream<Item = Result<(u64, usize, usize, Bytes), Error>> + '_, Error> {
+        prefix: Option<u32>,
+    ) -> Result<impl Stream<Item = Result<(u64, u64, u32, Bytes), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
@@ -299,7 +291,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Appends an item to the `journal` in a given `section`.
-    pub async fn append(&mut self, section: u64, item: Bytes) -> Result<usize, Error> {
+    pub async fn append(&mut self, section: u64, item: Bytes) -> Result<u64, Error> {
         // Check last pruned
         self.prune_guard(section, false)?;
 
@@ -346,8 +338,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     pub async fn get_prefix(
         &self,
         section: u64,
-        offset: usize,
-        prefix: usize,
+        offset: u64,
+        prefix: u32,
     ) -> Result<Option<Bytes>, Error> {
         self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {
@@ -366,8 +358,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     pub async fn get(
         &self,
         section: u64,
-        offset: usize,
-        exact: Option<usize>,
+        offset: u64,
+        exact: Option<u32>,
     ) -> Result<Option<Bytes>, Error> {
         self.prune_guard(section, false)?;
         let blob = match self.blobs.get(&section) {

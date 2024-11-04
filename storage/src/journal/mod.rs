@@ -108,7 +108,7 @@ pub enum Error {
     #[error("offset overflow")]
     OffsetOverflow,
     #[error("unexpected size: expected={0} actual={1}")]
-    UnexpectedSize(usize, usize),
+    UnexpectedSize(u32, u32),
 }
 
 /// Configuration for `journal` storage.
@@ -182,7 +182,7 @@ mod tests {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok((blob_index, _, full_len, item)) => {
-                        assert_eq!(full_len, item.len());
+                        assert_eq!(full_len as usize, item.len());
                         items.push((blob_index, item))
                     }
                     Err(err) => panic!("Failed to read item: {}", err),
@@ -259,7 +259,7 @@ mod tests {
                 while let Some(result) = stream.next().await {
                     match result {
                         Ok((blob_index, _, full_len, item)) => {
-                            assert_eq!(full_len, item.len());
+                            assert_eq!(full_len as usize, item.len());
                             items.push((blob_index, item))
                         }
                         Err(err) => panic!("Failed to read item: {}", err),
@@ -287,7 +287,7 @@ mod tests {
                     match result {
                         Ok((_, _, full_len, item)) => {
                             assert_eq!(item, Bytes::from("Data"));
-                            assert!(full_len > item.len());
+                            assert!(full_len as usize > item.len());
                         }
                         Err(err) => panic!("Failed to read item: {}", err),
                     }
@@ -426,7 +426,7 @@ mod tests {
         });
     }
 
-    fn journal_read_size_missing(exact: Option<usize>) {
+    fn journal_read_size_missing(exact: Option<u32>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
 
@@ -485,7 +485,7 @@ mod tests {
         journal_read_size_missing(Some(1));
     }
 
-    fn journal_read_item_missing(exact: Option<usize>) {
+    fn journal_read_item_missing(exact: Option<u32>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
 
@@ -644,7 +644,7 @@ mod tests {
             blob.write_at(item_data, offset)
                 .await
                 .expect("Failed to write item data");
-            offset += item_data.len();
+            offset += item_data.len() as u64;
 
             // Write incorrect checksum
             blob.write_at(&incorrect_checksum.to_be_bytes(), offset)

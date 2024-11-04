@@ -12,8 +12,8 @@ use tracing::debug;
 /// This is the most memory-efficient way to maintain a multi-map.
 struct Index {
     section: u64,
-    offset: usize,
-    len: usize,
+    offset: u64,
+    len: u32,
     next: Option<Box<Index>>,
 }
 
@@ -145,11 +145,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         })
     }
 
-    fn parse_key(key_len: usize, mut data: Bytes) -> Result<Bytes, Error> {
-        if data.remaining() != key_len + 4 {
+    fn parse_key(key_len: u32, mut data: Bytes) -> Result<Bytes, Error> {
+        if data.remaining() != key_len as usize + 4 {
             return Err(Error::RecordCorrupted);
         }
-        let key = data.copy_to_bytes(key_len);
+        let key = data.copy_to_bytes(key_len as usize);
         let checksum = data.get_u32();
         if checksum != crc32fast::hash(&key) {
             return Err(Error::RecordCorrupted);
@@ -157,11 +157,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(key)
     }
 
-    fn parse_item(key_len: usize, mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
-        if data.remaining() < key_len + 4 {
+    fn parse_item(key_len: u32, mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
+        if data.remaining() < key_len as usize + 4 {
             return Err(Error::RecordCorrupted);
         }
-        let key = data.copy_to_bytes(key_len);
+        let key = data.copy_to_bytes(key_len as usize);
 
         // We don't need to compute checksum here as the underlying journal
         // already performs this check for us.
@@ -264,7 +264,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         force_sync: bool,
     ) -> Result<(), Error> {
         // Check key length
-        if key.len() != self.cfg.key_len {
+        if key.len() != self.cfg.key_len as usize {
             return Err(Error::InvalidKeyLength);
         }
 
@@ -298,7 +298,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 entry.next = Some(Box::new(Index {
                     section,
                     offset,
-                    len: buf_len,
+                    len: buf_len as u32,
                     next: entry.next.take(),
                 }));
             }
@@ -306,7 +306,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 entry.insert(Index {
                     section,
                     offset,
-                    len: buf_len,
+                    len: buf_len as u32,
                     next: None,
                 });
             }
@@ -329,7 +329,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Retrieve a value from the archive.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Check key length
-        if key.len() != self.cfg.key_len {
+        if key.len() != self.cfg.key_len as usize {
             return Err(Error::InvalidKeyLength);
         }
 
@@ -369,7 +369,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Check if a key exists in the archive.
     pub async fn has(&self, key: &[u8]) -> Result<bool, Error> {
         // Check key length
-        if key.len() != self.cfg.key_len {
+        if key.len() != self.cfg.key_len as usize {
             return Err(Error::InvalidKeyLength);
         }
 
