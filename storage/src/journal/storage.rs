@@ -2,10 +2,7 @@ use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::hex;
-use futures::{
-    io::Cursor,
-    stream::{self, Stream, StreamExt},
-};
+use futures::stream::{self, Stream, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{debug, trace, warn};
@@ -26,18 +23,14 @@ pub struct Journal<B: Blob, E: Storage<B>> {
     pruned: Counter,
 }
 
-fn compute_next_offset(offset: u64) -> Result<u32, Error> {
+fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
     let overage = offset % ITEM_ALIGNMENT;
-    let offset = offset + (ITEM_ALIGNMENT - overage);
+    if overage != 0 {
+        offset += ITEM_ALIGNMENT - overage;
+    }
     let offset = offset / ITEM_ALIGNMENT;
     let aligned_offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
     Ok(aligned_offset)
-}
-
-fn compute_next_cursor(len: u64) -> Result<u64, Error> {
-    let overage = len % ITEM_ALIGNMENT;
-    let len = len + (ITEM_ALIGNMENT - overage);
-    Ok(len)
 }
 
 impl<B: Blob, E: Storage<B>> Journal<B, E> {
@@ -259,7 +252,8 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
             let len = blob.len().await.map_err(Error::Runtime)?;
-            blobs.push((*section, blob, len));
+            let aligned_len = compute_next_offset(len)?;
+            blobs.push((*section, blob, aligned_len));
         }
 
         // Replay all blobs concurrently and stream items as they are read (to avoid
@@ -267,7 +261,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         Ok(stream::iter(blobs)
             .map(move |(section, blob, len)| async move {
                 stream::unfold(
-                    (section, blob, 0),
+                    (section, blob, 0u32),
                     move |(section, blob, offset)| async move {
                         if offset == len {
                             return None;
@@ -277,10 +271,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                             None => Self::read(blob, offset).await,
                         };
                         match read {
-                            Ok((next_offset, full_item_size, item)) => {
-                                trace!(blob = section, cursor = offset, "replayed item");
+                            Ok((next_offset, item_size, item)) => {
+                                trace!(blob = section, cursor = offset, len, "replayed item");
                                 Some((
-                                    Ok((section, offset, full_item_size, item)),
+                                    Ok((section, offset, item_size, item)),
                                     (section, blob, next_offset),
                                 ))
                             }
@@ -308,7 +302,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                                     old_size = len,
                                     "trailing bytes detected: truncating"
                                 );
-                                blob.truncate(offset).await.map_err(Error::Runtime).ok()?;
+                                blob.truncate(offset as u64 * ITEM_ALIGNMENT)
+                                    .await
+                                    .map_err(Error::Runtime)
+                                    .ok()?;
                                 blob.sync().await.map_err(Error::Runtime).ok()?;
                                 None
                             }
@@ -358,8 +355,12 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
 
         // Append item to blob
         let cursor = blob.len().await.map_err(Error::Runtime)?;
-        blob.write_at(&buf, cursor).await.map_err(Error::Runtime)?;
-        Ok(cursor)
+        let offset = compute_next_offset(cursor)?;
+        blob.write_at(&buf, offset as u64 * ITEM_ALIGNMENT)
+            .await
+            .map_err(Error::Runtime)?;
+        trace!(blob = section, offset, len, "appended item");
+        Ok(offset)
     }
 
     /// Retrieves the first `prefix` bytes of an item from the `journal` at a given `section` and `offset`.
