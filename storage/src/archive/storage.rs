@@ -182,40 +182,41 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Checks if there exists a duplicate key in the provided section.
     ///
     /// If any records exist that are older than the oldest allowed section, they are pruned.
-    async fn check_existing(
+    async fn check(
         &mut self,
         section: u64,
         key: &[u8],
         index_key: &T::Key,
         oldest_allowed: u64,
     ) -> Result<(), Error> {
-        // Find head
+        // Find new head (first valid key)
         let head = match self.keys.get_mut(index_key) {
             Some(head) => head,
             None => return Ok(()),
         };
-
-        // Find new head, updating current head in-place to avoid map modification
         let found = loop {
             if head.section < oldest_allowed {
                 self.keys_pruned.inc();
                 self.keys_tracked.dec();
                 match head.next {
                     Some(ref mut next) => {
+                        // Update invalid head in-place
                         head.section = next.section;
                         head.offset = next.offset;
                         head.next = next.next.take();
                     }
                     None => {
+                        // No valid entries remaining
                         break false;
                     }
                 }
             } else {
+                // Found valid head
                 break true;
             }
         };
 
-        // If there is no valid head, remove key
+        // If there are no valid entries remaining (there is no head), remove key
         if !found {
             self.keys.remove(index_key);
             return Ok(());
@@ -284,8 +285,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Check for existing key in the same section (and clean up any useless
         // entries)
         let index_key = self.cfg.translator.transform(key);
-        self.check_existing(section, key, &index_key, oldest_allowed)
-            .await?;
+        self.check(section, key, &index_key, oldest_allowed).await?;
 
         // Store item in journal
         let buf_len = key
