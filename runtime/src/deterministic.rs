@@ -163,6 +163,22 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
+    fn stop(&self) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"stop");
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn stopped(&self) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"stopped");
+        *hash = hasher.finalize().to_vec();
+    }
+
     fn bind(&self, address: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
@@ -727,10 +743,12 @@ impl crate::Spawner for Context {
     }
 
     fn stop(&self) {
+        self.executor.auditor.stop();
         self.executor.stopper.write().unwrap().signal();
     }
 
     async fn stopped(&self) {
+        self.executor.auditor.stopped();
         let waiter = self.executor.stopper.read().unwrap().signaled();
         let _ = waiter.await;
     }
