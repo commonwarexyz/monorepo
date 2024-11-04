@@ -4,7 +4,7 @@ use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
 
 /// In the case there are multiple records with the same key, we store them in a linked list.
@@ -32,7 +32,7 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     keys: HashMap<T::Key, Index>,
 
     // Track the number of writes pending for a section to determine when to sync.
-    pending_writes: HashMap<u64, usize>,
+    pending_writes: BTreeMap<u64, usize>,
 
     keys_tracked: Gauge,
     keys_pruned: Counter,
@@ -136,7 +136,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             journal,
             oldest_allowed: None,
             keys,
-            pending_writes: HashMap::new(),
+            pending_writes: BTreeMap::new(),
             keys_tracked,
             keys_pruned,
             unnecessary_prefix_reads,
@@ -424,6 +424,15 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             // section twice. In `put`, we just want to make sure we don't return
             // anything that has already been pruned (`< oldest_allowed`).
             return Err(Error::AlreadyPrunedToSection(oldest_allowed));
+        }
+
+        // Remove all pending writes (no need to call `sync` as we are pruning)
+        loop {
+            let next = match self.pending_writes.first_key_value() {
+                Some((section, _)) if *section < min => *section,
+                _ => break,
+            };
+            self.pending_writes.remove(&next);
         }
 
         // Prune journal
