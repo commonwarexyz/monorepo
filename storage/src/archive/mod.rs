@@ -26,11 +26,11 @@
 //! # Uniqueness
 //!
 //! `Archive` assumes all keys stored are unique and only ever associated with a single `section`. If
-//! the same key is written to multiple sections, there is no guarantee which value will be returned. If the
-//! same key is written to the same section, the `Archive` will return an error. The `Archive` can be
-//! checked for the existence of a key using the `has` method.
+//! the same key is written to multiple sections, there is no guarantee which value will be returned (and no error
+//! will be returned when calling `put`). If the same key is written to the same section, the `Archive`
+//! will return an error. The `Archive` can be checked for the existence of a key using the `has` method.
 //!
-//! # Conflicts
+//! ## Conflicts
 //!
 //! Because a truncated representation of a key is only ever stored in memory, it is possible
 //! that two keys will be represented by the same truncated key. To resolve this case, the `Archive`
@@ -53,8 +53,11 @@
 //! If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
 //! uses a truncated representation that means keys on average have many conflicts, performance will degrade.
 //!
-//! All of this means that the memory overhead per key is `truncated(key).len() + 24` bytes (where `24` is
-//! the size of the `Index` struct).
+//! ## Memory Overhead
+//!
+//! The memory used to track each key is `~truncated(key).len() + 24` bytes (where `24` is the size of the `Index`
+//! struct). This means that an `Archive` employing a `Translator` that uses the first `8` bytes of a key will
+//! use `32` bytes per key in its in-memory index.
 //!
 //! # Sync
 //!

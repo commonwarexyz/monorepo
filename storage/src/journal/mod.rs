@@ -10,7 +10,7 @@
 //!
 //! Data stored in the journal is persisted in one of many `Blobs` within a caller-provided
 //! `partition`. The particular blob in which data is stored is identified by a `section`
-//! number. Within a blob, data is appended to the end of each blob in chunks of the following
+//! number. Within a section, data is appended to the end of each blob in chunks of the following
 //! format:
 //!
 //! ```text
@@ -26,6 +26,12 @@
 //! _To ensure data returned by `journal` is correct, a checksum (CRC32) is stored at the end of
 //! each item. If the checksum of the read data does not match the stored checksum, an error is
 //! returned._
+//!
+//! # Open Blobs
+//!
+//! `journal` uses 1 `Blob` per `section` to store data. All blobs in a caller-provided `partition` are
+//! kept open during the lifetime of the `journal`. If you wish to bound the number of open blobs, you
+//! should group data into fewer sections and/or prune unused sections.
 //!
 //! # Offset Alignment
 //!
