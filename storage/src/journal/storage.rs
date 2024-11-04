@@ -359,7 +359,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         blob.write_at(&buf, offset as u64 * ITEM_ALIGNMENT)
             .await
             .map_err(Error::Runtime)?;
-        trace!(blob = section, offset, len, "appended item");
+        trace!(blob = section, previous_len = len, offset, "appended item");
         Ok(offset)
     }
 

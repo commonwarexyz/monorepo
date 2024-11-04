@@ -139,7 +139,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
+    use commonware_runtime::{deterministic::Executor, Blob, Error as RError, Runner, Storage};
     use futures::{pin_mut, StreamExt};
     use prometheus_client::encoding::text::encode;
 
@@ -769,6 +769,110 @@ mod tests {
             assert_eq!(items[1].1, data_items[0].1);
             assert_eq!(items[2].0, data_items[1].0);
             assert_eq!(items[2].1, data_items[1].1);
+        });
+    }
+
+    // Define `MockBlob` that returns an offset length that should overflow
+    #[derive(Clone)]
+    struct MockBlob {
+        len: u64,
+    }
+
+    impl Blob for MockBlob {
+        async fn len(&self) -> Result<u64, commonware_runtime::Error> {
+            // Return a length that will cause offset overflow
+            Ok(self.len)
+        }
+
+        async fn read_at(&self, _buf: &mut [u8], _offset: u64) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn write_at(&self, _buf: &[u8], _offset: u64) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn truncate(&self, _len: u64) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn close(self) -> Result<(), RError> {
+            Ok(())
+        }
+    }
+
+    // Define `MockStorage` that returns `MockBlob`
+    #[derive(Clone)]
+    struct MockStorage {
+        len: u64,
+    }
+
+    impl Storage<MockBlob> for MockStorage {
+        async fn open(&self, _partition: &str, _name: &[u8]) -> Result<MockBlob, RError> {
+            Ok(MockBlob { len: self.len })
+        }
+
+        async fn remove(&self, _partition: &str, _name: Option<&[u8]>) -> Result<(), RError> {
+            Ok(())
+        }
+
+        async fn scan(&self, _partition: &str) -> Result<Vec<Vec<u8>>, RError> {
+            Ok(vec![])
+        }
+    }
+
+    // Define the `INDEX_ALIGNMENT` again explicitly to ensure we catch any accidental
+    // changes to the value
+    const INDEX_ALIGNMENT: u64 = 64;
+
+    #[test_traced]
+    fn test_journal_large_offset() {
+        // Initialize the deterministic runtime
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            // Create journal
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "partition".to_string(),
+            };
+            let runtime = MockStorage {
+                len: u32::MAX as u64 * INDEX_ALIGNMENT, // can store up to u32::Max at the last offset
+            };
+            let mut journal = Journal::init(runtime, cfg).await.unwrap();
+
+            // Append data
+            let data = Bytes::from("Test data");
+            let result = journal
+                .append(1, data)
+                .await
+                .expect("Failed to append data");
+            assert_eq!(result, u32::MAX);
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_offset_overflow() {
+        // Initialize the deterministic runtime
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            // Create journal
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "partition".to_string(),
+            };
+            let runtime = MockStorage {
+                len: u32::MAX as u64 * INDEX_ALIGNMENT + 1,
+            };
+            let mut journal = Journal::init(runtime, cfg).await.unwrap();
+
+            // Append data
+            let data = Bytes::from("Test data");
+            let result = journal.append(1, data).await;
+            assert!(matches!(result, Err(Error::OffsetOverflow)));
         });
     }
 }
