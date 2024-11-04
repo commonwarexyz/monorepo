@@ -191,10 +191,10 @@ pub struct Config<T: Translator> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::{Config as JournalConfig, Journal};
+    use crate::journal::{Config as JournalConfig, Error as JournalError, Journal};
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Runner};
+    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
     use prometheus_client::{encoding::text::encode, registry::Registry};
     use rand::Rng;
     use std::{
@@ -343,6 +343,88 @@ mod tests {
             assert!(buffer.contains("unnecessary_prefix_reads_total 0"));
             assert!(buffer.contains("unnecessary_item_reads_total 0"));
             assert!(buffer.contains("gets_total 0"));
+        });
+    }
+
+    #[test_traced]
+    fn test_archive_record_corruption() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context.clone(),
+                JournalConfig {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                key_len: 7,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            let section = 1u64;
+            let key = b"testkey";
+            let data = Bytes::from("testdata");
+
+            // Put the key-data pair
+            archive
+                .put(section, key, data.clone(), false)
+                .await
+                .expect("Failed to put data");
+
+            // Close the archive
+            archive.close().await.expect("Failed to close archive");
+
+            // Corrupt the value
+            let blob = context
+                .open("test_partition", &section.to_be_bytes())
+                .await
+                .unwrap();
+            let value_location = 4 + cfg.key_len as u64 + 4;
+            blob.write_at(b"testdaty", value_location).await.unwrap();
+            blob.close().await.unwrap();
+
+            // Initialize the archive again
+            let journal = Journal::init(
+                context,
+                JournalConfig {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+            let archive = Archive::init(
+                journal,
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    key_len: 7,
+                    translator: FourCap,
+                    pending_writes: 10,
+                    replay_concurrency: 4,
+                },
+            )
+            .await
+            .expect("Failed to initialize archive");
+
+            // Attempt to get the key
+            let result = archive.get(key).await;
+            assert!(matches!(
+                result,
+                Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
+            ));
         });
     }
 

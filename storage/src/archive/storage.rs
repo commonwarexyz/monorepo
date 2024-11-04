@@ -155,10 +155,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     fn parse_key(key_len: u32, mut data: Bytes) -> Result<Bytes, Error> {
-        if data.remaining() != key_len as usize + 4 {
+        let key_len = key_len as usize;
+        if data.remaining() != key_len + 4 {
             return Err(Error::RecordCorrupted);
         }
-        let key = data.copy_to_bytes(key_len as usize);
+        let key = data.copy_to_bytes(key_len);
         let checksum = data.get_u32();
         if checksum != crc32fast::hash(&key) {
             return Err(Error::RecordCorrupted);
