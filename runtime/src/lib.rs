@@ -682,6 +682,34 @@ mod tests {
         });
     }
 
+    fn test_shutdown(runner: impl Runner, context: impl Spawner) {
+        runner.start(async move {
+            // Spawn a task that waits for signal
+            let before = context.spawn("before", {
+                let context = context.clone();
+                async move {
+                    context.stopped().await;
+                }
+            });
+
+            // Signal the task
+            context.stop();
+
+            // Spawn a task after stop is called
+            let after = context.spawn("after", {
+                let context = context.clone();
+                async move {
+                    context.stopped().await;
+                }
+            });
+
+            // Ensure both tasks complete
+            let result = join!(before, after);
+            assert!(result.0.is_ok());
+            assert!(result.1.is_ok());
+        });
+    }
+
     #[test]
     fn test_deterministic_future() {
         let (runner, _, _) = deterministic::Executor::default();
@@ -779,6 +807,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_shutdown() {
+        let (executor, runtime, _) = deterministic::Executor::default();
+        test_shutdown(executor, runtime);
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
@@ -870,5 +904,11 @@ mod tests {
         let mut buffer = String::new();
         encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
         assert!(buffer.contains("open_blobs 0"));
+    }
+
+    #[test]
+    fn test_tokio_shutdown() {
+        let (executor, runtime) = tokio::Executor::default();
+        test_shutdown(executor, runtime);
     }
 }
