@@ -2,10 +2,15 @@ use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::hex;
-use futures::stream::{self, Stream, StreamExt};
+use futures::{
+    io::Cursor,
+    stream::{self, Stream, StreamExt},
+};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{btree_map::Entry, BTreeMap};
 use tracing::{debug, trace, warn};
+
+const ITEM_ALIGNMENT: u64 = 64;
 
 /// Implementation of an append-only log for storing arbitrary data.
 pub struct Journal<B: Blob, E: Storage<B>> {
@@ -19,6 +24,20 @@ pub struct Journal<B: Blob, E: Storage<B>> {
     tracked: Gauge,
     synced: Counter,
     pruned: Counter,
+}
+
+fn compute_next_offset(offset: u64) -> Result<u32, Error> {
+    let overage = offset % ITEM_ALIGNMENT;
+    let offset = offset + (ITEM_ALIGNMENT - overage);
+    let offset = offset / ITEM_ALIGNMENT;
+    let aligned_offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
+    Ok(aligned_offset)
+}
+
+fn compute_next_cursor(len: u64) -> Result<u64, Error> {
+    let overage = len % ITEM_ALIGNMENT;
+    let len = len + (ITEM_ALIGNMENT - overage);
+    Ok(len)
 }
 
 impl<B: Blob, E: Storage<B>> Journal<B, E> {
@@ -86,8 +105,9 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Reads an item from the blob at the given offset.
-    async fn read(blob: &B, offset: u64) -> Result<(u64, u32, Bytes), Error> {
+    async fn read(blob: &B, offset: u32) -> Result<(u32, u32, Bytes), Error> {
         // Read item size
+        let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut size = [0u8; 4];
         blob.read_at(&mut size, offset)
             .await
@@ -116,8 +136,11 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         }
         let offset = offset.checked_add(4).ok_or(Error::OffsetOverflow)?;
 
+        // Compute next offset
+        let aligned_offset = compute_next_offset(offset)?;
+
         // Return item
-        Ok((offset, size, Bytes::from(item)))
+        Ok((aligned_offset, size, Bytes::from(item)))
     }
 
     /// Read `prefix` bytes from the blob at the given offset.
@@ -127,8 +150,9 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// This method bypasses the checksum verification and the caller is responsible for ensuring
     /// the integrity of any data read. If `exact` exceeds the size of an item (and runs over the blob
     /// length), it will lead to unintentional truncation of data.
-    async fn read_prefix(blob: &B, offset: u64, prefix: u32) -> Result<(u64, u32, Bytes), Error> {
+    async fn read_prefix(blob: &B, offset: u32, prefix: u32) -> Result<(u32, u32, Bytes), Error> {
         // Read item size and first `prefix` bytes
+        let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut buf = vec![0u8; 4 + prefix as usize];
         blob.read_at(&mut buf, offset)
             .await
@@ -151,7 +175,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .ok_or(Error::OffsetOverflow)?
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?;
-        Ok((offset, size, item_prefix))
+        let aligned_offset = compute_next_offset(offset)?;
+
+        // Return item
+        Ok((aligned_offset, size, item_prefix))
     }
 
     /// Read an item from the blob assuming it is of `exact` length. This method verifies the
@@ -162,8 +189,9 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// This method assumes the caller knows the exact size of the item (either because
     /// they store fixed-size items or they previously indexed the size). If an incorrect
     /// `exact` is provided, the method will likely return an error (as integrity is verified).
-    async fn read_exact(blob: &B, offset: u64, exact: u32) -> Result<(u64, Bytes), Error> {
+    async fn read_exact(blob: &B, offset: u32, exact: u32) -> Result<(u32, Bytes), Error> {
         // Read all of the item into one buffer
+        let offset = offset as u64 * ITEM_ALIGNMENT;
         let mut buf = vec![0u8; 4 + exact as usize + 4];
         blob.read_at(&mut buf, offset)
             .await
@@ -185,7 +213,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
 
-        // Return item
+        // Compute next offset
         let offset = offset
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?
@@ -193,7 +221,10 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .ok_or(Error::OffsetOverflow)?
             .checked_add(4)
             .ok_or(Error::OffsetOverflow)?;
-        Ok((offset, item))
+        let aligned_offset = compute_next_offset(offset)?;
+
+        // Return item
+        Ok((aligned_offset, item))
     }
 
     /// Returns an unordered stream of all items in the journal.
@@ -223,7 +254,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         &mut self,
         concurrency: usize,
         prefix: Option<u32>,
-    ) -> Result<impl Stream<Item = Result<(u64, u64, u32, Bytes), Error>> + '_, Error> {
+    ) -> Result<impl Stream<Item = Result<(u64, u32, u32, Bytes), Error>> + '_, Error> {
         // Collect all blobs to replay
         let mut blobs = Vec::with_capacity(self.blobs.len());
         for (section, blob) in self.blobs.iter() {
@@ -291,7 +322,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     }
 
     /// Appends an item to the `journal` in a given `section`.
-    pub async fn append(&mut self, section: u64, item: Bytes) -> Result<u64, Error> {
+    pub async fn append(&mut self, section: u64, item: Bytes) -> Result<u32, Error> {
         // Check last pruned
         self.prune_guard(section, false)?;
 
@@ -338,7 +369,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     pub async fn get_prefix(
         &self,
         section: u64,
-        offset: u64,
+        offset: u32,
         prefix: u32,
     ) -> Result<Option<Bytes>, Error> {
         self.prune_guard(section, false)?;
@@ -358,7 +389,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     pub async fn get(
         &self,
         section: u64,
-        offset: u64,
+        offset: u32,
         exact: Option<u32>,
     ) -> Result<Option<Bytes>, Error> {
         self.prune_guard(section, false)?;

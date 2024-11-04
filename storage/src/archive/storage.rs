@@ -9,11 +9,13 @@ use tracing::debug;
 
 /// In the case there are multiple records with the same key, we store them in a linked list.
 ///
-/// This is the most memory-efficient way to maintain a multi-map.
+/// This is the most memory-efficient way to maintain a multi-map (24 bytes per entry, not including
+/// the key used to lookup a given index).
 struct Index {
     section: u64,
-    offset: u64,
+    offset: u32,
     len: u32,
+
     next: Option<Box<Index>>,
 }
 
