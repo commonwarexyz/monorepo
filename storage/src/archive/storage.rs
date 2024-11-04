@@ -34,7 +34,8 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
 
     keys_tracked: Gauge,
     keys_pruned: Counter,
-    unnecessary_reads: Counter,
+    unnecessary_prefix_reads: Counter,
+    unnecessary_item_reads: Counter,
     gets: Counter,
     has: Counter,
     syncs: Counter,
@@ -91,7 +92,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Initialize metrics
         let keys_tracked = Gauge::default();
         let keys_pruned = Counter::default();
-        let unnecessary_reads = Counter::default();
+        let unnecessary_prefix_reads = Counter::default();
+        let unnecessary_item_reads = Counter::default();
         let gets = Counter::default();
         let has = Counter::default();
         let syncs = Counter::default();
@@ -104,9 +106,14 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             );
             registry.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
             registry.register(
-                "unnecessary_reads",
-                "Number of unnecessary reads performed by the archive",
-                unnecessary_reads.clone(),
+                "unnecessary_prefix_reads",
+                "Number of unnecessary prefix reads performed by the archive",
+                unnecessary_prefix_reads.clone(),
+            );
+            registry.register(
+                "unnecessary_item_reads",
+                "Number of unnecessary item reads performed by the archive",
+                unnecessary_item_reads.clone(),
             );
             registry.register(
                 "gets",
@@ -130,7 +137,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             pending_writes: HashMap::new(),
             keys_tracked,
             keys_pruned,
-            unnecessary_reads,
+            unnecessary_prefix_reads,
+            unnecessary_item_reads,
             gets,
             has,
             syncs,
@@ -218,7 +226,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 if key == item_key {
                     return Err(Error::DuplicateKey);
                 }
-                self.unnecessary_reads.inc();
+                self.unnecessary_prefix_reads.inc();
             }
 
             // Set next and continue
@@ -349,7 +357,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 if disk_key == key {
                     return Ok(Some(value));
                 }
-                self.unnecessary_reads.inc();
+                self.unnecessary_item_reads.inc();
             }
 
             // Move to next index
@@ -389,7 +397,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 if key == item_key {
                     return Ok(true);
                 }
-                self.unnecessary_reads.inc();
+                self.unnecessary_prefix_reads.inc();
             }
 
             // Move to next index
