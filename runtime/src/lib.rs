@@ -707,7 +707,7 @@ mod tests {
             let before = context.spawn("before", {
                 let context = context.clone();
                 async move {
-                    context.stopped().await;
+                    let _ = context.stopped().await;
                 }
             });
 
