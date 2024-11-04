@@ -45,7 +45,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -264,7 +264,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: usize) {
+    fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -276,7 +276,7 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn write_at(&self, partition: &str, name: &[u8], buf: &[u8], offset: usize) {
+    fn write_at(&self, partition: &str, name: &[u8], buf: &[u8], offset: u64) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
@@ -285,6 +285,17 @@ impl Auditor {
         hasher.update(name);
         hasher.update(buf);
         hasher.update(offset.to_be_bytes());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn truncate(&self, partition: &str, name: &[u8], size: u64) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"truncate");
+        hasher.update(partition.as_bytes());
+        hasher.update(name);
+        hasher.update(size.to_be_bytes());
         *hash = hasher.finalize().to_vec();
     }
 
@@ -1032,7 +1043,7 @@ pub struct Blob {
     // For content to be updated for future opens,
     // it must be synced back to the partition (occurs on
     // `sync` and `close`).
-    content: Vec<u8>,
+    content: Arc<RwLock<Vec<u8>>>,
 }
 
 impl Blob {
@@ -1040,17 +1051,28 @@ impl Blob {
         executor.metrics.open_blobs.inc();
         Self {
             executor,
-
             partition,
             name: name.into(),
+            content: Arc::new(RwLock::new(content)),
+        }
+    }
+}
 
-            content,
+impl Clone for Blob {
+    fn clone(&self) -> Self {
+        // We implement `Clone` manually to ensure the `open_blobs` gauge is updated.
+        self.executor.metrics.open_blobs.inc();
+        Self {
+            executor: self.executor.clone(),
+            partition: self.partition.clone(),
+            name: self.name.clone(),
+            content: self.content.clone(),
         }
     }
 }
 
 impl crate::Storage<Blob> for Context {
-    async fn open(&mut self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         self.executor.auditor.open(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
         let partition_entry = partitions
@@ -1065,7 +1087,7 @@ impl crate::Storage<Blob> for Context {
         ))
     }
 
-    async fn remove(&mut self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
         self.executor.auditor.remove(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
         match name {
@@ -1102,39 +1124,43 @@ impl crate::Storage<Blob> for Context {
 }
 
 impl crate::Blob for Blob {
-    async fn len(&self) -> Result<usize, Error> {
+    async fn len(&self) -> Result<u64, Error> {
         self.executor.auditor.len(&self.partition, &self.name);
-        Ok(self.content.len())
+        let content = self.content.read().unwrap();
+        Ok(content.len() as u64)
     }
 
-    async fn read_at(&mut self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         let buf_len = buf.len();
         self.executor
             .auditor
             .read_at(&self.partition, &self.name, buf_len, offset);
-        let content_len = self.content.len();
-        if offset >= content_len {
-            return Ok(0);
+        let offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
+        let content = self.content.read().unwrap();
+        let content_len = content.len();
+        if offset + buf_len > content_len {
+            return Err(Error::BlobInsufficientLength);
         }
-        let len = buf_len.min(content_len - offset);
-        buf[..len].copy_from_slice(&self.content[offset..offset + len]);
+        buf.copy_from_slice(&content[offset..offset + buf_len]);
         self.executor.metrics.storage_reads.inc();
         self.executor
             .metrics
             .storage_read_bandwidth
-            .inc_by(len as u64);
-        Ok(len)
+            .inc_by(buf_len as u64);
+        Ok(())
     }
 
-    async fn write_at(&mut self, buf: &[u8], offset: usize) -> Result<(), Error> {
+    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
         self.executor
             .auditor
             .write_at(&self.partition, &self.name, buf, offset);
+        let offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
+        let mut content = self.content.write().unwrap();
         let required = offset + buf.len();
-        if required > self.content.len() {
-            self.content.resize(required, 0);
+        if required > content.len() {
+            content.resize(required, 0);
         }
-        self.content[offset..offset + buf.len()].copy_from_slice(buf);
+        content[offset..offset + buf.len()].copy_from_slice(buf);
         self.executor.metrics.storage_writes.inc();
         self.executor
             .metrics
@@ -1143,26 +1169,38 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
-    async fn truncate(&mut self, len: usize) -> Result<(), Error> {
-        self.content.truncate(len);
+    async fn truncate(&self, len: u64) -> Result<(), Error> {
+        self.executor
+            .auditor
+            .truncate(&self.partition, &self.name, len);
+        let len = len.try_into().map_err(|_| Error::OffsetOverflow)?;
+        let mut content = self.content.write().unwrap();
+        content.truncate(len);
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    async fn sync(&self) -> Result<(), Error> {
+        // Create new content for partition
+        //
+        // Doing this first means we don't need to hold both the content
+        // lock and the partition lock at the same time.
+        let new_content = self.content.read().unwrap().clone();
+
+        // Update partition content
         self.executor.auditor.sync(&self.partition, &self.name);
         let mut partitions = self.executor.partitions.lock().unwrap();
         let partition = partitions
             .get_mut(&self.partition)
             .ok_or(Error::PartitionMissing(self.partition.clone()))?;
-        let blob = partition
+        let content = partition
             .blobs
             .get_mut(&self.name)
             .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
-        blob.clone_from(&self.content);
+        *content = new_content;
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<(), Error> {
+    async fn close(self) -> Result<(), Error> {
         self.executor.auditor.close(&self.partition, &self.name);
         self.sync().await?;
         Ok(())
@@ -1178,7 +1216,8 @@ impl Drop for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::run_tasks, Runner};
+    use crate::{utils::run_tasks, Runner, Spawner};
+    use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
@@ -1203,7 +1242,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced("TRACE")]
     fn test_different_seeds_different_order() {
         let output1 = run_with_seed(12345);
         let output2 = run_with_seed(54321);
@@ -1273,5 +1312,20 @@ mod tests {
             ..Config::default()
         };
         let (_, _, _) = Executor::init(cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "root task cannot be spawned")]
+    fn test_spawn_root_task() {
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            let _ = context
+                .spawn(ROOT_TASK, async move {
+                    // This task should never run
+                    panic!("root task should not run");
+                })
+                .await;
+            panic!("root task should not be spawned");
+        });
     }
 }

@@ -51,6 +51,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     runtime::{Builder, Runtime},
+    sync::Mutex as AsyncMutex,
     task_local,
     time::timeout,
 };
@@ -235,6 +236,7 @@ pub struct Executor {
     cfg: Config,
     metrics: Arc<Metrics>,
     runtime: Runtime,
+    fs: AsyncMutex<()>,
 }
 
 impl Executor {
@@ -250,6 +252,7 @@ impl Executor {
             cfg,
             metrics,
             runtime,
+            fs: AsyncMutex::new(()),
         });
         (
             Runner {
@@ -501,23 +504,51 @@ pub struct Blob {
     partition: String,
     name: Vec<u8>,
 
-    file: fs::File,
+    // Files must be seeked prior to any read or write operation and are thus
+    // not safe to concurrently interact with. If we switched to mmaping files
+    // we could remove this lock.
+    //
+    // We also track the virtual file size because metadata isn't updated until
+    // the file is synced (not to mention it is a lot less fs calls).
+    file: Arc<AsyncMutex<(fs::File, u64)>>,
 }
 
 impl Blob {
-    fn new(metrics: Arc<Metrics>, partition: String, name: &[u8], file: fs::File) -> Self {
+    fn new(
+        metrics: Arc<Metrics>,
+        partition: String,
+        name: &[u8],
+        file: fs::File,
+        len: u64,
+    ) -> Self {
         metrics.open_blobs.inc();
         Self {
             metrics,
             partition,
             name: name.into(),
-            file,
+            file: Arc::new(AsyncMutex::new((file, len))),
+        }
+    }
+}
+
+impl Clone for Blob {
+    fn clone(&self) -> Self {
+        // We implement `Clone` manually to ensure the `open_blobs` gauge is updated.
+        self.metrics.open_blobs.inc();
+        Self {
+            metrics: self.metrics.clone(),
+            partition: self.partition.clone(),
+            name: self.name.clone(),
+            file: self.file.clone(),
         }
     }
 }
 
 impl crate::Storage<Blob> for Context {
-    async fn open(&mut self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+        // Acquire the filesystem lock
+        let _guard = self.executor.fs.lock().await;
+
         // Construct the full path
         let path = self
             .executor
@@ -548,16 +579,24 @@ impl crate::Storage<Blob> for Context {
         // Set the maximum buffer size
         file.set_max_buf_size(self.executor.cfg.maximum_buffer_size);
 
+        // Get the file length
+        let len = file.metadata().await.map_err(|_| Error::ReadFailed)?.len();
+
         // Construct the blob
         Ok(Blob::new(
             self.executor.metrics.clone(),
             partition.into(),
             name,
             file,
+            len,
         ))
     }
 
-    async fn remove(&mut self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        // Acquire the filesystem lock
+        let _guard = self.executor.fs.lock().await;
+
+        // Remove all related files
         let path = self.executor.cfg.storage_directory.join(partition);
         if let Some(name) = name {
             let blob_path = path.join(hex(name));
@@ -573,6 +612,10 @@ impl crate::Storage<Blob> for Context {
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        // Acquire the filesystem lock
+        let _guard = self.executor.fs.lock().await;
+
+        // Scan the partition directory
         let path = self.executor.cfg.storage_directory.join(partition);
         let mut entries = fs::read_dir(path)
             .await
@@ -593,54 +636,82 @@ impl crate::Storage<Blob> for Context {
 }
 
 impl crate::Blob for Blob {
-    async fn len(&self) -> Result<usize, Error> {
-        let metadata = self.file.metadata().await.map_err(|_| Error::ReadFailed)?;
-        let len = metadata.len() as usize;
+    async fn len(&self) -> Result<u64, Error> {
+        let (_, len) = *self.file.lock().await;
         Ok(len)
     }
 
-    async fn read_at(&mut self, buf: &mut [u8], offset: usize) -> Result<usize, Error> {
-        self.file
-            .seek(SeekFrom::Start(offset as u64))
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        // Ensure the read is within bounds
+        let mut file = self.file.lock().await;
+        if offset + buf.len() as u64 > file.1 {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        // Perform the read
+        file.0
+            .seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::ReadFailed)?;
-        let n = self.file.read(buf).await.map_err(|_| Error::ReadFailed)?;
+        file.0
+            .read_exact(buf)
+            .await
+            .map_err(|_| Error::ReadFailed)?;
         self.metrics.storage_reads.inc();
-        self.metrics.storage_read_bytes.inc_by(n as u64);
-        Ok(n)
+        self.metrics.storage_read_bytes.inc_by(buf.len() as u64);
+        Ok(())
     }
 
-    async fn write_at(&mut self, buf: &[u8], offset: usize) -> Result<(), Error> {
-        self.file
-            .seek(SeekFrom::Start(offset as u64))
+    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
+        // Perform the write
+        let mut file = self.file.lock().await;
+        file.0
+            .seek(SeekFrom::Start(offset))
             .await
             .map_err(|_| Error::WriteFailed)?;
-        self.file
+        file.0
             .write_all(buf)
             .await
             .map_err(|_| Error::WriteFailed)?;
+
+        // Update the virtual file size
+        let max_len = offset + buf.len() as u64;
+        if max_len > file.1 {
+            file.1 = max_len;
+        }
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(buf.len() as u64);
         Ok(())
     }
 
-    async fn truncate(&mut self, len: usize) -> Result<(), Error> {
-        self.file
-            .set_len(len as u64)
+    async fn truncate(&self, len: u64) -> Result<(), Error> {
+        // Perform the truncate
+        let mut file = self.file.lock().await;
+        file.0
+            .set_len(len)
             .await
-            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))
+            .map_err(|_| Error::BlobTruncateFailed(self.partition.clone(), hex(&self.name)))?;
+
+        // Update the virtual file size
+        file.1 = len;
+        Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.file
+    async fn sync(&self) -> Result<(), Error> {
+        let file = self.file.lock().await;
+        file.0
             .sync_all()
             .await
             .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))
     }
 
-    async fn close(&mut self) -> Result<(), Error> {
-        self.sync().await?;
-        self.file
+    async fn close(self) -> Result<(), Error> {
+        let mut file = self.file.lock().await;
+        file.0
+            .sync_all()
+            .await
+            .map_err(|_| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name)))?;
+        file.0
             .shutdown()
             .await
             .map_err(|_| Error::BlobCloseFailed(self.partition.clone(), hex(&self.name)))
@@ -668,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_codec_invalid_frame_len() {
-        // Initalize runtime
+        // Initialize runtime
         let (runner, _) = Executor::default();
         runner.start(async move {
             // Create a stream

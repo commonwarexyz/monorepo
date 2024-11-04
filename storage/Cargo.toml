@@ -17,9 +17,28 @@ commonware-utils = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
-crc32fast = "1.4.2"
 futures = { workspace = true }
 futures-util = { workspace = true }
+prometheus-client = { workspace = true }
+zstd = { workspace = true }
+crc32fast = "1.4.2"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+rand = { workspace = true }
+criterion = { workspace = true } 
+
+[[bench]]
+name="hashmap_iteration"
+harness = false
+path = "src/archive/benches/hashmap_iteration.rs"
+
+[[bench]]
+name="hashmap_load"
+harness = false
+path = "src/archive/benches/hashmap_load.rs"
+
+[[bench]]
+name="hashmap_load_fixed"
+harness = false
+path = "src/archive/benches/hashmap_load_fixed.rs"

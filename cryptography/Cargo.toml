@@ -22,8 +22,8 @@ zeroize = "1.5.7"
 rayon = "1.10"
 
 [dev-dependencies]
+criterion = { workspace = true } 
 proptest = "1"
-criterion = "0.5.1"
 
 [build-dependencies]
 prost-build = { workspace = true } 

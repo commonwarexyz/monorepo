@@ -23,3 +23,6 @@ tokio-util = { version = "0.7", features = ["codec"] }
 sha2 = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

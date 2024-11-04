@@ -472,6 +472,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -483,11 +484,15 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "crc32fast",
+ "criterion",
  "futures",
  "futures-util",
+ "prometheus-client",
+ "rand",
  "thiserror",
  "tracing",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]
