@@ -1,14 +1,15 @@
 //! A write-once key-value store optimized for throughput and low-latency reads.
 //!
-//! `archive` is a key-value store meant for workloads where data at a given key
-//! is written once and read many times. Data is stored in `journal` (an append-only
+//! `Archive` is a key-value store designed for workloads where data at a given key
+//! is written once and read many times. Data is stored in `Journal` (an append-only
 //! log) and truncated representations of keys are indexed in memory (using a caller-provided
-//! `Translator`) to enable single read operation lookups over the entire store. Notably, this
-//! design does not require compaction nor on-disk indexes.
+//! `Translator`) to enable "single read lookups" over the entire store. Notably, `Archive`
+//! does not make use of compaction nor on-disk indexes (and thus has no read nor write
+//! amplification during normal operation).
 //!
 //! # Format
 //!
-//! The `Archive` stores data in the following format:
+//! `Archive` stores data in the following format:
 //!
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
@@ -21,21 +22,22 @@
 //! ```
 //!
 //! _To ensure keys fetched using `Journal::get_prefix` are correctly read, the key is checksummed
-//! within the `Journal` entry (although the entire entry is also checksummed)._
+//! within a `Journal` entry (although the entire entry is also checksummed by `Journal`)._
 //!
 //! # Uniqueness
 //!
-//! `Archive` assumes all keys stored are unique and only ever associated with a single `section`. If
-//! the same key is written to multiple sections, there is no guarantee which value will be returned (and no error
-//! will be returned when calling `put`). If the same key is written to the same section, the `Archive`
-//! will return an error. The `Archive` can be checked for the existence of a key using the `has` method.
+//! `Archive` assumes all stored keys are unique and only ever associated with a single `section`. If
+//! the same key is written to multiple `sections`, there is no guarantee which value will be returned
+//! (and no error will be returned when calling `put`). If the same key is written to the same section,
+//! `Archive` will return an error. `Archive` can be checked for the existence of a key (across any `section`)
+//! using the `has` method.
 //!
 //! ## Conflicts
 //!
-//! Because a truncated representation of a key is only ever stored in memory, it is possible
-//! that two keys will be represented by the same truncated key. To resolve this case, the `Archive`
+//! Because a truncated representation of a key is only ever stored in memory, it is possible (and expected)
+//! that two keys will eventually be represented by the same truncated key. To handle this case, `Archive`
 //! must check the persisted form of all conflicting keys to ensure data from the correct key is returned.
-//! To handle this requirement, the `Archive` keeps a linked list of all keys with the same truncated prefix:
+//! To support efficient checks, `Archive` keeps a linked list of all keys with the same truncated prefix:
 //!
 //! ```rust
 //! struct Index {
@@ -47,7 +49,7 @@
 //! }
 //! ```
 //!
-//! _To avoid random heap reads in the common case, the in-memory index directly stores the first item
+//! _To avoid random memory reads in the common case, the in-memory index directly stores the first item
 //! in the linked list instead of a pointer to the first item._
 //!
 //! If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
@@ -57,29 +59,31 @@
 //!
 //! The memory used to track each key is `~truncated(key).len() + 24` bytes (where `24` is the size of the `Index`
 //! struct). This means that an `Archive` employing a `Translator` that uses the first `8` bytes of a key will
-//! use `32` bytes per key in its in-memory index.
+//! use `32` bytes to index each key.
 //!
 //! # Sync
 //!
-//! The `Archive` flushes writes in `section` to `Storage` after `pending_writes`. If the caller
+//! `Archive` flushes writes in a given `section` to `Storage` after `pending_writes`. If the caller
 //! requires durability on a particular write, they can `force_sync` when calling the `put` method.
 //!
 //! # Pruning
 //!
-//! The `Archive` supports pruning up to a minimum `section` using the `prune` method. After `prune` is called
-//! on a `section`, all interaction with a section less than the pruned section will return an error.
+//! `Archive` supports pruning up to a minimum `section` using the `prune` method. After `prune` is called
+//! on a `section`, all interaction with a `section` less than the pruned `section` will return an error.
 //!
 //! ## Lazy Index Cleanup
 //!
-//! To avoid either a full iteration of the in-memory index, storing an additional in-memory index per `section`,
-//! or replaying a `section` of the journal, the `Archive` lazily cleans up the in-memory index after pruning. When
-//! a key is stored that overlaps with a pruned key, the pruned key is removed from the in-memory index.
+//! Instead of performing a full iteration of the in-memory index, storing an additional in-memory index
+//! per `section`, or replaying a `section` of `Journal`, `Archive` lazily cleans up the in-memory index
+//! after pruning. When a new key is stored that overlaps (same truncated value) with a pruned key, the
+//! pruned key is removed from the in-memory index.
 //!
 //! # Single Operation Reads
 //!
-//! To enable single operation reads, the `Archive` caches the length of each item in its in-memory index. While
-//! it increases the footprint per key stored, the benefit of only ever performing a single operation to read a key (when
-//! there are no conflicts) is worth the tradeoff.
+//! To enable single operation reads (i.e. reading all of an item in a single call to `Blob`), `Archive`
+//! caches the length of each item in its in-memory index. While it increases the footprint per key stored, the
+//! benefit of only ever performing a single operation to read a key (when there are no conflicts) is worth the
+//! tradeoff.
 //!
 //! # Example
 //!
@@ -142,11 +146,11 @@ pub enum Error {
     InvalidKeyLength,
 }
 
-/// Translate keys into an internal representation used in the `Archive`'s
+/// Translate keys into an internal representation used in `Archive`'s
 /// in-memory index.
 ///
 /// If invoking `transform` on keys results in many conflicts, the performance
-/// of the `Archive` will degrade substantially.
+/// of `Archive` will degrade substantially.
 pub trait Translator: Clone {
     type Key: Eq + Hash + Send + Sync + Clone;
 
@@ -154,7 +158,7 @@ pub trait Translator: Clone {
     fn transform(&self, key: &[u8]) -> Self::Key;
 }
 
-/// Configuration for `archive` storage.
+/// Configuration for `Archive` storage.
 #[derive(Clone)]
 pub struct Config<T: Translator> {
     /// Registry for metrics.
@@ -162,14 +166,14 @@ pub struct Config<T: Translator> {
 
     /// Length of each key in bytes.
     ///
-    /// The `Archive` assumes that all keys are of the same length. This
+    /// `Archive` assumes that all keys are of the same length. This
     /// trick is used to store data more efficiently on disk and to substantially
     /// reduce the number of IO during initialization.
     pub key_len: u32,
 
     /// Logic to transform keys into their index representation.
     ///
-    /// The `Archive` assumes that all internal keys are spread uniformly across the key space.
+    /// `Archive` assumes that all internal keys are spread uniformly across the key space.
     /// If that is not the case, lookups may be O(n) instead of O(1).
     pub translator: T,
 
