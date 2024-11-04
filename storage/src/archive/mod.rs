@@ -144,6 +144,8 @@ pub enum Error {
     AlreadyPrunedToSection(u64),
     #[error("invalid key length")]
     InvalidKeyLength,
+    #[error("record too large")]
+    RecordTooLarge,
 }
 
 /// Translate keys into an internal representation used in `Archive`'s

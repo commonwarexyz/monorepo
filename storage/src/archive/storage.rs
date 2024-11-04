@@ -147,6 +147,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         })
     }
 
+    fn verify_key(&self, key: &[u8]) -> Result<(), Error> {
+        if key.len() != self.cfg.key_len as usize {
+            return Err(Error::InvalidKeyLength);
+        }
+        Ok(())
+    }
+
     fn parse_key(key_len: u32, mut data: Bytes) -> Result<Bytes, Error> {
         if data.remaining() != key_len as usize + 4 {
             return Err(Error::RecordCorrupted);
@@ -266,9 +273,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         force_sync: bool,
     ) -> Result<(), Error> {
         // Check key length
-        if key.len() != self.cfg.key_len as usize {
-            return Err(Error::InvalidKeyLength);
-        }
+        self.verify_key(key)?;
 
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
@@ -283,7 +288,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             .await?;
 
         // Store item in journal
-        let buf_len = key.len() + 4 + data.len();
+        let buf_len = key
+            .len()
+            .checked_add(4)
+            .and_then(|len| len.checked_add(data.len()))
+            .ok_or(Error::RecordTooLarge)?;
         let mut buf = Vec::with_capacity(buf_len);
         buf.put(key);
         // We store the checksum of the key because we employ partial reads from
@@ -331,9 +340,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Retrieve a value from the archive.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Check key length
-        if key.len() != self.cfg.key_len as usize {
-            return Err(Error::InvalidKeyLength);
-        }
+        self.verify_key(key)?;
 
         // Update metrics
         self.gets.inc();
@@ -371,9 +378,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Check if a key exists in the archive.
     pub async fn has(&self, key: &[u8]) -> Result<bool, Error> {
         // Check key length
-        if key.len() != self.cfg.key_len as usize {
-            return Err(Error::InvalidKeyLength);
-        }
+        self.verify_key(key)?;
 
         // Update metrics
         self.has.inc();

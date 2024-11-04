@@ -23,6 +23,8 @@ pub struct Journal<B: Blob, E: Storage<B>> {
     pruned: Counter,
 }
 
+/// Computes the next offset for an item using the underlying `u64`
+/// offset of `Blob`.
 fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
     let overage = offset % ITEM_ALIGNMENT;
     if overage != 0 {
