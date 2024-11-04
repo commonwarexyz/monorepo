@@ -22,7 +22,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{utils::Signaler, Clock, Error, Handle};
+use crate::{utils::Signaler, Clock, Error, Handle, Waiter};
 use bytes::Bytes;
 use commonware_utils::hex;
 use futures::{
@@ -450,7 +450,7 @@ pub struct Executor {
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
     stopper: Mutex<Signaler>,
-    stopper_signal: Shared<oneshot::Receiver<()>>,
+    stopper_waiter: Shared<oneshot::Receiver<()>>,
 }
 
 impl Executor {
@@ -468,7 +468,7 @@ impl Executor {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        let (stopper, stopper_signal) = Signaler::new();
+        let (stopper, stopper_waiter) = Signaler::new();
         let executor = Arc::new(Self {
             cycle: cfg.cycle,
             deadline,
@@ -484,7 +484,7 @@ impl Executor {
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
             stopper: Mutex::new(stopper),
-            stopper_signal,
+            stopper_waiter,
         });
         (
             Runner {
@@ -751,10 +751,9 @@ impl crate::Spawner for Context {
         self.executor.stopper.lock().unwrap().signal();
     }
 
-    async fn stopped(&self) {
+    fn stopped(&self) -> Waiter {
         self.executor.auditor.stopped();
-        let waiter = self.executor.stopper_signal.clone();
-        let _ = waiter.await;
+        self.executor.stopper_waiter.clone()
     }
 }
 

@@ -158,20 +158,69 @@ where
 ///
 /// # Example
 ///
+/// ## Basic Usage
+///
 /// ```rust
 /// use commonware_runtime::{Spawner, Runner, Signaler, deterministic::Executor};
 ///
 /// let (executor, _, _) = Executor::default();
 /// executor.start(async move {
 ///     // Setup signaler and get future
-///     let mut signaler = Signaler::new();
-///     let receiver = signaler.signaled();
+///     let (mut signaler, waiter) = Signaler::new();
 ///
 ///     // Signal shutdown
 ///     signaler.signal();
 ///
 ///     // Wait for shutdown in task
-///     receiver.await.expect("shutdown signaled");
+///     waiter.await.expect("shutdown signaled");
+/// });
+/// ```
+///
+/// ## Advanced Usage
+///
+/// While `Futures::Shared` is efficient, there is still meaningful overhead
+/// to cloning it excessively (i.e. in each iteration of a loop). To avoid
+/// a performance regression from introducing `Signaler`, it is recommended
+/// to pin the "waiter" to the stack and to wait on a reference to it.
+///
+/// ```rust
+/// use commonware_macros::select;
+/// use commonware_runtime::{Clock, Spawner, Runner, Signaler, deterministic::Executor};
+/// use futures::channel::oneshot;
+/// use std::{pin::pin, time::Duration};
+///
+/// let (executor, context, _) = Executor::default();
+/// executor.start(async move {
+///     // Setup signaler and get future
+///     let (mut signaler, mut waiter) = Signaler::new();
+///
+///     // Loop on the waiter until signal is received
+///     let (tx, rx) = oneshot::channel();
+///     context.spawn("waiter", {
+///         let context = context.clone();
+///         async move {
+///             // Pin the future to the stack and wait on a reference
+///             // to it instead of cloning during each loop iteration.
+///             let mut waiter = pin!(waiter);
+///
+///             // Wait for signal
+///             loop {
+///                 select! {
+///                      _ = &mut waiter => {
+///                          break;
+///                      },   
+///                      _ = context.sleep(Duration::from_secs(1)) => {},
+///                 };
+///             }
+///             let _ = tx.send(());
+///         }
+///     });
+///
+///     // Send signal
+///     signaler.signal();
+///
+///     // Wait for task
+///     rx.await.expect("shutdown signaled");
 /// });
 /// ```
 pub struct Signaler {
@@ -181,12 +230,7 @@ pub struct Signaler {
 impl Signaler {
     /// Create a new `Signaler`.
     ///
-    /// Get a future that resolves when the `Signaler` is signaled.
-    ///
-    /// Although this function is safe to call multiple times (or in a loop),
-    /// it incurs some performance overhead to do so. It is instead recommended
-    /// to call this function once and to wait on the returned future (using a
-    /// lighter weight mechanism in each iteration of a loop).
+    /// Returns a `Signaler` and a future that will resolve when the `Signaler` is signaled.
     pub fn new() -> (Self, Shared<oneshot::Receiver<()>>) {
         let (tx, rx) = oneshot::channel();
         (Self { tx: Some(tx) }, rx.shared())

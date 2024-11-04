@@ -16,6 +16,7 @@ pub mod mocks;
 pub mod tokio;
 
 mod utils;
+use futures::{channel::oneshot, future::Shared};
 pub use utils::{reschedule, Handle, Signaler};
 
 use bytes::Bytes;
@@ -74,6 +75,8 @@ pub trait Runner {
         F::Output: Send + 'static;
 }
 
+pub type Waiter = Shared<oneshot::Receiver<()>>;
+
 /// Interface that any task scheduler must implement to spawn
 /// sub-tasks in a given root task.
 pub trait Spawner: Clone + Send + Sync + 'static {
@@ -99,8 +102,12 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// `stopped`, that they should exit.
     fn stop(&self);
 
-    /// Returns a future that resolves when the runtime has stopped.
-    fn stopped(&self) -> impl std::future::Future<Output = ()> + Send;
+    /// Returns an instance of a `Waiter` that resolves when `stop` is called by
+    /// any task.
+    ///
+    /// While it is possible to clone `Waiter` frequently (i.e. each iteration of a loop),
+    /// it is recommended to clone it sparingly and to wait on a pinned reference to it.
+    fn stopped(&self) -> Waiter;
 }
 
 /// Interface that any task scheduler must implement to provide
