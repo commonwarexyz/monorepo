@@ -180,6 +180,13 @@ pub struct Signaler {
 
 impl Signaler {
     /// Create a new `Signaler`.
+    ///
+    /// Get a future that resolves when the `Signaler` is signaled.
+    ///
+    /// Although this function is safe to call multiple times (or in a loop),
+    /// it incurs some performance overhead to do so. It is instead recommended
+    /// to call this function once and to wait on the returned future (using a
+    /// lighter weight mechanism in each iteration of a loop).
     pub fn new() -> (Self, Shared<oneshot::Receiver<()>>) {
         let (tx, rx) = oneshot::channel();
         (Self { tx: Some(tx) }, rx.shared())
@@ -190,16 +197,6 @@ impl Signaler {
         if let Some(stop_tx) = self.tx.take() {
             let _ = stop_tx.send(());
         }
-    }
-
-    /// Get a future that resolves when the `Signaler` is signaled.
-    ///
-    /// Although this function is safe to call multiple times (or in a loop),
-    /// it incurs some performance overhead to do so. It is instead recommended
-    /// to call this function once and to wait on the returned future (using a
-    /// lighter weight mechanism in each iteration of a loop).
-    pub fn signaled(&self) -> Shared<oneshot::Receiver<()>> {
-        self.rx.clone()
     }
 }
 
