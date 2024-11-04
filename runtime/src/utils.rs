@@ -7,6 +7,7 @@ use crate::{Runner, Spawner};
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::{
     channel::oneshot,
+    future::Shared,
     stream::{AbortHandle, Abortable},
     FutureExt,
 };
@@ -150,6 +151,57 @@ where
         Pin::new(&mut self.receiver)
             .poll(cx)
             .map(|res| res.map_err(|_| Error::Closed).and_then(|r| r))
+    }
+}
+
+/// Coordinates a one-time signal across many tasks.
+///
+/// # Example
+///
+/// ```rust
+/// use commonware_runtime::{Spawner, Runner, Signaler, deterministic::Executor};
+///
+/// let (executor, _, _) = Executor::default();
+/// executor.start(async move {
+///     // Setup signaler and get future
+///     let mut signaler = Signaler::new();
+///     let receiver = signaler.signaled();
+///
+///     // Signal shutdown
+///     signaler.signal();
+///
+///     // Wait for shutdown in task
+///     receiver.await.expect("shutdown signaled");
+/// });
+/// ```
+pub struct Signaler {
+    tx: Option<oneshot::Sender<()>>,
+    rx: Shared<oneshot::Receiver<()>>,
+}
+
+impl Signaler {
+    pub fn new() -> Self {
+        let (tx, rx) = oneshot::channel();
+        Self {
+            tx: Some(tx),
+            rx: rx.shared(),
+        }
+    }
+
+    pub fn signal(&mut self) {
+        if let Some(stop_tx) = self.tx.take() {
+            let _ = stop_tx.send(());
+        }
+    }
+
+    pub fn signaled(&self) -> Shared<oneshot::Receiver<()>> {
+        self.rx.clone()
+    }
+}
+
+impl Default for Signaler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

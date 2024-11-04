@@ -22,7 +22,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{Clock, Error, Handle};
+use crate::{utils::Signaler, Clock, Error, Handle};
 use bytes::Bytes;
 use commonware_utils::hex;
 use futures::{
@@ -160,6 +160,22 @@ impl Auditor {
         hasher.update(b"process_task");
         hasher.update(task.to_be_bytes());
         hasher.update(label.as_bytes());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn stop(&self) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"stop");
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn stopped(&self) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"stopped");
         *hash = hasher.finalize().to_vec();
     }
 
@@ -432,6 +448,7 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
+    stopper: RwLock<Signaler>,
 }
 
 impl Executor {
@@ -463,6 +480,7 @@ impl Executor {
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
+            stopper: RwLock::new(Signaler::new()),
         });
         (
             Runner {
@@ -722,6 +740,17 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init(f, gauge, false);
         Tasks::register(&self.executor.tasks, &label, false, Box::pin(f));
         handle
+    }
+
+    fn stop(&self) {
+        self.executor.auditor.stop();
+        self.executor.stopper.write().unwrap().signal();
+    }
+
+    async fn stopped(&self) {
+        self.executor.auditor.stopped();
+        let waiter = self.executor.stopper.read().unwrap().signaled();
+        let _ = waiter.await;
     }
 }
 

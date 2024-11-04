@@ -16,7 +16,7 @@ pub mod mocks;
 pub mod tokio;
 
 mod utils;
-pub use utils::{reschedule, Handle};
+pub use utils::{reschedule, Handle, Signaler};
 
 use bytes::Bytes;
 use std::{
@@ -90,6 +90,17 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static;
+
+    /// Signals the runtime to stop execution and that all outstanding tasks
+    /// should perform any required cleanup and exit. This method is idempotent and
+    /// can be called multiple times.
+    ///
+    /// This method does not actually kill any tasks but rather signals to them, using
+    /// `stopped`, that they should exit.
+    fn stop(&self);
+
+    /// Returns a future that resolves when the runtime has stopped.
+    fn stopped(&self) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// Interface that any task scheduler must implement to provide
@@ -676,6 +687,34 @@ mod tests {
         });
     }
 
+    fn test_shutdown(runner: impl Runner, context: impl Spawner) {
+        runner.start(async move {
+            // Spawn a task that waits for signal
+            let before = context.spawn("before", {
+                let context = context.clone();
+                async move {
+                    context.stopped().await;
+                }
+            });
+
+            // Signal the task
+            context.stop();
+
+            // Spawn a task after stop is called
+            let after = context.spawn("after", {
+                let context = context.clone();
+                async move {
+                    context.stopped().await;
+                }
+            });
+
+            // Ensure both tasks complete
+            let result = join!(before, after);
+            assert!(result.0.is_ok());
+            assert!(result.1.is_ok());
+        });
+    }
+
     #[test]
     fn test_deterministic_future() {
         let (runner, _, _) = deterministic::Executor::default();
@@ -773,6 +812,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_shutdown() {
+        let (executor, runtime, _) = deterministic::Executor::default();
+        test_shutdown(executor, runtime);
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
@@ -864,5 +909,11 @@ mod tests {
         let mut buffer = String::new();
         encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
         assert!(buffer.contains("open_blobs 0"));
+    }
+
+    #[test]
+    fn test_tokio_shutdown() {
+        let (executor, runtime) = tokio::Executor::default();
+        test_shutdown(executor, runtime);
     }
 }
