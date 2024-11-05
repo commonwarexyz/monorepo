@@ -154,9 +154,20 @@ where
     }
 }
 
+/// A one-time signal that can be awaited by many tasks.
+///
+/// To minimize the overhead of tracking outstanding waiters (which only return once),
+/// it is recommended to pin an instance of `Waiter` to the stack and
+/// wait on a reference to it (i.e. `&mut waiter`) instead of
+/// cloning it multiple times in a given task (i.e. in each iteration
+/// of a loop).
+pub type Waiter = Shared<oneshot::Receiver<()>>;
+
 /// Coordinates a one-time signal across many tasks.
 ///
 /// # Example
+///
+/// ## Basic Usage
 ///
 /// ```rust
 /// use commonware_runtime::{Spawner, Runner, Signaler, deterministic::Executor};
@@ -164,44 +175,81 @@ where
 /// let (executor, _, _) = Executor::default();
 /// executor.start(async move {
 ///     // Setup signaler and get future
-///     let mut signaler = Signaler::new();
-///     let receiver = signaler.signaled();
+///     let (mut signaler, waiter) = Signaler::new();
 ///
 ///     // Signal shutdown
 ///     signaler.signal();
 ///
 ///     // Wait for shutdown in task
-///     receiver.await.expect("shutdown signaled");
+///     waiter.await.expect("shutdown signaled");
+/// });
+/// ```
+///
+/// ## Advanced Usage
+///
+/// While `Futures::Shared` is efficient, there is still meaningful overhead
+/// to cloning it (i.e. in each iteration of a loop). To avoid
+/// a performance regression from introducing `Signaler`, it is recommended
+/// to pin the `Waiter` to the stack and to wait on a reference to it.
+///
+/// ```rust
+/// use commonware_macros::select;
+/// use commonware_runtime::{Clock, Spawner, Runner, Signaler, deterministic::Executor};
+/// use futures::channel::oneshot;
+/// use std::{pin::pin, time::Duration};
+///
+/// let (executor, context, _) = Executor::default();
+/// executor.start(async move {
+///     // Setup signaler and get future
+///     let (mut signaler, mut waiter) = Signaler::new();
+///
+///     // Loop on the waiter until signal is received
+///     let (tx, rx) = oneshot::channel();
+///     context.spawn("waiter", {
+///         let context = context.clone();
+///         async move {
+///             // Pin the future to the stack and wait on a reference
+///             // to it instead of cloning during each loop iteration.
+///             let mut waiter = pin!(waiter);
+///
+///             // Wait for signal
+///             loop {
+///                 select! {
+///                      _ = &mut waiter => {
+///                          break;
+///                      },   
+///                      _ = context.sleep(Duration::from_secs(1)) => {},
+///                 };
+///             }
+///             let _ = tx.send(());
+///         }
+///     });
+///
+///     // Send signal
+///     signaler.signal();
+///
+///     // Wait for task
+///     rx.await.expect("shutdown signaled");
 /// });
 /// ```
 pub struct Signaler {
     tx: Option<oneshot::Sender<()>>,
-    rx: Shared<oneshot::Receiver<()>>,
 }
 
 impl Signaler {
-    pub fn new() -> Self {
+    /// Create a new `Signaler`.
+    ///
+    /// Returns a `Signaler` and a `Waiter` that will resolve when `signal` is called.
+    pub fn new() -> (Self, Waiter) {
         let (tx, rx) = oneshot::channel();
-        Self {
-            tx: Some(tx),
-            rx: rx.shared(),
-        }
+        (Self { tx: Some(tx) }, rx.shared())
     }
 
+    /// Signal the `Signaler`.
     pub fn signal(&mut self) {
         if let Some(stop_tx) = self.tx.take() {
             let _ = stop_tx.send(());
         }
-    }
-
-    pub fn signaled(&self) -> Shared<oneshot::Receiver<()>> {
-        self.rx.clone()
-    }
-}
-
-impl Default for Signaler {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

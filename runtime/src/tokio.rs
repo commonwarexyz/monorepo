@@ -23,7 +23,7 @@
 //! });
 //! ```
 
-use crate::{utils::Signaler, Clock, Error, Handle};
+use crate::{utils::Signaler, Clock, Error, Handle, Waiter};
 use bytes::Bytes;
 use commonware_utils::{from_hex, hex};
 use futures::{
@@ -43,7 +43,7 @@ use std::{
     io::SeekFrom,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 use tokio::{
@@ -237,7 +237,8 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     runtime: Runtime,
     fs: AsyncMutex<()>,
-    stopper: RwLock<Signaler>,
+    stopper: Mutex<Signaler>,
+    stopper_waiter: Waiter,
 }
 
 impl Executor {
@@ -249,12 +250,14 @@ impl Executor {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
+        let (stopper, stopper_waiter) = Signaler::new();
         let executor = Arc::new(Self {
             cfg,
             metrics,
             runtime,
             fs: AsyncMutex::new(()),
-            stopper: RwLock::new(Signaler::new()),
+            stopper: Mutex::new(stopper),
+            stopper_waiter,
         });
         (
             Runner {
@@ -327,12 +330,11 @@ impl crate::Spawner for Context {
     }
 
     fn stop(&self) {
-        self.executor.stopper.write().unwrap().signal();
+        self.executor.stopper.lock().unwrap().signal();
     }
 
-    async fn stopped(&self) {
-        let waiter = self.executor.stopper.read().unwrap().signaled();
-        let _ = waiter.await;
+    fn stopped(&self) -> Waiter {
+        self.executor.stopper_waiter.clone()
     }
 }
 

@@ -16,7 +16,7 @@ pub mod mocks;
 pub mod tokio;
 
 mod utils;
-pub use utils::{reschedule, Handle, Signaler};
+pub use utils::{reschedule, Handle, Signaler, Waiter};
 
 use bytes::Bytes;
 use std::{
@@ -99,8 +99,11 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// `stopped`, that they should exit.
     fn stop(&self);
 
-    /// Returns a future that resolves when the runtime has stopped.
-    fn stopped(&self) -> impl std::future::Future<Output = ()> + Send;
+    /// Returns an instance of a `Waiter` that resolves when `stop` is called by
+    /// any task.
+    ///
+    /// If `stop` has already been called, the returned `Waiter` will resolve immediately.
+    fn stopped(&self) -> Waiter;
 }
 
 /// Interface that any task scheduler must implement to provide
@@ -231,12 +234,11 @@ mod tests {
     use super::*;
     use commonware_macros::select;
     use core::panic;
-    use futures::future::ready;
-    use futures::join;
-    use futures::{channel::mpsc, SinkExt, StreamExt};
+    use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
     use prometheus_client::encoding::text::encode;
     use prometheus_client::registry::Registry;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::pin::pin;
     use std::sync::{Arc, Mutex};
     use utils::reschedule;
 
@@ -687,26 +689,43 @@ mod tests {
         });
     }
 
-    fn test_shutdown(runner: impl Runner, context: impl Spawner) {
+    fn test_shutdown(runner: impl Runner, context: impl Spawner + Clock) {
         runner.start(async move {
             // Spawn a task that waits for signal
             let before = context.spawn("before", {
                 let context = context.clone();
                 async move {
-                    context.stopped().await;
+                    let _ = context.stopped().await;
                 }
             });
-
-            // Signal the task
-            context.stop();
 
             // Spawn a task after stop is called
             let after = context.spawn("after", {
                 let context = context.clone();
                 async move {
-                    context.stopped().await;
+                    // Pin the future to the stack to avoid grabbing/dropping on each loop
+                    let mut stopper = pin!(context.stopped());
+
+                    // Wait for stop signal
+                    loop {
+                        select! {
+                            _ = &mut stopper => {
+                                // Stopper resolved
+                                break;
+                            },
+                            _ = context.sleep(Duration::from_millis(10)) => {
+                                // Continue waiting
+                            },
+                        }
+                    }
                 }
             });
+
+            // Sleep for a bit before stopping
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Signal the task
+            context.stop();
 
             // Ensure both tasks complete
             let result = join!(before, after);
