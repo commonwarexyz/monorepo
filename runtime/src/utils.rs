@@ -154,12 +154,13 @@ where
     }
 }
 
-/// A one-time signal that can be awaited by many tasks.
+/// A one-time broadcast that can be awaited by many tasks. It is often used for
+/// coordinating shutdown across many tasks.
 ///
-/// To minimize the overhead of tracking outstanding waiters (which only return once),
-/// it is recommended to wait on a reference to it (i.e. `&mut waiter`) instead of
+/// To minimize the overhead of tracking outstanding signals (which only return once),
+/// it is recommended to wait on a reference to it (i.e. `&mut signal`) instead of
 /// cloning it multiple times in a given task (i.e. in each iteration of a loop).
-pub type Waiter = Shared<oneshot::Receiver<()>>;
+pub type Signal = Shared<oneshot::Receiver<i32>>;
 
 /// Coordinates a one-time signal across many tasks.
 ///
@@ -173,13 +174,14 @@ pub type Waiter = Shared<oneshot::Receiver<()>>;
 /// let (executor, _, _) = Executor::default();
 /// executor.start(async move {
 ///     // Setup signaler and get future
-///     let (mut signaler, waiter) = Signaler::new();
+///     let (mut signaler, signal) = Signaler::new();
 ///
 ///     // Signal shutdown
-///     signaler.signal();
+///     signaler.signal(2);
 ///
 ///     // Wait for shutdown in task
-///     waiter.await.expect("shutdown signaled");
+///     let sig = signal.await.unwrap();
+///     println!("Received signal: {}", sig);
 /// });
 /// ```
 ///
@@ -188,7 +190,7 @@ pub type Waiter = Shared<oneshot::Receiver<()>>;
 /// While `Futures::Shared` is efficient, there is still meaningful overhead
 /// to cloning it (i.e. in each iteration of a loop). To avoid
 /// a performance regression from introducing `Signaler`, it is recommended
-/// to wait on a reference to `Waiter` (i.e. `&mut waiter`).
+/// to wait on a reference to `Signal` (i.e. `&mut signal`).
 ///
 /// ```rust
 /// use commonware_macros::select;
@@ -199,7 +201,7 @@ pub type Waiter = Shared<oneshot::Receiver<()>>;
 /// let (executor, context, _) = Executor::default();
 /// executor.start(async move {
 ///     // Setup signaler and get future
-///     let (mut signaler, mut waiter) = Signaler::new();
+///     let (mut signaler, mut signal) = Signaler::new();
 ///
 ///     // Loop on the waiter until signal is received
 ///     let (tx, rx) = oneshot::channel();
@@ -209,7 +211,8 @@ pub type Waiter = Shared<oneshot::Receiver<()>>;
 ///             // Wait for signal or sleep
 ///             loop {
 ///                 select! {
-///                      _ = &mut waiter => {
+///                      sig = &mut signal => {
+///                          println!("Received signal: {}", sig.unwrap());
 ///                          break;
 ///                      },   
 ///                      _ = context.sleep(Duration::from_secs(1)) => {},
@@ -220,29 +223,29 @@ pub type Waiter = Shared<oneshot::Receiver<()>>;
 ///     });
 ///
 ///     // Send signal
-///     signaler.signal();
+///     signaler.signal(9);
 ///
 ///     // Wait for task
 ///     rx.await.expect("shutdown signaled");
 /// });
 /// ```
 pub struct Signaler {
-    tx: Option<oneshot::Sender<()>>,
+    tx: Option<oneshot::Sender<i32>>,
 }
 
 impl Signaler {
     /// Create a new `Signaler`.
     ///
-    /// Returns a `Signaler` and a `Waiter` that will resolve when `signal` is called.
-    pub fn new() -> (Self, Waiter) {
+    /// Returns a `Signaler` and a `Signal` that will resolve when `signal` is called.
+    pub fn new() -> (Self, Signal) {
         let (tx, rx) = oneshot::channel();
         (Self { tx: Some(tx) }, rx.shared())
     }
 
-    /// Signal the `Signaler`.
-    pub fn signal(&mut self) {
+    /// Resolve the `Signal` for all waiters (if not already resolved).
+    pub fn signal(&mut self, value: i32) {
         if let Some(stop_tx) = self.tx.take() {
-            let _ = stop_tx.send(());
+            let _ = stop_tx.send(value);
         }
     }
 }

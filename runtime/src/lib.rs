@@ -16,7 +16,7 @@ pub mod mocks;
 pub mod tokio;
 
 mod utils;
-pub use utils::{reschedule, Handle, Signaler, Waiter};
+pub use utils::{reschedule, Handle, Signal, Signaler};
 
 use bytes::Bytes;
 use std::{
@@ -96,14 +96,14 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// can be called multiple times.
     ///
     /// This method does not actually kill any tasks but rather signals to them, using
-    /// `stopped`, that they should exit.
-    fn stop(&self);
+    /// the `Signal` returned by `stopped`, that they should exit.
+    fn stop(&self, value: i32);
 
-    /// Returns an instance of a `Waiter` that resolves when `stop` is called by
+    /// Returns an instance of a `Signal` that resolves when `stop` is called by
     /// any task.
     ///
     /// If `stop` has already been called, the returned `Waiter` will resolve immediately.
-    fn stopped(&self) -> Waiter;
+    fn stopped(&self) -> Signal;
 }
 
 /// Interface that any task scheduler must implement to provide
@@ -689,12 +689,14 @@ mod tests {
     }
 
     fn test_shutdown(runner: impl Runner, context: impl Spawner + Clock) {
+        let kill = 9;
         runner.start(async move {
             // Spawn a task that waits for signal
             let before = context.spawn("before", {
                 let context = context.clone();
                 async move {
-                    let _ = context.stopped().await;
+                    let sig = context.stopped().await;
+                    assert_eq!(sig.unwrap(), kill);
                 }
             });
 
@@ -703,11 +705,12 @@ mod tests {
                 let context = context.clone();
                 async move {
                     // Wait for stop signal
-                    let mut waiter = context.stopped();
+                    let mut signal = context.stopped();
                     loop {
                         select! {
-                            _ = &mut waiter => {
+                            sig = &mut signal => {
                                 // Stopper resolved
+                                assert_eq!(sig.unwrap(), kill);
                                 break;
                             },
                             _ = context.sleep(Duration::from_millis(10)) => {
@@ -722,7 +725,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             // Signal the task
-            context.stop();
+            context.stop(kill);
 
             // Ensure both tasks complete
             let result = join!(before, after);

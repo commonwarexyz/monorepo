@@ -22,7 +22,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{utils::Signaler, Clock, Error, Handle, Waiter};
+use crate::{utils::Signaler, Clock, Error, Handle, Signal};
 use bytes::Bytes;
 use commonware_utils::hex;
 use futures::{
@@ -163,11 +163,12 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn stop(&self) {
+    fn stop(&self, value: i32) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
         hasher.update(b"stop");
+        hasher.update(value.to_be_bytes());
         *hash = hasher.finalize().to_vec();
     }
 
@@ -449,7 +450,7 @@ pub struct Executor {
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
     stopper: Mutex<Signaler>,
-    stopper_waiter: Waiter,
+    signal: Signal,
 }
 
 impl Executor {
@@ -467,7 +468,7 @@ impl Executor {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        let (stopper, stopper_waiter) = Signaler::new();
+        let (stopper, signal) = Signaler::new();
         let executor = Arc::new(Self {
             cycle: cfg.cycle,
             deadline,
@@ -483,7 +484,7 @@ impl Executor {
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
             stopper: Mutex::new(stopper),
-            stopper_waiter,
+            signal,
         });
         (
             Runner {
@@ -745,14 +746,14 @@ impl crate::Spawner for Context {
         handle
     }
 
-    fn stop(&self) {
-        self.executor.auditor.stop();
-        self.executor.stopper.lock().unwrap().signal();
+    fn stop(&self, value: i32) {
+        self.executor.auditor.stop(value);
+        self.executor.stopper.lock().unwrap().signal(value);
     }
 
-    fn stopped(&self) -> Waiter {
+    fn stopped(&self) -> Signal {
         self.executor.auditor.stopped();
-        self.executor.stopper_waiter.clone()
+        self.executor.signal.clone()
     }
 }
 
