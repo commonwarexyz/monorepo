@@ -36,7 +36,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
-    use prometheus_client::{encoding::text::encode, registry};
+    use prometheus_client::encoding::text::encode;
 
     #[test_traced]
     fn test_metadata_put_get() {
