@@ -238,7 +238,6 @@ mod tests {
     use prometheus_client::encoding::text::encode;
     use prometheus_client::registry::Registry;
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::pin::pin;
     use std::sync::{Arc, Mutex};
     use utils::reschedule;
 
@@ -703,13 +702,11 @@ mod tests {
             let after = context.spawn("after", {
                 let context = context.clone();
                 async move {
-                    // Pin the future to the stack to avoid grabbing/dropping on each loop
-                    let mut stopper = pin!(context.stopped());
-
                     // Wait for stop signal
+                    let mut waiter = context.stopped();
                     loop {
                         select! {
-                            _ = &mut stopper => {
+                            _ = &mut waiter => {
                                 // Stopper resolved
                                 break;
                             },
