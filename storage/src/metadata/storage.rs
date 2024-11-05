@@ -4,7 +4,7 @@ use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use tracing::debug;
+use tracing::{debug, warn};
 
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 
@@ -109,7 +109,7 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         let computed_checksum = crc32fast::hash(&buf[..buf.len() - 4]);
         if stored_checksum != computed_checksum {
             // Truncate and return none
-            debug!(
+            warn!(
                 name = std::str::from_utf8(name).unwrap(),
                 stored = stored_checksum,
                 computed = computed_checksum,

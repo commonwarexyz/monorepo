@@ -35,8 +35,8 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic::Executor, Runner};
-    use prometheus_client::encoding::text::encode;
+    use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
+    use prometheus_client::{encoding::text::encode, registry};
 
     #[test_traced]
     fn test_metadata_put_get() {
@@ -202,6 +202,112 @@ mod tests {
             assert!(value.is_none());
             let value = metadata.get(key2).unwrap();
             assert_eq!(value, &foo);
+        });
+    }
+
+    #[test_traced]
+    fn test_recover_corrupted_one() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a metadata store
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "test".to_string(),
+            };
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Put a key
+            let key = 42;
+            let hello = Bytes::from("hello");
+            metadata.put(key, hello.clone());
+
+            // Sync the metadata store
+            metadata.sync().await.unwrap();
+
+            // Put an overlapping key and a new key
+            let world = Bytes::from("world");
+            metadata.put(key, world.clone());
+            let key2 = 43;
+            let foo = Bytes::from("foo");
+            metadata.put(key2, foo.clone());
+
+            // Close the metadata store
+            metadata.close().await.unwrap();
+
+            // Corrupt the metadata store
+            let blob = context.open("test", b"left").await.unwrap();
+            blob.write_at(b"corrupted", 0).await.unwrap();
+            blob.close().await.unwrap();
+
+            // Reopen the metadata store
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "test".to_string(),
+            };
+            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Get the key (falls back to non-corrupt)
+            let value = metadata.get(key).unwrap();
+            assert_eq!(value, &hello);
+        });
+    }
+
+    #[test_traced]
+    fn test_recover_corrupted_both() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a metadata store
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "test".to_string(),
+            };
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Put a key
+            let key = 42;
+            let hello = Bytes::from("hello");
+            metadata.put(key, hello.clone());
+
+            // Sync the metadata store
+            metadata.sync().await.unwrap();
+
+            // Put an overlapping key and a new key
+            let world = Bytes::from("world");
+            metadata.put(key, world.clone());
+            let key2 = 43;
+            let foo = Bytes::from("foo");
+            metadata.put(key2, foo.clone());
+
+            // Close the metadata store
+            metadata.close().await.unwrap();
+
+            // Corrupt the metadata store
+            let blob = context.open("test", b"left").await.unwrap();
+            blob.write_at(b"corrupted", 0).await.unwrap();
+            blob.close().await.unwrap();
+            let blob = context.open("test", b"right").await.unwrap();
+            blob.write_at(b"corrupted", 0).await.unwrap();
+            blob.close().await.unwrap();
+
+            // Reopen the metadata store
+            let registry = Arc::new(Mutex::new(Registry::default()));
+            let cfg = Config {
+                registry: registry.clone(),
+                partition: "test".to_string(),
+            };
+            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Get the key (falls back to non-corrupt)
+            let value = metadata.get(key);
+            assert!(value.is_none());
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("keys 0"));
         });
     }
 }
