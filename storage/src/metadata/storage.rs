@@ -4,7 +4,7 @@ use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use tracing::{debug, warn};
+use tracing::warn;
 
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 
