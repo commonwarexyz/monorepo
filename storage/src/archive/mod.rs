@@ -18,7 +18,7 @@
 //! | Key (Fixed Size)  |    C(u32)     |   Data    |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
 //!
-//! C = CRC32(Data)
+//! C = CRC32(Key)
 //! ```
 //!
 //! _To ensure keys fetched using `Journal::get_prefix` are correctly read, the key is checksummed
