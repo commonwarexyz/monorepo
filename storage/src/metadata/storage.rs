@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, marker::PhantomData};
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use tracing::debug;
 
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
@@ -14,6 +15,9 @@ pub struct Metadata<B: Blob, E: Storage<B>> {
 
     cursor: usize,
     blobs: [(B, u32); 2],
+
+    syncs: Counter,
+    keys: Gauge,
 
     _phantom_e: PhantomData<E>,
 }
@@ -60,11 +64,25 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
             }
         }
 
+        // Create metrics
+        let syncs = Counter::default();
+        let keys = Gauge::default();
+        {
+            let mut registry = cfg.registry.lock().unwrap();
+            registry.register("syncs", "number of syncs of data to disk", syncs.clone());
+            registry.register("keys", "number of tracked keys", keys.clone());
+        }
+
         // Return metadata
+        keys.set(data.len() as i64);
         Ok(Self {
             data,
+
             cursor,
             blobs: [(left, left_checksum), (right, right_checksum)],
+
+            syncs,
+            keys,
 
             _phantom_e: PhantomData,
         })
@@ -134,11 +152,13 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
     /// The value stored will not be persisted until `sync` is called.
     pub fn put(&mut self, key: u32, value: Bytes) {
         self.data.insert(key, value);
+        self.keys.set(self.data.len() as i64);
     }
 
     /// Remove a value from the metadata store (if it exists).
     pub fn remove(&mut self, key: u32) {
         self.data.remove(&key);
+        self.keys.set(self.data.len() as i64);
     }
 
     /// Persist the current state of the metadata store.
@@ -171,6 +191,7 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
 
         // Switch blobs
         self.cursor = next_cursor;
+        self.syncs.inc();
         Ok(())
     }
 
