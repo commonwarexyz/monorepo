@@ -1,6 +1,7 @@
 # commonware-vrf 
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-vrf.svg)](https://crates.io/crates/commonware-vrf)
+[![Docs.rs](https://docs.rs/commonware-vrf/badge.svg)](https://docs.rs/commonware-vrf)
 
 Generate bias-resistant randomness with untrusted contributors using [commonware-cryptography](https://crates.io/crates/commonware-cryptography) and [commonware-p2p](https://crates.io/crates/commonware-p2p).
 
