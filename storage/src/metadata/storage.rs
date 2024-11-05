@@ -166,10 +166,6 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         // Get current blob
         let past_checksum = &self.blobs[self.cursor].1;
 
-        // Get next blob
-        let next_cursor = 1 - self.cursor;
-        let next_blob = &self.blobs[next_cursor].0;
-
         // Create buffer
         let mut buf = Vec::new();
         buf.put_u32(*past_checksum);
@@ -182,12 +178,18 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
             buf.put_u32(value_len);
             buf.put(&value[..]);
         }
-        buf.put_u32(crc32fast::hash(&buf[..]));
+        let checksum = crc32fast::hash(&buf[..]);
+        buf.put_u32(checksum);
+
+        // Get next blob
+        let next_cursor = 1 - self.cursor;
+        let next_blob = &mut self.blobs[next_cursor];
 
         // Write and truncate blob
-        next_blob.write_at(&buf, 0).await?;
-        next_blob.truncate(buf.len() as u64).await?;
-        next_blob.sync().await?;
+        next_blob.0.write_at(&buf, 0).await?;
+        next_blob.0.truncate(buf.len() as u64).await?;
+        next_blob.0.sync().await?;
+        next_blob.1 = checksum;
 
         // Switch blobs
         self.cursor = next_cursor;
