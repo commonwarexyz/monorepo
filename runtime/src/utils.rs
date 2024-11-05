@@ -208,8 +208,8 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 ///     context.spawn("task", {
 ///         let context = context.clone();
 ///         async move {
-///             // Wait for signal or sleep
 ///             loop {
+///                 // Wait for signal or sleep
 ///                 select! {
 ///                      sig = &mut signal => {
 ///                          println!("Received signal: {}", sig.unwrap());
