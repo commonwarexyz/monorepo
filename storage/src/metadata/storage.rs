@@ -1,6 +1,7 @@
 use std::future::IntoFuture;
 
 use super::{Config, Error};
+use bytes::{BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use tracing::debug;
 
@@ -11,7 +12,35 @@ pub struct Metadata<B: Blob, E: Storage<B>> {
     cfg: Config,
 
     cursor: usize,
-    blobs: [B; 2],
+    blobs: [(B, u32); 2],
+}
+
+pub struct Batch {
+    pending: Vec<u8>,
+}
+
+impl Batch {
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn append(&mut self, key: &[u8], value: Bytes) -> Result<(), Error> {
+        let key_len = key.len().try_into().map_err(|_| Error::DataTooBig)?;
+        self.pending.put_u32(key_len);
+        self.pending.put(key);
+        let value_len = value.len().try_into().map_err(|_| Error::DataTooBig)?;
+        self.pending.put_u32(value_len);
+        self.pending.put(value);
+        Ok(())
+    }
+}
+
+impl Default for Batch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<B: Blob, E: Storage<B>> Metadata<B, E> {
@@ -59,22 +88,29 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         let left_result = Self::verify(&left).await?;
         let right_result = Self::verify(&right).await?;
 
+        // Set checksums
+        let mut left_parent = 0;
+        let mut left_checksum = 0;
+        if let Some((parent, checksum)) = left_result {
+            left_parent = parent;
+            left_checksum = checksum;
+        }
+        let mut right_parent = 0;
+        let mut right_checksum = 0;
+        if let Some((parent, checksum)) = right_result {
+            right_parent = parent;
+            right_checksum = checksum;
+        }
+
         // Choose latest blob
         let mut cursor = 0;
-        if let Some((right_parent, right_checksum)) = right_result {
-            match left_result {
-                Some((left_parent, left_checksum)) => {
-                    if right_parent == left_checksum {
-                        cursor = 1;
-                    } else if left_parent == right_checksum {
-                        cursor = 0;
-                    } else {
-                        panic!("cannot determine latest blob");
-                    }
-                }
-                None => {
-                    cursor = 1;
-                }
+        if right_checksum != 0 {
+            if right_parent == left_checksum {
+                cursor = 1;
+            } else if left_parent == right_checksum {
+                cursor = 0;
+            } else {
+                panic!("cannot determine latest blob");
             }
         }
 
@@ -83,7 +119,30 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
             runtime,
             cfg,
             cursor,
-            blobs: [left, right],
+            blobs: [(left, left_checksum), (right, right_checksum)],
         })
+    }
+
+    pub async fn commit(&mut self, batch: Batch) -> Result<(), Error> {
+        // Get current blob
+        let past_checksum = &self.blobs[self.cursor].1;
+
+        // Get next blob
+        let next_cursor = 1 - self.cursor;
+        let next_blob = &self.blobs[next_cursor].0;
+
+        // Create buffer
+        let mut buf = Vec::with_capacity(4 + batch.pending.len() + 4);
+        buf.put_u32(*past_checksum);
+        buf.put(&batch.pending[..]);
+        buf.put_u32(crc32fast::hash(&buf[..]));
+
+        // Write batch
+        next_blob.write_at(&buf, 0).await?;
+        next_blob.sync().await?;
+
+        // Switch blobs
+        self.cursor = next_cursor;
+        Ok(())
     }
 }

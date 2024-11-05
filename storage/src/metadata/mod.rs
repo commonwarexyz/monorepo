@@ -15,6 +15,8 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("blob too large: {0}")]
     BlobTooLarge(u64),
+    #[error("data too big")]
+    DataTooBig,
 }
 
 /// Configuration for `Metadata` storage.
