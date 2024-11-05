@@ -157,10 +157,8 @@ where
 /// A one-time signal that can be awaited by many tasks.
 ///
 /// To minimize the overhead of tracking outstanding waiters (which only return once),
-/// it is recommended to pin an instance of `Waiter` to the stack and
-/// wait on a reference to it (i.e. `&mut waiter`) instead of
-/// cloning it multiple times in a given task (i.e. in each iteration
-/// of a loop).
+/// it is recommended to wait on a reference to it (i.e. `&mut waiter`) instead of
+/// cloning it multiple times in a given task (i.e. in each iteration of a loop).
 pub type Waiter = Shared<oneshot::Receiver<()>>;
 
 /// Coordinates a one-time signal across many tasks.
@@ -190,13 +188,13 @@ pub type Waiter = Shared<oneshot::Receiver<()>>;
 /// While `Futures::Shared` is efficient, there is still meaningful overhead
 /// to cloning it (i.e. in each iteration of a loop). To avoid
 /// a performance regression from introducing `Signaler`, it is recommended
-/// to pin the `Waiter` to the stack and to wait on a reference to it.
+/// to wait on a reference to `Waiter` (i.e. `&mut waiter`).
 ///
 /// ```rust
 /// use commonware_macros::select;
 /// use commonware_runtime::{Clock, Spawner, Runner, Signaler, deterministic::Executor};
 /// use futures::channel::oneshot;
-/// use std::{pin::pin, time::Duration};
+/// use std::time::Duration;
 ///
 /// let (executor, context, _) = Executor::default();
 /// executor.start(async move {
@@ -208,11 +206,7 @@ pub type Waiter = Shared<oneshot::Receiver<()>>;
 ///     context.spawn("waiter", {
 ///         let context = context.clone();
 ///         async move {
-///             // Pin the future to the stack and wait on a reference
-///             // to it instead of cloning during each loop iteration.
-///             let mut waiter = pin!(waiter);
-///
-///             // Wait for signal
+///             // Wait for signal or sleep
 ///             loop {
 ///                 select! {
 ///                      _ = &mut waiter => {
