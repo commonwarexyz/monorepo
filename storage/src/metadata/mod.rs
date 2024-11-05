@@ -13,6 +13,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
+    #[error("blob too large: {0}")]
+    BlobTooLarge(u64),
 }
 
 /// Configuration for `Metadata` storage.
