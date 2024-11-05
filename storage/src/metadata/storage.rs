@@ -7,6 +7,7 @@ use tracing::debug;
 
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 
+/// Implementation of a metadata store.
 pub struct Metadata<B: Blob, E: Storage<B>> {
     // Data is stored in a BTreeMap to enable deterministic serialization.
     data: BTreeMap<u32, Bytes>,
@@ -170,6 +171,16 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
 
         // Switch blobs
         self.cursor = next_cursor;
+        Ok(())
+    }
+
+    /// Sync outstanding data and close open blobs.
+    pub async fn close(mut self) -> Result<(), Error> {
+        // Sync and close blobs
+        self.sync().await?;
+        for (blob, _) in self.blobs.into_iter() {
+            blob.close().await?;
+        }
         Ok(())
     }
 }
