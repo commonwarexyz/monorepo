@@ -26,12 +26,22 @@ impl Batch {
         }
     }
 
+    /// Insert a key-value pair into the batch.
+    ///
+    /// If the key already exists in the batch, it will be overwritten.
     pub fn put(&mut self, key: &[u8], value: Bytes) {
         self.pending.insert(key.to_vec(), value);
     }
 
+    /// Get the value associated with a key in the batch (if
+    /// it exists).
     pub fn get(&self, key: &[u8]) -> Option<Bytes> {
         self.pending.get(key).cloned()
+    }
+
+    /// Remove a key-value pair from the batch.
+    pub fn remove(&mut self, key: &[u8]) {
+        self.pending.remove(key);
     }
 }
 
