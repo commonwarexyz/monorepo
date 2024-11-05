@@ -7,3 +7,4 @@
 
 pub mod archive;
 pub mod journal;
+pub mod metadata;
