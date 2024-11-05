@@ -1,4 +1,4 @@
-use std::future::IntoFuture;
+use std::collections::BTreeMap;
 
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
@@ -16,24 +16,22 @@ pub struct Metadata<B: Blob, E: Storage<B>> {
 }
 
 pub struct Batch {
-    pending: Vec<u8>,
+    pending: BTreeMap<Vec<u8>, Bytes>,
 }
 
 impl Batch {
     pub fn new() -> Self {
         Self {
-            pending: Vec::new(),
+            pending: BTreeMap::new(),
         }
     }
 
-    pub fn append(&mut self, key: &[u8], value: Bytes) -> Result<(), Error> {
-        let key_len = key.len().try_into().map_err(|_| Error::DataTooBig)?;
-        self.pending.put_u32(key_len);
-        self.pending.put(key);
-        let value_len = value.len().try_into().map_err(|_| Error::DataTooBig)?;
-        self.pending.put_u32(value_len);
-        self.pending.put(value);
-        Ok(())
+    pub fn put(&mut self, key: &[u8], value: Bytes) {
+        self.pending.insert(key.to_vec(), value);
+    }
+
+    pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        self.pending.get(key).cloned()
     }
 }
 
@@ -44,7 +42,7 @@ impl Default for Batch {
 }
 
 impl<B: Blob, E: Storage<B>> Metadata<B, E> {
-    async fn verify(blob: &B) -> Result<Option<(u32, u32)>, Error> {
+    async fn verify(blob: &B) -> Result<Option<(u32, BTreeMap<Vec<u8>, Bytes>, u32)>, Error> {
         // Get blob length
         let len = blob.len().await?;
         let len = len.try_into().map_err(|_| Error::BlobTooLarge(len))?;
@@ -75,11 +73,26 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         // Get parent
         let parent = u32::from_be_bytes(buf[..4].try_into().unwrap());
 
+        // Extract data
+        let mut data = BTreeMap::new();
+        let mut cursor = 4;
+        while cursor < buf.len() - 4 {
+            let key_len = u32::from_be_bytes(buf[cursor..cursor + 4].try_into().unwrap());
+            cursor += 4;
+            let key = buf[cursor..cursor + key_len as usize].to_vec();
+            cursor += key_len as usize;
+            let value_len = u32::from_be_bytes(buf[cursor..cursor + 4].try_into().unwrap());
+            cursor += 4;
+            let value = Bytes::copy_from_slice(&buf[cursor..cursor + value_len as usize]);
+            cursor += value_len as usize;
+            data.insert(key, value);
+        }
+
         // Return info
-        Ok(Some((parent, computed_checksum)))
+        Ok(Some((parent, data, computed_checksum)))
     }
 
-    pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
+    pub async fn init(runtime: E, cfg: Config) -> Result<(Self, BTreeMap<Vec<u8>, Bytes>), Error> {
         // Open dedicated blobs
         let left = runtime.open(&cfg.partition, BLOB_NAMES[0]).await?;
         let right = runtime.open(&cfg.partition, BLOB_NAMES[1]).await?;
@@ -90,37 +103,46 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
 
         // Set checksums
         let mut left_parent = 0;
+        let mut left_data = BTreeMap::new();
         let mut left_checksum = 0;
-        if let Some((parent, checksum)) = left_result {
+        if let Some((parent, data, checksum)) = left_result {
             left_parent = parent;
+            left_data = data;
             left_checksum = checksum;
         }
         let mut right_parent = 0;
+        let mut right_data = BTreeMap::new();
         let mut right_checksum = 0;
-        if let Some((parent, checksum)) = right_result {
+        if let Some((parent, data, checksum)) = right_result {
             right_parent = parent;
+            right_data = data;
             right_checksum = checksum;
         }
 
         // Choose latest blob
         let mut cursor = 0;
+        let mut data = left_data;
         if right_checksum != 0 {
             if right_parent == left_checksum {
                 cursor = 1;
+                data = right_data;
             } else if left_parent == right_checksum {
-                cursor = 0;
+                // Already set
             } else {
                 panic!("cannot determine latest blob");
             }
         }
 
         // Return metadata
-        Ok(Self {
-            runtime,
-            cfg,
-            cursor,
-            blobs: [(left, left_checksum), (right, right_checksum)],
-        })
+        Ok((
+            Self {
+                runtime,
+                cfg,
+                cursor,
+                blobs: [(left, left_checksum), (right, right_checksum)],
+            },
+            data,
+        ))
     }
 
     pub async fn commit(&mut self, batch: Batch) -> Result<(), Error> {
@@ -134,7 +156,14 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         // Create buffer
         let mut buf = Vec::with_capacity(4 + batch.pending.len() + 4);
         buf.put_u32(*past_checksum);
-        buf.put(&batch.pending[..]);
+        for (key, value) in &batch.pending {
+            let key_len = key.len().try_into().map_err(|_| Error::DataTooBig)?;
+            buf.put_u32(key_len);
+            buf.put(&key[..]);
+            let value_len = value.len().try_into().map_err(|_| Error::DataTooBig)?;
+            buf.put_u32(value_len);
+            buf.put(&value[..]);
+        }
         buf.put_u32(crc32fast::hash(&buf[..]));
 
         // Write batch
