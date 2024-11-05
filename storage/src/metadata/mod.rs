@@ -154,7 +154,7 @@ mod tests {
                 registry: registry.clone(),
                 partition: "test".to_string(),
             };
-            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
 
             // Check metrics
             let mut buffer = String::new();
@@ -165,6 +165,41 @@ mod tests {
             // Get the key
             let value = metadata.get(key).unwrap();
             assert_eq!(value, &world);
+            let value = metadata.get(key2).unwrap();
+            assert_eq!(value, &foo);
+
+            // Remove the key
+            metadata.remove(key);
+
+            // Sync the metadata store
+            metadata.sync().await.unwrap();
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("syncs_total 1"));
+            assert!(buffer.contains("keys 1"));
+
+            // Close the metadata store
+            metadata.close().await.unwrap();
+
+            // Reopen the metadata store
+            let registry = Arc::new(Mutex::new(Registry::default()));
+            let cfg = Config {
+                registry: registry.clone(),
+                partition: "test".to_string(),
+            };
+            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("keys 1"));
+
+            // Get the key
+            let value = metadata.get(key);
+            assert!(value.is_none());
             let value = metadata.get(key2).unwrap();
             assert_eq!(value, &foo);
         });
