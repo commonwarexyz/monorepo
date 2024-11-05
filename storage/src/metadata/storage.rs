@@ -166,6 +166,9 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         }
         buf.put_u32(crc32fast::hash(&buf[..]));
 
+        // Truncate next blob
+        next_blob.truncate(0).await?;
+
         // Write batch
         next_blob.write_at(&buf, 0).await?;
         next_blob.sync().await?;
