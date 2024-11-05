@@ -237,7 +237,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     runtime: Runtime,
     fs: AsyncMutex<()>,
-    stopper: Mutex<Signaler>,
+    signaler: Mutex<Signaler>,
     signal: Signal,
 }
 
@@ -250,13 +250,13 @@ impl Executor {
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
-        let (stopper, signal) = Signaler::new();
+        let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Self {
             cfg,
             metrics,
             runtime,
             fs: AsyncMutex::new(()),
-            stopper: Mutex::new(stopper),
+            signaler: Mutex::new(signaler),
             signal,
         });
         (
@@ -330,7 +330,7 @@ impl crate::Spawner for Context {
     }
 
     fn stop(&self, value: i32) {
-        self.executor.stopper.lock().unwrap().signal(value);
+        self.executor.signaler.lock().unwrap().signal(value);
     }
 
     fn stopped(&self) -> Signal {

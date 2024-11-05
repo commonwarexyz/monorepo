@@ -449,7 +449,7 @@ pub struct Executor {
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
     partitions: Mutex<HashMap<String, Partition>>,
-    stopper: Mutex<Signaler>,
+    signaler: Mutex<Signaler>,
     signal: Signal,
 }
 
@@ -468,7 +468,7 @@ impl Executor {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
-        let (stopper, signal) = Signaler::new();
+        let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Self {
             cycle: cfg.cycle,
             deadline,
@@ -483,7 +483,7 @@ impl Executor {
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
             partitions: Mutex::new(HashMap::new()),
-            stopper: Mutex::new(stopper),
+            signaler: Mutex::new(signaler),
             signal,
         });
         (
@@ -748,7 +748,7 @@ impl crate::Spawner for Context {
 
     fn stop(&self, value: i32) {
         self.executor.auditor.stop(value);
-        self.executor.stopper.lock().unwrap().signal(value);
+        self.executor.signaler.lock().unwrap().signal(value);
     }
 
     fn stopped(&self) -> Signal {
