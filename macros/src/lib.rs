@@ -173,6 +173,12 @@ impl Parse for SelectInput {
 /// This macro is powered by the [futures](https://docs.rs/futures) crate
 /// and is not bound to a particular executor or runtime.
 ///
+/// # Fusing
+///
+/// This macro handles both the [fusing](https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse)
+/// and [pinning](https://docs.rs/futures/latest/futures/macro.pin_mut.html) of (fused) futures in
+/// a `select`-specific scope.
+///
 /// # Example
 ///
 /// ```rust
