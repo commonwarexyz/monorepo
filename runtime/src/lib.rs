@@ -102,7 +102,7 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Returns an instance of a `Signal` that resolves when `stop` is called by
     /// any task.
     ///
-    /// If `stop` has already been called, the returned `Waiter` will resolve immediately.
+    /// If `stop` has already been called, the returned `Signal` will resolve immediately.
     fn stopped(&self) -> Signal;
 }
 

@@ -203,9 +203,9 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 ///     // Setup signaler and get future
 ///     let (mut signaler, mut signal) = Signaler::new();
 ///
-///     // Loop on the waiter until signal is received
+///     // Loop on the signal until resolved
 ///     let (tx, rx) = oneshot::channel();
-///     context.spawn("waiter", {
+///     context.spawn("task", {
 ///         let context = context.clone();
 ///         async move {
 ///             // Wait for signal or sleep
