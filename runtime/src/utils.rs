@@ -239,7 +239,7 @@ pub struct Signaler {
 impl Signaler {
     /// Create a new `Signaler`.
     ///
-    /// Returns a `Signaler` and a future that will resolve when the `Signaler` is signaled.
+    /// Returns a `Signaler` and a `Waiter` that will resolve when `signal` is called.
     pub fn new() -> (Self, Waiter) {
         let (tx, rx) = oneshot::channel();
         (Self { tx: Some(tx) }, rx.shared())
