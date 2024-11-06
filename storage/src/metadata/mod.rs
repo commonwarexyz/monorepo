@@ -204,6 +204,11 @@ mod tests {
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
+            let last_update = metadata.last_update().unwrap();
+            assert_eq!(
+                last_update.duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+                1
+            );
 
             // Check metrics
             let mut buffer = String::new();
@@ -252,6 +257,11 @@ mod tests {
 
             // Sync the metadata store
             metadata.sync().await.unwrap();
+            let last_update = metadata.last_update().unwrap();
+            assert_eq!(
+                last_update.duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+                3 // Incremented by 1 during call to close
+            );
 
             // Check metrics
             let mut buffer = String::new();
