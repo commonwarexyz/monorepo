@@ -88,13 +88,13 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
     async fn load(name: &[u8], blob: &B) -> Result<Option<(u128, BTreeMap<u32, Bytes>)>, Error> {
         // Get blob length
         let len = blob.len().await?;
-        let len = len.try_into().map_err(|_| Error::BlobTooLarge(len))?;
         if len == 0 {
             // Empty blob
             return Ok(None);
         }
 
         // Read blob
+        let len = len.try_into().map_err(|_| Error::BlobTooLarge(len))?;
         let mut buf = vec![0u8; len];
         blob.read_at(&mut buf, 0).await?;
 

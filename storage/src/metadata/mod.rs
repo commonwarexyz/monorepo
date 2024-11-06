@@ -99,13 +99,12 @@ pub struct Config {
 
 #[cfg(test)]
 mod tests {
-    use std::time::UNIX_EPOCH;
-
     use super::*;
     use bytes::Bytes;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob, Runner, Storage};
     use prometheus_client::encoding::text::encode;
+    use std::time::UNIX_EPOCH;
 
     #[test_traced]
     fn test_put_get() {
@@ -429,6 +428,28 @@ mod tests {
             encode(&mut buffer, &registry.lock().unwrap()).unwrap();
             assert!(buffer.contains("syncs_total 0"));
             assert!(buffer.contains("keys 0"));
+        });
+    }
+
+    #[test_traced]
+    fn test_value_too_big_error() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a metadata store
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "test".to_string(),
+            };
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Create a value that exceeds u32::MAX bytes
+            let value = vec![0u8; (u32::MAX as usize) + 1];
+            metadata.put(1, Bytes::from(value));
+
+            // Assert
+            let result = metadata.sync().await;
+            assert!(matches!(result, Err(Error::ValueTooBig(_))));
         });
     }
 }
