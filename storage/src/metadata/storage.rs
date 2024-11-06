@@ -99,6 +99,19 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         blob.read_at(&mut buf, 0).await?;
 
         // Verify integrity
+        if buf.len() < 20 {
+            // Truncate and return none
+            warn!(
+                name = std::str::from_utf8(name).unwrap(),
+                len = buf.len(),
+                "blob is too short: truncating"
+            );
+            blob.truncate(0).await?;
+            blob.sync().await?;
+            return Ok(None);
+        }
+
+        // Extract checksum
         let checksum_index = buf.len() - 4;
         let stored_checksum = u32::from_be_bytes(buf[checksum_index..].try_into().unwrap());
         let computed_checksum = crc32fast::hash(&buf[..checksum_index]);
@@ -119,16 +132,27 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         let timestamp = u128::from_be_bytes(buf[..16].try_into().unwrap());
 
         // Extract data
+        //
+        // If the checksum is correct, we assume data is correctly packed and we don't perform
+        // length checks on the cursor.
         let mut data = BTreeMap::new();
         let mut cursor = 16;
         while cursor < checksum_index {
-            let key = u32::from_be_bytes(buf[cursor..cursor + 4].try_into().unwrap());
-            cursor += 4;
+            // Read key
+            let next_cursor = cursor + 4;
+            let key = u32::from_be_bytes(buf[cursor..next_cursor].try_into().unwrap());
+            cursor = next_cursor;
+
+            // Read value length
+            let next_cursor = cursor + 4;
             let value_len =
-                u32::from_be_bytes(buf[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-            let value = Bytes::copy_from_slice(&buf[cursor..cursor + value_len]);
-            cursor += value_len;
+                u32::from_be_bytes(buf[cursor..next_cursor].try_into().unwrap()) as usize;
+            cursor = next_cursor;
+
+            // Read value
+            let next_cursor = cursor + value_len;
+            let value = Bytes::copy_from_slice(&buf[cursor..next_cursor]);
+            cursor = next_cursor;
             data.insert(key, value);
         }
 

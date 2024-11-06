@@ -401,6 +401,55 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_recover_corrupted_short() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a metadata store
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "test".to_string(),
+            };
+            let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Put a key
+            let key = 42;
+            let hello = Bytes::from("hello");
+            metadata.put(key, hello.clone());
+
+            // Sync the metadata store
+            metadata.sync().await.unwrap();
+
+            // Put an overlapping key and a new key
+            let world = Bytes::from("world");
+            metadata.put(key, world.clone());
+            let key2 = 43;
+            let foo = Bytes::from("foo");
+            metadata.put(key2, foo.clone());
+
+            // Close the metadata store
+            metadata.close().await.unwrap();
+
+            // Corrupt the metadata store
+            let blob = context.open("test", b"left").await.unwrap();
+            let blob_len = blob.len().await.unwrap();
+            blob.truncate(blob_len - 8).await.unwrap();
+            blob.close().await.unwrap();
+
+            // Reopen the metadata store
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: "test".to_string(),
+            };
+            let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Get the key (falls back to non-corrupt)
+            let value = metadata.get(key).unwrap();
+            assert_eq!(value, &hello);
+        });
+    }
+
+    #[test_traced]
     fn test_unclean_shutdown() {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
