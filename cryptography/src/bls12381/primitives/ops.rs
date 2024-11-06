@@ -100,6 +100,8 @@ pub fn aggregate(signatures: &[group::Signature]) -> group::Signature {
 }
 
 /// Verifies the aggregate signature over multiple unique messages from the same public key.
+///
+/// If the same message is provided multiple times, the function will error.
 pub fn verify_aggregate(
     public: &group::Public,
     namespace: &[u8],
