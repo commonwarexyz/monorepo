@@ -108,7 +108,7 @@ pub fn verify_aggregate(
     messages: &[&[u8]],
     signature: &group::Signature,
 ) -> Result<(), Error> {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::with_capacity(messages.len());
     let mut hm_sum = group::Signature::zero();
     for msg in messages {
         if seen.contains(msg) {

@@ -83,11 +83,21 @@
 //! ```
 //!
 //! ## Signature Aggregation (Same Public Key)
+//!
 //! ```txt
 //! msgs=10                 time:   [11.731 µs 12.516 µs 13.316 µs]
 //! msgs=100                time:   [117.02 µs 117.16 µs 117.37 µs]
 //! msgs=1000               time:   [1.1751 ms 1.1777 ms 1.1803 ms]
 //! msgs=10000              time:   [11.878 ms 11.966 ms 12.068 ms]
+//! ```
+//!
+//! ## Aggregate Signature Verification (Same Public Key)
+//!
+//! ```txt
+//! msgs=10                 time:   [1.9449 ms 2.0191 ms 2.1215 ms]
+//! msgs=100                time:   [12.586 ms 12.599 ms 12.615 ms]
+//! msgs=1000               time:   [118.65 ms 118.78 ms 118.94 ms]
+//! msgs=10000              time:   [1.1794 s 1.1811 s 1.1836 s]
 //! ```
 
 pub mod dkg;
