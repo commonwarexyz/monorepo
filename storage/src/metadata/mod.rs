@@ -70,7 +70,7 @@ pub use storage::Metadata;
 
 use thiserror::Error;
 
-/// Errors that can occur when interacting with the journal.
+/// Errors that can occur when interacting with `Metadata`.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("runtime error: {0}")]

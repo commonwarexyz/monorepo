@@ -20,7 +20,7 @@ struct Index {
     next: Option<Box<Index>>,
 }
 
-/// Implementation of a write-once key-value store.
+/// Implementation of `Archive` storage.
 pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     cfg: Config<T>,
     journal: Journal<B, E>,
@@ -45,9 +45,9 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
 }
 
 impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
-    /// Initialize a new `archive` instance.
+    /// Initialize a new `Archive` instance.
     ///
-    /// The in-memory index for `archive` is populated during this call
+    /// The in-memory index for `Archive` is populated during this call
     /// by replaying the journal.
     pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize keys and run corruption check
@@ -104,31 +104,23 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             let mut registry = cfg.registry.lock().unwrap();
             registry.register(
                 "keys_tracked",
-                "Number of keys tracked by the archive",
+                "Number of keys tracked",
                 keys_tracked.clone(),
             );
             registry.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
             registry.register(
                 "unnecessary_prefix_reads",
-                "Number of unnecessary prefix reads performed by the archive",
+                "Number of unnecessary prefix reads performed",
                 unnecessary_prefix_reads.clone(),
             );
             registry.register(
                 "unnecessary_item_reads",
-                "Number of unnecessary item reads performed by the archive",
+                "Number of unnecessary item reads performed",
                 unnecessary_item_reads.clone(),
             );
-            registry.register(
-                "gets",
-                "Number of gets performed by the archive",
-                gets.clone(),
-            );
-            registry.register("has", "Number of has performed by the archive", has.clone());
-            registry.register(
-                "syncs",
-                "Number of syncs called by the archive",
-                syncs.clone(),
-            );
+            registry.register("gets", "Number of gets performed", gets.clone());
+            registry.register("has", "Number of has performed", has.clone());
+            registry.register("syncs", "Number of syncs called", syncs.clone());
         }
 
         // Return populated archive
@@ -261,12 +253,12 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
     }
 
-    /// Store a key-value pair in the archive. Keys are assumed to be unique.
+    /// Store a key-value pair in `Archive`. Keys are assumed to be unique.
     ///
     /// If the key already exists (at a given `section`), an error is returned. If the same key
     /// is stored multiple times in different sections, any value may be returned.
     ///
-    /// If `force_sync` is true, the archive will wait to return until the
+    /// If `force_sync` is true, `Archive` will wait to return until the
     /// journal has been synced.
     pub async fn put(
         &mut self,
@@ -307,7 +299,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let mut buf = Vec::with_capacity(buf_len);
         buf.put(key);
         // We store the checksum of the key because we employ partial reads from
-        // the journal, which aren't verified before returning to the archive.
+        // the journal, which aren't verified before returning to `Archive`.
         buf.put_u32(crc32fast::hash(key));
         buf.put(data); // we don't need to store data len because we already get this from the journal
         let offset = self.journal.append(section, buf.into()).await?;
@@ -348,7 +340,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    /// Retrieve a value from the archive.
+    /// Retrieve a value from `Archive`.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Check key length
         self.verify_key(key)?;
@@ -394,7 +386,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(None)
     }
 
-    /// Check if a key exists in the archive.
+    /// Check if a key exists in `Archive`.
     pub async fn has(&self, key: &[u8]) -> Result<bool, Error> {
         // Check key length
         self.verify_key(key)?;
@@ -432,7 +424,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(false)
     }
 
-    /// Prune the archive to the provided section.
+    /// Prune `Archive` to the provided section.
     ///
     /// Calling `prune` on a section that has already been pruned will return an error.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
@@ -463,7 +455,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    /// Close the archive (and underlying journal).
+    /// Close `Archive` (and underlying journal).
     pub async fn close(self) -> Result<(), Error> {
         self.journal.close().await.map_err(Error::Journal)
     }

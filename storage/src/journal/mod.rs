@@ -107,7 +107,7 @@ use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
-/// Errors that can occur when interacting with the journal.
+/// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("runtime error: {0}")]

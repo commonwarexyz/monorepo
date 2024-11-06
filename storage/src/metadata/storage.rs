@@ -12,7 +12,7 @@ use tracing::{trace, warn};
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
 
-/// Implementation of a metadata store.
+/// Implementation of `Metadata` storage.
 pub struct Metadata<B: Blob, E: Clock + Storage<B>> {
     runtime: E,
 
@@ -28,6 +28,7 @@ pub struct Metadata<B: Blob, E: Clock + Storage<B>> {
 }
 
 impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
+    /// Initialize a new `Metadata` instance.
     pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
         // Open dedicated blobs
         let left = runtime.open(&cfg.partition, BLOB_NAMES[0]).await?;
@@ -135,28 +136,27 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         Ok(Some((timestamp, data)))
     }
 
-    /// Get a value from the metadata store (if it exists).
+    /// Get a value from `Metadata` (if it exists).
     pub fn get(&self, key: u32) -> Option<&Bytes> {
         self.data.get(&key)
     }
 
-    /// Put a value into the metadata store.
+    /// Put a value into `Metadata`.
     ///
-    /// If the key already exists, the value will be overwritten.
-    ///
-    /// The value stored will not be persisted until `sync` is called.
+    /// If the key already exists, the value will be overwritten. The
+    /// value stored will not be persisted until `sync` is called.
     pub fn put(&mut self, key: u32, value: Bytes) {
         self.data.insert(key, value);
         self.keys.set(self.data.len() as i64);
     }
 
-    /// Remove a value from the metadata store (if it exists).
+    /// Remove a value from `Metadata` (if it exists).
     pub fn remove(&mut self, key: u32) {
         self.data.remove(&key);
         self.keys.set(self.data.len() as i64);
     }
 
-    /// Get the timestamp of the last update (if a previous
+    /// Get the timestamp of the last update to `Metadata` (if a previous
     /// update exists).
     pub fn last_update(&self) -> Option<SystemTime> {
         let timestamp = self.blobs[self.cursor].1;
@@ -170,7 +170,7 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         Some(UNIX_EPOCH + timestamp)
     }
 
-    /// Persist the current state of the metadata store.
+    /// Atomically commit the current state of `Metadata`.
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Compute next timestamp
         let past_timestamp = &self.blobs[self.cursor].1;
@@ -226,7 +226,7 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         Ok(())
     }
 
-    /// Sync outstanding data and close open blobs.
+    /// Sync outstanding data and close `Metadata`.
     pub async fn close(mut self) -> Result<(), Error> {
         // Sync and close blobs
         self.sync().await?;
