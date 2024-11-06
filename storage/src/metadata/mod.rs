@@ -22,6 +22,10 @@
 //! _To ensure the integrity of the data, a CRC32 checksum is appended to the end of the blob.
 //! This ensures that partial writes are detected before any data is relied on._
 //!
+//! _In the unlikely event that the current timestamp since the last `sync` is unchanged (as measured
+//! in nanoseconds), the timestamp is incremented by one to ensure that the latest update is always
+//! considered the most recent on restart._
+//!
 //! # Atomic Updates
 //!
 //! To provide support for atomic updates, `Metadata` maintains two blobs: a "left" and a "right"
