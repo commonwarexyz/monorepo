@@ -32,6 +32,8 @@ pub struct Config {
 
 #[cfg(test)]
 mod tests {
+    use std::time::UNIX_EPOCH;
+
     use super::*;
     use bytes::Bytes;
     use commonware_macros::test_traced;
@@ -50,6 +52,10 @@ mod tests {
                 partition: "test".to_string(),
             };
             let mut metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Check last update
+            let last_update = metadata.last_update();
+            assert!(last_update.is_none());
 
             // Get a key that doesn't exist
             let key = 42;
@@ -92,6 +98,13 @@ mod tests {
                 partition: "test".to_string(),
             };
             let metadata = Metadata::init(context.clone(), cfg).await.unwrap();
+
+            // Check last update (increment by 1 over the previous)
+            let last_update = metadata.last_update().unwrap();
+            assert_eq!(
+                last_update.duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+                1
+            );
 
             // Check metrics
             let mut buffer = String::new();

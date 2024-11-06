@@ -1,20 +1,25 @@
-use std::{collections::BTreeMap, marker::PhantomData};
-
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
-use commonware_runtime::{Blob, Storage};
+use commonware_runtime::{Blob, Clock, Storage};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
-use tracing::warn;
+use std::{
+    collections::BTreeMap,
+    marker::PhantomData,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tracing::{trace, warn};
 
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
+const SECONDS_IN_NANOSECONDS: u128 = 1_000_000_000;
 
 /// Implementation of a metadata store.
-pub struct Metadata<B: Blob, E: Storage<B>> {
+pub struct Metadata<B: Blob, E: Clock + Storage<B>> {
+    runtime: E,
+
     // Data is stored in a BTreeMap to enable deterministic serialization.
     data: BTreeMap<u32, Bytes>,
-
     cursor: usize,
-    blobs: [(B, u32); 2],
+    blobs: [(B, u128); 2],
 
     syncs: Counter,
     keys: Gauge,
@@ -22,7 +27,7 @@ pub struct Metadata<B: Blob, E: Storage<B>> {
     _phantom_e: PhantomData<E>,
 }
 
-impl<B: Blob, E: Storage<B>> Metadata<B, E> {
+impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
     pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
         // Open dedicated blobs
         let left = runtime.open(&cfg.partition, BLOB_NAMES[0]).await?;
@@ -33,35 +38,25 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         let right_result = Self::load(BLOB_NAMES[1], &right).await?;
 
         // Set checksums
-        let mut left_parent = 0;
+        let mut left_timestamp = 0;
         let mut left_data = BTreeMap::new();
-        let mut left_checksum = 0;
-        if let Some((parent, data, checksum)) = left_result {
-            left_parent = parent;
+        if let Some((timestamp, data)) = left_result {
+            left_timestamp = timestamp;
             left_data = data;
-            left_checksum = checksum;
         }
-        let mut right_parent = 0;
+        let mut right_timestamp = 0;
         let mut right_data = BTreeMap::new();
-        let mut right_checksum = 0;
-        if let Some((parent, data, checksum)) = right_result {
-            right_parent = parent;
+        if let Some((timestamp, data)) = right_result {
+            right_timestamp = timestamp;
             right_data = data;
-            right_checksum = checksum;
         }
 
         // Choose latest blob
         let mut data = left_data;
         let mut cursor = 0;
-        if right_checksum != 0 {
-            if right_parent == left_checksum {
-                cursor = 1;
-                data = right_data;
-            } else if left_parent == right_checksum {
-                // Already set
-            } else {
-                panic!("cannot determine latest blob");
-            }
+        if right_timestamp > left_timestamp {
+            cursor = 1;
+            data = right_data;
         }
 
         // Create metrics
@@ -76,10 +71,11 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         // Return metadata
         keys.set(data.len() as i64);
         Ok(Self {
-            data,
+            runtime,
 
+            data,
             cursor,
-            blobs: [(left, left_checksum), (right, right_checksum)],
+            blobs: [(left, left_timestamp), (right, right_timestamp)],
 
             syncs,
             keys,
@@ -88,10 +84,7 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         })
     }
 
-    async fn load(
-        name: &[u8],
-        blob: &B,
-    ) -> Result<Option<(u32, BTreeMap<u32, Bytes>, u32)>, Error> {
+    async fn load(name: &[u8], blob: &B) -> Result<Option<(u128, BTreeMap<u32, Bytes>)>, Error> {
         // Get blob length
         let len = blob.len().await?;
         let len = len.try_into().map_err(|_| Error::BlobTooLarge(len))?;
@@ -105,8 +98,9 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         blob.read_at(&mut buf, 0).await?;
 
         // Verify integrity
-        let stored_checksum = u32::from_be_bytes(buf[buf.len() - 4..].try_into().unwrap());
-        let computed_checksum = crc32fast::hash(&buf[..buf.len() - 4]);
+        let checksum_index = buf.len() - 4;
+        let stored_checksum = u32::from_be_bytes(buf[checksum_index..].try_into().unwrap());
+        let computed_checksum = crc32fast::hash(&buf[..checksum_index]);
         if stored_checksum != computed_checksum {
             // Truncate and return none
             warn!(
@@ -121,23 +115,24 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         }
 
         // Get parent
-        let parent = u32::from_be_bytes(buf[..4].try_into().unwrap());
+        let timestamp = u128::from_be_bytes(buf[..16].try_into().unwrap());
 
         // Extract data
         let mut data = BTreeMap::new();
-        let mut cursor = 4;
-        while cursor < buf.len() - 4 {
+        let mut cursor = 16;
+        while cursor < checksum_index {
             let key = u32::from_be_bytes(buf[cursor..cursor + 4].try_into().unwrap());
             cursor += 4;
-            let value_len = u32::from_be_bytes(buf[cursor..cursor + 4].try_into().unwrap());
+            let value_len =
+                u32::from_be_bytes(buf[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
-            let value = Bytes::copy_from_slice(&buf[cursor..cursor + value_len as usize]);
-            cursor += value_len as usize;
+            let value = Bytes::copy_from_slice(&buf[cursor..cursor + value_len]);
+            cursor += value_len;
             data.insert(key, value);
         }
 
         // Return info
-        Ok(Some((parent, data, computed_checksum)))
+        Ok(Some((timestamp, data)))
     }
 
     /// Get a value from the metadata store (if it exists).
@@ -161,14 +156,48 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         self.keys.set(self.data.len() as i64);
     }
 
+    /// Get the timestamp of the last update (if a previous
+    /// update exists).
+    pub fn last_update(&self) -> Option<SystemTime> {
+        let timestamp = self.blobs[self.cursor].1;
+        if timestamp == 0 {
+            return None;
+        }
+        let timestamp = Duration::new(
+            (timestamp / SECONDS_IN_NANOSECONDS) as u64,
+            (timestamp % SECONDS_IN_NANOSECONDS) as u32,
+        );
+        Some(UNIX_EPOCH + timestamp)
+    }
+
     /// Persist the current state of the metadata store.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        // Get current blob
-        let past_checksum = &self.blobs[self.cursor].1;
+        // Compute next timestamp
+        let past_timestamp = &self.blobs[self.cursor].1;
+        let mut next_timestamp = self
+            .runtime
+            .current()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        if next_timestamp <= *past_timestamp {
+            // While it is possible that extremely high-frequency updates to `Metadata` (more than
+            // one update per nanosecond) could cause an eventual overflow of the timestamp, this
+            // is not treated as a serious concern (as any call to `sync` will take longer than this).
+            //
+            // The nice benefit of this is that we also can provide the caller with some timestamp
+            // of the last update, which can be useful for a variety of things.
+            trace!(
+                past = *past_timestamp,
+                next = next_timestamp,
+                "timestamps are not monotonically increasing: adjusting next"
+            );
+            next_timestamp = *past_timestamp + 1;
+        }
 
         // Create buffer
         let mut buf = Vec::new();
-        buf.put_u32(*past_checksum);
+        buf.put_u128(next_timestamp);
         for (key, value) in &self.data {
             buf.put_u32(*key);
             let value_len = value
@@ -189,7 +218,7 @@ impl<B: Blob, E: Storage<B>> Metadata<B, E> {
         next_blob.0.write_at(&buf, 0).await?;
         next_blob.0.truncate(buf.len() as u64).await?;
         next_blob.0.sync().await?;
-        next_blob.1 = checksum;
+        next_blob.1 = next_timestamp;
 
         // Switch blobs
         self.cursor = next_cursor;
