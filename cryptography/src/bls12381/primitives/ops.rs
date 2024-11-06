@@ -1,7 +1,5 @@
 //! Digital signatures over the BLS12-381 curve.
 
-use std::collections::HashSet;
-
 use super::{
     group::{self, equal, Element, Point, Share},
     poly::{self, Eval},
@@ -9,6 +7,8 @@ use super::{
 };
 use commonware_utils::union;
 use rand::RngCore;
+use rayon::{prelude::*, ThreadPoolBuilder};
+use std::collections::HashSet;
 
 /// Returns a new keypair derived from the provided randomness.
 pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
@@ -107,19 +107,41 @@ pub fn verify_aggregate(
     namespace: &[u8],
     messages: &[&[u8]],
     signature: &group::Signature,
+    concurrency: usize,
 ) -> Result<(), Error> {
-    let mut seen = HashSet::with_capacity(messages.len());
-    let mut hm_sum = group::Signature::zero();
-    for msg in messages {
-        if seen.contains(msg) {
-            return Err(Error::DuplicateMessage);
+    // Check for duplicate messages before parallel processing
+    {
+        let mut seen = HashSet::new();
+        for msg in messages {
+            if !seen.insert(*msg) {
+                return Err(Error::DuplicateMessage);
+            }
         }
-        seen.insert(msg);
-        let payload = union(namespace, msg);
-        let mut hm = group::Signature::zero();
-        hm.map(&payload);
-        hm_sum.add(&hm);
     }
+
+    // Build a thread pool with the specified concurrency
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(concurrency)
+        .build()
+        .expect("Unable to build thread pool");
+
+    // Perform hashing an summation of messages in parallel
+    let hm_sum = pool.install(|| {
+        messages
+            .par_iter()
+            .map(|msg| {
+                let payload = union(namespace, msg);
+                let mut hm = group::Signature::zero();
+                hm.map(&payload);
+                hm
+            })
+            .reduce(group::Signature::zero, |mut sum, hm| {
+                sum.add(&hm);
+                sum
+            })
+    });
+
+    // Verify the signature
     if !equal(public, signature, &hm_sum) {
         return Err(Error::InvalidSignature);
     }
@@ -205,7 +227,7 @@ mod tests {
         let aggregate_sig = aggregate(&signatures);
 
         // Verify the aggregated signature
-        verify_aggregate(&public, namespace, &messages, &aggregate_sig)
+        verify_aggregate(&public, namespace, &messages, &aggregate_sig, 4)
             .expect("Aggregated signature should be valid");
     }
 
@@ -225,7 +247,7 @@ mod tests {
 
         // Verify the aggregated signature
         let wrong_messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 4"];
-        let result = verify_aggregate(&public, namespace, &wrong_messages, &aggregate_sig);
+        let result = verify_aggregate(&public, namespace, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
@@ -244,7 +266,7 @@ mod tests {
         let aggregate_sig = aggregate(&signatures);
 
         // Verify the aggregated signature
-        let result = verify_aggregate(&public, namespace, &messages, &aggregate_sig);
+        let result = verify_aggregate(&public, namespace, &messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::DuplicateMessage)));
     }
 
@@ -264,7 +286,7 @@ mod tests {
 
         // Verify the aggregated signature
         let wrong_messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2"];
-        let result = verify_aggregate(&public, namespace, &wrong_messages, &aggregate_sig);
+        let result = verify_aggregate(&public, namespace, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 }

@@ -8,7 +8,7 @@
 //!
 //! # Benchmarks
 //!
-//! _The following benchmarks were collected on 8/23/24 on a MacBook Pro (M3 Pro, Nov 2023)._
+//! _The following benchmarks were collected on 11/6/24 on a MacBook Pro (M3 Pro, Nov 2023)._
 //!
 //! ```bash
 //! cargo bench
@@ -94,10 +94,31 @@
 //! ## Aggregate Signature Verification (Same Public Key)
 //!
 //! ```txt
-//! msgs=10                 time:   [1.9449 ms 2.0191 ms 2.1215 ms]
-//! msgs=100                time:   [12.586 ms 12.599 ms 12.615 ms]
-//! msgs=1000               time:   [118.65 ms 118.78 ms 118.94 ms]
-//! msgs=10000              time:   [1.1794 s 1.1811 s 1.1836 s]
+//! conc=1 msgs=10          time:   [1.9960 ms 2.0150 ms 2.0263 ms]
+//! conc=2 msgs=10          time:   [1.3962 ms 1.3979 ms 1.3998 ms]
+//! conc=4 msgs=10          time:   [1.1857 ms 1.1882 ms 1.1906 ms]
+//! conc=8 msgs=10          time:   [1.1787 ms 1.1873 ms 1.2022 ms]
+//! conc=16 msgs=10         time:   [1.3770 ms 1.3882 ms 1.4133 ms]
+//! conc=1 msgs=100         time:   [12.687 ms 12.704 ms 12.723 ms]
+//! conc=2 msgs=100         time:   [6.8790 ms 6.9518 ms 7.0950 ms]
+//! conc=4 msgs=100         time:   [3.9784 ms 3.9912 ms 4.0085 ms]
+//! conc=8 msgs=100         time:   [2.8804 ms 2.9236 ms 2.9558 ms]
+//! conc=16 msgs=100        time:   [2.7870 ms 2.8007 ms 2.8139 ms]
+//! conc=1 msgs=1000        time:   [119.06 ms 119.11 ms 119.17 ms]
+//! conc=2 msgs=1000        time:   [61.170 ms 61.244 ms 61.332 ms]
+//! conc=4 msgs=1000        time:   [31.822 ms 31.882 ms 31.948 ms]
+//! conc=8 msgs=1000        time:   [19.635 ms 19.991 ms 20.547 ms]
+//! conc=16 msgs=1000       time:   [16.950 ms 17.039 ms 17.126 ms]
+//! conc=1 msgs=10000       time:   [1.1826 s 1.1905 s 1.2018 s]
+//! conc=2 msgs=10000       time:   [603.82 ms 610.05 ms 618.48 ms]
+//! conc=4 msgs=10000       time:   [309.44 ms 312.92 ms 318.01 ms]
+//! conc=8 msgs=10000       time:   [187.57 ms 192.75 ms 198.37 ms]
+//! conc=16 msgs=10000      time:   [158.16 ms 161.60 ms 165.44 ms]
+//! conc=1 msgs=50000       time:   [5.9263 s 5.9377 s 5.9547 s]
+//! conc=2 msgs=50000       time:   [3.0152 s 3.0266 s 3.0417 s]
+//! conc=4 msgs=50000       time:   [1.5420 s 1.5458 s 1.5500 s]
+//! conc=8 msgs=50000       time:   [925.32 ms 929.07 ms 933.83 ms]
+//! conc=16 msgs=50000      time:   [769.73 ms 773.88 ms 777.97 ms]
 //! ```
 
 pub mod dkg;
