@@ -1,4 +1,66 @@
-//! TBD
+//! A key-value store optimized for atomically committing a small collection of metadata.
+//!
+//! `Metadata` is a key-value store optimized for tracking a small collection of metadata
+//! that allows multiple updates to be committed in a single batch. It is commonly used with
+//! a variety of other underlying storage systems to persist application state across restarts.
+//!
+//! # Format
+//!
+//! Data stored in `Metadata` is serialized as a sequence of key-value pairs in either a
+//! "left" or "right" blob:
+//!
+//! ```text
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 |    ...    |15 |16 |17 |18 |19 |20 |21 |22 |23 |...|50 |51 |52 |53 |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! |   Timestamp (u128)    |  Key1 (u32)   |  VLen (u32)   |...|  CRC32(u32)   |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//!
+//! ... = Other key-value pairs (Key2|VLen2|Value2, Key3|VLen3|Value3, ...)
+//! ```
+//!
+//! _To ensure the integrity of the data, a CRC32 checksum is appended to the end of the blob.
+//! This ensures that partial writes are detected before any data is relied on._
+//!
+//! # Atomic Updates
+//!
+//! To provide support for atomic updates, `Metadata` maintains two blobs: a "left" and a "right"
+//! blob. When a new update is committed, it is written to the "older" of the two blobs (indicated
+//! by the timestamp persisted). Writes to `Storage` are not atomic and may only complete partially,
+//! so we only overwrite the "newer" blob once the "older" blob has been synced (otherwise, we would
+//! not be guaranteed to recover the latest complete state from disk on restart as half of a blob
+//! could be old data and half new data).
+//!
+//! # Example
+//!
+//! ```rust
+//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
+//! use commonware_storage::metadata::{Metadata, Config};
+//! use prometheus_client::registry::Registry;
+//! use std::sync::{Arc, Mutex};
+//!
+//! let (executor, context, _) = Executor::default();
+//! executor.start(async move {
+//!     // Create a store
+//!     let mut metadata = Metadata::init(context, Config{
+//!         registry: Arc::new(Mutex::new(Registry::default())),
+//!         partition: "partition".to_string()
+//!     }).await.unwrap();
+//!
+//!     // Store metadata
+//!     metadata.put(1, "hello".into());
+//!     metadata.put(2, "world".into());
+//!
+//!     // Sync the metadata store (batch write changes)
+//!     metadata.sync().await.unwrap();
+//!
+//!     // Retrieve some metadata
+//!     let value = metadata.get(1);
+//!
+//!     // Close the store
+//!     metadata.close().await.unwrap();
+//! });
+//! ```
 
 mod storage;
 use std::sync::{Arc, Mutex};
