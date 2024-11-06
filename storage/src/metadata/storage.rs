@@ -35,8 +35,8 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         let right = runtime.open(&cfg.partition, BLOB_NAMES[1]).await?;
 
         // Find latest blob (check which includes a hash of the other)
-        let left_result = Self::load(BLOB_NAMES[0], &left).await?;
-        let right_result = Self::load(BLOB_NAMES[1], &right).await?;
+        let left_result = Self::load(0, &left).await?;
+        let right_result = Self::load(1, &right).await?;
 
         // Set checksums
         let mut left_timestamp = 0;
@@ -85,7 +85,7 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         })
     }
 
-    async fn load(name: &[u8], blob: &B) -> Result<Option<(u128, BTreeMap<u32, Bytes>)>, Error> {
+    async fn load(index: usize, blob: &B) -> Result<Option<(u128, BTreeMap<u32, Bytes>)>, Error> {
         // Get blob length
         let len = blob.len().await?;
         if len == 0 {
@@ -101,11 +101,7 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         // Verify integrity
         if buf.len() < 20 {
             // Truncate and return none
-            warn!(
-                name = std::str::from_utf8(name).unwrap(),
-                len = buf.len(),
-                "blob is too short: truncating"
-            );
+            warn!(index, len = buf.len(), "blob is too short: truncating");
             blob.truncate(0).await?;
             blob.sync().await?;
             return Ok(None);
@@ -118,7 +114,7 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         if stored_checksum != computed_checksum {
             // Truncate and return none
             warn!(
-                name = std::str::from_utf8(name).unwrap(),
+                index,
                 stored = stored_checksum,
                 computed = computed_checksum,
                 "checksum mismatch: truncating"
