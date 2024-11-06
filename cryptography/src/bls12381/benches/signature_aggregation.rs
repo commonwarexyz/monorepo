@@ -18,7 +18,7 @@ fn benchmark_signature_aggregation(c: &mut Criterion) {
                         .collect::<Vec<_>>()
                 },
                 |partials| {
-                    black_box(primitives::ops::aggregate(t, partials).unwrap());
+                    black_box(primitives::ops::partial_aggregate(t, partials).unwrap());
                 },
                 BatchSize::SmallInput,
             );

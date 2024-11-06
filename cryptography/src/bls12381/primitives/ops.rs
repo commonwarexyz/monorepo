@@ -74,7 +74,7 @@ pub fn partial_verify(
 ///
 /// Signatures recovered by this function are deterministic and are safe
 /// to use in a consensus-critical context.
-pub fn aggregate(
+pub fn partial_aggregate(
     threshold: u32,
     partials: Vec<Eval<group::Signature>>,
 ) -> Result<group::Signature, Error> {
@@ -142,7 +142,7 @@ mod tests {
         for p in &partials {
             partial_verify(&public, namespace, msg, p).expect("signature should be valid");
         }
-        let threshold_sig = aggregate(t, partials).unwrap();
+        let threshold_sig = partial_aggregate(t, partials).unwrap();
         let threshold_pub = poly::public(&public);
         verify(&threshold_pub, namespace, msg, &threshold_sig).expect("signature should be valid");
         let payload = union(namespace, msg);
