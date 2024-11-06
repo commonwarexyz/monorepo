@@ -59,13 +59,7 @@
 //! conc=8 n=500 t=333      time:   [1.1176 s 1.1355 s 1.1539 s]
 //! ```
 //!
-//! ## Signature Generation
-//!
-//! ```txt
-//! ns_len=9 msg_len=5      time:   [232.12 µs 233.63 µs 235.42 µs]
-//! ```
-//!
-//! ## Signature Aggregation
+//! ## Partial Signature Aggregation
 //!
 //! ```txt
 //! n=5 t=3                 time:   [126.85 µs 128.50 µs 130.67 µs]
@@ -75,6 +69,11 @@
 //! n=100 t=67              time:   [5.0113 ms 5.0155 ms 5.0203 ms]
 //! n=250 t=167             time:   [16.922 ms 16.929 ms 16.937 ms]
 //! n=500 t=333             time:   [37.642 ms 37.676 ms 37.729 ms]
+//! ```
+//! ## Signature Generation (Signing)
+//!
+//! ```txt
+//! ns_len=9 msg_len=5      time:   [232.12 µs 233.63 µs 235.42 µs]
 //! ```
 //!
 //! ## Signature Verification
