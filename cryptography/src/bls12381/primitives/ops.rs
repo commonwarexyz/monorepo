@@ -1,5 +1,7 @@
 //! Digital signatures over the BLS12-381 curve.
 
+use std::collections::HashSet;
+
 use super::{
     group::{self, equal, Element, Point, Share},
     poly::{self, Eval},
@@ -85,6 +87,43 @@ pub fn partial_aggregate(
     poly::Signature::recover(threshold, partials)
 }
 
+/// Aggregates multiple signatures over unique messages from the same public key.
+///
+/// If the same signatures is provided multiple times, the function will not error
+/// but any attempt to verify the aggregated signature will fail.
+pub fn aggregate(signatures: &[group::Signature]) -> group::Signature {
+    let mut s = group::Signature::zero();
+    for sig in signatures {
+        s.add(sig);
+    }
+    s
+}
+
+/// Verifies the aggregate signature over multiple unique messages from the same public key.
+pub fn verify_aggregate(
+    public: &group::Public,
+    namespace: &[u8],
+    messages: &[&[u8]],
+    signature: &group::Signature,
+) -> Result<(), Error> {
+    let mut seen = HashSet::new();
+    let mut hm_sum = group::Signature::zero();
+    for msg in messages {
+        if seen.contains(msg) {
+            return Err(Error::DuplicateMessage);
+        }
+        seen.insert(msg);
+        let payload = union(namespace, msg);
+        let mut hm = group::Signature::zero();
+        hm.map(&payload);
+        hm_sum.add(&hm);
+    }
+    if !equal(public, signature, &hm_sum) {
+        return Err(Error::InvalidSignature);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +186,83 @@ mod tests {
         verify(&threshold_pub, namespace, msg, &threshold_sig).expect("signature should be valid");
         let payload = union(namespace, msg);
         blst_verify(&threshold_pub, &payload, &threshold_sig).expect("signature should be valid");
+    }
+
+    #[test]
+    fn test_aggregate_signatures() {
+        // Generate signatures
+        let (private, public) = keypair(&mut thread_rng());
+        let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 3"];
+        let namespace = b"test";
+        let signatures: Vec<_> = messages
+            .iter()
+            .map(|msg| sign(&private, namespace, msg))
+            .collect();
+
+        // Aggregate the signatures
+        let aggregate_sig = aggregate(&signatures);
+
+        // Verify the aggregated signature
+        verify_aggregate(&public, namespace, &messages, &aggregate_sig)
+            .expect("Aggregated signature should be valid");
+    }
+
+    #[test]
+    fn test_aggregate_signatures_wrong_messages() {
+        // Generate signatures
+        let (private, public) = keypair(&mut thread_rng());
+        let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 3"];
+        let namespace = b"test";
+        let signatures: Vec<_> = messages
+            .iter()
+            .map(|msg| sign(&private, namespace, msg))
+            .collect();
+
+        // Aggregate the signatures
+        let aggregate_sig = aggregate(&signatures);
+
+        // Verify the aggregated signature
+        let wrong_messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 4"];
+        let result = verify_aggregate(&public, namespace, &wrong_messages, &aggregate_sig);
+        assert!(matches!(result, Err(Error::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_aggregate_signatures_duplicate_messages() {
+        // Generate signatures
+        let (private, public) = keypair(&mut thread_rng());
+        let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 2"];
+        let namespace = b"test";
+        let signatures: Vec<_> = messages
+            .iter()
+            .map(|msg| sign(&private, namespace, msg))
+            .collect();
+
+        // Aggregate the signatures
+        let aggregate_sig = aggregate(&signatures);
+
+        // Verify the aggregated signature
+        let result = verify_aggregate(&public, namespace, &messages, &aggregate_sig);
+        assert!(matches!(result, Err(Error::DuplicateMessage)));
+    }
+
+    #[test]
+    fn test_aggregate_signatures_wrong_message_count() {
+        // Generate signatures
+        let (private, public) = keypair(&mut thread_rng());
+        let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 3"];
+        let namespace = b"test";
+        let signatures: Vec<_> = messages
+            .iter()
+            .map(|msg| sign(&private, namespace, msg))
+            .collect();
+
+        // Aggregate the signatures
+        let aggregate_sig = aggregate(&signatures);
+
+        // Verify the aggregated signature
+        let wrong_messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2"];
+        let result = verify_aggregate(&public, namespace, &wrong_messages, &aggregate_sig);
+        assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 }
