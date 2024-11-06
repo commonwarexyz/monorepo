@@ -81,6 +81,14 @@
 //! ```txt
 //! ns_len=9 msg_len=5      time:   [980.92 µs 981.37 µs 981.88 µs]
 //! ```
+//!
+//! ## Signature Aggregation (Same Public Key)
+//! ```txt
+//! msgs=10                 time:   [11.731 µs 12.516 µs 13.316 µs]
+//! msgs=100                time:   [117.02 µs 117.16 µs 117.37 µs]
+//! msgs=1000               time:   [1.1751 ms 1.1777 ms 1.1803 ms]
+//! msgs=10000              time:   [11.878 ms 11.966 ms 12.068 ms]
+//! ```
 
 pub mod dkg;
 pub mod primitives;
