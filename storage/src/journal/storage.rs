@@ -9,7 +9,7 @@ use tracing::{debug, trace, warn};
 
 const ITEM_ALIGNMENT: u64 = 16;
 
-/// Implementation of an append-only log for storing arbitrary data.
+/// Implementation of `Journal` storage.
 pub struct Journal<B: Blob, E: Storage<B>> {
     runtime: E,
     cfg: Config,
@@ -36,11 +36,11 @@ fn compute_next_offset(mut offset: u64) -> Result<u32, Error> {
 }
 
 impl<B: Blob, E: Storage<B>> Journal<B, E> {
-    /// Initialize a new `journal` instance.
+    /// Initialize a new `Journal` instance.
     ///
     /// All backing blobs are opened but not read during
     /// initialization. The `replay` method can be used
-    /// to iterate over all items in the `journal`.
+    /// to iterate over all items in the `Journal`.
     pub async fn init(runtime: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
@@ -323,7 +323,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
             .flatten())
     }
 
-    /// Appends an item to the `journal` in a given `section`.
+    /// Appends an item to `Journal` in a given `section`.
     ///
     /// # Warning
     ///
@@ -376,7 +376,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         Ok(offset)
     }
 
-    /// Retrieves the first `prefix` bytes of an item from the `journal` at a given `section` and `offset`.
+    /// Retrieves the first `prefix` bytes of an item from `Journal` at a given `section` and `offset`.
     ///
     /// This method bypasses the checksum verification and the caller is responsible for ensuring
     /// the integrity of any data read.
@@ -395,7 +395,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
         Ok(Some(item))
     }
 
-    /// Retrieves an item from the `journal` at a given `section` and `offset`.
+    /// Retrieves an item from `Journal` at a given `section` and `offset`.
     ///
     /// If `exact` is provided, it is assumed the item is of size `exact` (which allows
     /// the item to be read in a single read). If `exact` is provided, the checksum of the
