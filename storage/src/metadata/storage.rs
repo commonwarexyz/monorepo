@@ -101,7 +101,11 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         // Verify integrity
         if buf.len() < 20 {
             // Truncate and return none
-            warn!(index, len = buf.len(), "blob is too short: truncating");
+            warn!(
+                blob = index,
+                len = buf.len(),
+                "blob is too short: truncating"
+            );
             blob.truncate(0).await?;
             blob.sync().await?;
             return Ok(None);
@@ -114,7 +118,7 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         if stored_checksum != computed_checksum {
             // Truncate and return none
             warn!(
-                index,
+                blob = index,
                 stored = stored_checksum,
                 computed = computed_checksum,
                 "checksum mismatch: truncating"
