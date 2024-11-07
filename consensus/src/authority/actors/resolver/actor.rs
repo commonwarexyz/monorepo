@@ -25,8 +25,11 @@ use governor::{
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    time::SystemTime,
+};
 use tracing::{debug, trace, warn};
 
 #[derive(Clone)]
@@ -868,7 +871,7 @@ impl<
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
-        let mut outstanding_task = None;
+        let mut outstanding_task: Option<(PublicKey, Height, Digest, SystemTime)> = None;
         loop {
             // Ensure task has not been resolved
             if let Some((_, ref height, ref digest, _)) = outstanding_task {
