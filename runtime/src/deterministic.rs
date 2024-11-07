@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic::{Executor, Config}};
+//! use commonware_runtime::{Spawner, Runner, deterministic::Executor};
 //!
 //! let (executor, runtime, auditor) = Executor::default();
 //! executor.start(async move {
@@ -22,8 +22,9 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{Clock, Error, Handle};
+use crate::{utils::Signaler, Clock, Error, Handle, Signal};
 use bytes::Bytes;
+use commonware_utils::hex;
 use futures::{
     channel::mpsc,
     task::{waker_ref, ArcWake},
@@ -44,7 +45,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     ops::Range,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -66,7 +67,13 @@ struct Metrics {
     tasks_running: Family<Work, Gauge>,
     task_polls: Family<Work, Counter>,
 
-    bandwidth: Counter,
+    network_bandwidth: Counter,
+
+    open_blobs: Gauge,
+    storage_reads: Counter,
+    storage_read_bandwidth: Counter,
+    storage_writes: Counter,
+    storage_write_bandwidth: Counter,
 }
 
 impl Metrics {
@@ -75,7 +82,12 @@ impl Metrics {
             task_polls: Family::default(),
             tasks_running: Family::default(),
             tasks_spawned: Family::default(),
-            bandwidth: Counter::default(),
+            network_bandwidth: Counter::default(),
+            open_blobs: Gauge::default(),
+            storage_reads: Counter::default(),
+            storage_read_bandwidth: Counter::default(),
+            storage_writes: Counter::default(),
+            storage_write_bandwidth: Counter::default(),
         };
         {
             let mut registry = registry.lock().unwrap();
@@ -97,7 +109,32 @@ impl Metrics {
             registry.register(
                 "bandwidth",
                 "Total amount of data sent over network",
-                metrics.bandwidth.clone(),
+                metrics.network_bandwidth.clone(),
+            );
+            registry.register(
+                "open_blobs",
+                "Number of open blobs",
+                metrics.open_blobs.clone(),
+            );
+            registry.register(
+                "storage_reads",
+                "Total number of disk reads",
+                metrics.storage_reads.clone(),
+            );
+            registry.register(
+                "storage_read_bandwidth",
+                "Total amount of data read from disk",
+                metrics.storage_read_bandwidth.clone(),
+            );
+            registry.register(
+                "storage_writes",
+                "Total number of disk writes",
+                metrics.storage_writes.clone(),
+            );
+            registry.register(
+                "storage_write_bandwidth",
+                "Total amount of data written to disk",
+                metrics.storage_write_bandwidth.clone(),
             );
         }
         metrics
@@ -106,84 +143,197 @@ impl Metrics {
 
 /// Track the state of the runtime for determinism auditing.
 pub struct Auditor {
-    hash: Mutex<String>,
+    hash: Mutex<Vec<u8>>,
 }
 
 impl Auditor {
     fn new() -> Self {
         Self {
-            hash: Mutex::new(String::new()),
+            hash: Mutex::new(Vec::new()),
         }
     }
 
     fn process_task(&self, task: u128, label: &str) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"process_task");
         hasher.update(task.to_be_bytes());
         hasher.update(label.as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn stop(&self, value: i32) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"stop");
+        hasher.update(value.to_be_bytes());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn stopped(&self) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"stopped");
+        *hash = hasher.finalize().to_vec();
     }
 
     fn bind(&self, address: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"bind");
         hasher.update(address.to_string().as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn dial(&self, dialer: SocketAddr, dialee: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"dial");
         hasher.update(dialer.to_string().as_bytes());
         hasher.update(dialee.to_string().as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn accept(&self, dialee: SocketAddr, dialer: SocketAddr) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"accept");
         hasher.update(dialee.to_string().as_bytes());
         hasher.update(dialer.to_string().as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn send(&self, sender: SocketAddr, receiver: SocketAddr, message: Bytes) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"send");
         hasher.update(sender.to_string().as_bytes());
         hasher.update(receiver.to_string().as_bytes());
         hasher.update(&message);
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn recv(&self, receiver: SocketAddr, sender: SocketAddr, message: Bytes) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"recv");
         hasher.update(receiver.to_string().as_bytes());
         hasher.update(sender.to_string().as_bytes());
         hasher.update(&message);
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
     }
 
     fn rand(&self, method: String) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
-        hasher.update(hash.as_bytes());
+        hasher.update(&*hash);
         hasher.update(b"rand");
         hasher.update(method.as_bytes());
-        *hash = format!("{:x}", hasher.finalize());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn open(&self, partition: &str, name: &[u8]) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"open");
+        hasher.update(partition.as_bytes());
+        hasher.update(name);
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn remove(&self, partition: &str, name: Option<&[u8]>) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"remove");
+        hasher.update(partition.as_bytes());
+        if let Some(name) = name {
+            hasher.update(name);
+        }
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn scan(&self, partition: &str) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"scan");
+        hasher.update(partition.as_bytes());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn len(&self, partition: &str, name: &[u8]) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"len");
+        hasher.update(partition.as_bytes());
+        hasher.update(name);
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn read_at(&self, partition: &str, name: &[u8], buf: usize, offset: u64) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"read_at");
+        hasher.update(partition.as_bytes());
+        hasher.update(name);
+        hasher.update(buf.to_be_bytes());
+        hasher.update(offset.to_be_bytes());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn write_at(&self, partition: &str, name: &[u8], buf: &[u8], offset: u64) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"write_at");
+        hasher.update(partition.as_bytes());
+        hasher.update(name);
+        hasher.update(buf);
+        hasher.update(offset.to_be_bytes());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn truncate(&self, partition: &str, name: &[u8], size: u64) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"truncate");
+        hasher.update(partition.as_bytes());
+        hasher.update(name);
+        hasher.update(size.to_be_bytes());
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn sync(&self, partition: &str, name: &[u8]) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"sync");
+        hasher.update(partition.as_bytes());
+        hasher.update(name);
+        *hash = hasher.finalize().to_vec();
+    }
+
+    fn close(&self, partition: &str, name: &[u8]) {
+        let mut hash = self.hash.lock().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&*hash);
+        hasher.update(b"close");
+        hasher.update(partition.as_bytes());
+        hasher.update(name);
+        *hash = hasher.finalize().to_vec();
     }
 
     /// Generate a representation of the current state of the runtime.
@@ -191,7 +341,8 @@ impl Auditor {
     /// This can be used to ensure that logic running on top
     /// of the runtime is interacting deterministically.
     pub fn state(&self) -> String {
-        self.hash.lock().unwrap().clone()
+        let hash = self.hash.lock().unwrap().clone();
+        hex(&hash)
     }
 }
 
@@ -297,6 +448,9 @@ pub struct Executor {
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
+    partitions: Mutex<HashMap<String, Partition>>,
+    signaler: Mutex<Signaler>,
+    signal: Signal,
 }
 
 impl Executor {
@@ -314,6 +468,7 @@ impl Executor {
         let deadline = cfg
             .timeout
             .map(|timeout| start_time.checked_add(timeout).expect("timeout overflowed"));
+        let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Self {
             cycle: cfg.cycle,
             deadline,
@@ -327,6 +482,9 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
+            partitions: Mutex::new(HashMap::new()),
+            signaler: Mutex::new(signaler),
+            signal,
         });
         (
             Runner {
@@ -543,8 +701,9 @@ impl crate::Runner for Runner {
     }
 }
 
-/// Implementation of [`crate::Spawner`] and [`crate::Clock`]
-/// for the `deterministic` runtime.
+/// Implementation of [`crate::Spawner`], [`crate::Clock`],
+/// [`crate::Network`], and [`crate::Storage`] for the `deterministic`
+/// runtime.
 #[derive(Clone)]
 pub struct Context {
     executor: Arc<Executor>,
@@ -585,6 +744,16 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init(f, gauge, false);
         Tasks::register(&self.executor.tasks, &label, false, Box::pin(f));
         handle
+    }
+
+    fn stop(&self, value: i32) {
+        self.executor.auditor.stop(value);
+        self.executor.signaler.lock().unwrap().signal(value);
+    }
+
+    fn stopped(&self) -> Signal {
+        self.executor.auditor.stopped();
+        self.executor.signal.clone()
     }
 }
 
@@ -787,6 +956,7 @@ impl crate::Network<Listener, Sink, Stream> for Context {
     }
 }
 
+/// Implementation of [`crate::Listener`] for the `deterministic` runtime.
 pub struct Listener {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -821,6 +991,7 @@ impl crate::Listener<Sink, Stream> for Listener {
     }
 }
 
+/// Implementation of [`crate::Sink`] for the `deterministic` runtime.
 pub struct Sink {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
@@ -837,11 +1008,12 @@ impl crate::Sink for Sink {
             .send(msg)
             .await
             .map_err(|_| Error::WriteFailed)?;
-        self.metrics.bandwidth.inc_by(len as u64);
+        self.metrics.network_bandwidth.inc_by(len as u64);
         Ok(())
     }
 }
 
+/// Implementation of [`crate::Stream`] for the `deterministic` runtime.
 pub struct Stream {
     auditor: Arc<Auditor>,
     me: SocketAddr,
@@ -881,10 +1053,203 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
+struct Partition {
+    blobs: HashMap<Vec<u8>, Vec<u8>>,
+}
+
+impl Partition {
+    fn new() -> Self {
+        Self {
+            blobs: HashMap::new(),
+        }
+    }
+}
+
+/// Implementation of [`crate::Blob`] for the `deterministic` runtime.
+pub struct Blob {
+    executor: Arc<Executor>,
+
+    partition: String,
+    name: Vec<u8>,
+
+    // For content to be updated for future opens,
+    // it must be synced back to the partition (occurs on
+    // `sync` and `close`).
+    content: Arc<RwLock<Vec<u8>>>,
+}
+
+impl Blob {
+    fn new(executor: Arc<Executor>, partition: String, name: &[u8], content: Vec<u8>) -> Self {
+        executor.metrics.open_blobs.inc();
+        Self {
+            executor,
+            partition,
+            name: name.into(),
+            content: Arc::new(RwLock::new(content)),
+        }
+    }
+}
+
+impl Clone for Blob {
+    fn clone(&self) -> Self {
+        // We implement `Clone` manually to ensure the `open_blobs` gauge is updated.
+        self.executor.metrics.open_blobs.inc();
+        Self {
+            executor: self.executor.clone(),
+            partition: self.partition.clone(),
+            name: self.name.clone(),
+            content: self.content.clone(),
+        }
+    }
+}
+
+impl crate::Storage<Blob> for Context {
+    async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
+        self.executor.auditor.open(partition, name);
+        let mut partitions = self.executor.partitions.lock().unwrap();
+        let partition_entry = partitions
+            .entry(partition.into())
+            .or_insert_with(Partition::new);
+        let content = partition_entry.blobs.entry(name.into()).or_default();
+        Ok(Blob::new(
+            self.executor.clone(),
+            partition.into(),
+            name,
+            content.clone(),
+        ))
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.executor.auditor.remove(partition, name);
+        let mut partitions = self.executor.partitions.lock().unwrap();
+        match name {
+            Some(name) => {
+                partitions
+                    .get_mut(partition)
+                    .ok_or(Error::PartitionMissing(partition.into()))?
+                    .blobs
+                    .remove(name)
+                    .ok_or(Error::BlobMissing(partition.into(), hex(name)))?;
+            }
+            None => {
+                partitions
+                    .remove(partition)
+                    .ok_or(Error::PartitionMissing(partition.into()))?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.executor.auditor.scan(partition);
+        let partitions = self.executor.partitions.lock().unwrap();
+        let partition = partitions
+            .get(partition)
+            .ok_or(Error::PartitionMissing(partition.into()))?;
+        let mut results = Vec::with_capacity(partition.blobs.len());
+        for name in partition.blobs.keys() {
+            results.push(name.clone());
+        }
+        results.sort(); // deterministic output
+        Ok(results)
+    }
+}
+
+impl crate::Blob for Blob {
+    async fn len(&self) -> Result<u64, Error> {
+        self.executor.auditor.len(&self.partition, &self.name);
+        let content = self.content.read().unwrap();
+        Ok(content.len() as u64)
+    }
+
+    async fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+        let buf_len = buf.len();
+        self.executor
+            .auditor
+            .read_at(&self.partition, &self.name, buf_len, offset);
+        let offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
+        let content = self.content.read().unwrap();
+        let content_len = content.len();
+        if offset + buf_len > content_len {
+            return Err(Error::BlobInsufficientLength);
+        }
+        buf.copy_from_slice(&content[offset..offset + buf_len]);
+        self.executor.metrics.storage_reads.inc();
+        self.executor
+            .metrics
+            .storage_read_bandwidth
+            .inc_by(buf_len as u64);
+        Ok(())
+    }
+
+    async fn write_at(&self, buf: &[u8], offset: u64) -> Result<(), Error> {
+        self.executor
+            .auditor
+            .write_at(&self.partition, &self.name, buf, offset);
+        let offset = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
+        let mut content = self.content.write().unwrap();
+        let required = offset + buf.len();
+        if required > content.len() {
+            content.resize(required, 0);
+        }
+        content[offset..offset + buf.len()].copy_from_slice(buf);
+        self.executor.metrics.storage_writes.inc();
+        self.executor
+            .metrics
+            .storage_write_bandwidth
+            .inc_by(buf.len() as u64);
+        Ok(())
+    }
+
+    async fn truncate(&self, len: u64) -> Result<(), Error> {
+        self.executor
+            .auditor
+            .truncate(&self.partition, &self.name, len);
+        let len = len.try_into().map_err(|_| Error::OffsetOverflow)?;
+        let mut content = self.content.write().unwrap();
+        content.truncate(len);
+        Ok(())
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        // Create new content for partition
+        //
+        // Doing this first means we don't need to hold both the content
+        // lock and the partition lock at the same time.
+        let new_content = self.content.read().unwrap().clone();
+
+        // Update partition content
+        self.executor.auditor.sync(&self.partition, &self.name);
+        let mut partitions = self.executor.partitions.lock().unwrap();
+        let partition = partitions
+            .get_mut(&self.partition)
+            .ok_or(Error::PartitionMissing(self.partition.clone()))?;
+        let content = partition
+            .blobs
+            .get_mut(&self.name)
+            .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
+        *content = new_content;
+        Ok(())
+    }
+
+    async fn close(self) -> Result<(), Error> {
+        self.executor.auditor.close(&self.partition, &self.name);
+        self.sync().await?;
+        Ok(())
+    }
+}
+
+impl Drop for Blob {
+    fn drop(&mut self) {
+        self.executor.metrics.open_blobs.dec();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::run_tasks, Runner};
+    use crate::{utils::run_tasks, Runner, Spawner};
+    use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
     fn run_with_seed(seed: u64) -> (String, Vec<usize>) {
@@ -909,7 +1274,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced("TRACE")]
     fn test_different_seeds_different_order() {
         let output1 = run_with_seed(12345);
         let output2 = run_with_seed(54321);
@@ -979,5 +1344,20 @@ mod tests {
             ..Config::default()
         };
         let (_, _, _) = Executor::init(cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "root task cannot be spawned")]
+    fn test_spawn_root_task() {
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            let _ = context
+                .spawn(ROOT_TASK, async move {
+                    // This task should never run
+                    panic!("root task should not run");
+                })
+                .await;
+            panic!("root task should not be spawned");
+        });
     }
 }

@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     primitives::{ops::{partial_sign, partial_verify, aggregate, verify}, poly::public},
+//!     primitives::{ops::{partial_sign, partial_verify, partial_aggregate, verify}, poly::public},
 //!     dkg::ops::{generate_shares},
 //! };
 //!
@@ -34,7 +34,7 @@
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = aggregate(t, partials).unwrap();
+//! let threshold_sig = partial_aggregate(t, partials).unwrap();
 //!
 //! // Verify threshold signature
 //! let threshold_pub = public(&commitment);
@@ -59,4 +59,6 @@ pub enum Error {
     NoInverse,
     #[error("duplicate eval")]
     DuplicateEval,
+    #[error("duplicate message")]
+    DuplicateMessage,
 }

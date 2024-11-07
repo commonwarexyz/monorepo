@@ -2,7 +2,7 @@
 name = "commonware-runtime"
 edition = "2021"
 publish = true
-version = "0.0.7"
+version = "0.0.9"
 license = "MIT OR Apache-2.0"
 description = "Execute asynchronous tasks with a configurable scheduler."
 readme = "README.md"
@@ -12,6 +12,7 @@ documentation = "https://docs.rs/commonware-runtime"
 
 [dependencies]
 commonware-macros = { workspace = true }
+commonware-utils = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true } 
@@ -22,3 +23,6 @@ tokio-util = { version = "0.7", features = ["codec"] }
 sha2 = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

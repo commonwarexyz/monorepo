@@ -2,7 +2,7 @@
 name = "commonware-p2p"
 edition = "2021"
 publish = true
-version = "0.0.21"
+version = "0.0.23"
 license = "MIT OR Apache-2.0"
 description = "Communicate with authenticated peers over encrypted connections."
 readme = "README.md"
@@ -25,10 +25,10 @@ tracing = { workspace = true }
 prost = { workspace = true }
 governor = { workspace = true }
 prometheus-client = { workspace = true } 
+zstd = { workspace = true }
 x25519-dalek = "2"
 chacha20poly1305 = "0.10"
 bitvec = "1"
-zstd = "0.13"
 
 [build-dependencies]
 prost-build = { workspace = true } 

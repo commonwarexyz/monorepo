@@ -380,7 +380,7 @@ checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.23"
+version = "0.0.25"
 dependencies = [
  "chrono",
  "clap",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.10"
+version = "0.0.12"
 dependencies = [
  "blst",
  "bytes",
@@ -462,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.2"
+version = "0.0.4"
 dependencies = [
  "futures",
  "futures-timer",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.21"
+version = "0.0.23"
 dependencies = [
  "bitvec",
  "bytes",
@@ -501,10 +501,11 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.7"
+version = "0.0.9"
 dependencies = [
  "bytes",
  "commonware-macros",
+ "commonware-utils",
  "futures",
  "governor",
  "prometheus-client",
@@ -514,19 +515,39 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "commonware-storage"
+version = "0.0.4"
+dependencies = [
+ "bytes",
+ "commonware-macros",
+ "commonware-runtime",
+ "commonware-utils",
+ "crc32fast",
+ "criterion",
+ "futures",
+ "futures-util",
+ "prometheus-client",
+ "rand",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.2"
+version = "0.0.4"
 dependencies = [
- "bytes",
  "sha2 0.10.8",
 ]
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.10"
+version = "0.0.12"
 dependencies = [
  "bytes",
  "clap",
@@ -571,6 +592,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53fe5e26ff1b7aef8bca9c6080520cfb8d9333c7568e1829cef191a9723e5504"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crc32fast"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a97769d94ddab943e4510d138150169a2758b5ef3eb191a9ee688de3e23ef7b3"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]

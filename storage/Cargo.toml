@@ -1,0 +1,44 @@
+[package]
+name = "commonware-storage"
+edition = "2021"
+publish = true
+version = "0.0.4"
+license = "MIT OR Apache-2.0"
+description = "Persist and retrieve data from an abstract store."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
+documentation = "https://docs.rs/commonware-storage"
+
+[dependencies]
+commonware-macros = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+prometheus-client = { workspace = true }
+zstd = { workspace = true }
+crc32fast = "1.4.2"
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+rand = { workspace = true }
+criterion = { workspace = true } 
+
+[[bench]]
+name="hashmap_iteration"
+harness = false
+path = "src/archive/benches/hashmap_iteration.rs"
+
+[[bench]]
+name="hashmap_load"
+harness = false
+path = "src/archive/benches/hashmap_load.rs"
+
+[[bench]]
+name="hashmap_load_fixed"
+harness = false
+path = "src/archive/benches/hashmap_load_fixed.rs"

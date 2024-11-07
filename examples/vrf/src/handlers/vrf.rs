@@ -151,7 +151,7 @@ impl<E: Clock> Vrf<E> {
         }
 
         // Aggregate partial signatures
-        match ops::aggregate(self.threshold, partials) {
+        match ops::partial_aggregate(self.threshold, partials) {
             Ok(signature) => Some(signature),
             Err(_) => {
                 warn!(round, "failed to aggregate partial signatures");
@@ -175,11 +175,7 @@ impl<E: Clock> Vrf<E> {
             {
                 Some(signature) => {
                     let signature = signature.serialize();
-                    info!(
-                        round,
-                        siganture = hex(&signature.into()),
-                        "generated signature"
-                    );
+                    info!(round, signature = hex(&signature), "generated signature");
                 }
                 None => {
                     warn!(round, "failed to generate signature");

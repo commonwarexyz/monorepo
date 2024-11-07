@@ -2,7 +2,7 @@
 name = "commonware-utils"
 edition = "2021"
 publish = true
-version = "0.0.2"
+version = "0.0.4"
 license = "MIT OR Apache-2.0"
 description = "Leverage common functionality across multiple primitives."
 readme = "README.md"
@@ -11,5 +11,4 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/utils"
 documentation = "https://docs.rs/commonware-utils"
 
 [dependencies]
-bytes = { workspace = true }
 sha2 = { workspace = true }

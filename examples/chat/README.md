@@ -1,6 +1,7 @@
 # commonware-chat 
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-chat.svg)](https://crates.io/crates/commonware-chat)
+[![Docs.rs](https://docs.rs/commonware-chat/badge.svg)](https://docs.rs/commonware-chat)
 
 Send encrypted messages to a group of friends using [commonware-cryptography::ed25519](https://docs.rs/commonware-cryptography/latest/commonware_cryptography/ed25519/index.html)
 and [commonware-p2p::authenticated](https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/index.html).
