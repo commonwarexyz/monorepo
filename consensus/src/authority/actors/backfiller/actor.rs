@@ -50,6 +50,9 @@ impl<
 {
     pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {
         // Initialize rate limiter
+        //
+        // This ensures we don't exceed the inbound rate limit on any peer we are communicating with (which
+        // would halt their processing of all our messages).
         let fetch_rate_limiter = RateLimiter::hashmap_with_clock(cfg.fetch_rate_per_peer, &runtime);
 
         // Initialize mailbox
