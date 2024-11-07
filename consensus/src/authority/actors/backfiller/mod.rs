@@ -15,7 +15,7 @@ pub struct Config<C: Scheme, H: Hasher, A: Automaton> {
     pub application: A,
     pub namespace: Bytes,
     pub fetch_timeout: Duration,
-    pub max_fetch_count: u64,
+    pub max_fetch_count: u32,
     pub max_fetch_size: usize,
     pub fetch_rate_per_peer: Quota,
 }
