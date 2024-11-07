@@ -68,7 +68,7 @@ message Backfiller {
 message ProposalRequest {
     bytes digest = 1;
     // Block preceeding (lower height) from digest
-    uint64 parents = 2;
+    uint32 parents = 2;
 }
 
 message ProposalResponse {
@@ -78,7 +78,7 @@ message ProposalResponse {
 message NotarizationRequest {
     uint64 view = 1;
     // Notarizations following (higher view) from view
-    uint64 children = 2;
+    uint32 children = 2;
 }
 
 message NotarizationResponse {
