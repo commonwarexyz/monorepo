@@ -3,6 +3,7 @@ use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {
+    Notarized { view: View },
     Proposals { digest: Digest, parents: u32 },
     Notarizations { view: View, children: u32 },
 }
@@ -15,6 +16,10 @@ pub struct Mailbox {
 impl Mailbox {
     pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
         Self { sender }
+    }
+
+    pub async fn notarized(&mut self, view: View) {
+        self.sender.send(Message::Notarized { view }).await.unwrap();
     }
 
     pub async fn proposals(&mut self, digest: Digest, parents: u32) {
