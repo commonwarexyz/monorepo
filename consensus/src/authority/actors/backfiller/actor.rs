@@ -6,9 +6,10 @@ use crate::{
     },
     Automaton, Supervisor,
 };
+use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Sender};
+use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
 use futures::{channel::mpsc, future::Either, StreamExt};
@@ -18,8 +19,18 @@ use governor::{
 };
 use prost::Message as _;
 use rand::{prelude::SliceRandom, Rng};
-use std::time::{Duration, SystemTime};
+use std::{
+    collections::{btree_map::Entry, BTreeMap, BTreeSet, HashSet},
+    time::{Duration, SystemTime},
+};
 use tracing::{debug, warn};
+
+const STARTING_DURATION: Duration = Duration::from_secs(0);
+
+enum Status {
+    Stalled,
+    Outstanding(PublicKey, SystemTime),
+}
 
 pub struct Actor<
     E: Clock + GClock + Rng,
@@ -39,6 +50,7 @@ pub struct Actor<
     max_fetch_size: usize,
     fetch_rate_limiter:
         RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
+    fetch_performance: BTreeMap<Duration, Vec<PublicKey>>,
 }
 
 impl<
@@ -70,25 +82,16 @@ impl<
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
                 fetch_rate_limiter,
+                fetch_performance: BTreeMap::new(),
             },
             Mailbox::new(sender),
         )
     }
 
-    async fn recipient(&mut self, view: View) -> PublicKey {
-        // Get validators from highest view we know about
-        let validators = self.application.participants(view).unwrap();
-
-        // Generate a shuffle
-        let mut validator_indices = (0..validators.len()).collect::<Vec<_>>();
-        validator_indices.shuffle(&mut self.runtime);
-
-        // Minimize footprint of rate limiter
-        self.fetch_rate_limiter.shrink_to_fit();
-
+    async fn send(&mut self, view: View, msg: Bytes, sender: &mut impl Sender) -> PublicKey {
         // Loop until we find a recipient
         let mut index = 0;
-        loop {
+        let validator = loop {
             // Check if we have exhausted all validators
             if index == validators.len() {
                 warn!(view, "failed to send request to any validator");
@@ -96,6 +99,7 @@ impl<
                 // Avoid busy looping when disconnected
                 self.runtime.sleep(self.fetch_timeout).await;
                 index = 0;
+                continue;
             }
 
             // Select random validator to fetch from
@@ -115,8 +119,25 @@ impl<
                 continue;
             }
 
-            return validator;
-        }
+            // Send message
+            if sender
+                .send(Recipients::One(validator.clone()), msg.clone(), false)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                // Try again
+                debug!(peer = hex(&validator), "failed to send request");
+                index += 1;
+                continue;
+            }
+            debug!(peer = hex(&validator), "sent request");
+            break validator;
+        };
+
+        // Minimize footprint of rate limiter
+        self.fetch_rate_limiter.shrink_to_fit();
+        validator
     }
 
     pub async fn run(
@@ -127,23 +148,32 @@ impl<
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
-        let mut outstanding_block_task: Option<(PublicKey, Digest, u32, SystemTime)> = None;
-        let mut outstanding_notarization_task: Option<(PublicKey, View, u32, SystemTime)> = None;
+        let mut outstanding_block: Option<(Digest, u32, Status)> = None;
+        let mut outstanding_notarization: Option<(View, u32, Status)> = None;
         loop {
             // Set timeout for next block
-            let block_timeout = if let Some((_, _, _, deadline)) = &outstanding_block_task {
-                Either::Left(self.runtime.sleep_until(*deadline))
+            let block_timeout = if let Some((_, _, status)) = &outstanding_block {
+                Either::Left(match status {
+                    Status::Stalled => Either::Left(futures::future::ready(())),
+                    Status::Outstanding(_, deadline) => {
+                        Either::Right(self.runtime.sleep_until(*deadline))
+                    }
+                })
             } else {
                 Either::Right(futures::future::pending())
             };
 
             // Set timeout for next notarization
-            let notarization_timeout =
-                if let Some((_, _, _, deadline)) = &outstanding_notarization_task {
-                    Either::Left(self.runtime.sleep_until(*deadline))
-                } else {
-                    Either::Right(futures::future::pending())
-                };
+            let notarization_timeout = if let Some((_, _, status)) = &outstanding_notarization {
+                Either::Left(match status {
+                    Status::Stalled => Either::Left(futures::future::ready(())),
+                    Status::Outstanding(_, deadline) => {
+                        Either::Right(self.runtime.sleep_until(*deadline))
+                    }
+                })
+            } else {
+                Either::Right(futures::future::pending())
+            };
 
             // Wait for an event
             select! {
@@ -157,7 +187,29 @@ impl<
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Notarized { view } => {
-                            last_notarized = view;
+                            // Remove any old validators
+                            let mut validators_set = self.application.participants(view).unwrap().iter().collect::<BTreeSet<_>>();
+                            for (_, validators) in self.fetch_performance.iter_mut() {
+                                validators.iter().filter(|v| {
+                                    if validators_set.contains(v){
+                                        true
+                                    } else {
+                                        validators_set.remove(v);
+                                        false
+                                    }
+                                });
+                            }
+
+                            // Add new validators with minimum duration to explore
+                            let new_validators = validators_set.into_iter().cloned().collect::<Vec<_>>();
+                            match self.fetch_performance.entry(STARTING_DURATION) {
+                                Entry::Vacant(entry) => {
+                                    entry.insert(new_validators);
+                                },
+                                Entry::Occupied(mut entry) => {
+                                    entry.get_mut().extend(new_validators);
+                                },
+                            }
                             continue;
                         },
                         Message::Proposals { digest, parents } => {
