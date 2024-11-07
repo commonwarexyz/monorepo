@@ -4,8 +4,7 @@ use crate::bls12381::{
     dkg::Error,
     primitives::{group::Share, poly},
 };
-use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
+use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
 
 /// Generate shares and a commitment.
