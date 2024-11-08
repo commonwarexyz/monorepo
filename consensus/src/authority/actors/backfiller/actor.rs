@@ -33,9 +33,7 @@ use std::{
 };
 use tracing::{debug, warn};
 
-const STARTING_DURATION: Duration = Duration::from_secs(0);
-
-type Status = (PublicKey, SystemTime);
+type Status = (PublicKey, SystemTime, SystemTime);
 
 pub struct Actor<
     T: Translator,
@@ -64,6 +62,8 @@ pub struct Actor<
     fetch_rate_limiter:
         RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
     fetch_performance: PriorityQueue,
+
+    incorrect: HashSet<PublicKey>,
 }
 
 impl<
@@ -109,6 +109,8 @@ impl<
                 max_fetch_size: cfg.max_fetch_size,
                 fetch_rate_limiter,
                 fetch_performance: PriorityQueue::new(),
+
+                incorrect: HashSet::new(),
             },
             Mailbox::new(sender),
         )
@@ -138,13 +140,22 @@ impl<
         msg: Bytes,
         sent: &mut HashSet<PublicKey>,
         sender: &mut impl Sender,
-    ) -> (PublicKey, SystemTime) {
+    ) -> Status {
         // Loop until we find a recipient
         loop {
             let mut iter = self.fetch_performance.iter();
             while let Some(next) = iter.next() {
                 // Check if self
                 if next.public_key == self.crypto.public_key() {
+                    continue;
+                }
+
+                // Check if peer is invalid
+                if self.incorrect.contains(&next.public_key) {
+                    debug!(
+                        peer = hex(&next.public_key),
+                        "skipping request because peer is incorrect"
+                    );
                     continue;
                 }
 
@@ -180,11 +191,12 @@ impl<
                 }
                 debug!(peer = hex(&validator), "sent request");
                 sent.insert(validator.clone());
-                let deadline = self.runtime.current() + self.fetch_timeout;
+                let start = self.runtime.current();
+                let deadline = start + self.fetch_timeout;
 
                 // Minimize footprint of rate limiter
                 self.fetch_rate_limiter.shrink_to_fit();
-                return (validator.clone(), deadline);
+                return (validator.clone(), start, deadline);
             }
 
             // Avoid busy looping when disconnected
@@ -213,8 +225,7 @@ impl<
         .into();
 
         // Send message
-        let (public_key, deadline) = self.send(msg, sent, sender).await;
-        (public_key, deadline)
+        self.send(msg, sent, sender).await
     }
 
     async fn send_notarization_request(
@@ -234,8 +245,7 @@ impl<
         .into();
 
         // Send message
-        let (public_key, deadline) = self.send(msg, sent, sender).await;
-        (public_key, deadline)
+        self.send(msg, sent, sender).await
     }
 
     pub async fn run(
@@ -249,7 +259,7 @@ impl<
         // Instantiate priority queue
         let validators = self.application.participants(last_notarized).unwrap();
         self.fetch_performance
-            .retain(self.fetch_timeout / 2, validators);
+            .retain(self.fetch_timeout, validators);
 
         // Wait for an event
         let mut outstanding_proposal: Option<(Digest, u32, HashSet<PublicKey>, Status)> = None;
@@ -257,14 +267,14 @@ impl<
         loop {
             // Set timeout for next proposal
             let proposal_timeout = if let Some((_, _, _, status)) = &outstanding_proposal {
-                Either::Left(self.runtime.sleep_until(status.1))
+                Either::Left(self.runtime.sleep_until(status.2))
             } else {
                 Either::Right(futures::future::pending())
             };
 
             // Set timeout for next notarization
             let notarization_timeout = if let Some((_, _, _, status)) = &outstanding_notarization {
-                Either::Left(self.runtime.sleep_until(status.1))
+                Either::Left(self.runtime.sleep_until(status.2))
             } else {
                 Either::Right(futures::future::pending())
             };
@@ -297,7 +307,7 @@ impl<
                         Message::Notarized { view } => {
                             // Update stored validators
                             let validators = self.application.participants(view).unwrap();
-                            self.fetch_performance.retain(self.fetch_timeout/2, validators);
+                            self.fetch_performance.retain(self.fetch_timeout, validators);
                             continue;
                         },
                         Message::Proposals { digest, parents } => {
@@ -409,10 +419,8 @@ impl<
                             sender.send(Recipients::One(s), msg, false).await.unwrap();
                         },
                         wire::backfiller::Payload::ProposalResponse(response) => {
-                            // TODO: ensure starts with the proposal we are waiting on
-                            // TODO: record response time
-
                             // Parse proposals
+                            let received = self.runtime.current();
                             let mut resolved = false;
                             let mut next = None;
                             let mut proposals_found = Vec::new();
@@ -533,6 +541,10 @@ impl<
                                 let outstanding = outstanding_proposal.take().unwrap();
                                 debug!(height = outstanding.1, digest = hex(&outstanding.0), peer = hex(&s), "resolved missing proposal via backfill");
                                 resolver.send(Message::Proposals { digest: next.unwrap().1, parents: next.unwrap().0 }).await.unwrap();
+
+                                // Update performance
+                                let duration = received.duration_since(outstanding.3.1).unwrap();
+                                self.fetch_performance.put(s, duration);
                             }
                         },
                         wire::backfiller::Payload::NotarizationRequest(request) => {
@@ -620,10 +632,48 @@ impl<
                             sender.send(Recipients::One(s), msg, false).await.unwrap();
                         },
                         wire::backfiller::Payload::NotarizationResponse(response) => {
-                            // TODO: ensure starts with the notarization we are waiting on
-                            // TODO: record response time
+                            // Ensure this notarization is expected
+                            //
+                            // If we don't do this check, it is trivial to DoS us.
+                            match outstanding_notarization {
+                                Some((view, _, _, status)) => {
+                                    if s != status.0 {
+                                        debug!(sender = hex(&s), "received unexpected notarization response");
+                                        continue;
+                                    }
+
+                                    // Check if this is an empty response (go to next recipient)
+                                    if response.notarizations.is_empty() {
+                                        debug!(view, peer = hex(&s), "received empty notarization response");
+
+                                        // Pick new recipient
+                                        let (view, children, mut sent, _) = outstanding_notarization.take().unwrap();
+                                        let status = self.send_notarization_request(view, children, &mut sent, &mut sender).await;
+                                        outstanding_notarization = Some((view, children, sent, status));
+                                        continue;
+                                    }
+
+                                    // Ensure first item is the one we are looking for
+                                    let notarization = &response.notarizations[0];
+                                    if notarization.view != view {
+                                        debug!(view, peer = hex(&s), "received invalid notarization response");
+                                        self.incorrect.insert(s);
+
+                                        // Pick new recipient
+                                        let (digest, parents, mut sent, _) = outstanding_notarization.take().unwrap();
+                                        let status = self.send_notarization_request(view, parents, &mut sent, &mut sender).await;
+                                        outstanding_notarization = Some((view, parents, sent, status));
+                                        continue;
+                                    }
+                                },
+                                None => {
+                                    debug!(sender = hex(&s), "received unexpected batch notarization");
+                                    continue;
+                                },
+                            }
 
                             // Parse notarizations
+                            let received = self.runtime.current();
                             let mut resolved = false;
                             let mut next = None;
                             let mut notarizations_found = Vec::new();
@@ -638,15 +688,15 @@ impl<
                                 if let Some(notarization_digest) = notarization.digest.as_ref() {
                                     if !H::validate(notarization_digest) {
                                         debug!(sender = hex(&s), "invalid notarization digest size");
-                                        continue;
+                                        break;
                                     }
                                     if notarization.height.is_none() {
                                         debug!(sender = hex(&s), "missing notarization height");
-                                        continue;
+                                        break;
                                     }
                                 } else if notarization.height.is_some() {
                                     debug!(sender = hex(&s), "invalid notarization height for null container");
-                                    continue;
+                                    break;
                                 }
 
                                 // Ensure notarization has valid number of signatures
@@ -658,7 +708,7 @@ impl<
                                             reason = "unable to compute participants for view",
                                             "dropping notarization"
                                         );
-                                        return;
+                                        break;
                                     }
                                 };
                                 if notarization.signatures.len() < threshold as usize {
@@ -668,7 +718,7 @@ impl<
                                         reason = "insufficient signatures",
                                         "dropping notarization"
                                     );
-                                    return;
+                                    break;
                                 }
                                 if notarization.signatures.len() > count as usize {
                                     debug!(
@@ -677,7 +727,7 @@ impl<
                                         reason = "too many signatures",
                                         "dropping notarization"
                                     );
-                                    return;
+                                    break;
                                 }
 
                                 // Verify threshold notarization
@@ -690,7 +740,7 @@ impl<
                                             reason = "invalid validator",
                                             "dropping notarization"
                                         );
-                                        return;
+                                        break;
                                     }
 
                                     // Ensure we haven't seen this signature before
@@ -700,7 +750,7 @@ impl<
                                             reason = "duplicate signature",
                                             "dropping notarization"
                                         );
-                                        return;
+                                        break;
                                     }
                                     seen.insert(signature.public_key.clone());
 
@@ -716,7 +766,7 @@ impl<
                                         &signature.signature,
                                     ) {
                                         debug!(reason = "invalid signature", "dropping notarization");
-                                        return;
+                                        break;
                                     }
                                 }
                                 let view = notarization.view;
@@ -735,6 +785,15 @@ impl<
                                     break;
                                 }
                                 next = Some(view + 1);
+                            }
+
+                            // If invalid, pick new
+                            if notarizations_found.len() != response.notarizations.len() {
+                                self.incorrect.insert(s);
+                                let (view, children, mut sent, _) = outstanding_notarization.take().unwrap();
+                                let status = self.send_notarization_request(view, children, &mut sent, &mut sender).await;
+                                outstanding_notarization = Some((view, children, sent, status));
+                                continue;
                             }
 
                             // Persist notarizations
@@ -757,10 +816,8 @@ impl<
                                     Err(Error::DuplicateKey) => {
                                         debug!(view, peer = hex(&s), "duplicate notarization");
                                     },
-                                    Err(_) => {
-                                        warn!(view, peer = hex(&s), "unable to persist notarization");
-                                        resolved = false;
-                                        break;
+                                    Err(err) => {
+                                        panic!("unable to persist notarization: {:?}", err);
                                     },
                                 }
                             }
@@ -770,6 +827,10 @@ impl<
                                 let outstanding = outstanding_notarization.take().unwrap();
                                 debug!(view = outstanding.0, peer = hex(&s), "resolved missing notarization via backfill");
                                 resolver.send(Message::Notarized { view }).await.unwrap();
+
+                                // Update performance
+                                let duration = received.duration_since(outstanding.3.1).unwrap();
+                                self.fetch_performance.put(s, duration);
                             }
                         },
                     }
