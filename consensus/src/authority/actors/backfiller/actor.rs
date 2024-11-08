@@ -88,7 +88,7 @@ impl<
         )
     }
 
-    async fn send(&mut self, view: View, msg: Bytes, sender: &mut impl Sender) -> PublicKey {
+    async fn send(&mut self, msg: Bytes, sender: &mut impl Sender) -> (PublicKey, SystemTime) {
         // Loop until we find a recipient
         loop {
             let mut iter = self.fetch_performance.iter();
@@ -118,11 +118,14 @@ impl<
 
                 // Minimize footprint of rate limiter
                 self.fetch_rate_limiter.shrink_to_fit();
-                return validator.clone();
+                return (
+                    validator.clone(),
+                    self.runtime.current() + self.fetch_timeout,
+                );
             }
 
             // Avoid busy looping when disconnected
-            warn!(view, "failed to send request to any validator");
+            warn!("failed to send request to any validator");
             self.runtime.sleep(self.fetch_timeout).await;
         }
     }
@@ -165,10 +168,52 @@ impl<
             // Wait for an event
             select! {
                 _ = block_timeout => {
-                    // Send request to a different peer
+                    // Penalize requester for timeout
+                    let (digest, parents, status) = outstanding_block.take().unwrap();
+                    if let Status::Outstanding(public_key, _) = status {
+                        self.fetch_performance.put(public_key, self.fetch_timeout);
+                    }
+
+                    // Create new message
+                    let msg = wire::Backfiller {
+                        payload: Some(wire::backfiller::Payload::ProposalRequest(
+                            wire::ProposalRequest {
+                                digest: digest.clone(),
+                                parents,
+                            },
+                        )),
+                    }
+                    .encode_to_vec()
+                    .into();
+
+                    // Send message
+                    let (public_key, deadline) = self.send(msg, &mut sender).await;
+                    outstanding_block = Some((digest, parents, Status::Outstanding(public_key, deadline)));
+                    continue;
                 },
                 _ = notarization_timeout => {
-                    // Send request to a different peer
+                    // Penalize requester for timeout
+                    let (view, children, status) = outstanding_notarization.take().unwrap();
+                    if let Status::Outstanding(public_key, _) = status {
+                        self.fetch_performance.put(public_key, self.fetch_timeout);
+                    }
+
+                    // Create new message
+                    let msg = wire::Backfiller {
+                        payload: Some(wire::backfiller::Payload::NotarizationRequest(
+                            wire::NotarizationRequest {
+                                view,
+                                children,
+                            },
+                        )),
+                    }
+                    .encode_to_vec()
+                    .into();
+
+                    // Send message
+                    let (public_key, deadline) = self.send(msg, &mut sender).await;
+                    outstanding_notarization = Some((view, children, Status::Outstanding(public_key, deadline)));
+                    continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();

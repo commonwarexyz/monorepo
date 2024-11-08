@@ -11,7 +11,7 @@ fn main() -> Result<()> {
         "Notarization.digest",
         "Finalize.digest",
         "Finalization.digest",
-        "Request.digest",
+        "ProposalRequest.digest",
     ]);
     config.compile_protos(&["src/authority/wire.proto"], &["src/authority/"])?;
     Ok(())
