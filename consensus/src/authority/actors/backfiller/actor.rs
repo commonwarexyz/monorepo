@@ -128,6 +128,46 @@ impl<
         }
     }
 
+    async fn send_block_request(
+        &mut self,
+        digest: Digest,
+        parents: u32,
+        sender: &mut impl Sender,
+    ) -> Status {
+        // Create new message
+        let msg = wire::Backfiller {
+            payload: Some(wire::backfiller::Payload::ProposalRequest(
+                wire::ProposalRequest { digest, parents },
+            )),
+        }
+        .encode_to_vec()
+        .into();
+
+        // Send message
+        let (public_key, deadline) = self.send(msg, sender).await;
+        Status::Outstanding(public_key, deadline)
+    }
+
+    async fn send_notarization_request(
+        &mut self,
+        view: View,
+        children: u32,
+        sender: &mut impl Sender,
+    ) -> Status {
+        // Create new message
+        let msg = wire::Backfiller {
+            payload: Some(wire::backfiller::Payload::NotarizationRequest(
+                wire::NotarizationRequest { view, children },
+            )),
+        }
+        .encode_to_vec()
+        .into();
+
+        // Send message
+        let (public_key, deadline) = self.send(msg, sender).await;
+        Status::Outstanding(public_key, deadline)
+    }
+
     pub async fn run(
         mut self,
         mut last_notarized: View,
@@ -172,21 +212,9 @@ impl<
                         self.fetch_performance.put(public_key, self.fetch_timeout);
                     }
 
-                    // Create new message
-                    let msg = wire::Backfiller {
-                        payload: Some(wire::backfiller::Payload::ProposalRequest(
-                            wire::ProposalRequest {
-                                digest: digest.clone(),
-                                parents,
-                            },
-                        )),
-                    }
-                    .encode_to_vec()
-                    .into();
-
                     // Send message
-                    let (public_key, deadline) = self.send(msg, &mut sender).await;
-                    outstanding_block = Some((digest, parents, Status::Outstanding(public_key, deadline)));
+                    let status = self.send_block_request(digest.clone(), parents, &mut sender).await;
+                    outstanding_block = Some((digest, parents, status));
                     continue;
                 },
                 _ = notarization_timeout => {
@@ -196,21 +224,9 @@ impl<
                         self.fetch_performance.put(public_key, self.fetch_timeout);
                     }
 
-                    // Create new message
-                    let msg = wire::Backfiller {
-                        payload: Some(wire::backfiller::Payload::NotarizationRequest(
-                            wire::NotarizationRequest {
-                                view,
-                                children,
-                            },
-                        )),
-                    }
-                    .encode_to_vec()
-                    .into();
-
                     // Send message
-                    let (public_key, deadline) = self.send(msg, &mut sender).await;
-                    outstanding_notarization = Some((view, children, Status::Outstanding(public_key, deadline)));
+                    let status = self.send_notarization_request(view, children, &mut sender).await;
+                    outstanding_notarization = Some((view, children, status));
                     continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
@@ -223,10 +239,16 @@ impl<
                             continue;
                         },
                         Message::Proposals { digest, parents } => {
-                            // Handle proposals
+                            // Send message
+                            let status = self.send_block_request(digest.clone(), parents, &mut sender).await;
+                            outstanding_block = Some((digest, parents, status));
+                            continue;
                         },
                         Message::Notarizations { view, children } => {
-                            // Handle notarizations
+                            // Send message
+                            let status = self.send_notarization_request(view, children, &mut sender).await;
+                            outstanding_notarization = Some((view, children, status));
+                            continue;
                         },
                     }
                 },
