@@ -317,57 +317,70 @@ impl<
                             // Populate as many proposals as possible
                             let mut proposal_bytes = 0;
                             let mut proposals_found = Vec::new();
-                            let mut cursor = request.digest;
-                            let proposals = self.proposals.lock().await;
-                            loop {
-                                // Check to see if we have proposal
-                                let proposal = match proposals.get(&cursor).await {
-                                    Ok(proposal) => proposal,
-                                    Err(err) => {
+                            let mut cursor = request.digest.clone();
+                            {
+                                let proposals = self.proposals.lock().await;
+                                loop {
+                                    // Check to see if we have proposal
+                                    let proposal = match proposals.get(&cursor).await {
+                                        Ok(proposal) => proposal,
+                                        Err(err) => {
+                                            debug!(
+                                                sender = hex(&s),
+                                                proposal = hex(&cursor),
+                                                ?err,
+                                                "unable to load proposal",
+                                            );
+                                            break;
+                                        }
+                                    };
+                                    let proposal = match proposal {
+                                        Some(proposal) => proposal,
+                                        None => {
+                                            debug!(
+                                                sender = hex(&s),
+                                                proposal = hex(&cursor),
+                                                "missing proposal",
+                                            );
+                                            break;
+                                        }
+                                    };
+                                    let proposal = wire::Proposal::decode(proposal).expect("unable to decode persisted proposal");
+
+                                    // If we don't have any more space, stop
+                                    proposal_bytes += proposal.encoded_len();
+                                    if proposal_bytes > self.max_fetch_size {
                                         debug!(
-                                            sender = hex(&s),
-                                            proposal = hex(&cursor),
-                                            ?err,
-                                            "unable to load proposal",
+                                            requested = request.parents + 1,
+                                            found = proposals_found.len(),
+                                            peer = hex(&s),
+                                            "reached max response size",
                                         );
                                         break;
                                     }
-                                };
-                                let proposal = match proposal {
-                                    Some(proposal) => proposal,
-                                    None => {
-                                        debug!(
-                                            sender = hex(&s),
-                                            proposal = hex(&cursor),
-                                            "missing proposal",
-                                        );
+
+                                    // If we do have space, add to proposals
+                                    cursor = proposal.parent.clone();
+                                    proposals_found.push(proposal);
+
+                                    // If we have all parents requested, stop gathering more
+                                    let fetched = proposals_found.len() as u32;
+                                    if fetched == request.parents + 1 || fetched == self.max_fetch_count {
                                         break;
                                     }
-                                };
-                                let proposal = wire::Proposal::decode(proposal).expect("unable to decode persisted proposal");
-
-                                // If we don't have any more space, stop
-                                proposal_bytes += proposal.encoded_len();
-                                if proposal_bytes > self.max_fetch_size {
-                                    debug!(
-                                        requested = request.parents + 1,
-                                        found = proposals_found.len(),
-                                        peer = hex(&s),
-                                        "reached max response size",
-                                    );
-                                    break;
-                                }
-
-                                // If we do have space, add to proposals
-                                cursor = proposal.parent.clone();
-                                proposals_found.push(proposal);
-
-                                // If we have all parents requested, stop gathering more
-                                let fetched = proposals_found.len() as u32;
-                                if fetched == request.parents + 1 || fetched == self.max_fetch_count {
-                                    break;
                                 }
                             }
+
+                            // Send response
+                            debug!(digest = hex(&request.digest), requested = request.parents + 1, found = proposals_found.len(), peer = hex(&s), "responding to backfill request");
+                            let msg =  wire::Backfiller {
+                                payload: Some(wire::backfiller::Payload::ProposalResponse(wire::ProposalResponse {
+                                    proposals: proposals_found,
+                                })),
+                            }
+                            .encode_to_vec()
+                            .into();
+                            sender.send(Recipients::One(s), msg, false).await.unwrap();
                         },
                         wire::backfiller::Payload::ProposalResponse(response) => {
                             // TODO: skip duration update if response is empty
