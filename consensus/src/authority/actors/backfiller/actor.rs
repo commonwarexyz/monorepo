@@ -419,10 +419,38 @@ impl<
                             sender.send(Recipients::One(s), msg, false).await.unwrap();
                         },
                         wire::backfiller::Payload::ProposalResponse(response) => {
+                            // Ensure this proposal is expected
+                            //
+                            // If we don't do this check, it is trivial to DoS us.
+                            let next = match outstanding_proposal {
+                                Some((digest, _, _, status)) => {
+                                    if s != status.0 {
+                                        debug!(sender = hex(&s), "received unexpected proposal response");
+                                        continue;
+                                    }
+
+                                    // Check if this is an empty response (go to next recipient)
+                                    if response.proposals.is_empty() {
+                                        debug!(digest = hex(&digest), peer = hex(&s), "received empty proposal response");
+
+                                        // Pick new recipient
+                                        let (digest, parents, mut sent, _) = outstanding_proposal.take().unwrap();
+                                        let status = self.send_block_request(digest, parents, &mut sent, &mut sender).await;
+                                        outstanding_proposal = Some((digest, parents, sent, status));
+                                        continue;
+                                    }
+                                    digest
+                                },
+                                None => {
+                                    debug!(sender = hex(&s), "received unexpected batch proposal");
+                                    continue;
+                                },
+                            };
+
+
                             // Parse proposals
                             let received = self.runtime.current();
                             let mut resolved = false;
-                            let mut next = None;
                             let mut proposals_found = Vec::new();
                             for proposal in response.proposals {
                                 // Ensure this is the container we want
@@ -445,11 +473,9 @@ impl<
                                 );
                                 self.hasher.update(&proposal_message);
                                 let proposal_digest = self.hasher.finalize();
-                                if let Some((height, ref digest)) = next {
-                                    if proposal.height != height || proposal_digest != digest {
-                                        debug!(sender = hex(&s), "received invalid batch proposal");
-                                        break;
-                                    }
+                                if proposal_digest != next {
+                                    debug!(sender = hex(&s), "received invalid batch proposal");
+                                    break;
                                 }
 
                                 // Verify leader signature
@@ -512,7 +538,16 @@ impl<
                                 if height <= 1 {
                                     break;
                                 }
-                                next = Some((height-1, parent));
+                                next = parent;
+                            }
+
+                            // If invalid, pick new
+                            if proposals_found.len() != response.proposals.len() {
+                                self.incorrect.insert(s);
+                                let (digest, parents, mut sent, _) = outstanding_proposal.take().unwrap();
+                                let status = self.send_block_request(digest, parents, &mut sent, &mut sender).await;
+                                outstanding_proposal = Some((digest, parents, sent, status));
+                                continue;
                             }
 
                             // Persist proposals
@@ -635,7 +670,7 @@ impl<
                             // Ensure this notarization is expected
                             //
                             // If we don't do this check, it is trivial to DoS us.
-                            match outstanding_notarization {
+                            let next = match outstanding_notarization {
                                 Some((view, _, _, status)) => {
                                     if s != status.0 {
                                         debug!(sender = hex(&s), "received unexpected notarization response");
@@ -652,38 +687,23 @@ impl<
                                         outstanding_notarization = Some((view, children, sent, status));
                                         continue;
                                     }
-
-                                    // Ensure first item is the one we are looking for
-                                    let notarization = &response.notarizations[0];
-                                    if notarization.view != view {
-                                        debug!(view, peer = hex(&s), "received invalid notarization response");
-                                        self.incorrect.insert(s);
-
-                                        // Pick new recipient
-                                        let (digest, parents, mut sent, _) = outstanding_notarization.take().unwrap();
-                                        let status = self.send_notarization_request(view, parents, &mut sent, &mut sender).await;
-                                        outstanding_notarization = Some((view, parents, sent, status));
-                                        continue;
-                                    }
+                                    view
                                 },
                                 None => {
                                     debug!(sender = hex(&s), "received unexpected batch notarization");
                                     continue;
                                 },
-                            }
+                            };
 
                             // Parse notarizations
                             let received = self.runtime.current();
                             let mut resolved = false;
-                            let mut next = None;
                             let mut notarizations_found = Vec::new();
                             for notarization in response.notarizations {
                                 // Ensure notarization is valid
-                                if let Some(view) = next {
-                                    if notarization.view != view {
-                                        debug!(sender = hex(&s), "received invalid batch notarization");
-                                        break;
-                                    }
+                                if notarization.view != next {
+                                    debug!(sender = hex(&s), "received invalid batch notarization");
+                                    break;
                                 }
                                 if let Some(notarization_digest) = notarization.digest.as_ref() {
                                     if !H::validate(notarization_digest) {
@@ -784,7 +804,7 @@ impl<
                                 if view == u64::MAX {
                                     break;
                                 }
-                                next = Some(view + 1);
+                                next = view + 1;
                             }
 
                             // If invalid, pick new
