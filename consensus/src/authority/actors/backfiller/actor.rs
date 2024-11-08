@@ -1,4 +1,4 @@
-use super::{ingress::Mailbox, Config, Message};
+use super::{ingress::Mailbox, priority_queue::PriorityQueue, Config, Message};
 use crate::{
     authority::{
         actors::{resolver, voter},
@@ -50,7 +50,7 @@ pub struct Actor<
     max_fetch_size: usize,
     fetch_rate_limiter:
         RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
-    fetch_performance: BTreeMap<Duration, Vec<PublicKey>>,
+    fetch_performance: PriorityQueue,
 }
 
 impl<
@@ -82,7 +82,7 @@ impl<
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
                 fetch_rate_limiter,
-                fetch_performance: BTreeMap::new(),
+                fetch_performance: PriorityQueue::new(),
             },
             Mailbox::new(sender),
         )
@@ -90,54 +90,41 @@ impl<
 
     async fn send(&mut self, view: View, msg: Bytes, sender: &mut impl Sender) -> PublicKey {
         // Loop until we find a recipient
-        let iter = self.fetch_performance.iter();
-        let validator = loop {
-            // Check if we have exhausted all validators
-            if index == validators.len() {
-                warn!(view, "failed to send request to any validator");
+        loop {
+            let mut iter = self.fetch_performance.iter();
+            while let Some(next) = iter.next() {
+                // Check if rate limit is exceeded
+                let validator = &next.public_key;
+                if self.fetch_rate_limiter.check_key(validator).is_err() {
+                    debug!(
+                        peer = hex(&validator),
+                        "skipping request because rate limited"
+                    );
+                    continue;
+                }
 
-                // Avoid busy looping when disconnected
-                self.runtime.sleep(self.fetch_timeout).await;
-                index = 0;
-                continue;
+                // Send message
+                if sender
+                    .send(Recipients::One(validator.clone()), msg.clone(), false)
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
+                    // Try again
+                    debug!(peer = hex(&validator), "failed to send request");
+                    continue;
+                }
+                debug!(peer = hex(&validator), "sent request");
+
+                // Minimize footprint of rate limiter
+                self.fetch_rate_limiter.shrink_to_fit();
+                return validator.clone();
             }
 
-            // Select random validator to fetch from
-            let validator = validators[validator_indices[index]].clone();
-            if validator == self.crypto.public_key() {
-                index += 1;
-                continue;
-            }
-
-            // Check if rate limit is exceeded
-            if self.fetch_rate_limiter.check_key(&validator).is_err() {
-                debug!(
-                    peer = hex(&validator),
-                    "skipping request because rate limited"
-                );
-                index += 1;
-                continue;
-            }
-
-            // Send message
-            if sender
-                .send(Recipients::One(validator.clone()), msg.clone(), false)
-                .await
-                .unwrap()
-                .is_empty()
-            {
-                // Try again
-                debug!(peer = hex(&validator), "failed to send request");
-                index += 1;
-                continue;
-            }
-            debug!(peer = hex(&validator), "sent request");
-            break validator;
-        };
-
-        // Minimize footprint of rate limiter
-        self.fetch_rate_limiter.shrink_to_fit();
-        validator
+            // Avoid busy looping when disconnected
+            warn!(view, "failed to send request to any validator");
+            self.runtime.sleep(self.fetch_timeout).await;
+        }
     }
 
     pub async fn run(
@@ -187,29 +174,9 @@ impl<
                     let msg = mailbox.unwrap();
                     match msg {
                         Message::Notarized { view } => {
-                            // Remove any old validators
-                            let mut validators_set = self.application.participants(view).unwrap().iter().collect::<BTreeSet<_>>();
-                            for (_, validators) in self.fetch_performance.iter_mut() {
-                                validators.iter().filter(|v| {
-                                    if validators_set.contains(v){
-                                        true
-                                    } else {
-                                        validators_set.remove(v);
-                                        false
-                                    }
-                                });
-                            }
-
-                            // Add new validators with minimum duration to explore
-                            let new_validators = validators_set.into_iter().cloned().collect::<Vec<_>>();
-                            match self.fetch_performance.entry(STARTING_DURATION) {
-                                Entry::Vacant(entry) => {
-                                    entry.insert(new_validators);
-                                },
-                                Entry::Occupied(mut entry) => {
-                                    entry.get_mut().extend(new_validators);
-                                },
-                            }
+                            // Update stored validators
+                            let validators = self.application.participants(view).unwrap();
+                            self.fetch_performance.retain(validators);
                             continue;
                         },
                         Message::Proposals { digest, parents } => {

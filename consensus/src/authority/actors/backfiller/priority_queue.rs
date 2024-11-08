@@ -6,7 +6,7 @@ use std::time::Duration;
 #[derive(Eq, PartialEq, Clone)]
 struct Entry {
     duration: Duration,
-    public_key: PublicKey,
+    pub public_key: PublicKey,
 }
 
 impl Ord for Entry {
@@ -24,7 +24,7 @@ impl PartialOrd for Entry {
     }
 }
 
-struct PriorityQueue {
+pub struct PriorityQueue {
     entries: BTreeSet<Entry>,
     keys: HashMap<PublicKey, Duration>,
 }
@@ -82,7 +82,7 @@ impl PriorityQueue {
     }
 
     // Iterate over the entries
-    fn iter(&self) -> impl Iterator<Item = &Entry> {
+    pub fn iter(&self) -> impl Iterator<Item = &Entry> {
         self.entries.iter()
     }
 }
