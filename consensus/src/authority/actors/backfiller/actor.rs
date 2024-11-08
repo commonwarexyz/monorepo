@@ -397,6 +397,9 @@ impl<
                             sender.send(Recipients::One(s), msg, false).await.unwrap();
                         },
                         wire::backfiller::Payload::ProposalResponse(response) => {
+                            // TODO: ensure starts with the proposal we are waiting on
+                            // TODO: record response time
+
                             // Parse proposals
                             let mut next = None;
                             let mut proposals_found = Vec::new();
@@ -507,6 +510,7 @@ impl<
                                 let result = proposals.put(section, &digest, proposal, false).await;
                                 if let Err(err) = result {
                                     warn!(height, digest = hex(&digest), ?err, "unable to persist proposal");
+                                    break;
                                 } else {
                                     debug!(height, digest = hex(&digest), peer = hex(&s), "persisted proposal");
                                 }
@@ -597,7 +601,67 @@ impl<
                             sender.send(Recipients::One(s), msg, false).await.unwrap();
                         },
                         wire::backfiller::Payload::NotarizationResponse(response) => {
-                            // TODO: skip duration update if response is empty
+                            // TODO: ensure starts with the notarization we are waiting on
+                            // TODO: record response time
+
+                            // Parse notarizations
+                            let mut next = None;
+                            let mut notarizations_found = Vec::new();
+                            for notarization in response.notarizations {
+                                // Ensure notarization is valid
+                                if let Some(view) = next {
+                                    if notarization.view != view {
+                                        debug!(sender = hex(&s), "received invalid batch notarization");
+                                        break;
+                                    }
+                                }
+                                if let Some(notarization_digest) = notarization.digest.as_ref() {
+                                    if !H::validate(notarization_digest) {
+                                        debug!(sender = hex(&s), "invalid notarization digest size");
+                                        continue;
+                                    }
+                                    if notarization.height.is_none() {
+                                        debug!(sender = hex(&s), "missing notarization height");
+                                        continue;
+                                    }
+                                } else if notarization.height.is_some() {
+                                    debug!(sender = hex(&s), "invalid notarization height for null container");
+                                    continue;
+                                }
+
+                                // TODO: verify notarization signature
+
+                                // TODO: check if satisfies task + send result to requester
+
+
+                                debug!(view = notarization.view, "received batch notarization");
+                                if notarization.view == u64::MAX {
+                                    break;
+                                }
+                                next = Some(notarization.view + 1);
+                                notarizations_found.push(notarization);
+                            }
+
+                            // Persist notarizations
+                            let mut notarizations = self.notarizations.lock().await;
+                            for notarization in notarizations_found {
+                                let view = notarization.view;
+                                let section = view & 0xFFFF_FFFF_FFFF_0000u64;
+                                let mut key = [0u8; 9];
+                                key[0..8].copy_from_slice(&view.to_be_bytes());
+                                key[8] = match notarization.digest {
+                                    Some(_) => 0x01,
+                                    None => 0x00,
+                                };
+                                let notarization = notarization.encode_to_vec().into();
+                                let result = notarizations.put(section, &key, notarization, false).await;
+                                if let Err(err) = result {
+                                    warn!(view, ?err, "unable to persist notarization");
+                                    break;
+                                } else {
+                                    debug!(view, peer = hex(&s), "persisted notarization");
+                                }
+                            }
                         },
                     }
                 }
