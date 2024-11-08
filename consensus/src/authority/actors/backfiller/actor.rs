@@ -112,7 +112,7 @@ impl<
         )
     }
 
-    // TODO: remove duplicatred code
+    // TODO: remove duplicated code
     fn leader(&self, view: View) -> Option<PublicKey> {
         let validators = match self.application.participants(view) {
             Some(validators) => validators,
@@ -512,7 +512,90 @@ impl<
                                 }
                             }
                         },
-                        wire::backfiller::Payload::NotarizationRequest(request) => {},
+                        wire::backfiller::Payload::NotarizationRequest(request) => {
+                            // Populate as many notarizations as we can
+                            let mut notarization_bytes = 0; // TODO: add a buffer
+                            let mut notarizations_found = Vec::new();
+                            let mut cursor = request.view;
+                            {
+                                let notarizations = self.notarizations.lock().await;
+                                loop {
+                                    // Attempt to fetch notarization
+                                    let mut key = [0u8; 9];
+                                    key[0..8].copy_from_slice(&cursor.to_be_bytes());
+                                    key[8] = 0x01;
+                                    let mut notarization = match notarizations.get(&key).await {
+                                        Ok(notarization) => notarization,
+                                        Err(err) => {
+                                            debug!(
+                                                sender = hex(&s),
+                                                view = cursor,
+                                                ?err,
+                                                "unable to load notarization",
+                                            );
+                                            break;
+                                        }
+                                    };
+                                    if notarization.is_none() {
+                                        key[8] = 0x00;
+                                        notarization = match notarizations.get(&key).await {
+                                            Ok(notarization) => notarization,
+                                            Err(err) => {
+                                                debug!(
+                                                    sender = hex(&s),
+                                                    view = cursor,
+                                                    ?err,
+                                                    "unable to load notarization",
+                                                );
+                                                break;
+                                            }
+                                        };
+                                    }
+                                    if notarization.is_none() {
+                                        debug!(
+                                            sender = hex(&s),
+                                            view = cursor,
+                                            "missing notarization",
+                                        );
+                                        break;
+                                    }
+                                    let notarization = wire::Notarization::decode(notarization.unwrap()).expect("unable to decode persisted notarization");
+
+                                    // If we don't have any more space, stop
+                                    notarization_bytes += notarization.encoded_len();
+                                    if notarization_bytes > self.max_fetch_size{
+                                        debug!(
+                                            requested = request.children + 1,
+                                            fetched = notarizations_found.len(),
+                                            peer = hex(&s),
+                                            "reached max fetch size"
+                                        );
+                                        break;
+                                    }
+                                    notarizations_found.push(notarization);
+
+                                    // If we have all children or we hit our limit, stop
+                                    let fetched = notarizations_found.len() as u32;
+                                    if fetched == request.children +1 || fetched == self.max_fetch_count {
+                                        break;
+                                    }
+                                    cursor +=1;
+                                }
+                            }
+
+                            // Send back notarizations
+                            debug!(view = cursor, fetched = notarizations_found.len(), peer = hex(&s), "responding to notarization request");
+                            let msg = wire::Backfiller {
+                                payload: Some(wire::backfiller::Payload::NotarizationResponse(
+                                    wire::NotarizationResponse {
+                                        notarizations: notarizations_found,
+                                    },
+                                )),
+                            }
+                            .encode_to_vec()
+                            .into();
+                            sender.send(Recipients::One(s), msg, false).await.unwrap();
+                        },
                         wire::backfiller::Payload::NotarizationResponse(response) => {
                             // TODO: skip duration update if response is empty
                         },
