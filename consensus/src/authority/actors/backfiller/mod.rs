@@ -8,14 +8,12 @@ use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};
 use governor::Quota;
 pub use ingress::{Mailbox, Message};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 pub struct Config<C: Scheme, H: Hasher, A: Automaton> {
     pub crypto: C,
     pub hasher: H,
     pub application: A,
-    pub blocks: Arc<Mutex<Archive>>,
-    pub notarizations: Arc<Mutex<Archive>>,
 
     pub namespace: Bytes,
     pub fetch_timeout: Duration,

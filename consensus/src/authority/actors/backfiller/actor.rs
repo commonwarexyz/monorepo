@@ -10,9 +10,15 @@ use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{Blob, Clock, Storage};
+use commonware_storage::archive::{Archive, Translator};
 use commonware_utils::hex;
-use futures::{channel::mpsc, future::Either, StreamExt};
+use futures::{
+    channel::mpsc,
+    future::Either,
+    lock::{Mutex, MutexGuard},
+    StreamExt,
+};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
     RateLimiter,
@@ -21,6 +27,7 @@ use prost::Message as _;
 use rand::{prelude::SliceRandom, Rng};
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet, HashSet},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -190,11 +197,13 @@ impl<
         (public_key, deadline)
     }
 
-    pub async fn run(
+    pub async fn run<T: Translator, B: Blob, S: Storage<B>>(
         mut self,
         last_notarized: View,
         voter: &mut voter::Mailbox,
         resolver: &mut resolver::Mailbox,
+        proposals: Arc<Mutex<Archive<T, B, S>>>,
+        notarizations: Arc<Mutex<Archive<T, B, S>>>,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
@@ -285,9 +294,14 @@ impl<
                         },
                     };
                     match payload {
-                        wire::backfiller::Payload::ProposalRequest(request) => {},
+                        wire::backfiller::Payload::ProposalRequest(request) => {
+                            let b = proposals.lock().await;
+                            let p = b.get(&request.digest).await;
+                        },
                         wire::backfiller::Payload::ProposalResponse(response) => {
                             // TODO: skip duration update if response is empty
+                            let b = proposals.lock().await;
+                            b.put(section, key, data, force_sync)
                         },
                         wire::backfiller::Payload::NotarizationRequest(request) => {},
                         wire::backfiller::Payload::NotarizationResponse(response) => {
