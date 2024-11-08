@@ -90,7 +90,7 @@ impl<
 
     async fn send(&mut self, view: View, msg: Bytes, sender: &mut impl Sender) -> PublicKey {
         // Loop until we find a recipient
-        let mut index = 0;
+        let iter = self.fetch_performance.iter();
         let validator = loop {
             // Check if we have exhausted all validators
             if index == validators.len() {

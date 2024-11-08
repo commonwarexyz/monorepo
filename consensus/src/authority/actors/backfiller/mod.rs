@@ -1,5 +1,6 @@
 mod actor;
 mod ingress;
+mod priority_queue;
 
 use crate::Automaton;
 pub use actor::Actor;
