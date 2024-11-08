@@ -12,7 +12,7 @@ use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Storage};
-use commonware_storage::archive::{Archive, Translator};
+use commonware_storage::archive::{Archive, Error, Translator};
 use commonware_utils::{hex, quorum};
 use futures::{
     channel::mpsc,
@@ -413,6 +413,7 @@ impl<
                             // TODO: record response time
 
                             // Parse proposals
+                            let mut resolved = false;
                             let mut next = None;
                             let mut proposals_found = Vec::new();
                             for proposal in response.proposals {
@@ -495,10 +496,7 @@ impl<
                                 // this is unexpected).
                                 if let Some(ref outstanding) = outstanding_proposal{
                                     if outstanding.0 == proposal_digest {
-                                        debug!(height = outstanding.1, digest = hex(&proposal_digest), peer = hex(&s), "resolved missing proposal via backfill");
-                                        outstanding_proposal = None;
-
-                                        // TODO: notify requester (after persisted)
+                                        resolved = true;
                                     }
                                 }
 
@@ -514,13 +512,27 @@ impl<
                             for (height, digest, proposal) in proposals_found {
                                 let section = height & 0xFFFF_FFFF_FFFF_0000u64;
                                 let proposal = proposal.encode_to_vec().into();
-                                let result = proposals.put(section, &digest, proposal, false).await;
-                                if let Err(err) = result {
-                                    warn!(height, digest = hex(&digest), ?err, "unable to persist proposal");
-                                    break;
-                                } else {
-                                    debug!(height, digest = hex(&digest), peer = hex(&s), "persisted proposal");
+                                let result = proposals.put(section, &digest, proposal, true).await;
+                                match result {
+                                    Ok(_) => {
+                                        debug!(height, digest = hex(&digest), peer = hex(&s), "persisted proposal");
+                                    },
+                                    Err(Error::DuplicateKey) => {
+                                        debug!(height, digest = hex(&digest), peer = hex(&s), "duplicate proposal");
+                                    },
+                                    Err(_) => {
+                                        warn!(height, digest = hex(&digest), peer = hex(&s), "unable to persist proposal");
+                                        resolved = false;
+                                        break;
+                                    },
                                 }
+                            }
+
+                            // Send resolution
+                            if resolved {
+                                let outstanding = outstanding_proposal.take().unwrap();
+                                debug!(height = outstanding.1, digest = hex(&outstanding.0), peer = hex(&s), "resolved missing proposal via backfill");
+                                resolver.send(Message::Proposals { digest: next.unwrap().1, parents: next.unwrap().0 }).await.unwrap();
                             }
                         },
                         wire::backfiller::Payload::NotarizationRequest(request) => {
@@ -612,6 +624,7 @@ impl<
                             // TODO: record response time
 
                             // Parse notarizations
+                            let mut resolved = false;
                             let mut next = None;
                             let mut notarizations_found = Vec::new();
                             for notarization in response.notarizations {
@@ -713,10 +726,7 @@ impl<
                                 // Remove outstanding task if we were waiting on this
                                 if let Some(ref outstanding) = outstanding_notarization {
                                     if outstanding.0 == view {
-                                        debug!(view, peer = hex(&s), "resolved missing notarization via backfill");
-                                        outstanding_notarization = None;
-
-                                        // TODO: notify requester (after persisted)
+                                        resolved = true;
                                     }
                                 }
 
@@ -739,13 +749,27 @@ impl<
                                     None => 0x00,
                                 };
                                 let notarization = notarization.encode_to_vec().into();
-                                let result = notarizations.put(section, &key, notarization, false).await;
-                                if let Err(err) = result {
-                                    warn!(view, ?err, "unable to persist notarization");
-                                    break;
-                                } else {
-                                    debug!(view, peer = hex(&s), "persisted notarization");
+                                let result = notarizations.put(section, &key, notarization, true).await;
+                                match result {
+                                    Ok(_) => {
+                                        debug!(view, peer = hex(&s), "persisted notarization");
+                                    },
+                                    Err(Error::DuplicateKey) => {
+                                        debug!(view, peer = hex(&s), "duplicate notarization");
+                                    },
+                                    Err(_) => {
+                                        warn!(view, peer = hex(&s), "unable to persist notarization");
+                                        resolved = false;
+                                        break;
+                                    },
                                 }
+                            }
+
+                            // Send resolution
+                            if resolved {
+                                let outstanding = outstanding_notarization.take().unwrap();
+                                debug!(view = outstanding.0, peer = hex(&s), "resolved missing notarization via backfill");
+                                resolver.send(Message::Notarized { view }).await.unwrap();
                             }
                         },
                     }
