@@ -7,8 +7,8 @@ pub use actor::Actor;
 use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};
 use governor::Quota;
-pub use ingress::{Mailbox, Message};
-use std::{sync::Arc, time::Duration};
+pub use ingress::Message;
+use std::time::Duration;
 
 pub struct Config<C: Scheme, H: Hasher, A: Automaton> {
     pub crypto: C,

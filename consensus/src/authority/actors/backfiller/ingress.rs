@@ -1,5 +1,5 @@
-use crate::authority::{actors::Proposal, wire, View};
-use commonware_cryptography::{Digest, PublicKey};
+use crate::authority::View;
+use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {

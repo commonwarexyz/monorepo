@@ -1,4 +1,4 @@
-use crate::authority::{Height, View};
+use crate::authority::{wire::Notarization, Height, View};
 use bytes::Bytes;
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
@@ -17,6 +17,10 @@ pub enum Message {
     },
     Verified {
         view: View,
+    },
+    Backfilled {
+        view: View,
+        notarizations: Vec<Notarization>,
     },
 }
 
@@ -59,5 +63,15 @@ impl Mailbox {
 
     pub async fn verified(&mut self, view: View) {
         self.sender.send(Message::Verified { view }).await.unwrap();
+    }
+
+    pub async fn backfilled(&mut self, view: View, notarizations: Vec<Notarization>) {
+        self.sender
+            .send(Message::Backfilled {
+                view,
+                notarizations,
+            })
+            .await
+            .unwrap();
     }
 }

@@ -3,7 +3,7 @@ use crate::{
     authority::{
         actors::{resolver, voter},
         encoder::{proposal_message, proposal_namespace, vote_message, vote_namespace},
-        wire, Context, Height, View,
+        wire, Context, View,
     },
     Automaton, Supervisor,
 };
@@ -14,20 +14,15 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Storage};
 use commonware_storage::archive::{Archive, Error, Translator};
 use commonware_utils::{hex, quorum};
-use futures::{
-    channel::mpsc,
-    future::Either,
-    lock::{Mutex, MutexGuard},
-    StreamExt,
-};
+use futures::{channel::mpsc, future::Either, lock::Mutex, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
     RateLimiter,
 };
 use prost::Message as _;
-use rand::{prelude::SliceRandom, Rng};
+use rand::Rng;
 use std::{
-    collections::{btree_map::Entry, BTreeMap, BTreeSet, HashSet},
+    collections::HashSet,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -125,6 +120,7 @@ impl<
         Some(validators[view as usize % validators.len()].clone())
     }
 
+    // TODO: remove duplicated code
     fn threshold(&self, view: View) -> Option<(u32, u32)> {
         let validators = match self.application.participants(view) {
             Some(validators) => validators,
@@ -422,8 +418,8 @@ impl<
                             // Ensure this proposal is expected
                             //
                             // If we don't do this check, it is trivial to DoS us.
-                            let next = match outstanding_proposal {
-                                Some((digest, _, _, status)) => {
+                            let mut next = match outstanding_proposal {
+                                Some((ref digest, _, _, ref status)) => {
                                     if s != status.0 {
                                         debug!(sender = hex(&s), "received unexpected proposal response");
                                         continue;
@@ -435,11 +431,11 @@ impl<
 
                                         // Pick new recipient
                                         let (digest, parents, mut sent, _) = outstanding_proposal.take().unwrap();
-                                        let status = self.send_block_request(digest, parents, &mut sent, &mut sender).await;
+                                        let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
                                         outstanding_proposal = Some((digest, parents, sent, status));
                                         continue;
                                     }
-                                    digest
+                                    digest.clone()
                                 },
                                 None => {
                                     debug!(sender = hex(&s), "received unexpected batch proposal");
@@ -452,6 +448,7 @@ impl<
                             let received = self.runtime.current();
                             let mut resolved = false;
                             let mut proposals_found = Vec::new();
+                            let len = response.proposals.len();
                             for proposal in response.proposals {
                                 // Ensure this is the container we want
                                 if !H::validate(&proposal.parent) {
@@ -521,7 +518,7 @@ impl<
                                 }
                                 let height = proposal.height;
                                 let parent = proposal.parent.clone();
-                                proposals_found.push((height, proposal_digest.clone(), proposal));
+                                proposals_found.push((proposal_digest.clone(), proposal));
                                 debug!(height, digest = hex(&proposal_digest), peer = hex(&s), "received batch proposal");
 
                                 // Remove outstanding task if we were waiting on this
@@ -542,17 +539,18 @@ impl<
                             }
 
                             // If invalid, pick new
-                            if proposals_found.len() != response.proposals.len() {
+                            if proposals_found.len() != len {
                                 self.incorrect.insert(s);
                                 let (digest, parents, mut sent, _) = outstanding_proposal.take().unwrap();
-                                let status = self.send_block_request(digest, parents, &mut sent, &mut sender).await;
+                                let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
                                 outstanding_proposal = Some((digest, parents, sent, status));
                                 continue;
                             }
 
                             // Persist proposals
                             let mut proposals = self.proposals.lock().await;
-                            for (height, digest, proposal) in proposals_found {
+                            for (digest, proposal) in &proposals_found {
+                                let height = proposal.height;
                                 let section = height & 0xFFFF_FFFF_FFFF_0000u64;
                                 let proposal = proposal.encode_to_vec().into();
                                 let result = proposals.put(section, &digest, proposal, true).await;
@@ -564,9 +562,7 @@ impl<
                                         debug!(height, digest = hex(&digest), peer = hex(&s), "duplicate proposal");
                                     },
                                     Err(_) => {
-                                        warn!(height, digest = hex(&digest), peer = hex(&s), "unable to persist proposal");
-                                        resolved = false;
-                                        break;
+                                        panic!("unable to persist proposal: {:?}", result);
                                     },
                                 }
                             }
@@ -575,7 +571,8 @@ impl<
                             if resolved {
                                 let outstanding = outstanding_proposal.take().unwrap();
                                 debug!(height = outstanding.1, digest = hex(&outstanding.0), peer = hex(&s), "resolved missing proposal via backfill");
-                                resolver.send(Message::Proposals { digest: next.unwrap().1, parents: next.unwrap().0 }).await.unwrap();
+                                let proposals_found = proposals_found.into_iter().map(|(_, proposal)| proposal).collect();
+                                resolver.backfilled(outstanding.0, proposals_found).await;
 
                                 // Update performance
                                 let duration = received.duration_since(outstanding.3.1).unwrap();
@@ -670,8 +667,8 @@ impl<
                             // Ensure this notarization is expected
                             //
                             // If we don't do this check, it is trivial to DoS us.
-                            let next = match outstanding_notarization {
-                                Some((view, _, _, status)) => {
+                            let mut next = match outstanding_notarization {
+                                Some((view, _, _, ref status)) => {
                                     if s != status.0 {
                                         debug!(sender = hex(&s), "received unexpected notarization response");
                                         continue;
@@ -699,6 +696,7 @@ impl<
                             let received = self.runtime.current();
                             let mut resolved = false;
                             let mut notarizations_found = Vec::new();
+                            let len = response.notarizations.len();
                             for notarization in response.notarizations {
                                 // Ensure notarization is valid
                                 if notarization.view != next {
@@ -808,7 +806,7 @@ impl<
                             }
 
                             // If invalid, pick new
-                            if notarizations_found.len() != response.notarizations.len() {
+                            if notarizations_found.len() != len {
                                 self.incorrect.insert(s);
                                 let (view, children, mut sent, _) = outstanding_notarization.take().unwrap();
                                 let status = self.send_notarization_request(view, children, &mut sent, &mut sender).await;
@@ -818,7 +816,7 @@ impl<
 
                             // Persist notarizations
                             let mut notarizations = self.notarizations.lock().await;
-                            for notarization in notarizations_found {
+                            for notarization in &notarizations_found {
                                 let view = notarization.view;
                                 let section = view & 0xFFFF_FFFF_FFFF_0000u64;
                                 let mut key = [0u8; 9];
@@ -846,7 +844,7 @@ impl<
                             if resolved {
                                 let outstanding = outstanding_notarization.take().unwrap();
                                 debug!(view = outstanding.0, peer = hex(&s), "resolved missing notarization via backfill");
-                                resolver.send(Message::Notarized { view }).await.unwrap();
+                                voter.backfilled(outstanding.0, notarizations_found).await;
 
                                 // Update performance
                                 let duration = received.duration_since(outstanding.3.1).unwrap();

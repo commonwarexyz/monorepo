@@ -17,6 +17,10 @@ pub enum Message {
     Finalized {
         proposal: Proposal,
     },
+    Backfilled {
+        container: Digest,
+        proposals: Vec<wire::Proposal>,
+    },
 }
 
 #[derive(Clone)]
@@ -56,6 +60,16 @@ impl Mailbox {
     pub async fn finalized(&mut self, proposal: Proposal) {
         self.sender
             .send(Message::Finalized { proposal })
+            .await
+            .unwrap();
+    }
+
+    pub async fn backfilled(&mut self, container: Digest, proposals: Vec<wire::Proposal>) {
+        self.sender
+            .send(Message::Backfilled {
+                container,
+                proposals,
+            })
             .await
             .unwrap();
     }
