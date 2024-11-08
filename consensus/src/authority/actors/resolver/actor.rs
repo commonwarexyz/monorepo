@@ -13,10 +13,11 @@ use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Blob, Clock, Spawner, Storage};
+use commonware_storage::archive::{Archive, Error, Translator};
 use commonware_utils::hex;
 use core::panic;
-use futures::{channel::mpsc, future::Either};
+use futures::{channel::mpsc, future::Either, lock::Mutex};
 use futures::{SinkExt, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
@@ -25,11 +26,11 @@ use governor::{
 use prost::Message as _;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use std::time::Duration;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     time::SystemTime,
 };
+use std::{sync::Arc, time::Duration};
 use tracing::{debug, trace, warn};
 
 #[derive(Clone)]
@@ -39,7 +40,9 @@ enum Knowledge {
 }
 
 pub struct Actor<
-    E: Clock + GClock + Rng + Spawner,
+    T: Translator,
+    B: Blob,
+    E: Clock + GClock + Rng + Spawner + Storage<B>,
     C: Scheme,
     H: Hasher,
     A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
@@ -49,19 +52,13 @@ pub struct Actor<
     hasher: H,
     application: A,
 
+    proposals: Arc<Mutex<Archive<T, B, E>>>,
+    notarizations: Arc<Mutex<Archive<T, B, E>>>,
+    finalizations: Arc<Mutex<Archive<T, B, E>>>,
+
     proposal_namespace: Vec<u8>,
 
-    fetch_timeout: Duration,
-    max_fetch_count: u64,
-    max_fetch_size: usize,
-    fetch_rate_limiter:
-        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
-
     mailbox_receiver: mpsc::Receiver<Message>,
-
-    null_notarizations: BTreeSet<View>,
-    knowledge: HashMap<Height, Knowledge>,
-    containers: HashMap<Digest, wire::Proposal>,
 
     // Track verifications
     //
@@ -87,34 +84,49 @@ pub struct Actor<
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
 impl<
-        E: Clock + GClock + Rng + Spawner,
+        T: Translator,
+        B: Blob,
+        E: Clock + GClock + Rng + Spawner + Storage<B>,
         C: Scheme,
         H: Hasher,
         A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
-    > Actor<E, C, H, A>
+    > Actor<T, B, E, C, H, A>
 {
-    pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> (Self, Mailbox) {
+    pub async fn new(
+        runtime: E,
+        proposals: Arc<Mutex<Archive<T, B, E>>>,
+        notarizations: Arc<Mutex<Archive<T, B, E>>>,
+        finalizations: Arc<Mutex<Archive<T, B, E>>>,
+        mut cfg: Config<C, H, A>,
+    ) -> (Self, Mailbox) {
         // Create genesis container and store it
         let mut verified = HashMap::new();
-        let mut knowledge = HashMap::new();
-        let mut containers = HashMap::new();
         let (genesis_payload, genesis_digest) = cfg.application.genesis();
         verified.insert(0, HashSet::from([genesis_digest.clone()]));
-        knowledge.insert(0, Knowledge::Finalized(genesis_digest.clone()));
-
-        containers.insert(
-            genesis_digest,
-            wire::Proposal {
-                view: 0,
-                height: 0,
-                parent: Digest::new(),
-                payload: genesis_payload,
-                signature: None,
-            },
-        );
-
-        // Initialize rate limiter
-        let fetch_rate_limiter = RateLimiter::hashmap_with_clock(cfg.fetch_rate_per_peer, &runtime);
+        let result = proposals
+            .lock()
+            .await
+            .put(
+                0,
+                &genesis_digest,
+                wire::Proposal {
+                    view: 0,
+                    height: 0,
+                    parent: Digest::new(),
+                    payload: genesis_payload.clone(),
+                    signature: None,
+                }
+                .encode_to_vec()
+                .into(),
+                true,
+            )
+            .await;
+        // TODO: need to add to notarizations/finalizations?
+        match result {
+            Ok(_) => {}
+            Err(Error::DuplicateKey) => {}
+            Err(err) => panic!("failed to store genesis container: {:?}", err),
+        }
 
         // Initialize mailbox
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
@@ -126,18 +138,13 @@ impl<
                 hasher: cfg.hasher,
                 application: cfg.application,
 
+                proposals,
+                notarizations,
+                finalizations,
+
                 proposal_namespace: proposal_namespace(&cfg.namespace),
 
-                fetch_timeout: cfg.fetch_timeout,
-                max_fetch_count: cfg.max_fetch_count,
-                max_fetch_size: cfg.max_fetch_size,
-                fetch_rate_limiter,
-
                 mailbox_receiver,
-
-                null_notarizations: BTreeSet::new(),
-                knowledge,
-                containers,
 
                 verified,
 
@@ -155,7 +162,7 @@ impl<
         )
     }
 
-    // TODO: remove duplicatred code
+    // TODO: remove duplicated code
     fn leader(&self, view: View) -> Option<PublicKey> {
         let validators = match self.application.participants(view) {
             Some(validators) => validators,
@@ -166,7 +173,7 @@ impl<
 
     async fn register_missing(&mut self, height: Height, digest: Digest) {
         // Check if we have the proposal
-        if self.containers.contains_key(&digest) {
+        if self.proposals.lock().await.has(&digest).await.unwrap() {
             return;
         }
 
