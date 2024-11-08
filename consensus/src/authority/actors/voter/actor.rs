@@ -507,6 +507,8 @@ impl<
                 }
             }
         }
+        // TODO: send notarizations/finalizations for all views restored (to properly seed
+        // the resolver)
 
         // Return initialized voter
         (voter, Mailbox::new(mailbox_sender))

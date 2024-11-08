@@ -71,6 +71,7 @@ pub struct Actor<
     // Track notarization/finalization
     //
     // TODO: this can stay in-memory because the application will inform us?
+    notarized: HashMap<Height, BTreeMap<View, Digest>>,
     last_notarized: Height,
     last_finalized: Height,
 
