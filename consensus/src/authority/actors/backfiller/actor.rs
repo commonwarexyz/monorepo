@@ -192,12 +192,18 @@ impl<
 
     pub async fn run(
         mut self,
-        mut last_notarized: View,
+        last_notarized: View,
         voter: &mut voter::Mailbox,
         resolver: &mut resolver::Mailbox,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
+        // Instantiate priority queue
+        let validators = self.application.participants(last_notarized).unwrap();
+        self.fetch_performance
+            .retain(self.fetch_timeout / 2, validators);
+
+        // Wait for an event
         let mut outstanding_block: Option<(Digest, u32, HashSet<PublicKey>, Status)> = None;
         let mut outstanding_notarization: Option<(View, u32, HashSet<PublicKey>, Status)> = None;
         loop {
