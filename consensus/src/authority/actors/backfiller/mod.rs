@@ -14,6 +14,9 @@ pub struct Config<C: Scheme, H: Hasher, A: Automaton> {
     pub crypto: C,
     pub hasher: H,
     pub application: A,
+    pub blocks: Arc<Mutex<Archive>>,
+    pub notarizations: Arc<Mutex<Archive>>,
+
     pub namespace: Bytes,
     pub fetch_timeout: Duration,
     pub max_fetch_count: u32,
