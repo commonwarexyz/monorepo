@@ -37,7 +37,9 @@ const STARTING_DURATION: Duration = Duration::from_secs(0);
 type Status = (PublicKey, SystemTime);
 
 pub struct Actor<
-    E: Clock + GClock + Rng,
+    T: Translator,
+    B: Blob,
+    E: Clock + GClock + Rng + Storage<B>,
     C: Scheme,
     H: Hasher,
     A: Automaton<Context = Context> + Supervisor<Index = View>,
@@ -46,6 +48,9 @@ pub struct Actor<
     crypto: C,
     hasher: H,
     application: A,
+
+    proposals: Arc<Mutex<Archive<T, B, E>>>,
+    notarizations: Arc<Mutex<Archive<T, B, E>>>,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -58,13 +63,20 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + GClock + Rng,
+        T: Translator,
+        B: Blob,
+        E: Clock + GClock + Rng + Storage<B>,
         C: Scheme,
         H: Hasher,
         A: Automaton<Context = Context> + Supervisor<Index = View>,
-    > Actor<E, C, H, A>
+    > Actor<T, B, E, C, H, A>
 {
-    pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {
+    pub fn new(
+        runtime: E,
+        proposals: Arc<Mutex<Archive<T, B, E>>>,
+        notarizations: Arc<Mutex<Archive<T, B, E>>>,
+        cfg: Config<C, H, A>,
+    ) -> (Self, Mailbox) {
         // Initialize rate limiter
         //
         // This ensures we don't exceed the inbound rate limit on any peer we are communicating with (which
@@ -79,6 +91,9 @@ impl<
                 crypto: cfg.crypto,
                 hasher: cfg.hasher,
                 application: cfg.application,
+
+                proposals,
+                notarizations,
 
                 mailbox_receiver: receiver,
 
@@ -197,13 +212,11 @@ impl<
         (public_key, deadline)
     }
 
-    pub async fn run<T: Translator, B: Blob, S: Storage<B>>(
+    pub async fn run(
         mut self,
         last_notarized: View,
         voter: &mut voter::Mailbox,
         resolver: &mut resolver::Mailbox,
-        proposals: Arc<Mutex<Archive<T, B, S>>>,
-        notarizations: Arc<Mutex<Archive<T, B, S>>>,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
@@ -295,13 +308,69 @@ impl<
                     };
                     match payload {
                         wire::backfiller::Payload::ProposalRequest(request) => {
-                            let b = proposals.lock().await;
-                            let p = b.get(&request.digest).await;
+                            // Confirm request is valid
+                            if !H::validate(&request.digest) {
+                                warn!(sender = hex(&s), "invalid digest");
+                                continue;
+                            }
+
+                            // Populate as many proposals as possible
+                            let mut proposal_bytes = 0;
+                            let mut proposals_found = Vec::new();
+                            let mut cursor = request.digest;
+                            let proposals = self.proposals.lock().await;
+                            loop {
+                                // Check to see if we have proposal
+                                let proposal = match proposals.get(&cursor).await {
+                                    Ok(proposal) => proposal,
+                                    Err(err) => {
+                                        debug!(
+                                            sender = hex(&s),
+                                            proposal = hex(&cursor),
+                                            ?err,
+                                            "unable to load proposal",
+                                        );
+                                        break;
+                                    }
+                                };
+                                let proposal = match proposal {
+                                    Some(proposal) => proposal,
+                                    None => {
+                                        debug!(
+                                            sender = hex(&s),
+                                            proposal = hex(&cursor),
+                                            "missing proposal",
+                                        );
+                                        break;
+                                    }
+                                };
+                                let proposal = wire::Proposal::decode(proposal).expect("unable to decode persisted proposal");
+
+                                // If we don't have any more space, stop
+                                proposal_bytes += proposal.encoded_len();
+                                if proposal_bytes > self.max_fetch_size {
+                                    debug!(
+                                        requested = request.parents + 1,
+                                        found = proposals_found.len(),
+                                        peer = hex(&s),
+                                        "reached max response size",
+                                    );
+                                    break;
+                                }
+
+                                // If we do have space, add to proposals
+                                cursor = proposal.parent.clone();
+                                proposals_found.push(proposal);
+
+                                // If we have all parents requested, stop gathering more
+                                let fetched = proposals_found.len() as u32;
+                                if fetched == request.parents + 1 || fetched == self.max_fetch_count {
+                                    break;
+                                }
+                            }
                         },
                         wire::backfiller::Payload::ProposalResponse(response) => {
                             // TODO: skip duration update if response is empty
-                            let b = proposals.lock().await;
-                            b.put(section, key, data, force_sync)
                         },
                         wire::backfiller::Payload::NotarizationRequest(request) => {},
                         wire::backfiller::Payload::NotarizationResponse(response) => {
