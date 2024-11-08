@@ -67,6 +67,8 @@ pub struct Actor<
     verified: HashMap<Height, HashSet<Digest>>,
 
     // Track notarization/finalization
+    //
+    // TODO: this can stay in-memory because the application will inform us?
     last_notarized: Height,
     last_finalized: Height,
 

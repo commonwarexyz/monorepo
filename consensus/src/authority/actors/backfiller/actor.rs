@@ -48,7 +48,7 @@ pub struct Actor<
 
     proposals: Arc<Mutex<Archive<T, B, E>>>,
     notarizations: Arc<Mutex<Archive<T, B, E>>>,
-
+    // TODO: allow other peers to fetch historical finalizations?
     mailbox_receiver: mpsc::Receiver<Message>,
 
     fetch_timeout: Duration,
