@@ -1,7 +1,8 @@
 use super::{Config, Error};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Error as RError, Storage};
 use commonware_utils::hex;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{btree_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
 
 pub struct Index<B: Blob, E: Storage<B>> {
@@ -14,6 +15,10 @@ pub struct Index<B: Blob, E: Storage<B>> {
 }
 
 impl<B: Blob, E: Storage<B>> Index<B, E> {
+    /// Initialize a new `Index` instance.
+    ///
+    /// All backing blobs are opened but not read during
+    /// initialization.
     pub async fn new(runtime: E, cfg: Config) -> Result<Self, Error> {
         // Iterate over blobs in partition
         let mut blobs = BTreeMap::new();
@@ -41,5 +46,51 @@ impl<B: Blob, E: Storage<B>> Index<B, E> {
             oldest_allowed: None,
             blobs,
         })
+    }
+
+    pub async fn put(&mut self, index: u64, data: &[u8]) -> Result<(), Error> {
+        if data.len() > self.cfg.value_size as usize {
+            return Err(Error::ItemTooLarge(data.len()));
+        }
+        let blob = index / self.cfg.entries_per_blob;
+        let offset = index % self.cfg.entries_per_blob * (self.cfg.value_size as u64 + 4);
+        let blob = match self.blobs.entry(blob) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let name = blob.to_be_bytes();
+                let blob = self
+                    .runtime
+                    .open(&self.cfg.partition, &name)
+                    .await
+                    .map_err(Error::Runtime)?;
+                entry.insert(blob)
+            }
+        };
+        let mut buf = Vec::with_capacity(data.len() + 4);
+        buf.put(data);
+        buf.put_u32(crc32fast::hash(data));
+        blob.write_at(&buf, offset).await.map_err(Error::Runtime)
+    }
+
+    pub async fn get(&self, index: u64) -> Result<Option<Bytes>, Error> {
+        let blob = index / self.cfg.entries_per_blob;
+        let offset = index % self.cfg.entries_per_blob * (self.cfg.value_size as u64 + 4);
+        let blob = match self.blobs.get(&blob) {
+            Some(blob) => blob,
+            None => return Ok(None),
+        };
+        let value_size = self.cfg.value_size as usize;
+        let mut buf = vec![0; value_size + 4];
+        blob.read_at(&mut buf, offset)
+            .await
+            .map_err(Error::Runtime)?;
+        let mut buf = buf.as_slice();
+        let data = buf.copy_to_bytes(value_size);
+        let actual = buf.get_u32();
+        let expected = crc32fast::hash(&data);
+        if expected != actual {
+            return Err(Error::ChecksumMismatch(expected, actual));
+        }
+        Ok(Some(data))
     }
 }
