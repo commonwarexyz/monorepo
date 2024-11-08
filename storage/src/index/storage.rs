@@ -48,6 +48,9 @@ impl<B: Blob, E: Storage<B>> Index<B, E> {
         })
     }
 
+    // TODO: when to sync?
+    /// Data can be updated in the index but is not guaranteed to be persisted
+    /// until XXX
     pub async fn put(&mut self, index: u64, data: &[u8]) -> Result<(), Error> {
         if data.len() > self.cfg.value_size as usize {
             return Err(Error::ItemTooLarge(data.len()));
