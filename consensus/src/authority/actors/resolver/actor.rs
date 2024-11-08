@@ -156,6 +156,7 @@ impl<
 
                 verified,
 
+                notarized: HashMap::new(),
                 last_notarized: 0,
                 last_finalized: 0,
 
@@ -228,30 +229,13 @@ impl<
         // Record what we learned
         if proposal.height > self.last_finalized {
             // Add to notarized if not finalized
-            match self.knowledge.get_mut(&proposal.height) {
-                Some(Knowledge::Notarized(seen)) => {
-                    seen.insert(proposal.view, digest.clone());
-                }
-                None => {
-                    let mut seen = BTreeMap::new();
-                    seen.insert(proposal.view, digest.clone());
-                    self.knowledge
-                        .insert(proposal.height, Knowledge::Notarized(seen));
-                }
-                _ => {}
-            }
+            self.notarized
+                .entry(proposal.height)
+                .or_default()
+                .insert(proposal.view, digest);
         } else {
-            // TODO: clean this up
-
-            // Insert as final (in case it doesn't exist)
-            let mut start = (proposal.height, digest.clone());
-            if let Some(Knowledge::Finalized(_)) = self.knowledge.get(&proposal.height) {
-                debug!("overriding backfill start to parent");
-                start = (proposal.height - 1, proposal.parent.clone());
-            }
-
             // Finalize this container and all containers we have that are ancestors of this container
-            self.backfill_finalization(start.0, start.1);
+            self.backfill_finalization(proposal.height, digest);
         }
 
         // Check if parent is missing
@@ -267,6 +251,14 @@ impl<
         // Notify application of all finalized proposals
         let mut next = self.last_notified + 1;
         loop {
+            // TODO: behave differently if < last_finalized vs > last_finalized
+            if next < self.last_finalized {
+                // TODO: check for all notarized proposals at this height
+            } else {
+                // TODO: how do we know what is next hash to run (could use a journal that we prune up
+                // to last finalized on restart)?
+            }
+
             // Get info
             let knowledge = match self.knowledge.get(&next).cloned() {
                 Some(knowledge) => knowledge,
