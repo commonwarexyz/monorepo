@@ -2,6 +2,7 @@ use super::{ingress::Mailbox, priority_queue::PriorityQueue, Config, Message};
 use crate::{
     authority::{
         actors::{resolver, voter},
+        encoder::{proposal_message, proposal_namespace},
         wire, Context, Height, View,
     },
     Automaton, Supervisor,
@@ -49,6 +50,8 @@ pub struct Actor<
     hasher: H,
     application: A,
 
+    proposal_namespace: Vec<u8>,
+
     proposals: Arc<Mutex<Archive<T, B, E>>>,
     notarizations: Arc<Mutex<Archive<T, B, E>>>,
 
@@ -92,6 +95,8 @@ impl<
                 hasher: cfg.hasher,
                 application: cfg.application,
 
+                proposal_namespace: proposal_namespace(&cfg.namespace),
+
                 proposals,
                 notarizations,
 
@@ -105,6 +110,15 @@ impl<
             },
             Mailbox::new(sender),
         )
+    }
+
+    // TODO: remove duplicatred code
+    fn leader(&self, view: View) -> Option<PublicKey> {
+        let validators = match self.application.participants(view) {
+            Some(validators) => validators,
+            None => return None,
+        };
+        Some(validators[view as usize % validators.len()].clone())
     }
 
     async fn send(
@@ -226,11 +240,11 @@ impl<
             .retain(self.fetch_timeout / 2, validators);
 
         // Wait for an event
-        let mut outstanding_block: Option<(Digest, u32, HashSet<PublicKey>, Status)> = None;
+        let mut outstanding_proposal: Option<(Digest, u32, HashSet<PublicKey>, Status)> = None;
         let mut outstanding_notarization: Option<(View, u32, HashSet<PublicKey>, Status)> = None;
         loop {
-            // Set timeout for next block
-            let block_timeout = if let Some((_, _, _, status)) = &outstanding_block {
+            // Set timeout for next proposal
+            let proposal_timeout = if let Some((_, _, _, status)) = &outstanding_proposal {
                 Either::Left(self.runtime.sleep_until(status.1))
             } else {
                 Either::Right(futures::future::pending())
@@ -245,14 +259,14 @@ impl<
 
             // Wait for an event
             select! {
-                _ = block_timeout => {
+                _ = proposal_timeout => {
                     // Penalize requester for timeout
-                    let (digest, parents, mut sent, status) = outstanding_block.take().unwrap();
+                    let (digest, parents, mut sent, status) = outstanding_proposal.take().unwrap();
                     self.fetch_performance.put(status.0, self.fetch_timeout);
 
                     // Send message
                     let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
-                    outstanding_block = Some((digest, parents, sent, status));
+                    outstanding_proposal = Some((digest, parents, sent, status));
                     continue;
                 },
                 _ = notarization_timeout => {
@@ -278,7 +292,7 @@ impl<
                             // Send message
                             let mut sent = HashSet::new();
                             let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
-                            outstanding_block = Some((digest, parents, sent, status));
+                            outstanding_proposal = Some((digest, parents, sent, status));
                             continue;
                         },
                         Message::Notarizations { view, children } => {
@@ -383,7 +397,120 @@ impl<
                             sender.send(Recipients::One(s), msg, false).await.unwrap();
                         },
                         wire::backfiller::Payload::ProposalResponse(response) => {
-                            // TODO: skip duration update if response is empty
+                            // Parse proposals
+                            let mut next = None;
+                            let mut proposals_found = Vec::new();
+                            for proposal in response.proposals {
+                                // Ensure this is the container we want
+                                if !H::validate(&proposal.parent) {
+                                    debug!(sender = hex(&s), "invalid proposal parent digest size");
+                                    break;
+                                }
+                                let payload_digest = match self.application.parse(proposal.payload.clone()).await {
+                                    Some(payload_digest) => payload_digest,
+                                    None => {
+                                        debug!(sender = hex(&s), "unable to parse notarized/finalized payload");
+                                        break;
+                                    }
+                                };
+                                let proposal_message = proposal_message(
+                                    proposal.view,
+                                    proposal.height,
+                                    &proposal.parent,
+                                    &payload_digest,
+                                );
+                                self.hasher.update(&proposal_message);
+                                let proposal_digest = self.hasher.finalize();
+                                if let Some((height, ref digest)) = next {
+                                    if proposal.height != height || proposal_digest != digest {
+                                        debug!(sender = hex(&s), "received invalid batch proposal");
+                                        break;
+                                    }
+                                }
+
+                                // Verify leader signature
+                                let signature = match &proposal.signature {
+                                    Some(signature) => signature,
+                                    None => {
+                                        debug!(sender = hex(&s), "missing proposal signature");
+                                        break;
+                                    }
+                                };
+                                if !C::validate(&signature.public_key) {
+                                    debug!(sender = hex(&s), "invalid proposal public key");
+                                    break;
+                                }
+                                let expected_leader = match self.leader(proposal.view) {
+                                    Some(leader) => leader,
+                                    None => {
+                                        debug!(
+                                            proposal_leader = hex(&signature.public_key),
+                                            reason = "unable to compute leader",
+                                            "dropping proposal"
+                                        );
+                                        break;
+                                    }
+                                };
+                                if expected_leader != signature.public_key {
+                                    debug!(
+                                        proposal_leader = hex(&signature.public_key),
+                                        view_leader = hex(&expected_leader),
+                                        reason = "leader mismatch",
+                                        "dropping proposal"
+                                    );
+                                    break;
+                                }
+                                if !C::verify(
+                                    &self.proposal_namespace,
+                                    &proposal_message,
+                                    &signature.public_key,
+                                    &signature.signature,
+                                ) {
+                                    warn!(sender = hex(&s), "invalid proposal signature");
+                                    break;
+                                }
+
+                                // Record the proposal
+                                let height = proposal.height;
+                                if height > 1 {
+                                    next = Some((height-1, proposal.parent.clone()));
+                                } else {
+                                    next = None;
+                                }
+                                debug!(height, digest = hex(&proposal_digest), peer = hex(&s), "received proposal via backfill");
+
+                                // Remove outstanding task if we were waiting on this
+                                //
+                                // Note, we don't care if we are sent the proposal from someone unexpected (although
+                                // this is unexpected).
+                                if let Some(ref outstanding) = outstanding_proposal{
+                                    if outstanding.0 == proposal_digest {
+                                        debug!(height = outstanding.1, digest = hex(&proposal_digest), peer = hex(&s), "resolved missing proposal via backfill");
+                                        outstanding_proposal = None;
+
+                                        // TODO: notify requester
+                                    }
+                                }
+                                proposals_found.push((height, proposal_digest, proposal));
+
+                                // Stop processing if we don't need anything else
+                                if next.is_none() {
+                                    break;
+                                }
+                            }
+
+                            // Persist proposals
+                            let mut proposals = self.proposals.lock().await;
+                            for (height, digest, proposal) in proposals_found {
+                                let section = height & 0xFFFF_FFFF_FFFF_0000u64;
+                                let proposal = proposal.encode_to_vec().into();
+                                let result = proposals.put(section, &digest, proposal, false).await;
+                                if let Err(err) = result {
+                                    warn!(height, digest = hex(&digest), ?err, "unable to persist proposal");
+                                } else {
+                                    debug!(height, digest = hex(&digest), peer = hex(&s), "persisted proposal");
+                                }
+                            }
                         },
                         wire::backfiller::Payload::NotarizationRequest(request) => {},
                         wire::backfiller::Payload::NotarizationResponse(response) => {
