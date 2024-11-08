@@ -257,6 +257,8 @@ impl<
             } else {
                 // TODO: how do we know what is next hash to run (could use a journal that we prune up
                 // to last finalized on restart)?
+                // TODO: could create doubly-linked list on the way backwards (parent points to child
+                // instead of doing an integer to hash index)
             }
 
             // Get info
