@@ -2,7 +2,7 @@ use super::{ingress::Mailbox, priority_queue::PriorityQueue, Config, Message};
 use crate::{
     authority::{
         actors::{resolver, voter},
-        encoder::{proposal_message, proposal_namespace},
+        encoder::{proposal_message, proposal_namespace, vote_message, vote_namespace},
         wire, Context, Height, View,
     },
     Automaton, Supervisor,
@@ -13,7 +13,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Storage};
 use commonware_storage::archive::{Archive, Translator};
-use commonware_utils::hex;
+use commonware_utils::{hex, quorum};
 use futures::{
     channel::mpsc,
     future::Either,
@@ -51,6 +51,7 @@ pub struct Actor<
     application: A,
 
     proposal_namespace: Vec<u8>,
+    vote_namespace: Vec<u8>,
 
     proposals: Arc<Mutex<Archive<T, B, E>>>,
     notarizations: Arc<Mutex<Archive<T, B, E>>>,
@@ -96,6 +97,7 @@ impl<
                 application: cfg.application,
 
                 proposal_namespace: proposal_namespace(&cfg.namespace),
+                vote_namespace: vote_namespace(&cfg.namespace),
 
                 proposals,
                 notarizations,
@@ -119,6 +121,16 @@ impl<
             None => return None,
         };
         Some(validators[view as usize % validators.len()].clone())
+    }
+
+    fn threshold(&self, view: View) -> Option<(u32, u32)> {
+        let validators = match self.application.participants(view) {
+            Some(validators) => validators,
+            None => return None,
+        };
+        let len = validators.len() as u32;
+        let threshold = quorum(len).expect("not enough validators for a quorum");
+        Some((threshold, len))
     }
 
     async fn send(
@@ -472,15 +484,10 @@ impl<
                                     warn!(sender = hex(&s), "invalid proposal signature");
                                     break;
                                 }
-
-                                // Record the proposal
                                 let height = proposal.height;
-                                if height > 1 {
-                                    next = Some((height-1, proposal.parent.clone()));
-                                } else {
-                                    next = None;
-                                }
-                                debug!(height, digest = hex(&proposal_digest), peer = hex(&s), "received proposal via backfill");
+                                let parent = proposal.parent.clone();
+                                proposals_found.push((height, proposal_digest.clone(), proposal));
+                                debug!(height, digest = hex(&proposal_digest), peer = hex(&s), "received batch proposal");
 
                                 // Remove outstanding task if we were waiting on this
                                 //
@@ -491,15 +498,15 @@ impl<
                                         debug!(height = outstanding.1, digest = hex(&proposal_digest), peer = hex(&s), "resolved missing proposal via backfill");
                                         outstanding_proposal = None;
 
-                                        // TODO: notify requester
+                                        // TODO: notify requester (after persisted)
                                     }
                                 }
-                                proposals_found.push((height, proposal_digest, proposal));
 
-                                // Stop processing if we don't need anything else
-                                if next.is_none() {
+                                // Setup next processing
+                                if height <= 1 {
                                     break;
                                 }
+                                next = Some((height-1, parent));
                             }
 
                             // Persist proposals
@@ -629,17 +636,95 @@ impl<
                                     continue;
                                 }
 
-                                // TODO: verify notarization signature
+                                // Ensure notarization has valid number of signatures
+                                let (threshold, count) = match self.threshold(notarization.view) {
+                                    Some(participation) => participation,
+                                    None => {
+                                        debug!(
+                                            view = notarization.view,
+                                            reason = "unable to compute participants for view",
+                                            "dropping notarization"
+                                        );
+                                        return;
+                                    }
+                                };
+                                if notarization.signatures.len() < threshold as usize {
+                                    debug!(
+                                        threshold,
+                                        signatures = notarization.signatures.len(),
+                                        reason = "insufficient signatures",
+                                        "dropping notarization"
+                                    );
+                                    return;
+                                }
+                                if notarization.signatures.len() > count as usize {
+                                    debug!(
+                                        threshold,
+                                        signatures = notarization.signatures.len(),
+                                        reason = "too many signatures",
+                                        "dropping notarization"
+                                    );
+                                    return;
+                                }
 
-                                // TODO: check if satisfies task + send result to requester
+                                // Verify threshold notarization
+                                let mut seen = HashSet::new();
+                                for signature in notarization.signatures.iter() {
+                                    // Verify signature
+                                    if !C::validate(&signature.public_key) {
+                                        debug!(
+                                            signer = hex(&signature.public_key),
+                                            reason = "invalid validator",
+                                            "dropping notarization"
+                                        );
+                                        return;
+                                    }
 
+                                    // Ensure we haven't seen this signature before
+                                    if seen.contains(&signature.public_key) {
+                                        debug!(
+                                            signer = hex(&signature.public_key),
+                                            reason = "duplicate signature",
+                                            "dropping notarization"
+                                        );
+                                        return;
+                                    }
+                                    seen.insert(signature.public_key.clone());
 
-                                debug!(view = notarization.view, "received batch notarization");
-                                if notarization.view == u64::MAX {
+                                    // Verify signature
+                                    if !C::verify(
+                                        &self.vote_namespace,
+                                        &vote_message(
+                                            notarization.view,
+                                            notarization.height,
+                                            notarization.digest.as_ref(),
+                                        ),
+                                        &signature.public_key,
+                                        &signature.signature,
+                                    ) {
+                                        debug!(reason = "invalid signature", "dropping notarization");
+                                        return;
+                                    }
+                                }
+                                let view = notarization.view;
+                                notarizations_found.push(notarization);
+                                debug!(view, "received batch notarization");
+
+                                // Remove outstanding task if we were waiting on this
+                                if let Some(ref outstanding) = outstanding_notarization {
+                                    if outstanding.0 == view {
+                                        debug!(view, peer = hex(&s), "resolved missing notarization via backfill");
+                                        outstanding_notarization = None;
+
+                                        // TODO: notify requester (after persisted)
+                                    }
+                                }
+
+                                // Setup next processing
+                                if view == u64::MAX {
                                     break;
                                 }
-                                next = Some(notarization.view + 1);
-                                notarizations_found.push(notarization);
+                                next = Some(view + 1);
                             }
 
                             // Persist notarizations
