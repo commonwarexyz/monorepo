@@ -52,6 +52,7 @@ pub struct Actor<
     hasher: H,
     application: A,
 
+    // TODO: only send notarization on-the-fly if block is already verified (don't need to track knowledge)
     proposals: Arc<Mutex<Archive<T, B, E>>>,
     notarizations: Arc<Mutex<Archive<T, B, E>>>,
     finalizations: Arc<Mutex<Archive<T, B, E>>>,
