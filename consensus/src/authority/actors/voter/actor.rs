@@ -15,9 +15,10 @@ use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{Blob, Clock, Storage};
+use commonware_storage::journal::Journal;
 use commonware_utils::{hex, quorum};
-use futures::{channel::mpsc, future::Either, StreamExt};
+use futures::{channel::mpsc, future::Either, pin_mut, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
     RateLimiter,
@@ -379,7 +380,8 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
 }
 
 pub struct Actor<
-    E: Clock + Rng + GClock,
+    B: Blob,
+    E: Clock + Rng + GClock + Storage<B>,
     C: Scheme,
     H: Hasher,
     A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
@@ -388,6 +390,8 @@ pub struct Actor<
     crypto: C,
     hasher: H,
     application: A,
+
+    journal: Journal<B, E>,
 
     proposal_namespace: Vec<u8>,
     vote_namespace: Vec<u8>,
@@ -398,11 +402,7 @@ pub struct Actor<
     null_vote_retry: Duration,
     proposal_retry: Duration,
     activity_timeout: View,
-    fetch_timeout: Duration,
-    max_fetch_count: u64,
-    max_fetch_size: usize,
-    fetch_rate_limiter:
-        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
+    max_fetch_count: u32,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -415,13 +415,14 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + Rng + GClock,
+        B: Blob,
+        E: Clock + Rng + GClock + Storage<B>,
         C: Scheme,
         H: Hasher,
         A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
-    > Actor<E, C, H, A>
+    > Actor<B, E, C, H, A>
 {
-    pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {
+    pub async fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -436,44 +437,79 @@ impl<
             registry.register("tracked_views", "tracked views", tracked_views.clone());
         }
 
-        // Initialize rate limiter
-        let fetch_rate_limiter = RateLimiter::hashmap_with_clock(cfg.fetch_rate_per_peer, &runtime);
-
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
-        (
-            Self {
-                runtime,
-                crypto: cfg.crypto,
-                hasher: cfg.hasher,
-                application: cfg.application,
+        let mut voter = Self {
+            runtime,
+            crypto: cfg.crypto,
+            hasher: cfg.hasher,
+            application: cfg.application,
 
-                proposal_namespace: proposal_namespace(&cfg.namespace),
-                vote_namespace: vote_namespace(&cfg.namespace),
-                finalize_namespace: finalize_namespace(&cfg.namespace),
+            journal,
 
-                leader_timeout: cfg.leader_timeout,
-                notarization_timeout: cfg.notarization_timeout,
-                null_vote_retry: cfg.null_vote_retry,
-                proposal_retry: cfg.proposal_retry,
-                fetch_timeout: cfg.fetch_timeout,
-                max_fetch_count: cfg.max_fetch_count,
-                max_fetch_size: cfg.max_fetch_size,
-                fetch_rate_limiter,
+            proposal_namespace: proposal_namespace(&cfg.namespace),
+            vote_namespace: vote_namespace(&cfg.namespace),
+            finalize_namespace: finalize_namespace(&cfg.namespace),
 
-                activity_timeout: cfg.activity_timeout,
+            leader_timeout: cfg.leader_timeout,
+            notarization_timeout: cfg.notarization_timeout,
+            null_vote_retry: cfg.null_vote_retry,
+            proposal_retry: cfg.proposal_retry,
+            max_fetch_count: cfg.max_fetch_count,
 
-                mailbox_receiver,
+            activity_timeout: cfg.activity_timeout,
 
-                last_finalized: 0,
-                view: 0,
-                views: BTreeMap::new(),
+            mailbox_receiver,
 
-                current_view,
-                tracked_views,
-            },
-            Mailbox::new(mailbox_sender),
-        )
+            last_finalized: 0,
+            view: 0,
+            views: BTreeMap::new(),
+
+            current_view,
+            tracked_views,
+        };
+
+        // Add initial view
+        //
+        // We start on view 1 because the genesis container occupies view 0/height 0.
+        voter.enter_view(1);
+        voter.current_view.set(1);
+        voter.tracked_views.set(1);
+
+        // Reload views from journal
+        let stream = voter
+            .journal
+            .replay(cfg.replay_concurrency, None)
+            .await
+            .expect("could not start replay");
+        pin_mut!(stream);
+        while let Some(result) = stream.next().await {
+            let (view, _, _, message) = result.expect("could not replay message");
+            let message = wire::Voter::decode(message).expect("could not decode message");
+            let payload = message
+                .payload
+                .expect("missing payload on persisted message");
+            match payload {
+                wire::voter::Payload::Proposal(proposal) => {
+                    unimplemented!()
+                }
+                wire::voter::Payload::Vote(vote) => {
+                    unimplemented!()
+                }
+                wire::voter::Payload::Finalize(finalize) => {
+                    unimplemented!()
+                }
+                wire::voter::Payload::Notarization(_) => {
+                    panic!("unexpected notarization in journal: view={:?}", view);
+                }
+                wire::voter::Payload::Finalization(_) => {
+                    panic!("unexpected finalization in journal: view={:?}", view);
+                }
+            }
+        }
+
+        // Return initialized voter
+        (voter, Mailbox::new(mailbox_sender))
     }
 
     fn leader(&self, view: View) -> Option<PublicKey> {
@@ -557,8 +593,8 @@ impl<
             match self.construct_notarization(past_view, true) {
                 Some(notarization) => {
                     debug!(view = past_view, "rebroadcasting notarization");
-                    let msg = wire::Consensus {
-                        payload: Some(wire::consensus::Payload::Notarization(notarization)),
+                    let msg = wire::Voter {
+                        payload: Some(wire::voter::Payload::Notarization(notarization)),
                     }
                     .encode_to_vec()
                     .into();
@@ -581,8 +617,8 @@ impl<
                 signature: self.crypto.sign(&self.vote_namespace, &message),
             }),
         };
-        let msg = wire::Consensus {
-            payload: Some(wire::consensus::Payload::Vote(vote.clone())),
+        let msg = wire::Voter {
+            payload: Some(wire::voter::Payload::Vote(vote.clone())),
         }
         .encode_to_vec()
         .into();
@@ -1563,8 +1599,8 @@ impl<
         // Attempt to vote
         if let Some(vote) = self.construct_proposal_vote(view) {
             // Broadcast the vote
-            let msg = wire::Consensus {
-                payload: Some(wire::consensus::Payload::Vote(vote.clone())),
+            let msg = wire::Voter {
+                payload: Some(wire::voter::Payload::Vote(vote.clone())),
             }
             .encode_to_vec();
             sender
@@ -1581,8 +1617,8 @@ impl<
         // Attempt to notarize
         if let Some(notarization) = self.construct_notarization(view, false) {
             // Broadcast the notarization
-            let msg = wire::Consensus {
-                payload: Some(wire::consensus::Payload::Notarization(notarization.clone())),
+            let msg = wire::Voter {
+                payload: Some(wire::voter::Payload::Notarization(notarization.clone())),
             }
             .encode_to_vec();
             sender
@@ -1610,10 +1646,8 @@ impl<
             {
                 match self.construct_finalization(self.last_finalized, true) {
                     Some(finalization) => {
-                        let msg = wire::Consensus {
-                            payload: Some(wire::consensus::Payload::Finalization(
-                                finalization.clone(),
-                            )),
+                        let msg = wire::Voter {
+                            payload: Some(wire::voter::Payload::Finalization(finalization.clone())),
                         }
                         .encode_to_vec();
                         sender
@@ -1641,8 +1675,8 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Broadcast the finalize
-            let msg = wire::Consensus {
-                payload: Some(wire::consensus::Payload::Finalize(finalize.clone())),
+            let msg = wire::Voter {
+                payload: Some(wire::voter::Payload::Finalize(finalize.clone())),
             };
             let msg = msg.encode_to_vec();
             sender
@@ -1662,8 +1696,8 @@ impl<
         // Attempt to finalization
         if let Some(finalization) = self.construct_finalization(view, false) {
             // Broadcast the finalization
-            let msg = wire::Consensus {
-                payload: Some(wire::consensus::Payload::Finalization(finalization.clone())),
+            let msg = wire::Voter {
+                payload: Some(wire::voter::Payload::Finalization(finalization.clone())),
             };
             let msg = msg.encode_to_vec();
             sender
@@ -1708,139 +1742,14 @@ impl<
         base.map(|base| (base, next - base - 1))
     }
 
-    async fn send_request(
-        &mut self,
-        base: View,
-        children: View,
-        sender: &mut impl Sender,
-    ) -> PublicKey {
-        // Send the request
-        let msg: Bytes = wire::Consensus {
-            payload: Some(wire::consensus::Payload::NotarizationRequest(
-                wire::NotarizationRequest {
-                    view: base,
-                    children,
-                },
-            )),
-        }
-        .encode_to_vec()
-        .into();
-
-        // Get validators from highest view we know about
-        let validators = self.application.participants(self.view).unwrap();
-
-        // Generate a shuffle
-        let mut validator_indices = (0..validators.len()).collect::<Vec<_>>();
-        validator_indices.shuffle(&mut self.runtime);
-
-        // Minimize footprint of rate limiter
-        self.fetch_rate_limiter.shrink_to_fit();
-
-        // Loop until we send a message
-        let mut index = 0;
-        loop {
-            // Check if we have exhausted all validators
-            if index == validators.len() {
-                warn!(
-                    base,
-                    view = self.view,
-                    "failed to send request to any validator"
-                );
-
-                // Avoid busy looping when disconnected
-                self.runtime.sleep(self.fetch_timeout).await;
-                index = 0;
-            }
-
-            // Select random validator to fetch from
-            let validator = validators[validator_indices[index]].clone();
-            if validator == self.crypto.public_key() {
-                index += 1;
-                continue;
-            }
-
-            // Check if rate limit is exceeded
-            if self.fetch_rate_limiter.check_key(&validator).is_err() {
-                debug!(
-                    base,
-                    view = self.view,
-                    peer = hex(&validator),
-                    "skipping request because rate limited"
-                );
-                index += 1;
-                continue;
-            }
-
-            // Send message
-            if !sender
-                .send(Recipients::One(validator.clone()), msg.clone(), true)
-                .await
-                .unwrap()
-                .is_empty()
-            {
-                debug!(
-                    base,
-                    view = self.view,
-                    peer = hex(&validator),
-                    "requested missing notarizations"
-                );
-                return validator;
-            }
-
-            // Try again
-            debug!(
-                base,
-                view = self.view,
-                peer = hex(&validator),
-                "failed to send backfill request"
-            );
-            index += 1;
-        }
-    }
-
     pub async fn run(
         mut self,
         resolver: &mut resolver::Mailbox,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
-        // Add initial view
-        //
-        // We start on view 1 because the genesis container occupies view 0/height 0.
-        self.enter_view(1);
-        self.current_view.set(1);
-        self.tracked_views.set(1);
-
         // Process messages
-        let mut outstanding_task = None;
         loop {
-            // Ensure task has not been resolved
-            if let Some((_, ref base, _, _)) = outstanding_task {
-                if self.notarization_observed(*base) {
-                    outstanding_task = None;
-                }
-            }
-
-            // Look for next task if nothing
-            if outstanding_task.is_none() {
-                if let Some((base, children)) = self.get_next_missing() {
-                    let validator = self.send_request(base, children, &mut sender).await;
-                    outstanding_task = Some((
-                        validator,
-                        base,
-                        children,
-                        self.runtime.current() + self.fetch_timeout,
-                    ));
-                }
-            }
-
-            // Create fetch timeout
-            let fetch_timeout = if let Some((_, _, _, ref deadline)) = outstanding_task {
-                Either::Left(self.runtime.sleep_until(*deadline))
-            } else {
-                Either::Right(futures::future::pending())
-            };
-
             // Attempt to propose a container
             let propose_retry = match self.propose(resolver).await {
                 Some(retry) => Either::Left(self.runtime.sleep_until(retry)),
@@ -1858,16 +1767,6 @@ impl<
                 },
                 _ = propose_retry => {
                     debug!(view = self.view, "proposal retry timeout fired");
-                    continue;
-                },
-                _ = fetch_timeout => {
-                    // Send request again
-                    let (_, base, children, _) = outstanding_task.unwrap();
-                    let validator = self.send_request(base, children, &mut sender).await;
-
-                    // Reset timeout
-                    let deadline = self.runtime.current() + self.fetch_timeout;
-                    outstanding_task = Some((validator, base, children, deadline));
                     continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
@@ -1903,8 +1802,8 @@ impl<
                             view = proposal_view;
 
                             // Broadcast the proposal
-                            let msg = wire::Consensus {
-                                payload: Some(wire::consensus::Payload::Proposal(proposal.clone())),
+                            let msg = wire::Voter{
+                                payload: Some(wire::voter::Payload::Proposal(proposal.clone())),
                             }.encode_to_vec();
                             sender
                                 .send(Recipients::All, msg.into(), true)
@@ -1931,12 +1830,15 @@ impl<
                             }
                             view = verified_view;
                         },
+                        Message::Backfilled { view, notarizations} => {
+                            unimplemented!();
+                        }
                     }
                 },
                 msg = receiver.recv() => {
                     // Parse message
                     let (s, msg) = msg.unwrap();
-                    let msg = match wire::Consensus::decode(msg) {
+                    let msg = match wire::Voter::decode(msg) {
                         Ok(msg) => msg,
                         Err(err) => {
                             debug!(?err, sender = hex(&s), "failed to decode message");
@@ -1955,7 +1857,7 @@ impl<
                     //
                     // All messages are semantically verified before being passed to the `voter`.
                     match payload {
-                        wire::consensus::Payload::Proposal(proposal) => {
+                        wire::voter::Payload::Proposal(proposal) => {
                             if !H::validate(&proposal.parent) {
                                 debug!(sender = hex(&s), "invalid proposal parent digest size");
                                 continue;
@@ -1963,7 +1865,7 @@ impl<
                             view = proposal.view;
                             self.peer_proposal(resolver, proposal).await;
                         }
-                        wire::consensus::Payload::Vote(vote) => {
+                        wire::voter::Payload::Vote(vote) => {
                             if let Some(vote_digest) = vote.digest.as_ref() {
                                 if !H::validate(vote_digest) {
                                     debug!(sender = hex(&s), "invalid vote digest size");
@@ -1980,7 +1882,7 @@ impl<
                             view = vote.view;
                             self.vote(vote).await;
                         }
-                        wire::consensus::Payload::Notarization(notarization) => {
+                        wire::voter::Payload::Notarization(notarization) => {
                             if let Some(notarization_digest) = notarization.digest.as_ref() {
                                 if !H::validate(notarization_digest) {
                                     debug!(sender = hex(&s), "invalid notarization digest size");
@@ -1997,7 +1899,7 @@ impl<
                             view = notarization.view;
                             self.notarization(resolver, notarization).await;
                         }
-                        wire::consensus::Payload::Finalize(finalize) => {
+                        wire::voter::Payload::Finalize(finalize) => {
                             if !H::validate(&finalize.digest) {
                                 debug!(sender = hex(&s), "invalid finalize digest size");
                                 continue;
@@ -2005,88 +1907,13 @@ impl<
                             view = finalize.view;
                             self.finalize(finalize).await;
                         }
-                        wire::consensus::Payload::Finalization(finalization) => {
+                        wire::voter::Payload::Finalization(finalization) => {
                             if !H::validate(&finalization.digest) {
                                 debug!(sender = hex(&s), "invalid finalization digest size");
                                 continue;
                             }
                             view = finalization.view;
                             self.finalization(resolver, finalization).await;
-                        }
-                        wire::consensus::Payload::NotarizationRequest(request) => {
-                            // Populate as many notarizations as we can
-                            let mut notarization_bytes = 0; // TODO: add a buffer
-                            let mut notarizations = Vec::new();
-                            let mut cursor = request.view;
-                            loop {
-                                // Attempt to construct notarization
-                                let notarization = match self.construct_notarization(cursor, true) {
-                                    Some(notarization) => notarization,
-                                    None => break,
-                                };
-
-                                // If we don't have any more space, stop
-                                notarization_bytes += notarization.encoded_len();
-                                if notarization_bytes > self.max_fetch_size{
-                                    debug!(
-                                        requested = request.children + 1,
-                                        fetched = notarizations.len(),
-                                        peer = hex(&s),
-                                        "reached max fetch size"
-                                    );
-                                    break;
-                                }
-                                notarizations.push(notarization);
-
-                                // If we have all children or we hit our limit, stop
-                                let fetched = notarizations.len() as u64;
-                                if fetched == request.children +1 || fetched == self.max_fetch_count {
-                                    break;
-                                }
-                                cursor +=1;
-                            }
-
-                            // Send back notarizations
-                            debug!(view = cursor, fetched = notarizations.len(), peer = hex(&s), "responding to notarization request");
-                            let msg = wire::Consensus {
-                                payload: Some(wire::consensus::Payload::BatchedNotarizations(
-                                    wire::BatchedNotarizations {
-                                        notarizations,
-                                    },
-                                )),
-                            }.encode_to_vec();
-                            sender
-                                .send(Recipients::One(s), msg.into(), false)
-                                .await
-                                .unwrap();
-                            continue;
-                        }
-                        wire::consensus::Payload::BatchedNotarizations(response) => {
-                            // Drop anything from someone we don't expect
-                            if let Some((ref sender, _, _, _)) = outstanding_task {
-                                if sender != &s {
-                                    continue
-                                }
-                                outstanding_task = None;
-                            }
-                            for notarization in response.notarizations {
-                                if let Some(notarization_digest) = notarization.digest.as_ref() {
-                                    if !H::validate(notarization_digest) {
-                                        debug!(sender = hex(&s), "invalid notarization digest size");
-                                        continue;
-                                    }
-                                    if notarization.height.is_none() {
-                                        debug!(sender = hex(&s), "missing notarization height");
-                                        continue;
-                                    }
-                                } else if notarization.height.is_some() {
-                                    debug!(sender = hex(&s), "invalid notarization height for null container");
-                                    continue;
-                                }
-                                debug!(view = notarization.view, "received batch notarization");
-                                self.notarization(resolver, notarization).await;
-                            }
-                            continue;
                         }
                     };
                 },

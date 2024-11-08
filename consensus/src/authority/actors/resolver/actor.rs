@@ -3,7 +3,7 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
-        actors::{voter, Proposal},
+        actors::{backfiller, voter, Proposal},
         encoder::{proposal_message, proposal_namespace},
         wire, Context, Height, View,
     },
@@ -58,6 +58,8 @@ pub struct Actor<
     finalizations: Arc<Mutex<Archive<T, B, E>>>,
 
     proposal_namespace: Vec<u8>,
+
+    max_fetch_count: u32,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -147,6 +149,8 @@ impl<
 
                 proposal_namespace: proposal_namespace(&cfg.namespace),
 
+                max_fetch_count: cfg.max_fetch_count,
+
                 mailbox_receiver,
 
                 verified,
@@ -191,11 +195,11 @@ impl<
         self.missing_sender.send((height, digest)).await.unwrap();
     }
 
-    fn resolve(&mut self, proposal: Proposal) -> Option<(Height, Digest)> {
+    async fn resolve(&mut self, proposal: Proposal) -> Option<(Height, Digest)> {
         // Parse proposal
         let (digest, proposal) = match proposal {
             Proposal::Reference(_, height, digest) => {
-                if self.containers.contains_key(&digest) {
+                if self.proposals.lock().await.has(&digest).await.unwrap() {
                     return None;
                 }
                 return Some((height, digest));
@@ -205,7 +209,9 @@ impl<
         };
 
         // If already resolved, do nothing.
-        if self.containers.contains_key(&digest) {
+        //
+        // TODO: this won't work if we feed proposals back in here that we populated during backfiller?
+        if self.proposals.lock().await.has(&digest).await.unwrap() {
             return None;
         }
 
@@ -247,13 +253,10 @@ impl<
             self.backfill_finalization(start.0, start.1);
         }
 
-        // Store proposal
-        let height = proposal.height;
-        let parent = proposal.parent.clone();
-        self.containers.insert(digest, proposal);
-
         // Check if parent is missing
-        if self.containers.contains_key(&parent) {
+        let parent = proposal.parent;
+        let height = proposal.height;
+        if self.proposals.lock().await.has(&parent).await.unwrap() {
             return None;
         }
         Some((height - 1, parent))
@@ -725,7 +728,7 @@ impl<
         self.notify().await;
     }
 
-    fn get_next_missing(&mut self) -> Option<(Height, Digest)> {
+    async fn get_next_missing(&mut self) -> Option<(Height, Digest)> {
         loop {
             // See if we have any missing proposals
             let (height, digest) = match self.missing_receiver.try_next() {
@@ -734,7 +737,7 @@ impl<
             };
 
             // Check if still unfulfilled
-            if self.containers.contains_key(&digest) {
+            if self.proposals.lock().await.has(&digest).await.unwrap() {
                 continue;
             }
 
@@ -743,17 +746,12 @@ impl<
         }
     }
 
-    async fn send_request(
-        &mut self,
-        height: Height,
-        digest: Digest,
-        sender: &mut impl Sender,
-    ) -> PublicKey {
+    async fn send_request(&mut self, height: Height, digest: Digest) -> u32 {
         // Compute missing containers from digest
         let mut parents = 0;
         loop {
             // Check to see if we are already at root
-            let target = height - parents;
+            let target = height - parents as u64;
             if target == 1 || parents + 1 == self.max_fetch_count {
                 break;
             }
@@ -779,7 +777,7 @@ impl<
                         break;
                     }
                     Knowledge::Finalized(digest) => {
-                        if self.containers.contains_key(digest) {
+                        if self.proposals.lock().await.has(&digest).await.unwrap() {
                             // We have a container and no longer need to fetch its parent
                             break;
                         }
@@ -790,156 +788,13 @@ impl<
             // If we have no knowledge of a height, we need to fetch it
             parents += 1;
         }
-
-        // Send the request
-        let msg: Bytes = wire::Backfill {
-            payload: Some(wire::backfill::Payload::Request(wire::Request {
-                digest: digest.clone(),
-                parents,
-            })),
-        }
-        .encode_to_vec()
-        .into();
-
-        // Get validators from highest view we know about
-        let validators = self.application.participants(self.last_notarized).unwrap();
-
-        // Generate a shuffle
-        let mut validator_indices = (0..validators.len()).collect::<Vec<_>>();
-        validator_indices.shuffle(&mut self.runtime);
-
-        // Minimize footprint of rate limiter
-        self.fetch_rate_limiter.shrink_to_fit();
-
-        // Loop until we send a message
-        let mut index = 0;
-        loop {
-            // Check if we have exhausted all validators
-            if index == validators.len() {
-                warn!(
-                    height,
-                    last_notarized = self.last_notarized,
-                    "failed to send request to any validator"
-                );
-
-                // Avoid busy looping when disconnected
-                self.runtime.sleep(self.fetch_timeout).await;
-                index = 0;
-            }
-
-            // Select random validator to fetch from
-            let validator = validators[validator_indices[index]].clone();
-            if validator == self.crypto.public_key() {
-                index += 1;
-                continue;
-            }
-
-            // Check if rate limit is exceeded
-            if self.fetch_rate_limiter.check_key(&validator).is_err() {
-                debug!(
-                    height,
-                    digest = hex(&digest),
-                    peer = hex(&validator),
-                    "skipping request because rate limited"
-                );
-                index += 1;
-                continue;
-            }
-
-            // Send message
-            if !sender
-                .send(Recipients::One(validator.clone()), msg.clone(), true)
-                .await
-                .unwrap()
-                .is_empty()
-            {
-                debug!(
-                    height,
-                    digest = hex(&digest),
-                    peer = hex(&validator),
-                    parents,
-                    last_notarized = self.last_notarized,
-                    "requested missing proposal"
-                );
-                return validator;
-            }
-
-            // Try again
-            debug!(
-                height,
-                digest = hex(&digest),
-                peer = hex(&validator),
-                "failed to send backfill request"
-            );
-            index += 1;
-        }
+        parents
     }
 
-    pub async fn run(
-        mut self,
-        voter: &mut voter::Mailbox,
-        mut sender: impl Sender,
-        mut receiver: impl Receiver,
-    ) {
-        let mut outstanding_task: Option<(PublicKey, Height, Digest, SystemTime)> = None;
+    pub async fn run(mut self, voter: &mut voter::Mailbox, backfiller: &mut backfiller::Mailbox) {
         loop {
-            // Ensure task has not been resolved
-            if let Some((_, ref height, ref digest, _)) = outstanding_task {
-                if self.containers.contains_key(digest) {
-                    debug!(
-                        height,
-                        digest = hex(digest),
-                        "unexpeted resolution of missing proposal out of backfill"
-                    );
-                    outstanding_task = None;
-                }
-            }
-
-            // Look for next task if nothing
-            if outstanding_task.is_none() {
-                let missing = self.get_next_missing();
-                if let Some((height, digest)) = missing {
-                    // Check if already have
-                    if self.containers.contains_key(&digest) {
-                        continue;
-                    }
-
-                    // Send request
-                    let validator = self.send_request(height, digest.clone(), &mut sender).await;
-
-                    // Set timeout
-                    debug!(
-                        height,
-                        digest = hex(&digest),
-                        peer = hex(&validator),
-                        "requesting missing proposal"
-                    );
-                    outstanding_task = Some((
-                        validator,
-                        height,
-                        digest,
-                        self.runtime.current() + self.fetch_timeout,
-                    ));
-                }
-            };
-
-            // Avoid arbitrarily long sleep
-            let missing_timeout = if let Some((_, _, _, ref deadline)) = outstanding_task {
-                Either::Left(self.runtime.sleep_until(*deadline))
-            } else {
-                Either::Right(futures::future::pending())
-            };
-
             // Wait for an event
             select! {
-                _ = missing_timeout => {
-                    // Send request again
-                    let (_, height, digest, _)= outstanding_task.take().unwrap();
-                    let validator = self.send_request(height, digest.clone(), &mut sender).await;
-
-                    // Reset timeout
-                    outstanding_task = Some((validator, height, digest, self.runtime.current() + self.fetch_timeout));
-                },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
@@ -975,202 +830,10 @@ impl<
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,
                         Message::Finalized { proposal } => self.finalized(proposal).await,
-                    };
-                },
-                network = receiver.recv() => {
-                    let (s, msg) = network.unwrap();
-                    let msg = match wire::Backfill::decode(msg) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, sender = hex(&s), "failed to decode message");
-                            continue;
+                        Message::Backfilled { container, proposals } => {
+                            unimplemented!();
                         }
                     };
-                    let payload = match msg.payload {
-                        Some(payload) => payload,
-                        None => {
-                            warn!(sender = hex(&s), "message missing payload");
-                            continue;
-                        }
-                    };
-                    match payload {
-                        wire::backfill::Payload::Request(request) => {
-                            // Confirm request is valid
-                            if !H::validate(&request.digest) {
-                                warn!(sender = hex(&s), "invalid request digest size");
-                                continue;
-                            }
-
-                            // Populate as many proposals as we can
-                            let mut proposal_bytes = 0; // TODO: add a buffer
-                            let mut proposals = Vec::new();
-                            let mut cursor = request.digest.clone();
-                            loop {
-                                // Check to see if we have proposal
-                                let proposal = match self.containers.get(&cursor).cloned() {
-                                    Some(proposal) => proposal,
-                                    None => {
-                                        break;
-                                    }
-                                };
-
-                                // If we don't have any more space, stop
-                                proposal_bytes += proposal.encoded_len();
-                                if proposal_bytes > self.max_fetch_size {
-                                    debug!(
-                                        requested = request.parents + 1,
-                                        found = proposals.len(),
-                                        peer = hex(&s),
-                                        "reached max response size",
-                                    );
-                                    break;
-                                }
-
-                                // If we do have space, add to proposals
-                                cursor = proposal.parent.clone();
-                                proposals.push(proposal);
-
-                                // If we have all parents requested, stop gathering more
-                                let fetched = proposals.len() as u64;
-                                if fetched == request.parents + 1 || fetched == self.max_fetch_count {
-                                    break;
-                                }
-                            }
-
-                            // Send messages
-                            debug!(digest = hex(&request.digest), requested = request.parents + 1, found = proposals.len(), peer = hex(&s), "responding to backfill request");
-                            let msg =  wire::Backfill {
-                                payload: Some(wire::backfill::Payload::Resolution(wire::Resolution {
-                                    proposals,
-                                })),
-                            };
-                            sender.send(Recipients::One(s), msg.encode_to_vec().into(), false).await.unwrap();
-                        }
-                        wire::backfill::Payload::Resolution(resolution) => {
-                            // If we arent' expecting any proposals, ignore
-                            if let Some((ref mut validator, _, _, _)) = outstanding_task {
-                                if *validator != s {
-                                    continue;
-                                }
-                            }
-
-                            // Parse proposals
-                            let mut next = None;
-                            for proposal in resolution.proposals {
-                                // Ensure this is the container we want
-                                if !H::validate(&proposal.parent) {
-                                    warn!(sender = hex(&s), "invalid proposal parent digest size");
-                                    break;
-                                }
-                                let payload_digest = match self.application.parse(proposal.payload.clone()).await {
-                                    Some(payload_digest) => payload_digest,
-                                    None => {
-                                        warn!(sender = hex(&s), "unable to parse notarized/finalized payload");
-                                        break;
-                                    }
-                                };
-                                let proposal_message = proposal_message(
-                                    proposal.view,
-                                    proposal.height,
-                                    &proposal.parent,
-                                    &payload_digest,
-                                );
-                                self.hasher.update(&proposal_message);
-                                let proposal_digest = self.hasher.finalize();
-                                if let Some((height, ref digest)) = next {
-                                    if proposal.height != height || proposal_digest != digest {
-                                        warn!(sender = hex(&s), "received invalid batch proposal");
-                                        break;
-                                    }
-                                }
-
-                                // Verify leader signature
-                                //
-                                // TODO: remove duplicate code shared with voter
-                                let signature = match &proposal.signature {
-                                    Some(signature) => signature,
-                                    None => {
-                                        warn!(sender = hex(&s), "missing proposal signature");
-                                        break;
-                                    }
-                                };
-                                if !C::validate(&signature.public_key) {
-                                    warn!(sender = hex(&s), "invalid proposal public key");
-                                    break;
-                                }
-                                let expected_leader = match self.leader(proposal.view) {
-                                    Some(leader) => leader,
-                                    None => {
-                                        debug!(
-                                            proposal_leader = hex(&signature.public_key),
-                                            reason = "unable to compute leader",
-                                            "dropping proposal"
-                                        );
-                                        break;
-                                    }
-                                };
-                                if expected_leader != signature.public_key {
-                                    debug!(
-                                        proposal_leader = hex(&signature.public_key),
-                                        view_leader = hex(&expected_leader),
-                                        reason = "leader mismatch",
-                                        "dropping proposal"
-                                    );
-                                    break;
-                                }
-                                if !C::verify(
-                                    &self.proposal_namespace,
-                                    &proposal_message,
-                                    &signature.public_key,
-                                    &signature.signature,
-                                ) {
-                                    warn!(sender = hex(&s), "invalid proposal signature");
-                                    break;
-                                }
-
-
-                                // Record the proposal
-                                let height = proposal.height;
-                                debug!(height, digest = hex(&proposal_digest), peer = hex(&s), "received proposal via backfill");
-                                let proposal = Proposal::Populated(proposal_digest.clone(), proposal.clone());
-                                next = self.resolve(proposal);
-
-                                // Remove outstanding task if we were waiting on this
-                                //
-                                // Note, we don't care if we are sent the proposal from someone unexpected (although
-                                // this is unexpected).
-                                if let Some(ref outstanding) = outstanding_task {
-                                    if outstanding.2 == proposal_digest {
-                                        debug!(height = outstanding.1, digest = hex(&proposal_digest), peer = hex(&s), "resolved missing proposal via backfill");
-                                        outstanding_task = None;
-                                    }
-                                }
-
-                                // Notify application if we can
-                                self.notify().await;
-
-                                // Stop processing if we don't need anything else
-                                if next.is_none() {
-                                    break;
-                                }
-                            }
-
-                            // Notify missing if next is not none
-                            if let Some((height, digest)) = next {
-                                // By waiting to register missing until the end, we avoid a bunch of unnecessary
-                                // backfill request additions.
-                                self.register_missing(height, digest).await;
-                            }
-
-                            // Reset outstanding task if it was not resolved
-                            //
-                            // Missing is a channel and thus we need to re-enqueue request if not satisfied.
-                            if let Some(outstanding) = outstanding_task {
-                                let validator = self.send_request(outstanding.1, outstanding.2.clone(), &mut sender).await;
-                                outstanding_task = Some((validator, outstanding.1, outstanding.2, self.runtime.current() + self.fetch_timeout));
-                            }
-                        }
-                    }
                 },
             }
         }
