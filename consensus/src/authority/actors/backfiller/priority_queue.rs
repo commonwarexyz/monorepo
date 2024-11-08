@@ -56,7 +56,7 @@ impl PriorityQueue {
         self.keys.insert(public_key, duration);
     }
 
-    pub fn retain(&mut self, keys: &Vec<PublicKey>) {
+    pub fn retain(&mut self, initial: Duration, keys: &Vec<PublicKey>) {
         // Turn new keys into a set
         let new_keys: HashSet<_> = keys.iter().cloned().collect();
 
@@ -76,7 +76,7 @@ impl PriorityQueue {
         // If a key is in new keys but not in old keys, add it
         for key in new_keys {
             if !self.keys.contains_key(&key) {
-                self.put(key, Duration::default());
+                self.put(key, initial);
             }
         }
     }
@@ -134,7 +134,7 @@ mod tests {
         pq.put(key1.clone(), Duration::from_secs(10));
         pq.put(key2.clone(), Duration::from_secs(5));
 
-        pq.retain(&vec![key1.clone(), key3.clone()]);
+        pq.retain(Duration::from_secs(2), &vec![key1.clone(), key3.clone()]);
 
         let entries: Vec<_> = pq.iter().cloned().collect();
         assert_eq!(entries.len(), 2);
@@ -143,6 +143,6 @@ mod tests {
             .any(|e| e.public_key == key1 && e.duration == Duration::from_secs(10)));
         assert!(entries
             .iter()
-            .any(|e| e.public_key == key3 && e.duration == Duration::default()));
+            .any(|e| e.public_key == key3 && e.duration == Duration::from_secs(2)));
     }
 }

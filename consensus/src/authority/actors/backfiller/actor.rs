@@ -27,10 +27,7 @@ use tracing::{debug, warn};
 
 const STARTING_DURATION: Duration = Duration::from_secs(0);
 
-enum Status {
-    Stalled,
-    Outstanding(PublicKey, SystemTime),
-}
+type Status = (PublicKey, SystemTime);
 
 pub struct Actor<
     E: Clock + GClock + Rng,
@@ -88,11 +85,30 @@ impl<
         )
     }
 
-    async fn send(&mut self, msg: Bytes, sender: &mut impl Sender) -> (PublicKey, SystemTime) {
+    async fn send(
+        &mut self,
+        msg: Bytes,
+        sent: &mut HashSet<PublicKey>,
+        sender: &mut impl Sender,
+    ) -> (PublicKey, SystemTime) {
         // Loop until we find a recipient
         loop {
             let mut iter = self.fetch_performance.iter();
             while let Some(next) = iter.next() {
+                // Check if self
+                if next.public_key == self.crypto.public_key() {
+                    continue;
+                }
+
+                // Check if already sent this request
+                if sent.contains(&next.public_key) {
+                    debug!(
+                        peer = hex(&next.public_key),
+                        "skipping request because already sent"
+                    );
+                    continue;
+                }
+
                 // Check if rate limit is exceeded
                 let validator = &next.public_key;
                 if self.fetch_rate_limiter.check_key(validator).is_err() {
@@ -115,6 +131,7 @@ impl<
                     continue;
                 }
                 debug!(peer = hex(&validator), "sent request");
+                sent.insert(validator.clone());
                 let deadline = self.runtime.current() + self.fetch_timeout;
 
                 // Minimize footprint of rate limiter
@@ -125,6 +142,9 @@ impl<
             // Avoid busy looping when disconnected
             warn!("failed to send request to any validator");
             self.runtime.sleep(self.fetch_timeout).await;
+
+            // Clear sent
+            sent.clear();
         }
     }
 
@@ -132,6 +152,7 @@ impl<
         &mut self,
         digest: Digest,
         parents: u32,
+        sent: &mut HashSet<PublicKey>,
         sender: &mut impl Sender,
     ) -> Status {
         // Create new message
@@ -144,14 +165,15 @@ impl<
         .into();
 
         // Send message
-        let (public_key, deadline) = self.send(msg, sender).await;
-        Status::Outstanding(public_key, deadline)
+        let (public_key, deadline) = self.send(msg, sent, sender).await;
+        (public_key, deadline)
     }
 
     async fn send_notarization_request(
         &mut self,
         view: View,
         children: u32,
+        sent: &mut HashSet<PublicKey>,
         sender: &mut impl Sender,
     ) -> Status {
         // Create new message
@@ -164,8 +186,8 @@ impl<
         .into();
 
         // Send message
-        let (public_key, deadline) = self.send(msg, sender).await;
-        Status::Outstanding(public_key, deadline)
+        let (public_key, deadline) = self.send(msg, sent, sender).await;
+        (public_key, deadline)
     }
 
     pub async fn run(
@@ -176,29 +198,19 @@ impl<
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
-        let mut outstanding_block: Option<(Digest, u32, Status)> = None;
-        let mut outstanding_notarization: Option<(View, u32, Status)> = None;
+        let mut outstanding_block: Option<(Digest, u32, HashSet<PublicKey>, Status)> = None;
+        let mut outstanding_notarization: Option<(View, u32, HashSet<PublicKey>, Status)> = None;
         loop {
             // Set timeout for next block
-            let block_timeout = if let Some((_, _, status)) = &outstanding_block {
-                Either::Left(match status {
-                    Status::Stalled => Either::Left(futures::future::ready(())),
-                    Status::Outstanding(_, deadline) => {
-                        Either::Right(self.runtime.sleep_until(*deadline))
-                    }
-                })
+            let block_timeout = if let Some((_, _, _, status)) = &outstanding_block {
+                Either::Left(self.runtime.sleep_until(status.1))
             } else {
                 Either::Right(futures::future::pending())
             };
 
             // Set timeout for next notarization
-            let notarization_timeout = if let Some((_, _, status)) = &outstanding_notarization {
-                Either::Left(match status {
-                    Status::Stalled => Either::Left(futures::future::ready(())),
-                    Status::Outstanding(_, deadline) => {
-                        Either::Right(self.runtime.sleep_until(*deadline))
-                    }
-                })
+            let notarization_timeout = if let Some((_, _, _, status)) = &outstanding_notarization {
+                Either::Left(self.runtime.sleep_until(status.1))
             } else {
                 Either::Right(futures::future::pending())
             };
@@ -207,26 +219,22 @@ impl<
             select! {
                 _ = block_timeout => {
                     // Penalize requester for timeout
-                    let (digest, parents, status) = outstanding_block.take().unwrap();
-                    if let Status::Outstanding(public_key, _) = status {
-                        self.fetch_performance.put(public_key, self.fetch_timeout);
-                    }
+                    let (digest, parents, mut sent, status) = outstanding_block.take().unwrap();
+                    self.fetch_performance.put(status.0, self.fetch_timeout);
 
                     // Send message
-                    let status = self.send_block_request(digest.clone(), parents, &mut sender).await;
-                    outstanding_block = Some((digest, parents, status));
+                    let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
+                    outstanding_block = Some((digest, parents, sent, status));
                     continue;
                 },
                 _ = notarization_timeout => {
                     // Penalize requester for timeout
-                    let (view, children, status) = outstanding_notarization.take().unwrap();
-                    if let Status::Outstanding(public_key, _) = status {
-                        self.fetch_performance.put(public_key, self.fetch_timeout);
-                    }
+                    let (view, children, mut sent, status) = outstanding_notarization.take().unwrap();
+                    self.fetch_performance.put(status.0, self.fetch_timeout);
 
                     // Send message
-                    let status = self.send_notarization_request(view, children, &mut sender).await;
-                    outstanding_notarization = Some((view, children, status));
+                    let status = self.send_notarization_request(view, children, &mut sent,  &mut sender).await;
+                    outstanding_notarization = Some((view, children, sent, status));
                     continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
@@ -235,19 +243,21 @@ impl<
                         Message::Notarized { view } => {
                             // Update stored validators
                             let validators = self.application.participants(view).unwrap();
-                            self.fetch_performance.retain(validators);
+                            self.fetch_performance.retain(self.fetch_timeout/2, validators);
                             continue;
                         },
                         Message::Proposals { digest, parents } => {
                             // Send message
-                            let status = self.send_block_request(digest.clone(), parents, &mut sender).await;
-                            outstanding_block = Some((digest, parents, status));
+                            let mut sent = HashSet::new();
+                            let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
+                            outstanding_block = Some((digest, parents, sent, status));
                             continue;
                         },
                         Message::Notarizations { view, children } => {
                             // Send message
-                            let status = self.send_notarization_request(view, children, &mut sender).await;
-                            outstanding_notarization = Some((view, children, status));
+                            let mut sent = HashSet::new();
+                            let status = self.send_notarization_request(view, children, &mut sent, &mut sender).await;
+                            outstanding_notarization = Some((view, children, sent, status));
                             continue;
                         },
                     }
@@ -271,11 +281,11 @@ impl<
                     match payload {
                         wire::backfiller::Payload::ProposalRequest(request) => {},
                         wire::backfiller::Payload::ProposalResponse(response) => {
-                            // TODO: set stalled if response is empty (use response duration)
+                            // TODO: skip duration update if response is empty
                         },
                         wire::backfiller::Payload::NotarizationRequest(request) => {},
                         wire::backfiller::Payload::NotarizationResponse(response) => {
-                            // TODO: set stalled if response is empty (use response duration)
+                            // TODO: skip duration update if response is empty
                         },
                     }
                 }

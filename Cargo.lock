@@ -428,6 +428,7 @@ dependencies = [
  "commonware-macros",
  "commonware-p2p",
  "commonware-runtime",
+ "commonware-storage",
  "commonware-utils",
  "futures",
  "governor",
