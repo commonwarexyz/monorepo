@@ -52,12 +52,12 @@ impl<B: Blob, E: Storage<B>> Index<B, E> {
         if data.len() > self.cfg.value_size as usize {
             return Err(Error::ItemTooLarge(data.len()));
         }
-        let blob = index / self.cfg.entries_per_blob;
+        let section = index / self.cfg.entries_per_blob;
         let offset = index % self.cfg.entries_per_blob * (self.cfg.value_size as u64 + 4);
-        let blob = match self.blobs.entry(blob) {
+        let blob = match self.blobs.entry(section) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                let name = blob.to_be_bytes();
+                let name = section.to_be_bytes();
                 let blob = self
                     .runtime
                     .open(&self.cfg.partition, &name)
@@ -73,9 +73,9 @@ impl<B: Blob, E: Storage<B>> Index<B, E> {
     }
 
     pub async fn get(&self, index: u64) -> Result<Option<Bytes>, Error> {
-        let blob = index / self.cfg.entries_per_blob;
+        let section = index / self.cfg.entries_per_blob;
         let offset = index % self.cfg.entries_per_blob * (self.cfg.value_size as u64 + 4);
-        let blob = match self.blobs.get(&blob) {
+        let blob = match self.blobs.get(&section) {
             Some(blob) => blob,
             None => return Ok(None),
         };
@@ -92,5 +92,34 @@ impl<B: Blob, E: Storage<B>> Index<B, E> {
             return Err(Error::ChecksumMismatch(expected, actual));
         }
         Ok(Some(data))
+    }
+
+    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+        let min_section = min / self.cfg.entries_per_blob;
+        while let Some((&section, _)) = self.blobs.first_key_value() {
+            if section >= min_section {
+                break;
+            }
+            let blob = self.blobs.remove(&section).unwrap();
+            blob.close().await.map_err(Error::Runtime)?;
+            debug!(blob = section, "closed blob");
+
+            // Remove blob from storage
+            self.runtime
+                .remove(&self.cfg.partition, Some(&section.to_be_bytes()))
+                .await
+                .map_err(Error::Runtime)?;
+            debug!(blob = section, "pruned blob");
+        }
+        self.oldest_allowed = Some(min_section);
+        Ok(())
+    }
+
+    pub async fn close(self) -> Result<(), Error> {
+        for (section, blob) in self.blobs {
+            blob.close().await.map_err(Error::Runtime)?;
+            debug!(blob = section, "closed blob");
+        }
+        Ok(())
     }
 }
