@@ -115,13 +115,11 @@ impl<
                     continue;
                 }
                 debug!(peer = hex(&validator), "sent request");
+                let deadline = self.runtime.current() + self.fetch_timeout;
 
                 // Minimize footprint of rate limiter
                 self.fetch_rate_limiter.shrink_to_fit();
-                return (
-                    validator.clone(),
-                    self.runtime.current() + self.fetch_timeout,
-                );
+                return (validator.clone(), deadline);
             }
 
             // Avoid busy looping when disconnected
@@ -250,9 +248,13 @@ impl<
                     };
                     match payload {
                         wire::backfiller::Payload::ProposalRequest(request) => {},
-                        wire::backfiller::Payload::ProposalResponse(response) => {},
+                        wire::backfiller::Payload::ProposalResponse(response) => {
+                            // TODO: set stalled if response is empty (use response duration)
+                        },
                         wire::backfiller::Payload::NotarizationRequest(request) => {},
-                        wire::backfiller::Payload::NotarizationResponse(response) => {},
+                        wire::backfiller::Payload::NotarizationResponse(response) => {
+                            // TODO: set stalled if response is empty (use response duration)
+                        },
                     }
                 }
             }
