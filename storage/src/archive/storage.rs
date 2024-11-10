@@ -493,6 +493,17 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Prune journal
         self.journal.prune(min).await.map_err(Error::Journal)?;
 
+        // Remove all indices that are less than min
+        loop {
+            let next = match self.indices.first_key_value() {
+                Some((index, _)) if *index < min => *index,
+                _ => break,
+            };
+            let location = self.indices.remove(&next).unwrap();
+
+            // TODO: how to handle interval update?
+        }
+
         // Update last pruned (to prevent reads from
         // pruned sections)
         self.oldest_allowed = Some(min);
