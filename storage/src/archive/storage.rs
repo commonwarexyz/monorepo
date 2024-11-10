@@ -273,13 +273,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
-        if section < oldest_allowed {
+        if index < oldest_allowed {
             return Err(Error::AlreadyPrunedToSection(oldest_allowed));
         }
 
         // Check for existing key in the same section (and clean up any useless
         // entries)
-        let index_key = self.cfg.translator.transform(key);
+        let translated_key = self.cfg.translator.transform(key);
         self.check(section, key, &index_key, oldest_allowed).await?;
 
         // If compression is enabled, compress the data before storing it.

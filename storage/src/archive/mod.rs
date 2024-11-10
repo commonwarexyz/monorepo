@@ -129,6 +129,7 @@
 
 mod storage;
 pub use storage::Archive;
+mod interval_tree;
 pub mod translator;
 
 use prometheus_client::registry::Registry;
