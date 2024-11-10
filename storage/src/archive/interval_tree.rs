@@ -51,7 +51,8 @@ impl IntervalTree {
     }
 
     /// Inserts an interval into the tree, merging overlapping intervals.
-    fn insert(&mut self, interval: Interval) {
+    fn insert(&mut self, point: u64) {
+        let interval = Interval::new(point, point + 1);
         self.root = Self::insert_node(self.root.take(), interval);
     }
 
@@ -62,9 +63,8 @@ impl IntervalTree {
         match node {
             Some(n) => {
                 {
-                    // Start a new scope for the mutable borrow
+                    // Borrow the node mutably
                     let mut n_borrow = n.borrow_mut();
-
                     if interval.start < n_borrow.interval.start {
                         n_borrow.left = Self::insert_node(n_borrow.left.take(), interval);
                     } else {
@@ -87,9 +87,9 @@ impl IntervalTree {
                                 .as_ref()
                                 .map_or(0, |right| right.borrow().max_end),
                         );
-                } // `n_borrow` goes out of scope here
+                }
 
-                // Now it's safe to move `n` because the borrow has ended
+                // Return node back
                 Some(n)
             }
             None => Some(Rc::new(RefCell::new(Node::new(interval)))),
