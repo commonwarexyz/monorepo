@@ -200,6 +200,11 @@ pub struct Config<T: Translator> {
 
     /// Optional compression level (using `zstd`) to apply to data before storing.
     pub compression: Option<u8>,
+
+    /// Mask to apply to indices to determine section.
+    ///
+    /// This value is `index & section_mask`.
+    pub section_mask: u64,
 }
 
 #[cfg(test)]

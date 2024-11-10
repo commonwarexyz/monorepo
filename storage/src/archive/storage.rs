@@ -8,16 +8,21 @@ use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
 use zstd::bulk::{compress, decompress};
 
+// TODO: infer section from index
+
+struct Location {
+    offset: u32,
+    len: u32,
+}
+
 /// In the case there are multiple records with the same key, we store them in a linked list.
 ///
 /// This is the most memory-efficient way to maintain a multi-map (24 bytes per entry, not including
 /// the key used to lookup a given index).
-struct Index {
-    section: u64,
-    offset: u32,
-    len: u32,
+struct Record {
+    index: u64,
 
-    next: Option<Box<Index>>,
+    next: Option<Box<Record>>,
 }
 
 /// Implementation of `Archive` storage.
@@ -30,7 +35,8 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     // We store the first index of the linked list in the HashMap
     // to significantly reduce the number of random reads we need to do
     // on the heap.
-    keys: HashMap<T::Key, Index>,
+    indices: BTreeMap<u64, Location>,
+    keys: HashMap<T::Key, Record>,
 
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: BTreeMap<u64, usize>,
@@ -51,41 +57,38 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// by replaying the journal.
     pub async fn init(mut journal: Journal<B, E>, cfg: Config<T>) -> Result<Self, Error> {
         // Initialize keys and run corruption check
+        let mut indices = BTreeMap::new();
         let mut keys = HashMap::new();
         let mut overlaps: u128 = 0;
         {
             debug!("initializing archive");
             let stream = journal
-                .replay(cfg.replay_concurrency, Some(cfg.key_len + 4))
+                .replay(cfg.replay_concurrency, Some(cfg.key_len + 8 + 4))
                 .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
-                let (index, offset, full_data_len, data) = result?;
-                let key = Self::parse_key(cfg.key_len, data)?;
-
-                // Create index key
-                let index_key = cfg.translator.transform(&key);
+                let (_, offset, len, data) = result?;
+                let (index, key) = Self::parse_record(cfg.key_len, data)?;
 
                 // Store index
-                match keys.entry(index_key.clone()) {
+                indices.insert(index, Location { offset, len });
+
+                // Create translated key
+                let translated_key = cfg.translator.transform(&key);
+
+                // Store index
+                match keys.entry(translated_key.clone()) {
                     Entry::Occupied(entry) => {
-                        let entry: &mut Index = entry.into_mut();
-                        entry.next = Some(Box::new(Index {
-                            section: index,
-                            offset,
-                            len: full_data_len,
+                        let entry: &mut Record = entry.into_mut();
+                        entry.next = Some(Box::new(Record {
+                            index,
                             next: entry.next.take(),
                         }));
                         overlaps += 1;
                     }
                     Entry::Vacant(entry) => {
-                        entry.insert(Index {
-                            section: index,
-                            offset,
-                            len: full_data_len,
-                            next: None,
-                        });
+                        entry.insert(Record { index, next: None });
                     }
                 };
             }
@@ -128,6 +131,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             cfg,
             journal,
             oldest_allowed: None,
+            indices,
             keys,
             pending_writes: BTreeMap::new(),
             keys_tracked,
@@ -147,23 +151,29 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    fn parse_key(key_len: u32, mut data: Bytes) -> Result<Bytes, Error> {
+    fn parse_record(key_len: u32, mut data: Bytes) -> Result<(u64, Bytes), Error> {
         let key_len = key_len as usize;
-        if data.remaining() != key_len + 4 {
+        if data.remaining() != 8 + key_len + 4 {
             return Err(Error::RecordCorrupted);
         }
+        let found = crc32fast::hash(&data[..key_len + 8]);
+        let index = data.get_u64();
         let key = data.copy_to_bytes(key_len);
-        let checksum = data.get_u32();
-        if checksum != crc32fast::hash(&key) {
+        let expected = data.get_u32();
+        if found != expected {
             return Err(Error::RecordCorrupted);
         }
-        Ok(key)
+        Ok((index, key))
     }
 
     fn parse_item(key_len: u32, mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
-        if data.remaining() < key_len as usize + 4 {
+        if data.remaining() < 8 + key_len as usize + 4 {
             return Err(Error::RecordCorrupted);
         }
+
+        // We don't need the index, so we just skip it
+        data.get_u64();
+
         let key = data.copy_to_bytes(key_len as usize);
 
         // We don't need to compute checksum here as the underlying journal
@@ -253,20 +263,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
     }
 
-    /// Store a key-value pair in `Archive`. Keys are assumed to be unique.
+    /// Store a key-value pair in `Archive`. Indexes and keys are assumed to be unique.
     ///
-    /// If the key already exists (at a given `section`), an error is returned. If the same key
-    /// is stored multiple times in different sections, any value may be returned.
-    ///
-    /// If `force_sync` is true, `Archive` will wait to return until the
-    /// journal has been synced.
-    pub async fn put(
-        &mut self,
-        section: u64,
-        key: &[u8],
-        data: Bytes,
-        force_sync: bool,
-    ) -> Result<(), Error> {
+    /// If the index already exists, an error is returned. If the same key
+    /// is stored multiple times at different indices, any value may be returned.
+    pub async fn put(&self, index: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Check key length
         self.verify_key(key)?;
 
@@ -340,8 +341,12 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
+    pub async fn get(&self, index: u64) -> Result<Option<Bytes>, Error> {
+        unimplemented!()
+    }
+
     /// Retrieve a value from `Archive`.
-    pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
+    pub async fn get_key(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Check key length
         self.verify_key(key)?;
 
@@ -386,8 +391,12 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(None)
     }
 
+    pub async fn has(&self, index: u64) -> Result<bool, Error> {
+        Ok(self.indices.contains_key(&index))
+    }
+
     /// Check if a key exists in `Archive`.
-    pub async fn has(&self, key: &[u8]) -> Result<bool, Error> {
+    pub async fn has_key(&self, key: &[u8]) -> Result<bool, Error> {
         // Check key length
         self.verify_key(key)?;
 
@@ -427,7 +436,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Prune `Archive` to the provided section.
     ///
     /// Calling `prune` on a section that has already been pruned will return an error.
-    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+    pub async fn prune(&self, min: u64) -> Result<(), Error> {
         // Upset pruning marker
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if min <= oldest_allowed {
@@ -452,6 +461,18 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Update last pruned (to prevent reads from
         // pruned sections)
         self.oldest_allowed = Some(min);
+        Ok(())
+    }
+
+    /// Sync all pending writes to disk.
+    pub async fn sync(&self) -> Result<(), Error> {
+        for (section, count) in self.pending_writes.iter_mut() {
+            if *count == 0 {
+                continue;
+            }
+            self.journal.sync(*section).await.map_err(Error::Journal)?;
+            *count = 0;
+        }
         Ok(())
     }
 

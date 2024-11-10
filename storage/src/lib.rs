@@ -6,6 +6,5 @@
 //! expect breaking changes and occasional instability.
 
 pub mod archive;
-pub mod index;
 pub mod journal;
 pub mod metadata;
