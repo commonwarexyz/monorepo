@@ -41,17 +41,17 @@ impl Node {
 }
 
 #[derive(Debug)]
-struct IntervalTree {
+pub struct IntervalTree {
     root: Option<Rc<RefCell<Node>>>,
 }
 
 impl IntervalTree {
-    fn new() -> Self {
+    pub fn new() -> Self {
         IntervalTree { root: None }
     }
 
     /// Inserts an interval into the tree, merging overlapping intervals.
-    fn insert(&mut self, point: u64) {
+    pub fn insert(&mut self, point: u64) {
         let interval = Interval::new(point, point + 1);
         self.root = Self::insert_node(self.root.take(), interval);
     }
@@ -97,7 +97,7 @@ impl IntervalTree {
     }
 
     /// Finds the next gap starting from a given point.
-    fn find_next_gap(&self, start: u64) -> Option<Interval> {
+    pub fn find_next_gap(&self, start: u64) -> Option<Interval> {
         let mut current_point = start;
         loop {
             let overlapping_interval = self.overlapping_interval(current_point);
@@ -120,7 +120,7 @@ impl IntervalTree {
     }
 
     /// Finds an interval that overlaps with the given point.
-    fn overlapping_interval(&self, point: u64) -> Option<Interval> {
+    pub fn overlapping_interval(&self, point: u64) -> Option<Interval> {
         Self::overlapping_node(&self.root, point)
     }
 
@@ -143,7 +143,7 @@ impl IntervalTree {
     }
 
     /// Finds the next interval after the given point.
-    fn next_interval(&self, point: u64) -> Option<Interval> {
+    pub fn next_interval(&self, point: u64) -> Option<Interval> {
         let mut node = self.root.clone();
         let mut successor: Option<Interval> = None;
 

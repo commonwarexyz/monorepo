@@ -146,7 +146,9 @@ pub enum Error {
     Journal(#[from] crate::journal::Error),
     #[error("record corrupted")]
     RecordCorrupted,
-    #[error("duplicate key found during replay")]
+    #[error("duplicate index")]
+    DuplicateIndex,
+    #[error("duplicate key")]
     DuplicateKey,
     #[error("already pruned to section: {0}")]
     AlreadyPrunedToSection(u64),

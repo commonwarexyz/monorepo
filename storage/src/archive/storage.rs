@@ -1,4 +1,4 @@
-use super::{Config, Error, Translator};
+use super::{interval_tree::IntervalTree, Config, Error, Translator};
 use crate::journal::Journal;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
@@ -38,6 +38,9 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     indices: BTreeMap<u64, Location>,
     keys: HashMap<T::Key, Record>,
 
+    // Track gaps in the archive
+    intervals: IntervalTree,
+
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: BTreeMap<u64, usize>,
 
@@ -59,6 +62,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut keys = HashMap::new();
+        let mut intervals = IntervalTree::new();
         let mut overlaps: u128 = 0;
         {
             debug!("initializing archive");
@@ -91,6 +95,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                         entry.insert(Record { index, next: None });
                     }
                 };
+
+                // Store interval
+                intervals.insert(index);
             }
             debug!(keys = keys.len(), overlaps, "archive initialized");
         }
@@ -133,6 +140,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             oldest_allowed: None,
             indices,
             keys,
+            intervals,
             pending_writes: BTreeMap::new(),
             keys_tracked,
             keys_pruned,
@@ -183,30 +191,22 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok((key, data))
     }
 
-    /// Checks if there exists a duplicate key in the provided section.
-    ///
-    /// If any records exist that are older than the oldest allowed section, they are pruned.
-    async fn check(
-        &mut self,
-        section: u64,
-        key: &[u8],
-        index_key: &T::Key,
-        oldest_allowed: u64,
-    ) -> Result<(), Error> {
+    /// Cleanup keys that are no longer valid.
+    fn cleanup(&mut self, index_key: &T::Key) -> Result<(), Error> {
         // Find new head (first valid key)
         let head = match self.keys.get_mut(index_key) {
             Some(head) => head,
             None => return Ok(()),
         };
+        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         let found = loop {
-            if head.section < oldest_allowed {
+            if head.index < oldest_allowed {
                 self.keys_pruned.inc();
                 self.keys_tracked.dec();
                 match head.next {
                     Some(ref mut next) => {
                         // Update invalid head in-place
-                        head.section = next.section;
-                        head.offset = next.offset;
+                        head.index = next.index;
                         head.next = next.next.take();
                     }
                     None => {
@@ -229,22 +229,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Keep valid post-head entries
         let mut cursor = head;
         loop {
-            // Check if key is a match
-            if section == cursor.section {
-                let item = self
-                    .journal
-                    .get_prefix(cursor.section, cursor.offset, self.cfg.key_len + 4)
-                    .await?
-                    .ok_or(Error::RecordCorrupted)?;
-                let item_key = Self::parse_key(self.cfg.key_len, item)?;
-                if key == item_key {
-                    return Err(Error::DuplicateKey);
-                }
-                self.unnecessary_prefix_reads.inc();
-            }
-
             // Set next and continue
-            if let Some(next) = cursor.next.as_ref().map(|next| next.section) {
+            if let Some(next) = cursor.next.as_ref().map(|next| next.index) {
                 // If next is invalid, skip it
                 if next < oldest_allowed {
                     self.keys_pruned.inc();
@@ -267,7 +253,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     ///
     /// If the index already exists, an error is returned. If the same key
     /// is stored multiple times at different indices, any value may be returned.
-    pub async fn put(&self, index: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
+    pub async fn put(&mut self, index: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Check key length
         self.verify_key(key)?;
 
@@ -277,10 +263,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             return Err(Error::AlreadyPrunedToSection(oldest_allowed));
         }
 
-        // Check for existing key in the same section (and clean up any useless
-        // entries)
-        let translated_key = self.cfg.translator.transform(key);
-        self.check(section, key, &index_key, oldest_allowed).await?;
+        // Check for existing index
+        if self.indices.contains_key(&index) {
+            return Err(Error::DuplicateIndex);
+        }
 
         // If compression is enabled, compress the data before storing it.
         let data = if let Some(level) = self.cfg.compression {
@@ -292,45 +278,56 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         };
 
         // Store item in journal
-        let buf_len = key
-            .len()
-            .checked_add(4)
+        let buf_len = 8usize
+            .checked_add(key.len())
+            .and_then(|len| len.checked_add(4))
             .and_then(|len| len.checked_add(data.len()))
             .ok_or(Error::RecordTooLarge)?;
         let mut buf = Vec::with_capacity(buf_len);
+        buf.put_u64(index);
         buf.put(key);
         // We store the checksum of the key because we employ partial reads from
         // the journal, which aren't verified before returning to `Archive`.
-        buf.put_u32(crc32fast::hash(key));
+        buf.put_u32(crc32fast::hash(&buf[..]));
         buf.put(data); // we don't need to store data len because we already get this from the journal
+        let section = self.cfg.section_mask & index;
         let offset = self.journal.append(section, buf.into()).await?;
 
-        // Store item in index
-        let entry = self.keys.entry(index_key.clone());
+        // Store index
+        self.indices.insert(
+            index,
+            Location {
+                offset,
+                len: buf_len as u32,
+            },
+        );
+
+        // Store interval
+        self.intervals.insert(index);
+
+        // Store item
+        let translated_key = self.cfg.translator.transform(key);
+        let entry = self.keys.entry(translated_key.clone());
         match entry {
             Entry::Occupied(entry) => {
-                let entry: &mut Index = entry.into_mut();
-                entry.next = Some(Box::new(Index {
-                    section,
-                    offset,
-                    len: buf_len as u32,
+                let entry: &mut Record = entry.into_mut();
+                entry.next = Some(Box::new(Record {
+                    index,
                     next: entry.next.take(),
                 }));
             }
             Entry::Vacant(entry) => {
-                entry.insert(Index {
-                    section,
-                    offset,
-                    len: buf_len as u32,
-                    next: None,
-                });
+                entry.insert(Record { index, next: None });
             }
         }
+
+        // Cleanup tracked keys
+        self.cleanup(&translated_key)?;
 
         // Update pending writes
         let pending_writes = self.pending_writes.entry(section).or_default();
         *pending_writes += 1;
-        if *pending_writes > self.cfg.pending_writes || force_sync {
+        if *pending_writes > self.cfg.pending_writes {
             self.journal.sync(section).await.map_err(Error::Journal)?;
             *pending_writes = 0;
             self.syncs.inc();
@@ -342,7 +339,32 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     pub async fn get(&self, index: u64) -> Result<Option<Bytes>, Error> {
-        unimplemented!()
+        // Get index location
+        let location = match self.indices.get(&index) {
+            Some(location) => location,
+            None => return Ok(None),
+        };
+
+        // Fetch item from disk
+        let section = self.cfg.section_mask & index;
+        let item = self
+            .journal
+            .get(section, location.offset, Some(location.len))
+            .await?
+            .ok_or(Error::RecordCorrupted)?;
+
+        // Get key from item
+        let (_, value) = Self::parse_item(self.cfg.key_len, item)?;
+
+        // If compression is enabled, decompress the data before returning.
+        if self.cfg.compression.is_some() {
+            return Ok(Some(
+                decompress(&value, u32::MAX as usize)
+                    .map_err(|_| Error::DecompressionFailed)?
+                    .into(),
+            ));
+        }
+        Ok(Some(value))
     }
 
     /// Retrieve a value from `Archive`.
@@ -361,11 +383,16 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         while let Some(head) = record {
             // Check for data if section is valid
-            if head.section >= min_allowed {
+            if head.index >= min_allowed {
                 // Fetch item from disk
+                let location = self
+                    .indices
+                    .get(&head.index)
+                    .ok_or(Error::RecordCorrupted)?;
+                let section = self.cfg.section_mask & head.index;
                 let item = self
                     .journal
-                    .get(head.section, head.offset, Some(head.len))
+                    .get(section, location.offset, Some(location.len))
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
 
@@ -411,16 +438,21 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         while let Some(head) = record {
             // Check for data if section is valid
-            if head.section >= min_allowed {
+            if head.index >= min_allowed {
                 // Fetch item from disk
+                let section = self.cfg.section_mask & head.index;
+                let location = self
+                    .indices
+                    .get(&head.index)
+                    .ok_or(Error::RecordCorrupted)?;
                 let item = self
                     .journal
-                    .get_prefix(head.section, head.offset, self.cfg.key_len + 4)
+                    .get_prefix(section, location.offset, 8 + self.cfg.key_len + 4)
                     .await?
                     .ok_or(Error::RecordCorrupted)?;
 
                 // Get key from item
-                let item_key = Self::parse_key(self.cfg.key_len, item)?;
+                let (_, item_key) = Self::parse_record(self.cfg.key_len, item)?;
                 if key == item_key {
                     return Ok(true);
                 }
@@ -436,7 +468,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Prune `Archive` to the provided section.
     ///
     /// Calling `prune` on a section that has already been pruned will return an error.
-    pub async fn prune(&self, min: u64) -> Result<(), Error> {
+    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Upset pruning marker
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if min <= oldest_allowed {
@@ -465,12 +497,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     /// Sync all pending writes to disk.
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&mut self) -> Result<(), Error> {
         for (section, count) in self.pending_writes.iter_mut() {
             if *count == 0 {
                 continue;
             }
             self.journal.sync(*section).await.map_err(Error::Journal)?;
+            self.syncs.inc();
             *count = 0;
         }
         Ok(())
