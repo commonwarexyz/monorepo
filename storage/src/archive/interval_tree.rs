@@ -3,18 +3,18 @@ use std::rc::Rc;
 
 /// Represents an interval [start, end), where `end` is exclusive.
 #[derive(Debug, Clone)]
-struct Interval {
+pub struct Interval {
     start: u64,
     end: u64,
 }
 
 impl Interval {
-    fn new(start: u64, end: u64) -> Self {
+    pub fn new(start: u64, end: u64) -> Self {
         Interval { start, end }
     }
 
     /// Checks if this interval overlaps with another.
-    fn overlaps(&self, other: &Interval) -> bool {
+    pub fn overlaps(&self, other: &Interval) -> bool {
         self.start < other.end && other.start < self.end
     }
 }
@@ -120,7 +120,7 @@ impl IntervalTree {
     }
 
     /// Finds an interval that overlaps with the given point.
-    pub fn overlapping_interval(&self, point: u64) -> Option<Interval> {
+    fn overlapping_interval(&self, point: u64) -> Option<Interval> {
         Self::overlapping_node(&self.root, point)
     }
 
@@ -143,7 +143,7 @@ impl IntervalTree {
     }
 
     /// Finds the next interval after the given point.
-    pub fn next_interval(&self, point: u64) -> Option<Interval> {
+    fn next_interval(&self, point: u64) -> Option<Interval> {
         let mut node = self.root.clone();
         let mut successor: Option<Interval> = None;
 

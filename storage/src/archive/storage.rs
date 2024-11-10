@@ -1,4 +1,7 @@
-use super::{interval_tree::IntervalTree, Config, Error, Translator};
+use super::{
+    interval_tree::{Interval, IntervalTree},
+    Config, Error, Translator,
+};
 use crate::journal::Journal;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
@@ -507,6 +510,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             *count = 0;
         }
         Ok(())
+    }
+
+    pub fn next_gap(&self, start: u64) -> Option<Interval> {
+        self.intervals.find_next_gap(start)
     }
 
     /// Close `Archive` (and underlying journal).
