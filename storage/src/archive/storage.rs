@@ -259,11 +259,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
     }
 
-    /// Store an index|key-value pair in `Archive`. Both indexes and keys are assumed to be unique.
+    /// Store an item in `Archive`. Both indices and keys are assumed to both be globally unique.
     ///
-    /// If the index already exists, an error is returned. If the same key
-    /// is stored multiple times at different indices (not recommended), any value associated
-    /// with the key may be returned.
+    /// If the index already exists, an error is returned. If the same key is stored multiple times
+    /// at different indices (not recommended), any value associated with the key may be returned.
     pub async fn put(&mut self, index: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Check key length
         self.check_key(key)?;
@@ -549,7 +548,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    /// Sync all pending writes to disk across all journals.
+    /// Forcibly sync all pending writes across all `Journals`.
     pub async fn sync(&mut self) -> Result<(), Error> {
         for (section, count) in self.pending_writes.iter_mut() {
             if *count == 0 {
