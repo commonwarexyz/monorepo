@@ -471,7 +471,7 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("tracked 0"));
+            assert!(buffer.contains("items_tracked 0"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 0"));
         });
@@ -629,7 +629,7 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("tracked 1"));
+            assert!(buffer.contains("items_tracked 1"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 2"));
         });
@@ -687,7 +687,7 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("tracked 0"));
+            assert!(buffer.contains("items_tracked 0"));
             assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 2"));
         });
@@ -764,7 +764,7 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("tracked 2"));
+            assert!(buffer.contains("items_tracked 2"));
             assert!(buffer.contains("unnecessary_reads_total 1"));
             assert!(buffer.contains("gets_total 2"));
         });
@@ -867,7 +867,7 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
-                section_mask: u64::MAX, // no mask
+                section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -892,7 +892,7 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("tracked 5"));
+            assert!(buffer.contains("items_tracked 5"));
 
             // Prune sections less than 3
             archive.prune(3).await.expect("Failed to prune");
@@ -913,7 +913,7 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("tracked 3"));
+            assert!(buffer.contains("items_tracked 3"));
             assert!(buffer.contains("indices_pruned_total 2"));
             assert!(buffer.contains("keys_pruned_total 0")); // no lazy cleanup yet
 
@@ -934,142 +934,175 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("tracked 4")); // lazily remove one, add one
+            assert!(buffer.contains("items_tracked 4")); // lazily remove one, add one
             assert!(buffer.contains("indices_pruned_total 2"));
             assert!(buffer.contains("keys_pruned_total 1"));
         });
     }
 
-    // fn test_archive_keys_and_restart(num_keys: usize, num_partitions: u64) -> String {
-    //     // Initialize the deterministic runtime
-    //     let (executor, mut context, auditor) = Executor::default();
-    //     executor.start(async move {
-    //         // Create a registry for metrics
-    //         let registry = Arc::new(Mutex::new(Registry::default()));
+    fn test_archive_keys_and_restart(num_keys: usize) -> String {
+        // Initialize the deterministic runtime
+        let (executor, mut context, auditor) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
 
-    //         // Initialize an empty journal
-    //         let journal = Journal::init(
-    //             context.clone(),
-    //             JournalConfig {
-    //                 registry: registry.clone(),
-    //                 partition: "test_partition".into(),
-    //             },
-    //         )
-    //         .await
-    //         .expect("Failed to initialize journal");
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
 
-    //         // Initialize the archive
-    //         let cfg = Config {
-    //             registry: registry.clone(),
-    //             key_len: 32,
-    //             translator: TwoCap,
-    //             pending_writes: 10,
-    //             replay_concurrency: 4,
-    //             compression: None,
-    //         };
-    //         let mut archive = Archive::init(journal, cfg.clone())
-    //             .await
-    //             .expect("Failed to initialize archive");
+            // Initialize the archive
+            let section_mask = 0xffff_ffff_ffff_ff00u64;
+            let cfg = Config {
+                registry: registry.clone(),
+                key_len: 32,
+                translator: TwoCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+                section_mask,
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
 
-    //         // Insert multiple keys across different sections
-    //         let mut keys = BTreeMap::new();
-    //         while keys.len() < num_keys {
-    //             let mut key = [0u8; 32];
-    //             context.fill(&mut key);
-    //             let section = context.gen_range(0..num_partitions);
-    //             let mut data = [0u8; 1024];
-    //             context.fill(&mut data);
-    //             let data = Bytes::from(data.to_vec());
-    //             archive
-    //                 .put(section, &key, data.clone(), false)
-    //                 .await
-    //                 .expect("Failed to put data");
-    //             keys.insert(key, (section, data));
-    //         }
+            // Insert multiple keys across different sections
+            let mut keys = BTreeMap::new();
+            while keys.len() < num_keys {
+                let index = keys.len() as u64;
+                let mut key = [0u8; 32];
+                context.fill(&mut key);
+                let mut data = [0u8; 1024];
+                context.fill(&mut data);
+                let data = Bytes::from(data.to_vec());
+                archive
+                    .put(index, &key, data.clone())
+                    .await
+                    .expect("Failed to put data");
+                keys.insert(key, (index, data));
+            }
 
-    //         // Ensure all keys can be retrieved
-    //         for (key, (_, data)) in &keys {
-    //             let retrieved = archive
-    //                 .get(key)
-    //                 .await
-    //                 .expect("Failed to get data")
-    //                 .expect("Data not found");
-    //             assert_eq!(retrieved, data);
-    //         }
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, data);
+            }
 
-    //         // Check metrics
-    //         let mut buffer = String::new();
-    //         encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-    //         let tracked = format!("keys_tracked {:?}", num_keys);
-    //         assert!(buffer.contains(&tracked));
-    //         assert!(!buffer.contains("syncs_total 0"));
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let tracked = format!("items_tracked {:?}", num_keys);
+            assert!(buffer.contains(&tracked));
+            assert!(buffer.contains("keys_pruned_total 0"));
 
-    //         // Close the archive
-    //         archive.close().await.expect("Failed to close archive");
+            // Close the archive
+            archive.close().await.expect("Failed to close archive");
 
-    //         // Reinitialize the archive
-    //         let journal = Journal::init(
-    //             context.clone(),
-    //             JournalConfig {
-    //                 registry: registry.clone(),
-    //                 partition: "test_partition".into(),
-    //             },
-    //         )
-    //         .await
-    //         .expect("Failed to initialize journal");
-    //         let mut archive = Archive::init(journal, cfg.clone())
-    //             .await
-    //             .expect("Failed to initialize archive");
+            // Reinitialize the archive
+            let registry = Arc::new(Mutex::new(Registry::default()));
+            let journal = Journal::init(
+                context.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+            let cfg = Config {
+                registry: registry.clone(),
+                key_len: 32,
+                translator: TwoCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+                section_mask,
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
 
-    //         // Ensure all keys can be retrieved
-    //         for (key, (_, data)) in &keys {
-    //             let retrieved = archive
-    //                 .get(key)
-    //                 .await
-    //                 .expect("Failed to get data")
-    //                 .expect("Data not found");
-    //             assert_eq!(retrieved, data);
-    //         }
+            // Ensure all keys can be retrieved
+            for (key, (index, data)) in &keys {
+                let retrieved = archive
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, data);
+            }
 
-    //         // Prune first half of partitions
-    //         let min = num_partitions / 2;
-    //         archive.prune(min).await.expect("Failed to prune");
+            // Prune first half
+            let min = (keys.len() / 2) as u64;
+            archive.prune(min).await.expect("Failed to prune");
 
-    //         // Ensure all keys can be retrieved that haven't been pruned
-    //         for (key, (section, data)) in keys {
-    //             if section >= min {
-    //                 let retrieved = archive
-    //                     .get(&key)
-    //                     .await
-    //                     .expect("Failed to get data")
-    //                     .expect("Data not found");
-    //                 assert_eq!(retrieved, data);
-    //             } else {
-    //                 let retrieved = archive.get(&key).await.expect("Failed to get data");
-    //                 assert!(retrieved.is_none());
-    //             }
-    //         }
+            // Ensure all keys can be retrieved that haven't been pruned
+            let min = min & section_mask;
+            let mut removed = 0;
+            for (key, (index, data)) in keys {
+                if index >= min {
+                    let retrieved = archive
+                        .get(Identifier::Key(&key))
+                        .await
+                        .expect("Failed to get data")
+                        .expect("Data not found");
+                    assert_eq!(retrieved, data);
+                } else {
+                    let retrieved = archive
+                        .get(Identifier::Key(&key))
+                        .await
+                        .expect("Failed to get data");
+                    assert!(retrieved.is_none());
+                    removed += 1;
+                }
+            }
 
-    //         // Check metrics
-    //         let mut buffer = String::new();
-    //         encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-    //         assert!(buffer.contains(&tracked)); // have not lazily removed keys yet
-    //         assert!(buffer.contains("keys_pruned_total 0"));
-    //     });
-    //     auditor.state()
-    // }
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            let tracked = format!("items_tracked {:?}", num_keys - removed);
+            assert!(buffer.contains(&tracked));
+            let pruned = format!("indices_pruned_total {}", removed);
+            assert!(buffer.contains(&pruned));
+            assert!(buffer.contains("keys_pruned_total 0")); // have not lazily removed keys yet
+        });
+        auditor.state()
+    }
 
-    // #[test_traced]
-    // fn test_archive_many_keys_and_restart() {
-    //     test_archive_keys_and_restart(100_000, 10);
-    // }
+    #[test_traced]
+    fn test_archive_many_keys_and_restart() {
+        test_archive_keys_and_restart(100_000); // 391 sections
+    }
 
-    // #[test_traced]
-    // fn test_determinism() {
-    //     let state1 = test_archive_keys_and_restart(5_000, 10);
-    //     let state2 = test_archive_keys_and_restart(5_000, 10);
-    //     assert_eq!(state1, state2);
-    // }
+    #[test_traced]
+    fn test_determinism() {
+        let state1 = test_archive_keys_and_restart(5_000); // 20 sections
+        let state2 = test_archive_keys_and_restart(5_000);
+        assert_eq!(state1, state2);
+    }
 
     // #[test_traced]
     // fn test_archive_determinism() {

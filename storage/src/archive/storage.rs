@@ -6,7 +6,7 @@ use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use rangemap::RangeSet;
 use std::collections::{hash_map::Entry, BTreeMap, HashMap};
-use tracing::debug;
+use tracing::{debug, trace};
 use zstd::bulk::{compress, decompress};
 
 /// Subject of a `get` operation.
@@ -342,7 +342,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         *pending_writes += 1;
         if *pending_writes > self.cfg.pending_writes {
             self.journal.sync(section).await.map_err(Error::Journal)?;
-            debug!(section, mode = "pending", "synced section");
+            trace!(section, mode = "pending", "synced section");
             *pending_writes = 0;
             self.syncs.inc();
         }
@@ -553,7 +553,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 continue;
             }
             self.journal.sync(*section).await.map_err(Error::Journal)?;
-            debug!(
+            trace!(
                 section = *section,
                 count = *count,
                 mode = "force",
