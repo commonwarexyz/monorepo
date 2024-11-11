@@ -161,8 +161,8 @@ pub enum Error {
     RecordCorrupted,
     #[error("duplicate index")]
     DuplicateIndex,
-    #[error("already pruned to section: {0}")]
-    AlreadyPrunedToSection(u64),
+    #[error("already pruned to: {0}")]
+    AlreadyPrunedTo(u64),
     #[error("invalid key length")]
     InvalidKeyLength,
     #[error("record too large")]
@@ -932,12 +932,16 @@ mod tests {
             assert!(buffer.contains("keys_pruned_total 0")); // no lazy cleanup yet
 
             // Try to prune older section
-            let result = archive.prune(2).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
+            archive.prune(2).await.expect("Failed to prune");
 
             // Try to prune current section again
-            let result = archive.prune(3).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
+            archive.prune(3).await.expect("Failed to prune");
+
+            // Try to put older index
+            let result = archive
+                .put(1, "key1-blah".as_bytes(), Bytes::from("data1"))
+                .await;
+            assert!(matches!(result, Err(Error::AlreadyPrunedTo(3))));
 
             // Trigger lazy removal of keys
             archive

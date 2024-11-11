@@ -271,7 +271,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         if index < oldest_allowed {
-            return Err(Error::AlreadyPrunedToSection(oldest_allowed));
+            return Err(Error::AlreadyPrunedTo(oldest_allowed));
         }
 
         // Check for existing index
@@ -499,8 +499,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Prune `Archive` to the provided min (masked by the configured
     /// section mask).
     ///
-    /// If this is called with a min lower than the last pruned, an
-    /// error is returned.
+    /// If this is called with a min lower than the last pruned, nothing
+    /// will happen.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
         // Update `min` to reflect section mask
         let min = self.cfg.section_mask & min;
@@ -508,7 +508,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Check if min is less than last pruned
         if let Some(oldest_allowed) = self.oldest_allowed {
             if min <= oldest_allowed {
-                return Err(Error::AlreadyPrunedToSection(oldest_allowed));
+                // We don't return an error in this case because the caller
+                // shouldn't be burdened with converting `min` to some section.
+                return Ok(());
             }
         }
         debug!(min, "pruning archive");
