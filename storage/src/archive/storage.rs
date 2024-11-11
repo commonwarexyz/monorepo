@@ -9,7 +9,8 @@ use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
 use zstd::bulk::{compress, decompress};
 
-pub enum Lookup<'a> {
+/// Subject of a `get` operation.
+pub enum Identifier<'a> {
     Index(u64),
     Key(&'a [u8]),
 }
@@ -153,7 +154,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         })
     }
 
-    fn verify_key(&self, key: &[u8]) -> Result<(), Error> {
+    fn check_key(&self, key: &[u8]) -> Result<(), Error> {
         if key.len() != self.cfg.key_len as usize {
             return Err(Error::InvalidKeyLength);
         }
@@ -251,13 +252,14 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
     }
 
-    /// Store a key-value pair in `Archive`. Indexes and keys are assumed to be unique.
+    /// Store an index|key-value pair in `Archive`. Both indexes and keys are assumed to be unique.
     ///
     /// If the index already exists, an error is returned. If the same key
-    /// is stored multiple times at different indices, any value associated with the key may be returned.
+    /// is stored multiple times at different indices (not recommended), any value associated
+    /// with the key may be returned.
     pub async fn put(&mut self, index: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Check key length
-        self.verify_key(key)?;
+        self.check_key(key)?;
 
         // Check last pruned
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
@@ -344,11 +346,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    /// Retrieve a value from `Archive`.
-    pub async fn get(&self, lookup: Lookup<'_>) -> Result<Option<Bytes>, Error> {
-        match lookup {
-            Lookup::Index(index) => self.get_index(index).await,
-            Lookup::Key(key) => self.get_key(key).await,
+    /// Retrieve an item from `Archive`.
+    pub async fn get(&self, identifier: Identifier<'_>) -> Result<Option<Bytes>, Error> {
+        match identifier {
+            Identifier::Index(index) => self.get_index(index).await,
+            Identifier::Key(key) => self.get_key(key).await,
         }
     }
 
@@ -386,7 +388,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
     async fn get_key(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Check key length
-        self.verify_key(key)?;
+        self.check_key(key)?;
 
         // Update metrics
         self.gets.inc();
@@ -434,12 +436,12 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(None)
     }
 
-    /// Check if a key exists in `Archive`.
-    pub async fn has(&self, lookup: Lookup<'_>) -> Result<bool, Error> {
+    /// Check if an item exists in the `Archive`.
+    pub async fn has(&self, identifier: Identifier<'_>) -> Result<bool, Error> {
         self.has.inc();
-        match lookup {
-            Lookup::Index(index) => Ok(self.has_index(index)),
-            Lookup::Key(key) => self.has_key(key).await,
+        match identifier {
+            Identifier::Index(index) => Ok(self.has_index(index)),
+            Identifier::Key(key) => self.has_key(key).await,
         }
     }
 
@@ -450,7 +452,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
     async fn has_key(&self, key: &[u8]) -> Result<bool, Error> {
         // Check key length
-        self.verify_key(key)?;
+        self.check_key(key)?;
 
         // Create index key
         let index_key = self.cfg.translator.transform(key);
@@ -555,8 +557,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    /// Retrieve the end of the current range and the start of the next range.
-    pub fn next_range(&self, index: u64) -> (Option<u64>, Option<u64>) {
+    /// Retrieve the end of the current range including `index` (if it exists) and
+    /// the start of the next range after `index` (if it exists).
+    ///
+    /// This is useful for driving backfill operations over the archive.
+    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         // Get end of current range (if exists)
         let current = self.intervals.get(&index);
         let current_end = current.map(|range| range.end);
@@ -567,7 +572,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         (current_end, next_start)
     }
 
-    /// Close `Archive` (and underlying journal).
+    /// Close `Archive` (and underlying `Journal`).
     pub async fn close(self) -> Result<(), Error> {
         self.journal.close().await.map_err(Error::Journal)
     }
