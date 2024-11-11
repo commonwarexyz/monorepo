@@ -12,7 +12,7 @@ use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Storage};
-use commonware_storage::archive::{Archive, Error, Translator};
+use commonware_storage::archive::{Archive, Error, Identifier, Translator};
 use commonware_utils::{hex, quorum};
 use futures::{channel::mpsc, future::Either, lock::Mutex, StreamExt};
 use governor::{
@@ -354,7 +354,7 @@ impl<
                                 let proposals = self.proposals.lock().await;
                                 loop {
                                     // Check to see if we have proposal
-                                    let proposal = match proposals.get(&cursor).await {
+                                    let proposal = match proposals.get(Identifier::Key(&cursor)).await {
                                         Ok(proposal) => proposal,
                                         Err(err) => {
                                             debug!(
@@ -551,14 +551,13 @@ impl<
                             let mut proposals = self.proposals.lock().await;
                             for (digest, proposal) in &proposals_found {
                                 let height = proposal.height;
-                                let section = height & 0xFFFF_FFFF_FFFF_0000u64;
                                 let proposal = proposal.encode_to_vec().into();
-                                let result = proposals.put(section, &digest, proposal, true).await;
+                                let result = proposals.put(height, &digest, proposal).await;
                                 match result {
                                     Ok(_) => {
                                         debug!(height, digest = hex(&digest), peer = hex(&s), "persisted proposal");
                                     },
-                                    Err(Error::DuplicateKey) => {
+                                    Err(Error::DuplicateIndex) => {
                                         debug!(height, digest = hex(&digest), peer = hex(&s), "duplicate proposal");
                                     },
                                     Err(_) => {
@@ -815,10 +814,11 @@ impl<
                             }
 
                             // Persist notarizations
+                            //
+                            // FIXME: this strategy doesn't work anymore because only 1 key per index
                             let mut notarizations = self.notarizations.lock().await;
                             for notarization in &notarizations_found {
                                 let view = notarization.view;
-                                let section = view & 0xFFFF_FFFF_FFFF_0000u64;
                                 let mut key = [0u8; 9];
                                 key[0..8].copy_from_slice(&view.to_be_bytes());
                                 key[8] = match notarization.digest {
@@ -826,12 +826,12 @@ impl<
                                     None => 0x00,
                                 };
                                 let notarization = notarization.encode_to_vec().into();
-                                let result = notarizations.put(section, &key, notarization, true).await;
+                                let result = notarizations.put(view, &key, notarization).await;
                                 match result {
                                     Ok(_) => {
                                         debug!(view, peer = hex(&s), "persisted notarization");
                                     },
-                                    Err(Error::DuplicateKey) => {
+                                    Err(Error::DuplicateIndex) => {
                                         debug!(view, peer = hex(&s), "duplicate notarization");
                                     },
                                     Err(err) => {
