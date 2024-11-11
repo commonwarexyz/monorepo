@@ -128,7 +128,7 @@
 //! ```
 
 mod storage;
-pub use storage::{Archive, Lookup};
+pub use storage::{Archive, Identifier};
 pub mod translator;
 
 use prometheus_client::registry::Registry;
@@ -262,12 +262,12 @@ mod tests {
 
             // Has the key
             let has = archive
-                .has(Lookup::Index(index))
+                .has(Identifier::Index(index))
                 .await
                 .expect("Failed to check key");
             assert!(!has);
             let has = archive
-                .has(Lookup::Key(key))
+                .has(Identifier::Key(key))
                 .await
                 .expect("Failed to check key");
             assert!(!has);
@@ -280,25 +280,25 @@ mod tests {
 
             // Has the key
             let has = archive
-                .has(Lookup::Index(index))
+                .has(Identifier::Index(index))
                 .await
                 .expect("Failed to check key");
             assert!(has);
             let has = archive
-                .has(Lookup::Key(key))
+                .has(Identifier::Key(key))
                 .await
                 .expect("Failed to check key");
             assert!(has);
 
             // Get the data back
             let retrieved = archive
-                .get(Lookup::Index(index))
+                .get(Identifier::Index(index))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
             assert_eq!(retrieved, data);
             let retrieved = archive
-                .get(Lookup::Key(key))
+                .get(Identifier::Key(key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
