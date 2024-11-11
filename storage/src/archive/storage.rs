@@ -577,7 +577,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Get start of next range (if exists)
         let next = self.intervals.iter().find(|range| range.start() > &index);
         let next_start = next.map(|range| range.start());
-        (current_end.cloned(), next_start.cloned())
+        (current_end.copied(), next_start.copied())
     }
 
     /// Close `Archive` (and underlying `Journal`).
