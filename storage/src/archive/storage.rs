@@ -49,8 +49,7 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
 
     keys_tracked: Gauge,
     keys_pruned: Counter,
-    unnecessary_prefix_reads: Counter,
-    unnecessary_item_reads: Counter,
+    unnecessary_reads: Counter,
     gets: Counter,
     has: Counter,
     syncs: Counter,
@@ -108,8 +107,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Initialize metrics
         let keys_tracked = Gauge::default();
         let keys_pruned = Counter::default();
-        let unnecessary_prefix_reads = Counter::default();
-        let unnecessary_item_reads = Counter::default();
+        let unnecessary_reads = Counter::default();
         let gets = Counter::default();
         let has = Counter::default();
         let syncs = Counter::default();
@@ -122,14 +120,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             );
             registry.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
             registry.register(
-                "unnecessary_prefix_reads",
-                "Number of unnecessary prefix reads performed",
-                unnecessary_prefix_reads.clone(),
-            );
-            registry.register(
-                "unnecessary_item_reads",
+                "unnecessary_reads",
                 "Number of unnecessary item reads performed",
-                unnecessary_item_reads.clone(),
+                unnecessary_reads.clone(),
             );
             registry.register("gets", "Number of gets performed", gets.clone());
             registry.register("has", "Number of has performed", has.clone());
@@ -147,8 +140,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             pending_writes: BTreeMap::new(),
             keys_tracked,
             keys_pruned,
-            unnecessary_prefix_reads,
-            unnecessary_item_reads,
+            unnecessary_reads,
             gets,
             has,
             syncs,
@@ -255,7 +247,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     /// Store a key-value pair in `Archive`. Indexes and keys are assumed to be unique.
     ///
     /// If the index already exists, an error is returned. If the same key
-    /// is stored multiple times at different indices, any value may be returned.
+    /// is stored multiple times at different indices, any value associated with the key may be returned.
     pub async fn put(&mut self, index: u64, key: &[u8], data: Bytes) -> Result<(), Error> {
         // Check key length
         self.verify_key(key)?;
@@ -412,7 +404,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                     }
                     return Ok(Some(value));
                 }
-                self.unnecessary_item_reads.inc();
+                self.unnecessary_reads.inc();
             }
 
             // Move to next index
@@ -459,7 +451,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 if key == item_key {
                     return Ok(true);
                 }
-                self.unnecessary_prefix_reads.inc();
+                self.unnecessary_reads.inc();
             }
 
             // Move to next index
