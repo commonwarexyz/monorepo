@@ -9,8 +9,7 @@ use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
 use zstd::bulk::{compress, decompress};
 
-// TODO: infer section from index
-
+/// Location of a record in `Journal`.
 struct Location {
     offset: u32,
     len: u32,
@@ -31,16 +30,15 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     cfg: Config<T>,
     journal: Journal<B, E>,
 
+    // Oldest allowed section to read from. This is updated when `prune` is called.
     oldest_allowed: Option<u64>,
 
     // We store the first index of the linked list in the HashMap
     // to significantly reduce the number of random reads we need to do
     // on the heap.
     indices: BTreeMap<u64, Location>,
-    keys: HashMap<T::Key, Record>,
-
-    // Track gaps in the archive
     intervals: RangeSet<u64>,
+    keys: HashMap<T::Key, Record>,
 
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: BTreeMap<u64, usize>,
@@ -73,7 +71,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             while let Some(result) = stream.next().await {
                 // Extract key from record
                 let (_, offset, len, data) = result?;
-                let (index, key) = Self::parse_record(cfg.key_len, data)?;
+                let (index, key) = Self::parse_prefix(cfg.key_len, data)?;
 
                 // Store index
                 indices.insert(index, Location { offset, len });
@@ -96,7 +94,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                     }
                 };
 
-                // Store interval
+                // Store index in intervals
                 intervals.insert(index..index + 1);
             }
             debug!(keys = keys.len(), overlaps, "archive initialized");
@@ -119,7 +117,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             registry.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
             registry.register(
                 "unnecessary_reads",
-                "Number of unnecessary item reads performed",
+                "Number of unnecessary reads performed during key lookups",
                 unnecessary_reads.clone(),
             );
             registry.register("gets", "Number of gets performed", gets.clone());
@@ -133,8 +131,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             journal,
             oldest_allowed: None,
             indices,
-            keys,
             intervals,
+            keys,
             pending_writes: BTreeMap::new(),
             keys_tracked,
             keys_pruned,
@@ -152,7 +150,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    fn parse_record(key_len: u32, mut data: Bytes) -> Result<(u64, Bytes), Error> {
+    fn parse_prefix(key_len: u32, mut data: Bytes) -> Result<(u64, Bytes), Error> {
         let key_len = key_len as usize;
         if data.remaining() != 8 + key_len + 4 {
             return Err(Error::RecordCorrupted);
@@ -175,21 +173,23 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // We don't need the index, so we just skip it
         data.get_u64();
 
+        // Read key from data
         let key = data.copy_to_bytes(key_len as usize);
 
         // We don't need to compute checksum here as the underlying journal
         // already performs this check for us.
         data.get_u32();
 
+        // Return remaining data as value
         Ok((key, data))
     }
 
-    /// Cleanup keys that are no longer valid.
-    fn cleanup(&mut self, index_key: &T::Key) -> Result<(), Error> {
+    /// Cleanup keys in-memory that are no longer valid.
+    fn cleanup(&mut self, translated_key: &T::Key) {
         // Find new head (first valid key)
-        let head = match self.keys.get_mut(index_key) {
+        let head = match self.keys.get_mut(translated_key) {
             Some(head) => head,
-            None => return Ok(()),
+            None => return,
         };
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         let found = loop {
@@ -213,10 +213,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             }
         };
 
-        // If there are no valid entries remaining (there is no head), remove key
+        // If there are no valid entries remaining (there is no head), remove key.
+        //
+        // In practice, we never expect to hit this when `cleanup` is called because we are
+        // always inserting a value at this `translated_key` but include for completeness.
         if !found {
-            self.keys.remove(index_key);
-            return Ok(());
+            self.keys.remove(translated_key);
+            return;
         }
 
         // Keep valid post-head entries
@@ -238,7 +241,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             }
 
             // There is no next, we are done
-            return Ok(());
+            return;
         }
     }
 
@@ -315,13 +318,17 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
 
         // Cleanup tracked keys
-        self.cleanup(&translated_key)?;
+        //
+        // We call this after insertion to avoid unnecessary underlying map
+        // operations.
+        self.cleanup(&translated_key);
 
         // Update pending writes
         let pending_writes = self.pending_writes.entry(section).or_default();
         *pending_writes += 1;
         if *pending_writes > self.cfg.pending_writes {
             self.journal.sync(section).await.map_err(Error::Journal)?;
+            debug!(section, mode = "put", "synced section");
             *pending_writes = 0;
             self.syncs.inc();
         }
@@ -332,6 +339,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     pub async fn get(&self, index: u64) -> Result<Option<Bytes>, Error> {
+        // Update metrics
+        self.gets.inc();
+
         // Get index location
         let location = match self.indices.get(&index) {
             Some(location) => location,
@@ -412,6 +422,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     pub async fn has(&self, index: u64) -> Result<bool, Error> {
+        // Update metrics
+        self.has.inc();
+
+        // Check if index exists
         Ok(self.indices.contains_key(&index))
     }
 
@@ -445,7 +459,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                     .ok_or(Error::RecordCorrupted)?;
 
                 // Get key from item
-                let (_, item_key) = Self::parse_record(self.cfg.key_len, item)?;
+                let (_, item_key) = Self::parse_prefix(self.cfg.key_len, item)?;
                 if key == item_key {
                     return Ok(true);
                 }
@@ -458,20 +472,27 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(false)
     }
 
-    /// Prune `Archive` to the provided section.
+    /// Prune `Archive` to the provided min (masked by the configured
+    /// section mask).
     ///
-    /// Calling `prune` on a section that has already been pruned will return an error.
+    /// If this is called with a min lower than the last pruned, an
+    /// error is returned.
     pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Upset pruning marker
-        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
-        if min <= oldest_allowed {
-            // Unlike in `put`, we want to return an error if we try to prune the same
-            // section twice. In `put`, we just want to make sure we don't return
-            // anything that has already been pruned (`< oldest_allowed`).
-            return Err(Error::AlreadyPrunedToSection(oldest_allowed));
-        }
+        // Update `min` to reflect section mask
+        let min = self.cfg.section_mask & min;
 
-        // Remove all pending writes (no need to call `sync` as we are pruning)
+        // Check if min is less than last pruned
+        if let Some(oldest_allowed) = self.oldest_allowed {
+            if min < oldest_allowed {
+                return Err(Error::AlreadyPrunedToSection(oldest_allowed));
+            }
+        }
+        debug!(min, "pruning archive");
+
+        // Prune journal
+        self.journal.prune(min).await.map_err(Error::Journal)?;
+
+        // Remove pending writes (no need to call `sync` as we are pruning)
         loop {
             let next = match self.pending_writes.first_key_value() {
                 Some((section, _)) if *section < min => *section,
@@ -479,9 +500,6 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             };
             self.pending_writes.remove(&next);
         }
-
-        // Prune journal
-        self.journal.prune(min).await.map_err(Error::Journal)?;
 
         // Remove all indices that are less than min
         loop {
@@ -501,13 +519,19 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    /// Sync all pending writes to disk.
+    /// Sync all pending writes to disk across all journals.
     pub async fn sync(&mut self) -> Result<(), Error> {
         for (section, count) in self.pending_writes.iter_mut() {
             if *count == 0 {
                 continue;
             }
             self.journal.sync(*section).await.map_err(Error::Journal)?;
+            debug!(
+                section = *section,
+                count = *count,
+                mode = "force",
+                "synced section"
+            );
             self.syncs.inc();
             *count = 0;
         }
@@ -515,13 +539,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     /// Retrieve the end of the current range and the start of the next range.
-    pub fn next_range(&self, start: u64) -> (Option<u64>, Option<u64>) {
+    pub fn next_range(&self, index: u64) -> (Option<u64>, Option<u64>) {
         // Get end of current range (if exists)
-        let current = self.intervals.get(&start);
+        let current = self.intervals.get(&index);
         let current_end = current.map(|range| range.end);
 
         // Get start of next range (if exists)
-        let next = self.intervals.iter().find(|range| range.start > start);
+        let next = self.intervals.iter().find(|range| range.start > index);
         let next_start = next.map(|range| range.start);
         (current_end, next_start)
     }
