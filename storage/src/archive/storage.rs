@@ -50,7 +50,8 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     pending_writes: BTreeMap<u64, usize>,
 
     items_tracked: Gauge,
-    items_pruned: Counter,
+    indices_pruned: Counter,
+    keys_pruned: Counter,
     unnecessary_reads: Counter,
     gets: Counter,
     has: Counter,
@@ -108,7 +109,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Initialize metrics
         let items_tracked = Gauge::default();
-        let items_pruned = Counter::default();
+        let indices_pruned = Counter::default();
+        let keys_pruned = Counter::default();
         let unnecessary_reads = Counter::default();
         let gets = Counter::default();
         let has = Counter::default();
@@ -121,10 +123,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 items_tracked.clone(),
             );
             registry.register(
-                "items_pruned",
-                "Number of items pruned",
-                items_pruned.clone(),
+                "indices_pruned",
+                "Number of indices pruned",
+                indices_pruned.clone(),
             );
+            registry.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
             registry.register(
                 "unnecessary_reads",
                 "Number of unnecessary reads performed during key lookups",
@@ -146,7 +149,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             keys,
             pending_writes: BTreeMap::new(),
             items_tracked,
-            items_pruned,
+            indices_pruned,
+            keys_pruned,
             unnecessary_reads,
             gets,
             has,
@@ -205,6 +209,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         let found = loop {
             if head.index < oldest_allowed {
+                self.keys_pruned.inc();
                 match head.next {
                     Some(ref mut next) => {
                         // Update invalid head in-place
@@ -239,6 +244,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 // If next is invalid, skip it
                 if next < oldest_allowed {
                     cursor.next = cursor.next.as_mut().unwrap().next.take();
+                    self.keys_pruned.inc();
                     continue;
                 }
 
@@ -500,7 +506,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
 
         // Check if min is less than last pruned
         if let Some(oldest_allowed) = self.oldest_allowed {
-            if min < oldest_allowed {
+            if min <= oldest_allowed {
                 return Err(Error::AlreadyPrunedToSection(oldest_allowed));
             }
         }
@@ -525,11 +531,13 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 _ => break,
             };
             self.indices.remove(&next).unwrap();
-            self.items_pruned.inc();
+            self.indices_pruned.inc();
         }
 
         // Remove all keys from interval tree less than min
-        self.intervals.remove(0..min);
+        if min > 0 {
+            self.intervals.remove(0..min);
+        }
 
         // Update last pruned (to prevent reads from
         // pruned sections)

@@ -219,6 +219,7 @@ mod tests {
     use std::{
         collections::BTreeMap,
         sync::{Arc, Mutex},
+        u64,
     };
     use translator::{FourCap, TwoCap};
 
@@ -769,171 +770,175 @@ mod tests {
         });
     }
 
-    // #[test_traced]
-    // fn test_archive_overlapping_key_multiple_sections() {
-    //     // Initialize the deterministic runtime
-    //     let (executor, context, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create a registry for metrics
-    //         let registry = Arc::new(Mutex::new(Registry::default()));
+    #[test_traced]
+    fn test_archive_overlapping_key_multiple_sections() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
 
-    //         // Initialize an empty journal
-    //         let journal = Journal::init(
-    //             context,
-    //             JournalConfig {
-    //                 registry: registry.clone(),
-    //                 partition: "test_partition".into(),
-    //             },
-    //         )
-    //         .await
-    //         .expect("Failed to initialize journal");
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context,
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
 
-    //         // Initialize the archive
-    //         let cfg = Config {
-    //             registry,
-    //             key_len: 5,
-    //             translator: FourCap,
-    //             pending_writes: 10,
-    //             replay_concurrency: 4,
-    //             compression: None,
-    //         };
-    //         let mut archive = Archive::init(journal, cfg.clone())
-    //             .await
-    //             .expect("Failed to initialize archive");
+            // Initialize the archive
+            let cfg = Config {
+                registry,
+                key_len: 5,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
 
-    //         let section1 = 1u64;
-    //         let key1 = b"keys1";
-    //         let data1 = Bytes::from("data1");
-    //         let section2 = 2u64;
-    //         let key2 = b"keys2";
-    //         let data2 = Bytes::from("data2");
+            let index1 = 1u64;
+            let key1 = b"keys1";
+            let data1 = Bytes::from("data1");
+            let index2 = 2_000_000u64;
+            let key2 = b"keys2";
+            let data2 = Bytes::from("data2");
 
-    //         // Put the key-data pair
-    //         archive
-    //             .put(section1, key1, data1.clone(), false)
-    //             .await
-    //             .expect("Failed to put data");
+            // Put the key-data pair
+            archive
+                .put(index1, key1, data1.clone())
+                .await
+                .expect("Failed to put data");
 
-    //         // Put the key-data pair
-    //         archive
-    //             .put(section2, key2, data2.clone(), false)
-    //             .await
-    //             .expect("Failed to put data");
+            // Put the key-data pair
+            archive
+                .put(index2, key2, data2.clone())
+                .await
+                .expect("Failed to put data");
 
-    //         // Get the data back
-    //         let retrieved = archive
-    //             .get(key1)
-    //             .await
-    //             .expect("Failed to get data")
-    //             .expect("Data not found");
-    //         assert_eq!(retrieved, data1);
+            // Get the data back
+            let retrieved = archive
+                .get(Identifier::Key(key1))
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data1);
 
-    //         // Get the data back
-    //         let retrieved = archive
-    //             .get(key2)
-    //             .await
-    //             .expect("Failed to get data")
-    //             .expect("Data not found");
-    //         assert_eq!(retrieved, data2);
-    //     });
-    // }
+            // Get the data back
+            let retrieved = archive
+                .get(Identifier::Key(key2))
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data2);
+        });
+    }
 
-    // #[test_traced]
-    // fn test_archive_prune_keys() {
-    //     // Initialize the deterministic runtime
-    //     let (executor, context, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create a registry for metrics
-    //         let registry = Arc::new(Mutex::new(Registry::default()));
+    #[test_traced]
+    fn test_archive_prune_keys() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
 
-    //         // Initialize an empty journal
-    //         let journal = Journal::init(
-    //             context.clone(),
-    //             JournalConfig {
-    //                 registry: registry.clone(),
-    //                 partition: "test_partition".into(),
-    //             },
-    //         )
-    //         .await
-    //         .expect("Failed to initialize journal");
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
 
-    //         // Initialize the archive
-    //         let cfg = Config {
-    //             registry: registry.clone(),
-    //             key_len: 9,
-    //             translator: FourCap,
-    //             pending_writes: 10,
-    //             replay_concurrency: 4,
-    //             compression: None,
-    //         };
-    //         let mut archive = Archive::init(journal, cfg.clone())
-    //             .await
-    //             .expect("Failed to initialize archive");
+            // Initialize the archive
+            let cfg = Config {
+                registry: registry.clone(),
+                key_len: 9,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+                section_mask: u64::MAX, // no mask
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
 
-    //         // Insert multiple keys across different sections
-    //         let keys = vec![
-    //             (1u64, "key1-blah", Bytes::from("data1")),
-    //             (2u64, "key2-blah", Bytes::from("data2")),
-    //             (3u64, "key3-blah", Bytes::from("data3")),
-    //             (3u64, "key3-bleh", Bytes::from("data3-again")),
-    //             (4u64, "key4-blah", Bytes::from("data4")),
-    //         ];
+            // Insert multiple keys across different sections
+            let keys = vec![
+                (1u64, "key1-blah", Bytes::from("data1")),
+                (2u64, "key2-blah", Bytes::from("data2")),
+                (3u64, "key3-blah", Bytes::from("data3")),
+                (4u64, "key3-bleh", Bytes::from("data3-again")),
+                (5u64, "key4-blah", Bytes::from("data4")),
+            ];
 
-    //         for (section, key, data) in &keys {
-    //             archive
-    //                 .put(*section, key.as_bytes(), data.clone(), false)
-    //                 .await
-    //                 .expect("Failed to put data");
-    //         }
+            for (index, key, data) in &keys {
+                archive
+                    .put(*index, key.as_bytes(), data.clone())
+                    .await
+                    .expect("Failed to put data");
+            }
 
-    //         // Check metrics
-    //         let mut buffer = String::new();
-    //         encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-    //         assert!(buffer.contains("keys_tracked 5"));
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 5"));
 
-    //         // Prune sections less than 3
-    //         archive.prune(3).await.expect("Failed to prune");
+            // Prune sections less than 3
+            archive.prune(3).await.expect("Failed to prune");
 
-    //         // Ensure keys 1 and 2 are no longer present
-    //         for (section, key, data) in keys {
-    //             let retrieved = archive
-    //                 .get(key.as_bytes())
-    //                 .await
-    //                 .expect("Failed to get data");
-    //             if section < 3 {
-    //                 assert!(retrieved.is_none());
-    //             } else {
-    //                 assert_eq!(retrieved.expect("Data not found"), data);
-    //             }
-    //         }
+            // Ensure keys 1 and 2 are no longer present
+            for (index, key, data) in keys {
+                let retrieved = archive
+                    .get(Identifier::Key(key.as_bytes()))
+                    .await
+                    .expect("Failed to get data");
+                if index < 3 {
+                    assert!(retrieved.is_none());
+                } else {
+                    assert_eq!(retrieved.expect("Data not found"), data);
+                }
+            }
 
-    //         // Check metrics
-    //         let mut buffer = String::new();
-    //         encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-    //         assert!(buffer.contains("keys_tracked 5")); // have not lazily removed keys yet
-    //         assert!(buffer.contains("keys_pruned_total 0"));
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 3"));
+            assert!(buffer.contains("indices_pruned_total 2"));
+            assert!(buffer.contains("keys_pruned_total 0")); // no lazy cleanup yet
 
-    //         // Try to prune older section
-    //         let result = archive.prune(2).await;
-    //         assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
+            // Try to prune older section
+            let result = archive.prune(2).await;
+            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
 
-    //         // Try to prune current section again
-    //         let result = archive.prune(3).await;
-    //         assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
+            // Try to prune current section again
+            let result = archive.prune(3).await;
+            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
 
-    //         // Trigger lazy removal of keys
-    //         archive
-    //             .put(3, "key2-blfh".as_bytes(), Bytes::from("data2-2"), false)
-    //             .await
-    //             .expect("Failed to put data");
+            // Trigger lazy removal of keys
+            archive
+                .put(6, "key2-blfh".as_bytes(), Bytes::from("data2-2"))
+                .await
+                .expect("Failed to put data");
 
-    //         // Check metrics
-    //         let mut buffer = String::new();
-    //         encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-    //         assert!(buffer.contains("keys_tracked 5")); // lazily remove one, add one
-    //         assert!(buffer.contains("keys_pruned_total 1"));
-    //     });
-    // }
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 4")); // lazily remove one, add one
+            assert!(buffer.contains("indices_pruned_total 2"));
+            assert!(buffer.contains("keys_pruned_total 1"));
+        });
+    }
 
     // fn test_archive_keys_and_restart(num_keys: usize, num_partitions: u64) -> String {
     //     // Initialize the deterministic runtime
