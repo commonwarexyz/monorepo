@@ -9,7 +9,7 @@ use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::{debug, trace};
 use zstd::bulk::{compress, decompress};
 
-/// Subject of a `get` operation.
+/// Subject of a `get` or `has` operation.
 pub enum Identifier<'a> {
     Index(u64),
     Key(&'a [u8]),
