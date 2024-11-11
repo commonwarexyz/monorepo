@@ -112,6 +112,7 @@
 //!     let cfg = Config {
 //!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         key_len: 8,
+//!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         translator: FourCap,
 //!         pending_writes: 10,
 //!         replay_concurrency: 4,
@@ -120,7 +121,7 @@
 //!     let mut archive = Archive::init(journal, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive.put(1, b"test-key", "data".into(), false).await.unwrap();
+//!     archive.put(1, b"test-key", "data".into()).await.unwrap();
 //!
 //!     // Close the archive (also closes the journal)
 //!     archive.close().await.unwrap();
