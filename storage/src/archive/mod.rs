@@ -221,7 +221,6 @@ mod tests {
     use std::{
         collections::BTreeMap,
         sync::{Arc, Mutex},
-        u64,
     };
     use translator::{FourCap, TwoCap};
 
