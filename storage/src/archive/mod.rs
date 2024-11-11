@@ -1,8 +1,9 @@
 //! A write-once key-value store optimized for low-latency reads.
 //!
-//! `Archive` is a key-value store designed for workloads where data is uniquely associated with an
-//! (index, key) tuple and that data is only written once (and read many times). Data is stored in
-//! `Journal` (an append-only log) and the location of written data is indexed by both the index
+//! `Archive` is a key-value store designed for workloads where data is uniquely associated with some `index`
+//! and some `key` and said data is only written once (and read many times).
+//!
+//! Data is stored in `Journal` (an append-only log) and the location of written data is indexed by both the index
 //! and key (truncated representation using a caller-provided `Translator`) provided during insertion to enable
 //! **single-read lookups** over the entire store.
 //!
@@ -102,9 +103,9 @@
 //! field in the `Config` struct to a valid `zstd` compression level. This setting can be changed between initializations
 //! of `Archive`, however, it must remain populated if any data was written with compression enabled.
 //!
-//! # Tracking Gaps
+//! # Querying for Gaps
 //!
-//! `Archive` tracks gaps in the index space to enable the caller to efficiently fetch unknown keys (using `rangemap`).
+//! `Archive` tracks gaps in the index space to enable the caller to efficiently fetch unknown keys using `next_gap`.
 //! This is a very common pattern when syncing blocks in a blockchain.
 //!
 //! # Example
