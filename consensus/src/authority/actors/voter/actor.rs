@@ -619,11 +619,25 @@ impl<
                 signature: self.crypto.sign(&self.vote_namespace, &message),
             }),
         };
-        let msg = wire::Voter {
+        let msg: Bytes = wire::Voter {
             payload: Some(wire::voter::Payload::Vote(vote.clone())),
         }
         .encode_to_vec()
         .into();
+
+        // Persist to journal
+        if !retry {
+            self.journal
+                .append(self.view, msg.clone())
+                .await
+                .expect("could not append to journal");
+            self.journal
+                .sync(self.view)
+                .await
+                .expect("could not sync journal");
+        }
+
+        // Send null vote
         sender.send(Recipients::All, msg, true).await.unwrap();
 
         // Handle the vote
@@ -1804,11 +1818,19 @@ impl<
                             view = proposal_view;
 
                             // Broadcast the proposal
-                            let msg = wire::Voter{
+                            let msg: Bytes = wire::Voter{
                                 payload: Some(wire::voter::Payload::Proposal(proposal.clone())),
-                            }.encode_to_vec();
+                            }.encode_to_vec().into();
+
+
+                            // Journal the proposal
+                            self.journal.append(proposal.view, msg.clone()).await.expect("failed to journal proposal");
+                            self.journal.sync(proposal.view).await.expect("failed to sync journal");
+
+
+                            // Send the proposal
                             sender
-                                .send(Recipients::All, msg.into(), true)
+                                .send(Recipients::All, msg, true)
                                 .await
                                 .unwrap();
                         },
