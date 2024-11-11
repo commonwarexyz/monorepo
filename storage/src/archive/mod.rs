@@ -4,8 +4,10 @@
 //! (index, key) tuple and that data is only written once (and read many times). Data is stored in
 //! `Journal` (an append-only log) and the location of written data is indexed by both the index
 //! and key (truncated representation using a caller-provided `Translator`) provided during insertion to enable
-//! **single-read lookups** over the entire store. Notably, `Archive` does not make use of compaction
-//! nor on-disk indexes (and thus has no read nor write amplification during normal operation).
+//! **single-read lookups** over the entire store.
+//!
+//! Notably, `Archive` does not make use of compaction nor on-disk indexes (and thus has no read nor
+//! write amplification during normal operation).
 //!
 //! # Format
 //!
@@ -49,10 +51,8 @@
 //! _To avoid random memory reads in the common case, the in-memory index directly stores the first item
 //! in the linked list instead of a pointer to the first item._
 //!
-//! _If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
-//! uses a truncated representation that means keys on average have many conflicts, performance will degrade._
-//!
-//! `index` is a key to the index map that stores the location of the data in blobs:
+//! `index` is the key to the map used to serve lookups by `index` that stores the location of data in a given
+//! blob (where the blob is identified by `index & section_mask` to minimize the number of open `Journals`):
 //!
 //! ```rust
 //! struct Location {
@@ -60,6 +60,9 @@
 //!     len: u32,
 //! }
 //! ```
+//!
+//! _If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
+//! uses a truncated representation that means keys on average have many conflicts, performance will degrade._
 //!
 //! ## Memory Overhead
 //!
@@ -71,8 +74,8 @@
 //!
 //! # Sync
 //!
-//! `Archive` flushes writes in a given `section` (`index & section_mask`) to `Storage` after `pending_writes`.
-//! If the caller requires durability on a particular write, they can call `sync`.
+//! `Archive` flushes writes in a given `section` (computed by `index & section_mask`) to `Storage` after
+//! `pending_writes`. If the caller requires durability on a particular write, they can call `sync`.
 //!
 //! # Pruning
 //!
@@ -101,8 +104,8 @@
 //!
 //! # Tracking Gaps
 //!
-//! `Archive` tracks gaps in the index space to enable the caller to efficiently fetch unknown keys. This is a very
-//! common pattern when syncing blocks in a blockchain.
+//! `Archive` tracks gaps in the index space to enable the caller to efficiently fetch unknown keys (using `rangemap`).
+//! This is a very common pattern when syncing blocks in a blockchain.
 //!
 //! # Example
 //!

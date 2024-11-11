@@ -496,7 +496,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(false)
     }
 
-    /// Prune `Archive` to the provided min (masked by the configured
+    /// Prune `Archive` to the provided `min` (masked by the configured
     /// section mask).
     ///
     /// If this is called with a min lower than the last pruned, nothing
