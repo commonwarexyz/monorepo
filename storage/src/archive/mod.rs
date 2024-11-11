@@ -4,8 +4,8 @@
 //! uniquely associated with both an `index` and a `key`.
 //!
 //! Data is stored in `Journal` (an append-only log) and the location of written data is stored in-memory
-//! by both said index and said key (truncated representation using a caller-provided `Translator`) to
-//! enable **single-read lookups** over all archived data.
+//! by both index and key (truncated representation using a caller-provided `Translator`) to
+//! enable **single-read lookups** for both query patterns over all archived data.
 //!
 //! _Notably, `Archive` does not make use of compaction nor on-disk indexes (and thus has no read nor
 //! write amplification during normal operation)._
