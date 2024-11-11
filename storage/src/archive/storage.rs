@@ -1,12 +1,10 @@
-use super::{
-    interval_tree::{Interval, IntervalTree},
-    Config, Error, Translator,
-};
+use super::{Config, Error, Translator};
 use crate::journal::Journal;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_runtime::{Blob, Storage};
 use futures::{pin_mut, StreamExt};
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
+use rangemap::RangeSet;
 use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
 use zstd::bulk::{compress, decompress};
@@ -42,7 +40,7 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     keys: HashMap<T::Key, Record>,
 
     // Track gaps in the archive
-    intervals: IntervalTree,
+    intervals: RangeSet<u64>,
 
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: BTreeMap<u64, usize>,
@@ -64,7 +62,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut keys = HashMap::new();
-        let mut intervals = IntervalTree::new();
+        let mut intervals = RangeSet::new();
         let mut overlaps: u128 = 0;
         {
             debug!("initializing archive");
@@ -99,7 +97,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 };
 
                 // Store interval
-                intervals.insert(index);
+                intervals.insert(index..index + 1);
             }
             debug!(keys = keys.len(), overlaps, "archive initialized");
         }
@@ -298,7 +296,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         );
 
         // Store interval
-        self.intervals.insert(index);
+        self.intervals.insert(index..index + 1);
 
         // Store item
         let translated_key = self.cfg.translator.transform(key);
@@ -495,7 +493,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
 
         // Remove all keys from interval tree less than min
-        self.intervals.prune_below(min);
+        self.intervals.remove(0..min);
 
         // Update last pruned (to prevent reads from
         // pruned sections)
@@ -516,8 +514,16 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    pub fn next_gap(&self, start: u64) -> Option<Interval> {
-        self.intervals.find_next_gap(start)
+    /// Retrieve the end of the current range and the start of the next range.
+    pub fn next_range(&self, start: u64) -> (Option<u64>, Option<u64>) {
+        // Get end of current range (if exists)
+        let current = self.intervals.get(&start);
+        let current_end = current.map(|range| range.end);
+
+        // Get start of next range (if exists)
+        let next = self.intervals.iter().find(|range| range.start > start);
+        let next_start = next.map(|range| range.start);
+        (current_end, next_start)
     }
 
     /// Close `Archive` (and underlying journal).
