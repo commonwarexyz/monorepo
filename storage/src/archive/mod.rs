@@ -1070,6 +1070,11 @@ mod tests {
                         .expect("Failed to get data")
                         .expect("Data not found");
                     assert_eq!(retrieved, data);
+
+                    // Check range
+                    let (current_end, start_next) = archive.next_gap(index);
+                    assert_eq!(current_end.unwrap(), num_keys as u64 - 1);
+                    assert!(start_next.is_none());
                 } else {
                     let retrieved = archive
                         .get(Identifier::Key(&key))
@@ -1077,6 +1082,11 @@ mod tests {
                         .expect("Failed to get data");
                     assert!(retrieved.is_none());
                     removed += 1;
+
+                    // Check range
+                    let (current_end, start_next) = archive.next_gap(index);
+                    assert!(current_end.is_none());
+                    assert_eq!(start_next.unwrap(), min);
                 }
             }
 
@@ -1102,5 +1112,120 @@ mod tests {
         let state1 = test_archive_keys_and_restart(5_000); // 20 sections
         let state2 = test_archive_keys_and_restart(5_000);
         assert_eq!(state1, state2);
+    }
+
+    #[test_traced]
+    fn test_ranges() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
+
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context.clone(),
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+
+            // Initialize the archive
+            let cfg = Config {
+                registry,
+                key_len: 9,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            // Insert multiple keys across different indices
+            let keys = vec![
+                (1u64, "key1-blah", Bytes::from("data1")),
+                (10u64, "key2-blah", Bytes::from("data2")),
+                (11u64, "key3-blah", Bytes::from("data3")),
+                (14u64, "key3-bleh", Bytes::from("data3-again")),
+            ];
+            for (index, key, data) in &keys {
+                archive
+                    .put(*index, key.as_bytes(), data.clone())
+                    .await
+                    .expect("Failed to put data");
+            }
+
+            // Check ranges
+            let (current_end, start_next) = archive.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 1);
+
+            let (current_end, start_next) = archive.next_gap(1);
+            assert_eq!(current_end.unwrap(), 1);
+            assert_eq!(start_next.unwrap(), 10);
+
+            let (current_end, start_next) = archive.next_gap(10);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(11);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(12);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(14);
+            assert_eq!(current_end.unwrap(), 14);
+            assert!(start_next.is_none());
+
+            // Close and check again
+            archive.close().await.expect("Failed to close archive");
+
+            let journal = Journal::init(
+                context,
+                JournalConfig {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+            let archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            // Check ranges again
+            let (current_end, start_next) = archive.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 1);
+
+            let (current_end, start_next) = archive.next_gap(1);
+            assert_eq!(current_end.unwrap(), 1);
+            assert_eq!(start_next.unwrap(), 10);
+
+            let (current_end, start_next) = archive.next_gap(10);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(11);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(12);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(14);
+            assert_eq!(current_end.unwrap(), 14);
+            assert!(start_next.is_none());
+        });
     }
 }
