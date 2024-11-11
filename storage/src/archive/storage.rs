@@ -72,7 +72,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         {
             debug!("initializing archive");
             let stream = journal
-                .replay(cfg.replay_concurrency, Some(cfg.key_len + 8 + 4))
+                .replay(cfg.replay_concurrency, Some(8 + cfg.key_len + 4))
                 .await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
@@ -400,10 +400,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         self.gets.inc();
 
         // Create index key
-        let index_key = self.cfg.translator.transform(key);
+        let translated_key = self.cfg.translator.transform(key);
 
         // Fetch index
-        let mut record = self.keys.get(&index_key);
+        let mut record = self.keys.get(&translated_key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         while let Some(head) = record {
             // Check for data if section is valid
@@ -461,10 +461,10 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         self.check_key(key)?;
 
         // Create index key
-        let index_key = self.cfg.translator.transform(key);
+        let translated_key = self.cfg.translator.transform(key);
 
         // Fetch index
-        let mut record = self.keys.get(&index_key);
+        let mut record = self.keys.get(&translated_key);
         let min_allowed = self.oldest_allowed.unwrap_or(0);
         while let Some(head) = record {
             // Check for data if section is valid
