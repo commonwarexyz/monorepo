@@ -44,7 +44,7 @@
 //! struct Record {
 //!     index: u64,
 //!
-//!     next: Option<Box<Index>>,
+//!     next: Option<Box<Record>>,
 //! }
 //! ```
 //!
