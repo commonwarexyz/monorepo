@@ -491,10 +491,11 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 Some((index, _)) if *index < min => *index,
                 _ => break,
             };
-            let location = self.indices.remove(&next).unwrap();
-
-            // TODO: how to handle interval update?
+            self.indices.remove(&next).unwrap();
         }
+
+        // Remove all keys from interval tree less than min
+        self.intervals.prune_below(min);
 
         // Update last pruned (to prevent reads from
         // pruned sections)

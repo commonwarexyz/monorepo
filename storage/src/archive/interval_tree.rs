@@ -266,7 +266,7 @@ impl IntervalTree {
         successor
     }
 
-    fn prune_below(&mut self, value: u64) {
+    pub fn prune_below(&mut self, value: u64) {
         self.root = Self::prune_below_node(self.root.take(), value);
     }
 
