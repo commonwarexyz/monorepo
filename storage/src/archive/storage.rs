@@ -17,8 +17,8 @@ struct Location {
 
 /// In the case there are multiple records with the same key, we store them in a linked list.
 ///
-/// This is the most memory-efficient way to maintain a multi-map (24 bytes per entry, not including
-/// the key used to lookup a given index).
+/// To minimize memory usage, we store the corresponding index of a particular item to determine
+/// its storage position.
 struct Record {
     index: u64,
 
@@ -43,8 +43,8 @@ pub struct Archive<T: Translator, B: Blob, E: Storage<B>> {
     // Track the number of writes pending for a section to determine when to sync.
     pending_writes: BTreeMap<u64, usize>,
 
-    keys_tracked: Gauge,
-    keys_pruned: Counter,
+    items_tracked: Gauge,
+    items_pruned: Counter,
     unnecessary_reads: Counter,
     gets: Counter,
     has: Counter,
@@ -101,8 +101,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
 
         // Initialize metrics
-        let keys_tracked = Gauge::default();
-        let keys_pruned = Counter::default();
+        let items_tracked = Gauge::default();
+        let items_pruned = Counter::default();
         let unnecessary_reads = Counter::default();
         let gets = Counter::default();
         let has = Counter::default();
@@ -110,11 +110,15 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         {
             let mut registry = cfg.registry.lock().unwrap();
             registry.register(
-                "keys_tracked",
-                "Number of keys tracked",
-                keys_tracked.clone(),
+                "items_tracked",
+                "Number of items tracked",
+                items_tracked.clone(),
             );
-            registry.register("keys_pruned", "Number of keys pruned", keys_pruned.clone());
+            registry.register(
+                "items_pruned",
+                "Number of items pruned",
+                items_pruned.clone(),
+            );
             registry.register(
                 "unnecessary_reads",
                 "Number of unnecessary reads performed during key lookups",
@@ -124,6 +128,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             registry.register("has", "Number of has performed", has.clone());
             registry.register("syncs", "Number of syncs called", syncs.clone());
         }
+        items_tracked.set(indices.len() as i64);
 
         // Return populated archive
         Ok(Self {
@@ -134,8 +139,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             intervals,
             keys,
             pending_writes: BTreeMap::new(),
-            keys_tracked,
-            keys_pruned,
+            items_tracked,
+            items_pruned,
             unnecessary_reads,
             gets,
             has,
@@ -194,8 +199,6 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         let oldest_allowed = self.oldest_allowed.unwrap_or(0);
         let found = loop {
             if head.index < oldest_allowed {
-                self.keys_pruned.inc();
-                self.keys_tracked.dec();
                 match head.next {
                     Some(ref mut next) => {
                         // Update invalid head in-place
@@ -229,8 +232,6 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
             if let Some(next) = cursor.next.as_ref().map(|next| next.index) {
                 // If next is invalid, skip it
                 if next < oldest_allowed {
-                    self.keys_pruned.inc();
-                    self.keys_tracked.dec();
                     cursor.next = cursor.next.as_mut().unwrap().next.take();
                     continue;
                 }
@@ -334,7 +335,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         }
 
         // Update metrics
-        self.keys_tracked.inc();
+        self.items_tracked.set(self.indices.len() as i64);
         Ok(())
     }
 
@@ -508,6 +509,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
                 _ => break,
             };
             self.indices.remove(&next).unwrap();
+            self.items_pruned.inc();
         }
 
         // Remove all keys from interval tree less than min
@@ -516,6 +518,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         // Update last pruned (to prevent reads from
         // pruned sections)
         self.oldest_allowed = Some(min);
+        self.items_tracked.set(self.indices.len() as i64);
         Ok(())
     }
 
