@@ -598,7 +598,7 @@ impl<
                                         }
                                     };
 
-                                    // Prefer return a digest notariation (if it exists)
+                                    // Prefer return a digest notarization (if it exists)
                                     let notarization = match digest_notarization {
                                         Some(notarization) => notarization,
                                         None => null_notarization.as_ref().unwrap(), // if exists, one must be a valid notarization
