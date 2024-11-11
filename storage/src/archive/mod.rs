@@ -224,6 +224,8 @@ mod tests {
     };
     use translator::{FourCap, TwoCap};
 
+    const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
+
     fn test_archive_put_get(compression: Option<u8>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
@@ -250,7 +252,7 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression,
-                section_mask: 0xffff_ffff_ffff_0000u64,
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -337,78 +339,86 @@ mod tests {
         test_archive_put_get(Some(3));
     }
 
-    // #[test_traced]
-    // fn test_archive_compression_then_none() {
-    //     // Initialize the deterministic runtime
-    //     let (executor, context, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Initialize an empty journal
-    //         let journal = Journal::init(
-    //             context.clone(),
-    //             JournalConfig {
-    //                 registry: Arc::new(Mutex::new(Registry::default())),
-    //                 partition: "test_partition".into(),
-    //             },
-    //         )
-    //         .await
-    //         .expect("Failed to initialize journal");
+    #[test_traced]
+    fn test_archive_compression_then_none() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context.clone(),
+                JournalConfig {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
 
-    //         // Initialize the archive
-    //         let cfg = Config {
-    //             registry: Arc::new(Mutex::new(Registry::default())),
-    //             key_len: 7,
-    //             translator: FourCap,
-    //             pending_writes: 10,
-    //             replay_concurrency: 4,
-    //             compression: Some(3),
-    //         };
-    //         let mut archive = Archive::init(journal, cfg.clone())
-    //             .await
-    //             .expect("Failed to initialize archive");
+            // Initialize the archive
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                key_len: 7,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: Some(3),
+                section_mask: DEFAULT_SECTION_MASK,
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
 
-    //         // Put the key-data pair
-    //         let section = 1u64;
-    //         let key = b"testkey";
-    //         let data = Bytes::from("testdata");
-    //         archive
-    //             .put(section, key, data.clone(), false)
-    //             .await
-    //             .expect("Failed to put data");
+            // Put the key-data pair
+            let index = 1u64;
+            let key = b"testkey";
+            let data = Bytes::from("testdata");
+            archive
+                .put(index, key, data.clone())
+                .await
+                .expect("Failed to put data");
 
-    //         // Close the archive
-    //         archive.close().await.expect("Failed to close archive");
+            // Close the archive
+            archive.close().await.expect("Failed to close archive");
 
-    //         // Initialize the archive again without compression
-    //         let journal = Journal::init(
-    //             context,
-    //             JournalConfig {
-    //                 registry: Arc::new(Mutex::new(Registry::default())),
-    //                 partition: "test_partition".into(),
-    //             },
-    //         )
-    //         .await
-    //         .expect("Failed to initialize journal");
-    //         let cfg = Config {
-    //             registry: Arc::new(Mutex::new(Registry::default())),
-    //             key_len: 7,
-    //             translator: FourCap,
-    //             pending_writes: 10,
-    //             replay_concurrency: 4,
-    //             compression: None,
-    //         };
-    //         let archive = Archive::init(journal, cfg.clone())
-    //             .await
-    //             .expect("Failed to initialize archive");
+            // Initialize the archive again without compression
+            let journal = Journal::init(
+                context,
+                JournalConfig {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                key_len: 7,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
+            };
+            let archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
 
-    //         // Get the data back
-    //         let retrieved = archive
-    //             .get(key)
-    //             .await
-    //             .expect("Failed to get data")
-    //             .expect("Data not found");
-    //         assert_ne!(retrieved, data);
-    //     });
-    // }
+            // Get the data back
+            let retrieved = archive
+                .get(Identifier::Index(index))
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_ne!(retrieved, data);
+            let retrieved = archive
+                .get(Identifier::Key(key))
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_ne!(retrieved, data);
+        });
+    }
 
     // #[test_traced]
     // fn test_archive_invalid_key_length() {

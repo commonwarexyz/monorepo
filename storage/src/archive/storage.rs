@@ -573,6 +573,9 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     /// Close `Archive` (and underlying `Journal`).
+    ///
+    /// Any pending writes will be synced by `Journal` prior
+    /// to closing.
     pub async fn close(self) -> Result<(), Error> {
         self.journal.close().await.map_err(Error::Journal)
     }
