@@ -634,128 +634,140 @@ mod tests {
         });
     }
 
-    // #[test_traced]
-    // fn test_archive_get_nonexistent_key() {
-    //     // Initialize the deterministic runtime
-    //     let (executor, context, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create a registry for metrics
-    //         let registry = Arc::new(Mutex::new(Registry::default()));
+    #[test_traced]
+    fn test_archive_get_nonexistent() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
 
-    //         // Initialize an empty journal
-    //         let journal = Journal::init(
-    //             context,
-    //             JournalConfig {
-    //                 registry: registry.clone(),
-    //                 partition: "test_partition".into(),
-    //             },
-    //         )
-    //         .await
-    //         .expect("Failed to initialize journal");
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context,
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
 
-    //         // Initialize the archive
-    //         let cfg = Config {
-    //             registry,
-    //             key_len: 11,
-    //             translator: FourCap,
-    //             pending_writes: 10,
-    //             replay_concurrency: 4,
-    //             compression: None,
-    //         };
-    //         let archive = Archive::init(journal, cfg.clone())
-    //             .await
-    //             .expect("Failed to initialize archive");
+            // Initialize the archive
+            let cfg = Config {
+                registry,
+                key_len: 11,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
+            };
+            let archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
 
-    //         // Attempt to get a key that doesn't exist
-    //         let key = b"nonexistent";
-    //         let retrieved = archive.get(key).await.expect("Failed to get data");
-    //         assert!(retrieved.is_none());
+            // Attempt to get an index that doesn't exist
+            let index = 1u64;
+            let retrieved = archive
+                .get(Identifier::Index(index))
+                .await
+                .expect("Failed to get data");
+            assert!(retrieved.is_none());
 
-    //         // Check metrics
-    //         let mut buffer = String::new();
-    //         encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-    //         assert!(buffer.contains("keys_tracked 0"));
-    //         assert!(buffer.contains("unnecessary_prefix_reads_total 0"));
-    //         assert!(buffer.contains("unnecessary_item_reads_total 0"));
-    //         assert!(buffer.contains("gets_total 1"));
-    //     });
-    // }
+            // Attempt to get a key that doesn't exist
+            let key = b"nonexistent";
+            let retrieved = archive
+                .get(Identifier::Key(key))
+                .await
+                .expect("Failed to get data");
+            assert!(retrieved.is_none());
 
-    // #[test_traced]
-    // fn test_archive_overlapping_key() {
-    //     // Initialize the deterministic runtime
-    //     let (executor, context, _) = Executor::default();
-    //     executor.start(async move {
-    //         // Create a registry for metrics
-    //         let registry = Arc::new(Mutex::new(Registry::default()));
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 0"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
+            assert!(buffer.contains("gets_total 2"));
+        });
+    }
 
-    //         // Initialize an empty journal
-    //         let journal = Journal::init(
-    //             context,
-    //             JournalConfig {
-    //                 registry: registry.clone(),
-    //                 partition: "test_partition".into(),
-    //             },
-    //         )
-    //         .await
-    //         .expect("Failed to initialize journal");
+    #[test_traced]
+    fn test_archive_overlapping_key() {
+        // Initialize the deterministic runtime
+        let (executor, context, _) = Executor::default();
+        executor.start(async move {
+            // Create a registry for metrics
+            let registry = Arc::new(Mutex::new(Registry::default()));
 
-    //         // Initialize the archive
-    //         let cfg = Config {
-    //             registry,
-    //             key_len: 5,
-    //             translator: FourCap,
-    //             pending_writes: 10,
-    //             replay_concurrency: 4,
-    //             compression: None,
-    //         };
-    //         let mut archive = Archive::init(journal, cfg.clone())
-    //             .await
-    //             .expect("Failed to initialize archive");
+            // Initialize an empty journal
+            let journal = Journal::init(
+                context,
+                JournalConfig {
+                    registry: registry.clone(),
+                    partition: "test_partition".into(),
+                },
+            )
+            .await
+            .expect("Failed to initialize journal");
 
-    //         let section = 1u64;
-    //         let key1 = b"keys1";
-    //         let data1 = Bytes::from("data1");
-    //         let key2 = b"keys2";
-    //         let data2 = Bytes::from("data2");
+            // Initialize the archive
+            let cfg = Config {
+                registry,
+                key_len: 5,
+                translator: FourCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
+            };
+            let mut archive = Archive::init(journal, cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
 
-    //         // Put the key-data pair
-    //         archive
-    //             .put(section, key1, data1.clone(), false)
-    //             .await
-    //             .expect("Failed to put data");
+            let index1 = 1u64;
+            let key1 = b"keys1";
+            let data1 = Bytes::from("data1");
+            let index2 = 2u64;
+            let key2 = b"keys2";
+            let data2 = Bytes::from("data2");
 
-    //         // Put the key-data pair
-    //         archive
-    //             .put(section, key2, data2.clone(), false)
-    //             .await
-    //             .expect("Failed to put data");
+            // Put the key-data pair
+            archive
+                .put(index1, key1, data1.clone())
+                .await
+                .expect("Failed to put data");
 
-    //         // Get the data back
-    //         let retrieved = archive
-    //             .get(key1)
-    //             .await
-    //             .expect("Failed to get data")
-    //             .expect("Data not found");
-    //         assert_eq!(retrieved, data1);
+            // Put the key-data pair
+            archive
+                .put(index2, key2, data2.clone())
+                .await
+                .expect("Failed to put data");
 
-    //         // Get the data back
-    //         let retrieved = archive
-    //             .get(key2)
-    //             .await
-    //             .expect("Failed to get data")
-    //             .expect("Data not found");
-    //         assert_eq!(retrieved, data2);
+            // Get the data back
+            let retrieved = archive
+                .get(Identifier::Key(key1))
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data1);
 
-    //         // Check metrics
-    //         let mut buffer = String::new();
-    //         encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-    //         assert!(buffer.contains("keys_tracked 2"));
-    //         assert!(buffer.contains("unnecessary_prefix_reads_total 1"));
-    //         assert!(buffer.contains("unnecessary_item_reads_total 1"));
-    //         assert!(buffer.contains("gets_total 2"));
-    //     });
-    // }
+            // Get the data back
+            let retrieved = archive
+                .get(Identifier::Key(key2))
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data2);
+
+            // Check metrics
+            let mut buffer = String::new();
+            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
+            assert!(buffer.contains("tracked 2"));
+            assert!(buffer.contains("unnecessary_reads_total 1"));
+            assert!(buffer.contains("gets_total 2"));
+        });
+    }
 
     // #[test_traced]
     // fn test_archive_overlapping_key_multiple_sections() {
