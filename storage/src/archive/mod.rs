@@ -1,36 +1,35 @@
-//! A write-once key-value store optimized for throughput and low-latency reads.
+//! A write-once key-value store optimized for low-latency reads.
 //!
-//! `Archive` is a key-value store designed for workloads where data at a given key
-//! is written once and read many times. Data is stored in `Journal` (an append-only
-//! log) and truncated representations of keys are indexed in memory (using a caller-provided
-//! `Translator`) to enable "single read lookups" over the entire store. Notably, `Archive`
-//! does not make use of compaction nor on-disk indexes (and thus has no read nor write
-//! amplification during normal operation).
+//! `Archive` is a key-value store designed for workloads where data is uniquely associated with an
+//! (index, key) tuple and that data is only written once (and read many times). Data is stored in
+//! `Journal` (an append-only log) and the location of written data is indexed by both the index
+//! and key (truncated representation using a caller-provided `Translator`) provided during insertion to enable
+//! **single-read lookups** over the entire store. Notably, `Archive` does not make use of compaction
+//! nor on-disk indexes (and thus has no read nor write amplification during normal operation).
 //!
 //! # Format
 //!
 //! `Archive` stores data in the following format:
 //!
 //! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |    ...    |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! | Key (Fixed Size)  |    C(u32)     |   Data    |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |13 |14 |15 |16 |      ...      |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! |          Index(u64)           |  Key(Fixed Size)  |    C(u32)     |     Data      |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //!
 //! C = CRC32(Key)
 //! ```
 //!
-//! _To ensure keys fetched using `Journal::get_prefix` are correctly read, the key is checksummed
-//! within a `Journal` entry (although the entire entry is also checksummed by `Journal`)._
+//! _To ensure keys fetched using `Journal::get_prefix` are correctly read, the index and key are
+//! checksummed within a `Journal` entry (although the entire entry is also checksummed by `Journal`)._
 //!
 //! # Uniqueness
 //!
-//! `Archive` assumes all stored keys are unique and only ever associated with a single `section`. If
-//! the same key is written to multiple `sections`, there is no guarantee which value will be returned
-//! (and no error will be returned when calling `put`). If the same key is written to the same section,
-//! `Archive` will return an error. `Archive` can be checked for the existence of a key (across any `section`)
-//! using the `has` method.
+//! `Archive` assumes all stored keys are unique and only ever associated with a single index. If
+//! the same key is written to multiple `indexes`, there is no guarantee which value will be returned
+//! (and no error will be returned when calling `put`). If the same key is written to the same `index`,
+//! `Archive` will return an error. `Archive` can be queried either by `index` or by key.
 //!
 //! ## Conflicts
 //!
@@ -40,10 +39,8 @@
 //! To support efficient checks, `Archive` keeps a linked list of all keys with the same truncated prefix:
 //!
 //! ```rust
-//! struct Index {
-//!     section: u64,
-//!     offset: u32,
-//!     len: u32,
+//! struct Record {
+//!     index: u64,
 //!
 //!     next: Option<Box<Index>>,
 //! }
@@ -52,23 +49,34 @@
 //! _To avoid random memory reads in the common case, the in-memory index directly stores the first item
 //! in the linked list instead of a pointer to the first item._
 //!
-//! If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
-//! uses a truncated representation that means keys on average have many conflicts, performance will degrade.
+//! _If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
+//! uses a truncated representation that means keys on average have many conflicts, performance will degrade._
+//!
+//! `index` is a key to the index map that stores the location of the data in blobs:
+//!
+//! ```rust
+//! struct Location {
+//!     offset: u32,
+//!     len: u32,
+//! }
+//! ```
 //!
 //! ## Memory Overhead
 //!
-//! The memory used to track each key is `~truncated(key).len() + 24` bytes (where `24` is the size of the `Index`
-//! struct). This means that an `Archive` employing a `Translator` that uses the first `8` bytes of a key will
-//! use `32` bytes to index each key.
+//! `Archive` uses two maps to enable lookups by both index and key. The memory used to track each index
+//! item is `8 + 4 + 4` (where `8` is the index, `4` is the offset, and `4` is the length). The memory used to track
+//! each key item is `~truncated(key).len() + 16` bytes (where `16` is the size of the `Record` struct).
+//! This means that an `Archive` employing a `Translator` that uses the first `8` bytes of a key will use `~40` bytes
+//! to index each key.
 //!
 //! # Sync
 //!
-//! `Archive` flushes writes in a given `section` to `Storage` after `pending_writes`. If the caller
-//! requires durability on a particular write, they can `force_sync` when calling the `put` method.
+//! `Archive` flushes writes in a given `section` (`index & section_mask`) to `Storage` after `pending_writes`.
+//! If the caller requires durability on a particular write, they can call `sync`.
 //!
 //! # Pruning
 //!
-//! `Archive` supports pruning up to a minimum `section` using the `prune` method. After `prune` is called
+//! `Archive` supports pruning up to a minimum `index` using the `prune` method. After `prune` is called
 //! on a `section`, all interaction with a `section` less than the pruned `section` will return an error.
 //!
 //! ## Lazy Index Cleanup
@@ -91,6 +99,11 @@
 //! field in the `Config` struct to a valid `zstd` compression level. This setting can be changed between initializations
 //! of `Archive`, however, it must remain populated if any data was written with compression enabled.
 //!
+//! # Tracking Gaps
+//!
+//! `Archive` tracks gaps in the index space to enable the caller to efficiently fetch unknown keys. This is a very
+//! common pattern when syncing blocks in a blockchain.
+//!
 //! # Example
 //!
 //! ```rust
@@ -112,8 +125,8 @@
 //!     let cfg = Config {
 //!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         key_len: 8,
-//!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         translator: FourCap,
+//!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         pending_writes: 10,
 //!         replay_concurrency: 4,
 //!         compression: Some(3),
