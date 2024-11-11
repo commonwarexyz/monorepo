@@ -181,7 +181,8 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
     }
 
     fn parse_item(key_len: u32, mut data: Bytes) -> Result<(Bytes, Bytes), Error> {
-        if data.remaining() < 8 + key_len as usize + 4 {
+        let key_len = key_len as usize;
+        if data.remaining() < 8 + key_len + 4 {
             return Err(Error::RecordCorrupted);
         }
 
@@ -189,7 +190,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         data.get_u64();
 
         // Read key from data
-        let key = data.copy_to_bytes(key_len as usize);
+        let key = data.copy_to_bytes(key_len);
 
         // We don't need to compute checksum here as the underlying journal
         // already performs this check for us.
