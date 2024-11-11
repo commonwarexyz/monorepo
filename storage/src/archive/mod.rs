@@ -1,14 +1,14 @@
 //! A write-once key-value store optimized for low-latency reads.
 //!
-//! `Archive` is a key-value store designed for workloads where data is uniquely associated with some `index`
-//! and some `key` and said data is only written once (and read many times).
+//! `Archive` is a key-value store designed for workloads where all data is written only once and is
+//! uniquely associated with both an `index` and a `key`.
 //!
-//! Data is stored in `Journal` (an append-only log) and the location of written data is indexed by both the index
-//! and key (truncated representation using a caller-provided `Translator`) provided during insertion to enable
-//! **single-read lookups** over the entire store.
+//! Data is stored in `Journal` (an append-only log) and the location of written data is stored in-memory
+//! by both said index and said key (truncated representation using a caller-provided `Translator`) to
+//! enable **single-read lookups** over all archived data.
 //!
-//! Notably, `Archive` does not make use of compaction nor on-disk indexes (and thus has no read nor
-//! write amplification during normal operation).
+//! _Notably, `Archive` does not make use of compaction nor on-disk indexes (and thus has no read nor
+//! write amplification during normal operation)._
 //!
 //! # Format
 //!
@@ -29,10 +29,9 @@
 //!
 //! # Uniqueness
 //!
-//! `Archive` assumes all stored keys are unique and only ever associated with a single index. If
-//! the same key is written to multiple `indexes`, there is no guarantee which value will be returned
-//! (and no error will be returned when calling `put`). If the same key is written to the same `index`,
-//! `Archive` will return an error. `Archive` can be queried either by `index` or by key.
+//! `Archive` assumes all stored indexes and keys are unique. If the same key is associated with multiple
+//! `indices`, there is no guarantee which value will be returned. If the a key is written to an existing `index`,
+//! `Archive` will return an error.
 //!
 //! ## Conflicts
 //!
@@ -53,7 +52,7 @@
 //! in the linked list instead of a pointer to the first item._
 //!
 //! `index` is the key to the map used to serve lookups by `index` that stores the location of data in a given
-//! blob (where the blob is identified by `index & section_mask` to minimize the number of open `Journals`):
+//! `Blob` (selected by `section = index & section_mask` to minimize the number of open `Journals`):
 //!
 //! ```rust
 //! struct Location {
