@@ -178,11 +178,17 @@ pub struct Config<T: Translator> {
     /// Registry for metrics.
     pub registry: Arc<Mutex<Registry>>,
 
+    /// Mask to apply to indices to determine section.
+    ///
+    /// This value is `index & section_mask`.
+    pub section_mask: u64,
+
     /// Length of each key in bytes.
     ///
     /// `Archive` assumes that all keys are of the same length. This
     /// trick is used to store data more efficiently on disk and to substantially
-    /// reduce the number of IO during initialization.
+    /// reduce the number of IO during initialization. If a key is provided that
+    /// is not of the correct length, an error will be returned.
     pub key_len: u32,
 
     /// Logic to transform keys into their index representation.
@@ -201,11 +207,6 @@ pub struct Config<T: Translator> {
 
     /// Optional compression level (using `zstd`) to apply to data before storing.
     pub compression: Option<u8>,
-
-    /// Mask to apply to indices to determine section.
-    ///
-    /// This value is `index & section_mask`.
-    pub section_mask: u64,
 }
 
 #[cfg(test)]
