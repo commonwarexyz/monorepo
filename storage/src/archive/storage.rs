@@ -9,6 +9,11 @@ use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use tracing::debug;
 use zstd::bulk::{compress, decompress};
 
+pub enum Lookup<'a> {
+    Index(u64),
+    Key(&'a [u8]),
+}
+
 /// Location of a record in `Journal`.
 struct Location {
     offset: u32,
@@ -339,7 +344,15 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(())
     }
 
-    pub async fn get(&self, index: u64) -> Result<Option<Bytes>, Error> {
+    /// Retrieve a value from `Archive`.
+    pub async fn get(&self, lookup: Lookup<'_>) -> Result<Option<Bytes>, Error> {
+        match lookup {
+            Lookup::Index(index) => self.get_index(index).await,
+            Lookup::Key(key) => self.get_key(key).await,
+        }
+    }
+
+    async fn get_index(&self, index: u64) -> Result<Option<Bytes>, Error> {
         // Update metrics
         self.gets.inc();
 
@@ -371,8 +384,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(Some(value))
     }
 
-    /// Retrieve a value from `Archive`.
-    pub async fn get_key(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
+    async fn get_key(&self, key: &[u8]) -> Result<Option<Bytes>, Error> {
         // Check key length
         self.verify_key(key)?;
 
@@ -422,21 +434,23 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         Ok(None)
     }
 
-    pub async fn has(&self, index: u64) -> Result<bool, Error> {
-        // Update metrics
+    /// Check if a key exists in `Archive`.
+    pub async fn has(&self, lookup: Lookup<'_>) -> Result<bool, Error> {
         self.has.inc();
-
-        // Check if index exists
-        Ok(self.indices.contains_key(&index))
+        match lookup {
+            Lookup::Index(index) => Ok(self.has_index(index)),
+            Lookup::Key(key) => self.has_key(key).await,
+        }
     }
 
-    /// Check if a key exists in `Archive`.
-    pub async fn has_key(&self, key: &[u8]) -> Result<bool, Error> {
+    fn has_index(&self, index: u64) -> bool {
+        // Check if index exists
+        self.indices.contains_key(&index)
+    }
+
+    async fn has_key(&self, key: &[u8]) -> Result<bool, Error> {
         // Check key length
         self.verify_key(key)?;
-
-        // Update metrics
-        self.has.inc();
 
         // Create index key
         let index_key = self.cfg.translator.transform(key);
