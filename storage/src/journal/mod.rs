@@ -142,7 +142,7 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
+    use bytes::{BufMut, Bytes};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic::Executor, Blob, Error as RError, Runner, Storage};
     use futures::{pin_mut, StreamExt};
@@ -524,7 +524,11 @@ mod tests {
 
             // Write size but no item data
             let item_size: u32 = 10; // Size of the item
-            blob.write_at(&item_size.to_be_bytes(), 0)
+            let mut buf = Vec::new();
+            buf.put_u32(item_size);
+            let data = [2u8; 5];
+            buf.put_slice(&data);
+            blob.write_at(&buf, 0)
                 .await
                 .expect("Failed to write item size");
             blob.close().await.expect("Failed to close blob");
