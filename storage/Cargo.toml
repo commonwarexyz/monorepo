@@ -22,6 +22,7 @@ futures-util = { workspace = true }
 prometheus-client = { workspace = true }
 zstd = { workspace = true }
 crc32fast = "1.4.2"
+rangemap = "1.5.1"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

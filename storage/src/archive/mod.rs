@@ -1,36 +1,37 @@
-//! A write-once key-value store optimized for throughput and low-latency reads.
+//! A write-once key-value store optimized for low-latency reads.
 //!
-//! `Archive` is a key-value store designed for workloads where data at a given key
-//! is written once and read many times. Data is stored in `Journal` (an append-only
-//! log) and truncated representations of keys are indexed in memory (using a caller-provided
-//! `Translator`) to enable "single read lookups" over the entire store. Notably, `Archive`
-//! does not make use of compaction nor on-disk indexes (and thus has no read nor write
-//! amplification during normal operation).
+//! `Archive` is a key-value store designed for workloads where all data is written only once and is
+//! uniquely associated with both an `index` and a `key`.
+//!
+//! Data is stored in `Journal` (an append-only log) and the location of written data is stored in-memory
+//! by both index and key (truncated representation using a caller-provided `Translator`) to
+//! enable **single-read lookups** for both query patterns over all archived data.
+//!
+//! _Notably, `Archive` does not make use of compaction nor on-disk indexes (and thus has no read nor
+//! write amplification during normal operation)._
 //!
 //! # Format
 //!
 //! `Archive` stores data in the following format:
 //!
 //! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |    ...    |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! | Key (Fixed Size)  |    C(u32)     |   Data    |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |12 |13 |14 |15 |16 |      ...      |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+//! |          Index(u64)           |  Key(Fixed Size)  |    C(u32)     |     Data      |
+//! +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
 //!
 //! C = CRC32(Key)
 //! ```
 //!
-//! _To ensure keys fetched using `Journal::get_prefix` are correctly read, the key is checksummed
-//! within a `Journal` entry (although the entire entry is also checksummed by `Journal`)._
+//! _To ensure keys fetched using `Journal::get_prefix` are correctly read, the index and key are
+//! checksummed within a `Journal` entry (although the entire entry is also checksummed by `Journal`)._
 //!
 //! # Uniqueness
 //!
-//! `Archive` assumes all stored keys are unique and only ever associated with a single `section`. If
-//! the same key is written to multiple `sections`, there is no guarantee which value will be returned
-//! (and no error will be returned when calling `put`). If the same key is written to the same section,
-//! `Archive` will return an error. `Archive` can be checked for the existence of a key (across any `section`)
-//! using the `has` method.
+//! `Archive` assumes all stored indexes and keys are unique. If the same key is associated with multiple
+//! `indices`, there is no guarantee which value will be returned. If the a key is written to an existing `index`,
+//! `Archive` will return an error.
 //!
 //! ## Conflicts
 //!
@@ -40,35 +41,45 @@
 //! To support efficient checks, `Archive` keeps a linked list of all keys with the same truncated prefix:
 //!
 //! ```rust
-//! struct Index {
-//!     section: u64,
-//!     offset: u32,
-//!     len: u32,
+//! struct Record {
+//!     index: u64,
 //!
-//!     next: Option<Box<Index>>,
+//!     next: Option<Box<Record>>,
 //! }
 //! ```
 //!
 //! _To avoid random memory reads in the common case, the in-memory index directly stores the first item
 //! in the linked list instead of a pointer to the first item._
 //!
-//! If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
-//! uses a truncated representation that means keys on average have many conflicts, performance will degrade.
+//! `index` is the key to the map used to serve lookups by `index` that stores the location of data in a given
+//! `Blob` (selected by `section = index & section_mask` to minimize the number of open `Journals`):
+//!
+//! ```rust
+//! struct Location {
+//!     offset: u32,
+//!     len: u32,
+//! }
+//! ```
+//!
+//! _If the `Translator` provided by the caller does not uniformly distribute keys across the key space or
+//! uses a truncated representation that means keys on average have many conflicts, performance will degrade._
 //!
 //! ## Memory Overhead
 //!
-//! The memory used to track each key is `~truncated(key).len() + 24` bytes (where `24` is the size of the `Index`
-//! struct). This means that an `Archive` employing a `Translator` that uses the first `8` bytes of a key will
-//! use `32` bytes to index each key.
+//! `Archive` uses two maps to enable lookups by both index and key. The memory used to track each index
+//! item is `8 + 4 + 4` (where `8` is the index, `4` is the offset, and `4` is the length). The memory used to track
+//! each key item is `~truncated(key).len() + 16` bytes (where `16` is the size of the `Record` struct).
+//! This means that an `Archive` employing a `Translator` that uses the first `8` bytes of a key will use `~40` bytes
+//! to index each key.
 //!
 //! # Sync
 //!
-//! `Archive` flushes writes in a given `section` to `Storage` after `pending_writes`. If the caller
-//! requires durability on a particular write, they can `force_sync` when calling the `put` method.
+//! `Archive` flushes writes in a given `section` (computed by `index & section_mask`) to `Storage` after
+//! `pending_writes`. If the caller requires durability on a particular write, they can call `sync`.
 //!
 //! # Pruning
 //!
-//! `Archive` supports pruning up to a minimum `section` using the `prune` method. After `prune` is called
+//! `Archive` supports pruning up to a minimum `index` using the `prune` method. After `prune` is called
 //! on a `section`, all interaction with a `section` less than the pruned `section` will return an error.
 //!
 //! ## Lazy Index Cleanup
@@ -90,6 +101,11 @@
 //! `Archive` supports compressing data before storing it on disk. This can be enabled by setting the `compression`
 //! field in the `Config` struct to a valid `zstd` compression level. This setting can be changed between initializations
 //! of `Archive`, however, it must remain populated if any data was written with compression enabled.
+//!
+//! # Querying for Gaps
+//!
+//! `Archive` tracks gaps in the index space to enable the caller to efficiently fetch unknown keys using `next_gap`.
+//! This is a very common pattern when syncing blocks in a blockchain.
 //!
 //! # Example
 //!
@@ -113,6 +129,7 @@
 //!         registry: Arc::new(Mutex::new(Registry::default())),
 //!         key_len: 8,
 //!         translator: FourCap,
+//!         section_mask: 0xffff_ffff_ffff_0000u64,
 //!         pending_writes: 10,
 //!         replay_concurrency: 4,
 //!         compression: Some(3),
@@ -120,7 +137,7 @@
 //!     let mut archive = Archive::init(journal, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive.put(1, b"test-key", "data".into(), false).await.unwrap();
+//!     archive.put(1, b"test-key", "data".into()).await.unwrap();
 //!
 //!     // Close the archive (also closes the journal)
 //!     archive.close().await.unwrap();
@@ -128,7 +145,7 @@
 //! ```
 
 mod storage;
-pub use storage::Archive;
+pub use storage::{Archive, Identifier};
 pub mod translator;
 
 use prometheus_client::registry::Registry;
@@ -145,10 +162,10 @@ pub enum Error {
     Journal(#[from] crate::journal::Error),
     #[error("record corrupted")]
     RecordCorrupted,
-    #[error("duplicate key found during replay")]
-    DuplicateKey,
-    #[error("already pruned to section: {0}")]
-    AlreadyPrunedToSection(u64),
+    #[error("duplicate index")]
+    DuplicateIndex,
+    #[error("already pruned to: {0}")]
+    AlreadyPrunedTo(u64),
     #[error("invalid key length")]
     InvalidKeyLength,
     #[error("record too large")]
@@ -177,11 +194,17 @@ pub struct Config<T: Translator> {
     /// Registry for metrics.
     pub registry: Arc<Mutex<Registry>>,
 
+    /// Mask to apply to indices to determine section.
+    ///
+    /// This value is `index & section_mask`.
+    pub section_mask: u64,
+
     /// Length of each key in bytes.
     ///
     /// `Archive` assumes that all keys are of the same length. This
     /// trick is used to store data more efficiently on disk and to substantially
-    /// reduce the number of IO during initialization.
+    /// reduce the number of IO during initialization. If a key is provided that
+    /// is not of the correct length, an error will be returned.
     pub key_len: u32,
 
     /// Logic to transform keys into their index representation.
@@ -217,6 +240,8 @@ mod tests {
     };
     use translator::{FourCap, TwoCap};
 
+    const DEFAULT_SECTION_MASK: u64 = 0xffff_ffff_ffff_0000u64;
+
     fn test_archive_put_get(compression: Option<u8>) {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
@@ -243,32 +268,55 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression,
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
-            let section = 1u64;
+            let index = 1u64;
             let key = b"testkey";
             let data = Bytes::from("testdata");
 
             // Has the key
-            let has = archive.has(key).await.expect("Failed to check key");
+            let has = archive
+                .has(Identifier::Index(index))
+                .await
+                .expect("Failed to check key");
+            assert!(!has);
+            let has = archive
+                .has(Identifier::Key(key))
+                .await
+                .expect("Failed to check key");
             assert!(!has);
 
             // Put the key-data pair
             archive
-                .put(section, key, data.clone(), false)
+                .put(index, key, data.clone())
                 .await
                 .expect("Failed to put data");
 
             // Has the key
-            let has = archive.has(key).await.expect("Failed to check key");
+            let has = archive
+                .has(Identifier::Index(index))
+                .await
+                .expect("Failed to check key");
+            assert!(has);
+            let has = archive
+                .has(Identifier::Key(key))
+                .await
+                .expect("Failed to check key");
             assert!(has);
 
             // Get the data back
             let retrieved = archive
-                .get(key)
+                .get(Identifier::Index(index))
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data);
+            let retrieved = archive
+                .get(Identifier::Key(key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -277,28 +325,22 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 1"));
-            assert!(buffer.contains("unnecessary_prefix_reads_total 0"));
-            assert!(buffer.contains("unnecessary_item_reads_total 0"));
-            assert!(buffer.contains("gets_total 1"));
-            assert!(buffer.contains("has_total 2"));
+            assert!(buffer.contains("items_tracked 1"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
+            assert!(buffer.contains("gets_total 2"));
+            assert!(buffer.contains("has_total 4"));
             assert!(buffer.contains("syncs_total 0"));
 
             // Force a sync
-            let key = b"testkex";
-            archive
-                .put(section, key, data.clone(), true)
-                .await
-                .expect("failed to put and sync data");
+            archive.sync().await.expect("Failed to sync data");
 
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 2"));
-            assert!(buffer.contains("unnecessary_prefix_reads_total 1"));
-            assert!(buffer.contains("unnecessary_item_reads_total 0"));
-            assert!(buffer.contains("gets_total 1"));
-            assert!(buffer.contains("has_total 2"));
+            assert!(buffer.contains("items_tracked 1"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
+            assert!(buffer.contains("gets_total 2"));
+            assert!(buffer.contains("has_total 4"));
             assert!(buffer.contains("syncs_total 1"));
         });
     }
@@ -337,17 +379,18 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: Some(3),
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
             // Put the key-data pair
-            let section = 1u64;
+            let index = 1u64;
             let key = b"testkey";
             let data = Bytes::from("testdata");
             archive
-                .put(section, key, data.clone(), false)
+                .put(index, key, data.clone())
                 .await
                 .expect("Failed to put data");
 
@@ -371,6 +414,7 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let archive = Archive::init(journal, cfg.clone())
                 .await
@@ -378,7 +422,13 @@ mod tests {
 
             // Get the data back
             let retrieved = archive
-                .get(key)
+                .get(Identifier::Index(index))
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_ne!(retrieved, data);
+            let retrieved = archive
+                .get(Identifier::Key(key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -413,33 +463,33 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
-            let section = 1u64;
+            let index = 1u64;
             let key = b"invalidkey";
             let data = Bytes::from("invaliddata");
 
             // Put the key-data pair
-            let result = archive.put(section, key, data, false).await;
+            let result = archive.put(index, key, data).await;
             assert!(matches!(result, Err(Error::InvalidKeyLength)));
 
             // Get the data back
-            let result = archive.get(key).await;
+            let result = archive.get(Identifier::Key(key)).await;
             assert!(matches!(result, Err(Error::InvalidKeyLength)));
 
             // Has the key
-            let result = archive.has(key).await;
+            let result = archive.has(Identifier::Key(key)).await;
             assert!(matches!(result, Err(Error::InvalidKeyLength)));
 
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 0"));
-            assert!(buffer.contains("unnecessary_prefix_reads_total 0"));
-            assert!(buffer.contains("unnecessary_item_reads_total 0"));
+            assert!(buffer.contains("items_tracked 0"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
             assert!(buffer.contains("gets_total 0"));
         });
     }
@@ -468,18 +518,19 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
-            let section = 1u64;
+            let index = 1u64;
             let key = b"testkey";
             let data = Bytes::from("testdata");
 
             // Put the key-data pair
             archive
-                .put(section, key, data.clone(), false)
+                .put(index, key, data.clone())
                 .await
                 .expect("Failed to put data");
 
@@ -487,11 +538,12 @@ mod tests {
             archive.close().await.expect("Failed to close archive");
 
             // Corrupt the value
+            let section = index & DEFAULT_SECTION_MASK;
             let blob = context
                 .open("test_partition", &section.to_be_bytes())
                 .await
                 .unwrap();
-            let value_location = 4 + cfg.key_len as u64 + 4;
+            let value_location = 4 + 8 + cfg.key_len as u64 + 4;
             blob.write_at(b"testdaty", value_location).await.unwrap();
             blob.close().await.unwrap();
 
@@ -514,13 +566,14 @@ mod tests {
                     pending_writes: 10,
                     replay_concurrency: 4,
                     compression: None,
+                    section_mask: DEFAULT_SECTION_MASK,
                 },
             )
             .await
             .expect("Failed to initialize archive");
 
             // Attempt to get the key
-            let result = archive.get(key).await;
+            let result = archive.get(Identifier::Key(key)).await;
             assert!(matches!(
                 result,
                 Err(Error::Journal(JournalError::ChecksumMismatch(_, _)))
@@ -555,29 +608,36 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
-            let section = 1u64;
+            let index = 1u64;
             let key = b"duplicate";
             let data1 = Bytes::from("data1");
             let data2 = Bytes::from("data2");
 
             // Put the key-data pair
             archive
-                .put(section, key, data1.clone(), false)
+                .put(index, key, data1.clone())
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair again
-            let result = archive.put(section, key, data2.clone(), false).await;
-            assert!(matches!(result, Err(Error::DuplicateKey)));
+            let result = archive.put(index, key, data2.clone()).await;
+            assert!(matches!(result, Err(Error::DuplicateIndex)));
 
             // Get the data back
             let retrieved = archive
-                .get(key)
+                .get(Identifier::Index(index))
+                .await
+                .expect("Failed to get data")
+                .expect("Data not found");
+            assert_eq!(retrieved, data1);
+            let retrieved = archive
+                .get(Identifier::Key(key))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -586,15 +646,14 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 1"));
-            assert!(buffer.contains("unnecessary_prefix_reads_total 0"));
-            assert!(buffer.contains("unnecessary_item_reads_total 0"));
-            assert!(buffer.contains("gets_total 1"));
+            assert!(buffer.contains("items_tracked 1"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
+            assert!(buffer.contains("gets_total 2"));
         });
     }
 
     #[test_traced]
-    fn test_archive_get_nonexistent_key() {
+    fn test_archive_get_nonexistent() {
         // Initialize the deterministic runtime
         let (executor, context, _) = Executor::default();
         executor.start(async move {
@@ -620,23 +679,34 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
+            // Attempt to get an index that doesn't exist
+            let index = 1u64;
+            let retrieved = archive
+                .get(Identifier::Index(index))
+                .await
+                .expect("Failed to get data");
+            assert!(retrieved.is_none());
+
             // Attempt to get a key that doesn't exist
             let key = b"nonexistent";
-            let retrieved = archive.get(key).await.expect("Failed to get data");
+            let retrieved = archive
+                .get(Identifier::Key(key))
+                .await
+                .expect("Failed to get data");
             assert!(retrieved.is_none());
 
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 0"));
-            assert!(buffer.contains("unnecessary_prefix_reads_total 0"));
-            assert!(buffer.contains("unnecessary_item_reads_total 0"));
-            assert!(buffer.contains("gets_total 1"));
+            assert!(buffer.contains("items_tracked 0"));
+            assert!(buffer.contains("unnecessary_reads_total 0"));
+            assert!(buffer.contains("gets_total 2"));
         });
     }
 
@@ -667,32 +737,34 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
-            let section = 1u64;
+            let index1 = 1u64;
             let key1 = b"keys1";
             let data1 = Bytes::from("data1");
+            let index2 = 2u64;
             let key2 = b"keys2";
             let data2 = Bytes::from("data2");
 
             // Put the key-data pair
             archive
-                .put(section, key1, data1.clone(), false)
+                .put(index1, key1, data1.clone())
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive
-                .put(section, key2, data2.clone(), false)
+                .put(index2, key2, data2.clone())
                 .await
                 .expect("Failed to put data");
 
             // Get the data back
             let retrieved = archive
-                .get(key1)
+                .get(Identifier::Key(key1))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -700,7 +772,7 @@ mod tests {
 
             // Get the data back
             let retrieved = archive
-                .get(key2)
+                .get(Identifier::Key(key2))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -709,9 +781,8 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 2"));
-            assert!(buffer.contains("unnecessary_prefix_reads_total 1"));
-            assert!(buffer.contains("unnecessary_item_reads_total 1"));
+            assert!(buffer.contains("items_tracked 2"));
+            assert!(buffer.contains("unnecessary_reads_total 1"));
             assert!(buffer.contains("gets_total 2"));
         });
     }
@@ -743,33 +814,34 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
-            let section1 = 1u64;
+            let index1 = 1u64;
             let key1 = b"keys1";
             let data1 = Bytes::from("data1");
-            let section2 = 2u64;
+            let index2 = 2_000_000u64;
             let key2 = b"keys2";
             let data2 = Bytes::from("data2");
 
             // Put the key-data pair
             archive
-                .put(section1, key1, data1.clone(), false)
+                .put(index1, key1, data1.clone())
                 .await
                 .expect("Failed to put data");
 
             // Put the key-data pair
             archive
-                .put(section2, key2, data2.clone(), false)
+                .put(index2, key2, data2.clone())
                 .await
                 .expect("Failed to put data");
 
             // Get the data back
             let retrieved = archive
-                .get(key1)
+                .get(Identifier::Key(key1))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -777,7 +849,7 @@ mod tests {
 
             // Get the data back
             let retrieved = archive
-                .get(key2)
+                .get(Identifier::Key(key2))
                 .await
                 .expect("Failed to get data")
                 .expect("Data not found");
@@ -812,6 +884,7 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
+                section_mask: 0xffff_ffff_ffff_ffffu64, // no mask
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -822,13 +895,13 @@ mod tests {
                 (1u64, "key1-blah", Bytes::from("data1")),
                 (2u64, "key2-blah", Bytes::from("data2")),
                 (3u64, "key3-blah", Bytes::from("data3")),
-                (3u64, "key3-bleh", Bytes::from("data3-again")),
-                (4u64, "key4-blah", Bytes::from("data4")),
+                (4u64, "key3-bleh", Bytes::from("data3-again")),
+                (5u64, "key4-blah", Bytes::from("data4")),
             ];
 
-            for (section, key, data) in &keys {
+            for (index, key, data) in &keys {
                 archive
-                    .put(*section, key.as_bytes(), data.clone(), false)
+                    .put(*index, key.as_bytes(), data.clone())
                     .await
                     .expect("Failed to put data");
             }
@@ -836,18 +909,18 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 5"));
+            assert!(buffer.contains("items_tracked 5"));
 
             // Prune sections less than 3
             archive.prune(3).await.expect("Failed to prune");
 
             // Ensure keys 1 and 2 are no longer present
-            for (section, key, data) in keys {
+            for (index, key, data) in keys {
                 let retrieved = archive
-                    .get(key.as_bytes())
+                    .get(Identifier::Key(key.as_bytes()))
                     .await
                     .expect("Failed to get data");
-                if section < 3 {
+                if index < 3 {
                     assert!(retrieved.is_none());
                 } else {
                     assert_eq!(retrieved.expect("Data not found"), data);
@@ -857,32 +930,38 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 5")); // have not lazily removed keys yet
-            assert!(buffer.contains("keys_pruned_total 0"));
+            assert!(buffer.contains("items_tracked 3"));
+            assert!(buffer.contains("indices_pruned_total 2"));
+            assert!(buffer.contains("keys_pruned_total 0")); // no lazy cleanup yet
 
             // Try to prune older section
-            let result = archive.prune(2).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
+            archive.prune(2).await.expect("Failed to prune");
 
             // Try to prune current section again
-            let result = archive.prune(3).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedToSection(3))));
+            archive.prune(3).await.expect("Failed to prune");
+
+            // Try to put older index
+            let result = archive
+                .put(1, "key1-blah".as_bytes(), Bytes::from("data1"))
+                .await;
+            assert!(matches!(result, Err(Error::AlreadyPrunedTo(3))));
 
             // Trigger lazy removal of keys
             archive
-                .put(3, "key2-blfh".as_bytes(), Bytes::from("data2-2"), false)
+                .put(6, "key2-blfh".as_bytes(), Bytes::from("data2-2"))
                 .await
                 .expect("Failed to put data");
 
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 5")); // lazily remove one, add one
+            assert!(buffer.contains("items_tracked 4")); // lazily remove one, add one
+            assert!(buffer.contains("indices_pruned_total 2"));
             assert!(buffer.contains("keys_pruned_total 1"));
         });
     }
 
-    fn test_archive_keys_and_restart(num_keys: usize, num_partitions: u64) -> String {
+    fn test_archive_keys_and_restart(num_keys: usize) -> String {
         // Initialize the deterministic runtime
         let (executor, mut context, auditor) = Executor::default();
         executor.start(async move {
@@ -901,6 +980,7 @@ mod tests {
             .expect("Failed to initialize journal");
 
             // Initialize the archive
+            let section_mask = 0xffff_ffff_ffff_ff00u64;
             let cfg = Config {
                 registry: registry.clone(),
                 key_len: 32,
@@ -908,6 +988,7 @@ mod tests {
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
+                section_mask,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
@@ -916,23 +997,29 @@ mod tests {
             // Insert multiple keys across different sections
             let mut keys = BTreeMap::new();
             while keys.len() < num_keys {
+                let index = keys.len() as u64;
                 let mut key = [0u8; 32];
                 context.fill(&mut key);
-                let section = context.gen_range(0..num_partitions);
                 let mut data = [0u8; 1024];
                 context.fill(&mut data);
                 let data = Bytes::from(data.to_vec());
                 archive
-                    .put(section, &key, data.clone(), false)
+                    .put(index, &key, data.clone())
                     .await
                     .expect("Failed to put data");
-                keys.insert(key, (section, data));
+                keys.insert(key, (index, data));
             }
 
             // Ensure all keys can be retrieved
-            for (key, (_, data)) in &keys {
+            for (key, (index, data)) in &keys {
                 let retrieved = archive
-                    .get(key)
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");
@@ -942,14 +1029,15 @@ mod tests {
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            let tracked = format!("keys_tracked {:?}", num_keys);
+            let tracked = format!("items_tracked {:?}", num_keys);
             assert!(buffer.contains(&tracked));
-            assert!(!buffer.contains("syncs_total 0"));
+            assert!(buffer.contains("keys_pruned_total 0"));
 
             // Close the archive
             archive.close().await.expect("Failed to close archive");
 
             // Reinitialize the archive
+            let registry = Arc::new(Mutex::new(Registry::default()));
             let journal = Journal::init(
                 context.clone(),
                 JournalConfig {
@@ -959,68 +1047,98 @@ mod tests {
             )
             .await
             .expect("Failed to initialize journal");
+            let cfg = Config {
+                registry: registry.clone(),
+                key_len: 32,
+                translator: TwoCap,
+                pending_writes: 10,
+                replay_concurrency: 4,
+                compression: None,
+                section_mask,
+            };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
             // Ensure all keys can be retrieved
-            for (key, (_, data)) in &keys {
+            for (key, (index, data)) in &keys {
                 let retrieved = archive
-                    .get(key)
+                    .get(Identifier::Index(*index))
+                    .await
+                    .expect("Failed to get data")
+                    .expect("Data not found");
+                assert_eq!(retrieved, data);
+                let retrieved = archive
+                    .get(Identifier::Key(key))
                     .await
                     .expect("Failed to get data")
                     .expect("Data not found");
                 assert_eq!(retrieved, data);
             }
 
-            // Prune first half of partitions
-            let min = num_partitions / 2;
+            // Prune first half
+            let min = (keys.len() / 2) as u64;
             archive.prune(min).await.expect("Failed to prune");
 
             // Ensure all keys can be retrieved that haven't been pruned
-            for (key, (section, data)) in keys {
-                if section >= min {
+            let min = min & section_mask;
+            let mut removed = 0;
+            for (key, (index, data)) in keys {
+                if index >= min {
                     let retrieved = archive
-                        .get(&key)
+                        .get(Identifier::Key(&key))
                         .await
                         .expect("Failed to get data")
                         .expect("Data not found");
                     assert_eq!(retrieved, data);
+
+                    // Check range
+                    let (current_end, start_next) = archive.next_gap(index);
+                    assert_eq!(current_end.unwrap(), num_keys as u64 - 1);
+                    assert!(start_next.is_none());
                 } else {
-                    let retrieved = archive.get(&key).await.expect("Failed to get data");
+                    let retrieved = archive
+                        .get(Identifier::Key(&key))
+                        .await
+                        .expect("Failed to get data");
                     assert!(retrieved.is_none());
+                    removed += 1;
+
+                    // Check range
+                    let (current_end, start_next) = archive.next_gap(index);
+                    assert!(current_end.is_none());
+                    assert_eq!(start_next.unwrap(), min);
                 }
             }
 
             // Check metrics
             let mut buffer = String::new();
             encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains(&tracked)); // have not lazily removed keys yet
-            assert!(buffer.contains("keys_pruned_total 0"));
+            let tracked = format!("items_tracked {:?}", num_keys - removed);
+            assert!(buffer.contains(&tracked));
+            let pruned = format!("indices_pruned_total {}", removed);
+            assert!(buffer.contains(&pruned));
+            assert!(buffer.contains("keys_pruned_total 0")); // have not lazily removed keys yet
         });
         auditor.state()
     }
 
     #[test_traced]
     fn test_archive_many_keys_and_restart() {
-        test_archive_keys_and_restart(100_000, 10);
+        test_archive_keys_and_restart(100_000); // 391 sections
     }
 
     #[test_traced]
     fn test_determinism() {
-        let state1 = test_archive_keys_and_restart(5_000, 10);
-        let state2 = test_archive_keys_and_restart(5_000, 10);
+        let state1 = test_archive_keys_and_restart(5_000); // 20 sections
+        let state2 = test_archive_keys_and_restart(5_000);
         assert_eq!(state1, state2);
     }
 
     #[test_traced]
-    fn test_archive_determinism() {
-        // Configure test
-        let num_keys = 100_000;
-        let num_partitions = 10;
-
+    fn test_ranges() {
         // Initialize the deterministic runtime
-        let (executor, mut context, _) = Executor::default();
+        let (executor, context, _) = Executor::default();
         executor.start(async move {
             // Create a registry for metrics
             let registry = Arc::new(Mutex::new(Registry::default()));
@@ -1038,100 +1156,97 @@ mod tests {
 
             // Initialize the archive
             let cfg = Config {
-                registry: registry.clone(),
-                key_len: 32,
-                translator: TwoCap,
+                registry,
+                key_len: 9,
+                translator: FourCap,
                 pending_writes: 10,
                 replay_concurrency: 4,
                 compression: None,
+                section_mask: DEFAULT_SECTION_MASK,
             };
             let mut archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
-            // Insert multiple keys across different sections
-            let mut keys = BTreeMap::new();
-            while keys.len() < num_keys {
-                let mut key = [0u8; 32];
-                context.fill(&mut key);
-                let section = context.gen_range(0..num_partitions);
-                let mut data = [0u8; 1024];
-                context.fill(&mut data);
-                let data = Bytes::from(data.to_vec());
+            // Insert multiple keys across different indices
+            let keys = vec![
+                (1u64, "key1-blah", Bytes::from("data1")),
+                (10u64, "key2-blah", Bytes::from("data2")),
+                (11u64, "key3-blah", Bytes::from("data3")),
+                (14u64, "key3-bleh", Bytes::from("data3-again")),
+            ];
+            for (index, key, data) in &keys {
                 archive
-                    .put(section, &key, data.clone(), false)
+                    .put(*index, key.as_bytes(), data.clone())
                     .await
                     .expect("Failed to put data");
-                keys.insert(key, (section, data));
             }
 
-            // Ensure all keys can be retrieved
-            for (key, (_, data)) in &keys {
-                let retrieved = archive
-                    .get(key)
-                    .await
-                    .expect("Failed to get data")
-                    .expect("Data not found");
-                assert_eq!(retrieved, data);
-            }
+            // Check ranges
+            let (current_end, start_next) = archive.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 1);
 
-            // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 100000"));
-            assert!(!buffer.contains("syncs_total 0"));
+            let (current_end, start_next) = archive.next_gap(1);
+            assert_eq!(current_end.unwrap(), 1);
+            assert_eq!(start_next.unwrap(), 10);
 
-            // Close the archive
+            let (current_end, start_next) = archive.next_gap(10);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(11);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(12);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(14);
+            assert_eq!(current_end.unwrap(), 14);
+            assert!(start_next.is_none());
+
+            // Close and check again
             archive.close().await.expect("Failed to close archive");
 
-            // Reinitialize the archive
             let journal = Journal::init(
-                context.clone(),
+                context,
                 JournalConfig {
-                    registry: registry.clone(),
+                    registry: Arc::new(Mutex::new(Registry::default())),
                     partition: "test_partition".into(),
                 },
             )
             .await
             .expect("Failed to initialize journal");
-            let mut archive = Archive::init(journal, cfg.clone())
+            let archive = Archive::init(journal, cfg.clone())
                 .await
                 .expect("Failed to initialize archive");
 
-            // Ensure all keys can be retrieved
-            for (key, (_, data)) in &keys {
-                let retrieved = archive
-                    .get(key)
-                    .await
-                    .expect("Failed to get data")
-                    .expect("Data not found");
-                assert_eq!(retrieved, data);
-            }
+            // Check ranges again
+            let (current_end, start_next) = archive.next_gap(0);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 1);
 
-            // Prune first half of partitions
-            let min = num_partitions / 2;
-            archive.prune(min).await.expect("Failed to prune");
+            let (current_end, start_next) = archive.next_gap(1);
+            assert_eq!(current_end.unwrap(), 1);
+            assert_eq!(start_next.unwrap(), 10);
 
-            // Ensure all keys can be retrieved that haven't been pruned
-            for (key, (section, data)) in keys {
-                if section >= min {
-                    let retrieved = archive
-                        .get(&key)
-                        .await
-                        .expect("Failed to get data")
-                        .expect("Data not found");
-                    assert_eq!(retrieved, data);
-                } else {
-                    let retrieved = archive.get(&key).await.expect("Failed to get data");
-                    assert!(retrieved.is_none());
-                }
-            }
+            let (current_end, start_next) = archive.next_gap(10);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
 
-            // Check metrics
-            let mut buffer = String::new();
-            encode(&mut buffer, &cfg.registry.lock().unwrap()).unwrap();
-            assert!(buffer.contains("keys_tracked 100000")); // have not lazily removed keys yet
-            assert!(buffer.contains("keys_pruned_total 0"));
+            let (current_end, start_next) = archive.next_gap(11);
+            assert_eq!(current_end.unwrap(), 11);
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(12);
+            assert!(current_end.is_none());
+            assert_eq!(start_next.unwrap(), 14);
+
+            let (current_end, start_next) = archive.next_gap(14);
+            assert_eq!(current_end.unwrap(), 14);
+            assert!(start_next.is_none());
         });
     }
 }

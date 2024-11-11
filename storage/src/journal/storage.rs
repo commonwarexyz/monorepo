@@ -268,13 +268,25 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
                 stream::unfold(
                     (section, blob, 0u32),
                     move |(section, blob, offset)| async move {
+                        // Check if we are at the end of the blob
                         if offset == len {
                             return None;
                         }
-                        let read = match prefix {
+
+                        // Get next item
+                        let mut read = match prefix {
                             Some(prefix) => Self::read_prefix(blob, offset, prefix).await,
                             None => Self::read(blob, offset).await,
                         };
+
+                        // Ensure a full read wouldn't put us past the end of the blob
+                        if let Ok((next_offset, _, _)) = read {
+                            if next_offset > len {
+                                read = Err(Error::Runtime(RError::BlobInsufficientLength));
+                            }
+                        };
+
+                        // Handle read result
                         match read {
                             Ok((next_offset, item_size, item)) => {
                                 trace!(blob = section, cursor = offset, len, "replayed item");
