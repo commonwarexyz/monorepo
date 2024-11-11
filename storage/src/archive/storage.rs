@@ -336,7 +336,7 @@ impl<T: Translator, B: Blob, E: Storage<B>> Archive<T, B, E> {
         *pending_writes += 1;
         if *pending_writes > self.cfg.pending_writes {
             self.journal.sync(section).await.map_err(Error::Journal)?;
-            debug!(section, mode = "put", "synced section");
+            debug!(section, mode = "pending", "synced section");
             *pending_writes = 0;
             self.syncs.inc();
         }
