@@ -3,7 +3,8 @@ use crate::{
     authority::{
         actors::{resolver, voter},
         encoder::{proposal_message, proposal_namespace, vote_message, vote_namespace},
-        wire, Context, View,
+        wire::{self, Notarization},
+        Context, View,
     },
     Automaton, Supervisor,
 };
@@ -22,7 +23,7 @@ use governor::{
 use prost::Message as _;
 use rand::Rng;
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -47,7 +48,7 @@ pub struct Actor<
     vote_namespace: Vec<u8>,
 
     proposals: Arc<Mutex<Archive<T, B, E>>>,
-    notarizations: Arc<Mutex<Archive<T, B, E>>>,
+    notarizations: BTreeMap<View, (Option<Notarization>, Option<Notarization>)>,
     // TODO: allow other peers to fetch historical finalizations?
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -73,7 +74,6 @@ impl<
     pub fn new(
         runtime: E,
         proposals: Arc<Mutex<Archive<T, B, E>>>,
-        notarizations: Arc<Mutex<Archive<T, B, E>>>,
         cfg: Config<C, H, A>,
     ) -> (Self, Mailbox) {
         // Initialize rate limiter
@@ -95,7 +95,7 @@ impl<
                 vote_namespace: vote_namespace(&cfg.namespace),
 
                 proposals,
-                notarizations,
+                notarizations: BTreeMap::new(),
 
                 mailbox_receiver: receiver,
 
@@ -584,48 +584,25 @@ impl<
                             let mut notarizations_found = Vec::new();
                             let mut cursor = request.view;
                             {
-                                let notarizations = self.notarizations.lock().await;
                                 loop {
                                     // Attempt to fetch notarization
-                                    let mut key = [0u8; 9];
-                                    key[0..8].copy_from_slice(&cursor.to_be_bytes());
-                                    key[8] = 0x01;
-                                    let mut notarization = match notarizations.get(&key).await {
-                                        Ok(notarization) => notarization,
-                                        Err(err) => {
+                                    let (digest_notarization, null_notarization) = match self.notarizations.get(&cursor) {
+                                        Some(notarizations) => notarizations,
+                                        None => {
                                             debug!(
                                                 sender = hex(&s),
                                                 view = cursor,
-                                                ?err,
                                                 "unable to load notarization",
                                             );
                                             break;
                                         }
                                     };
-                                    if notarization.is_none() {
-                                        key[8] = 0x00;
-                                        notarization = match notarizations.get(&key).await {
-                                            Ok(notarization) => notarization,
-                                            Err(err) => {
-                                                debug!(
-                                                    sender = hex(&s),
-                                                    view = cursor,
-                                                    ?err,
-                                                    "unable to load notarization",
-                                                );
-                                                break;
-                                            }
-                                        };
-                                    }
-                                    if notarization.is_none() {
-                                        debug!(
-                                            sender = hex(&s),
-                                            view = cursor,
-                                            "missing notarization",
-                                        );
-                                        break;
-                                    }
-                                    let notarization = wire::Notarization::decode(notarization.unwrap()).expect("unable to decode persisted notarization");
+
+                                    // Prefer return a digest notariation (if it exists)
+                                    let notarization = match digest_notarization {
+                                        Some(notarization) => notarization,
+                                        None => null_notarization.as_ref().unwrap(), // if exists, one must be a valid notarization
+                                    };
 
                                     // If we don't have any more space, stop
                                     notarization_bytes += notarization.encoded_len();
@@ -638,7 +615,7 @@ impl<
                                         );
                                         break;
                                     }
-                                    notarizations_found.push(notarization);
+                                    notarizations_found.push(notarization.clone());
 
                                     // If we have all children or we hit our limit, stop
                                     let fetched = notarizations_found.len() as u32;
@@ -814,29 +791,16 @@ impl<
                             }
 
                             // Persist notarizations
-                            //
-                            // FIXME: this strategy doesn't work anymore because only 1 key per index
-                            let mut notarizations = self.notarizations.lock().await;
                             for notarization in &notarizations_found {
                                 let view = notarization.view;
-                                let mut key = [0u8; 9];
-                                key[0..8].copy_from_slice(&view.to_be_bytes());
-                                key[8] = match notarization.digest {
-                                    Some(_) => 0x01,
-                                    None => 0x00,
-                                };
-                                let notarization = notarization.encode_to_vec().into();
-                                let result = notarizations.put(view, &key, notarization).await;
-                                match result {
-                                    Ok(_) => {
-                                        debug!(view, peer = hex(&s), "persisted notarization");
-                                    },
-                                    Err(Error::DuplicateIndex) => {
-                                        debug!(view, peer = hex(&s), "duplicate notarization");
-                                    },
-                                    Err(err) => {
-                                        panic!("unable to persist notarization: {:?}", err);
-                                    },
+                                let null = notarization.digest.is_none();
+                                let entry = self.notarizations.entry(view).or_insert((None, None));
+                                if null && entry.1.is_none() {
+                                    entry.1 = Some(notarization.clone());
+                                } else if !null && entry.0.is_none() {
+                                    entry.0 = Some(notarization.clone());
+                                } else {
+                                    debug!(view, null, "received unnecessary notarization");
                                 }
                             }
 
