@@ -51,11 +51,8 @@ pub struct Actor<
 
     proposal_namespace: Vec<u8>,
 
-    fetch_timeout: Duration,
     max_fetch_count: u64,
     max_fetch_size: usize,
-    fetch_rate_limiter:
-        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -113,9 +110,6 @@ impl<
             },
         );
 
-        // Initialize rate limiter
-        let fetch_rate_limiter = RateLimiter::hashmap_with_clock(cfg.fetch_rate_per_peer, &runtime);
-
         // Initialize mailbox
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
@@ -128,10 +122,8 @@ impl<
 
                 proposal_namespace: proposal_namespace(&cfg.namespace),
 
-                fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
-                fetch_rate_limiter,
 
                 mailbox_receiver,
 
@@ -807,7 +799,7 @@ impl<
 
                     // Send to backfiller
                     //
-                    // This will overwrite any existing request in the backfiller.
+                    // This will override any existing request in the backfiller.
                     debug!(height, digest = hex(&digest), "requesting missing proposal");
                     outstanding_task = Some((height, digest.clone()));
                     backfiller.proposals(digest, parents).await;
