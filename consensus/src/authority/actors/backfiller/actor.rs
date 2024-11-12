@@ -328,7 +328,18 @@ impl<
                                 }
                             });
                         }
-                        _ => unimplemented!(),
+                        Message::Proposals {digest, parents} => {
+                            // Send message
+                            let mut sent = HashSet::new();
+                            let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
+                            outstanding_proposal = Some((digest, parents, sent, status));
+                        },
+                        Message::Notarizations { view, children } => {
+                            // Send message
+                            let mut sent = HashSet::new();
+                            let status = self.send_notarization_request(view, children, &mut sent, &mut sender).await;
+                            outstanding_notarization = Some((view, children, sent, status));
+                        },
                     }
                 },
                 network = receiver.recv() => {
