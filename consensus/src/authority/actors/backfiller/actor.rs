@@ -310,13 +310,11 @@ impl<
                             self.fetch_performance.retain(self.fetch_timeout, validators);
 
                             // Add notarization to cache
-                            {
-                                let notarizations = self.notarizations.entry(view).or_default();
-                                if notarization.digest.is_none() {
-                                    notarizations.null = Some(notarization);
-                                } else {
-                                    notarizations.digest = Some(notarization);
-                                }
+                            let notarizations = self.notarizations.entry(view).or_default();
+                            if notarization.digest.is_none() {
+                                notarizations.null = Some(notarization);
+                            } else {
+                                notarizations.digest = Some(notarization);
                             }
 
                             // Remove notarization from cache less than last finalized
