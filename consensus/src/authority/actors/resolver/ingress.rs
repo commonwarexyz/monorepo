@@ -1,11 +1,11 @@
-use crate::authority::{actors::Proposal, wire, View};
+use std::time::SystemTime;
+
+use crate::authority::{actors::Proposal, wire, Height, View};
 use commonware_cryptography::{Digest, PublicKey};
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
+use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {
+    // Sent from voter to resolver
     Propose {
         view: View,
         proposer: PublicKey, // will be self
@@ -20,11 +20,21 @@ pub enum Message {
     Finalized {
         proposal: Proposal,
     },
+
+    // Request from backfiller for some peer
     Proposals {
         digest: Digest,
         parents: u32,
         size_limit: usize,
+
+        // Recipient already rate-limited by p2p layer, this is just functionally
+        // required to send the response back.
+        recipient: PublicKey,
+        // Avoid processing anything that is past the deadline (would occur if there is a backup of requests).
+        deadline: SystemTime,
     },
+
+    // Resolved requests from peers
     BackfilledProposals {
         proposals: Vec<wire::Proposal>,
     },
@@ -77,16 +87,18 @@ impl Mailbox {
     pub async fn proposals(
         &mut self,
         digest: Digest,
-        parents: u32,
+        parents: Height,
         size_limit: usize,
-        response: oneshot::Sender<Vec<wire::Proposal>>,
+        recipient: PublicKey,
+        deadline: SystemTime,
     ) {
         self.sender
             .send(Message::Proposals {
                 digest,
                 parents,
                 size_limit,
-                response,
+                recipient,
+                deadline,
             })
             .await
             .unwrap();

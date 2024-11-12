@@ -7,7 +7,7 @@ use crate::{
     authority::{
         actors::resolver,
         encoder::{proposal_message, proposal_namespace, vote_message, vote_namespace},
-        wire, Context, View,
+        wire, Context, Height, View,
     },
     Automaton, Supervisor,
 };
@@ -69,7 +69,7 @@ pub struct Actor<
     mailbox_receiver: mpsc::Receiver<Message>,
 
     fetch_timeout: Duration,
-    max_fetch_count: u32,
+    max_fetch_count: u64,
     max_fetch_size: usize,
     fetch_rate_limiter:
         RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
@@ -216,14 +216,25 @@ impl<
     async fn send_block_request(
         &mut self,
         digest: Digest,
-        parents: u32,
+        parents: Height,
         sent: &mut HashSet<PublicKey>,
         sender: &mut impl Sender,
     ) -> Status {
+        // Compute deadline
+        let deadline = self.runtime.current() + self.fetch_timeout;
+        let deadline = deadline
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
         // Create new message
         let msg = wire::Backfiller {
             payload: Some(wire::backfiller::Payload::ProposalRequest(
-                wire::ProposalRequest { digest, parents },
+                wire::ProposalRequest {
+                    deadline,
+                    digest,
+                    parents,
+                },
             )),
         }
         .encode_to_vec()
@@ -236,14 +247,25 @@ impl<
     async fn send_notarization_request(
         &mut self,
         view: View,
-        children: u32,
+        children: View,
         sent: &mut HashSet<PublicKey>,
         sender: &mut impl Sender,
     ) -> Status {
+        // Compute deadline
+        let deadline = self.runtime.current() + self.fetch_timeout;
+        let deadline = deadline
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
         // Create new message
         let msg = wire::Backfiller {
             payload: Some(wire::backfiller::Payload::NotarizationRequest(
-                wire::NotarizationRequest { view, children },
+                wire::NotarizationRequest {
+                    deadline,
+                    view,
+                    children,
+                },
             )),
         }
         .encode_to_vec()
@@ -266,8 +288,8 @@ impl<
             .retain(self.fetch_timeout, validators);
 
         // Wait for an event
-        let mut outstanding_proposal: Option<(Digest, u32, HashSet<PublicKey>, Status)> = None;
-        let mut outstanding_notarization: Option<(View, u32, HashSet<PublicKey>, Status)> = None;
+        let mut outstanding_proposal: Option<(Digest, Height, HashSet<PublicKey>, Status)> = None;
+        let mut outstanding_notarization: Option<(View, View, HashSet<PublicKey>, Status)> = None;
         loop {
             // Set timeout for next proposal
             let proposal_timeout = if let Some((_, _, _, status)) = &outstanding_proposal {
@@ -336,6 +358,17 @@ impl<
                             let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
                             outstanding_proposal = Some((digest, parents, sent, status));
                         },
+                        Message::FilledProposals {recipient, proposals} => {
+                            // Send message
+                            let msg = wire::Backfiller {
+                                payload: Some(wire::backfiller::Payload::ProposalResponse(wire::ProposalResponse {
+                                    proposals,
+                                })),
+                            }
+                            .encode_to_vec()
+                            .into();
+                            sender.send(Recipients::One(recipient), msg, false).await.unwrap();
+                        },
                         Message::Notarizations { view, children } => {
                             // Send message
                             let mut sent = HashSet::new();
@@ -368,29 +401,17 @@ impl<
                                 continue;
                             }
 
-                            // Request proposals from resolver
-                            let (proposals_sender, proposals_receiver) = oneshot::channel();
-                            resolver.proposals(request.digest.clone(), request.parents, self.max_fetch_size, proposals_sender).await;
-
-                            // Wait for response
-                            let proposals = match proposals_receiver.await {
-                                Ok(proposals) => proposals,
-                                Err(err) => {
-                                    warn!(?err, sender = hex(&s), "failed to receive proposals from resolver");
-                                    continue;
-                                },
-                            };
-
-                            // Send response
-                            debug!(digest = hex(&request.digest), requested = request.parents + 1, found = proposals.len(), peer = hex(&s), "responding to backfill request");
-                            let msg =  wire::Backfiller {
-                                payload: Some(wire::backfiller::Payload::ProposalResponse(wire::ProposalResponse {
-                                    proposals,
-                                })),
+                            // Confirm deadline is valid
+                            let request_deadline = SystemTime::UNIX_EPOCH + Duration::from_secs(request.deadline);
+                            let min_deadline = self.runtime.current();
+                            let max_deadline = min_deadline + self.fetch_timeout;
+                            if request_deadline < min_deadline || request_deadline > max_deadline {
+                                warn!(sender = hex(&s), "invalid deadline");
+                                continue;
                             }
-                            .encode_to_vec()
-                            .into();
-                            sender.send(Recipients::One(s), msg, false).await.unwrap();
+
+                            // Request proposals from resolver
+                            resolver.proposals(request.digest.clone(), request.parents, self.max_fetch_size, s, request_deadline).await;
                         },
                         wire::backfiller::Payload::ProposalResponse(response) => {
                             // Ensure this proposal is expected
@@ -577,7 +598,7 @@ impl<
                                     notarizations_found.push(notarization.clone());
 
                                     // If we have all children or we hit our limit, stop
-                                    let fetched = notarizations_found.len() as u32;
+                                    let fetched = notarizations_found.len() as u64;
                                     if fetched == request.children +1 || fetched == self.max_fetch_count {
                                         break;
                                     }

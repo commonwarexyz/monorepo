@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 use crate::authority::{wire, Height, View};
 use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};
@@ -9,10 +7,6 @@ pub enum Message {
     Proposals {
         digest: Digest,
         parents: Height,
-
-        // Avoid processing anything that is past the deadline
-        recipient: PublicKey,
-        deadline: SystemTime,
     },
     FilledProposals {
         recipient: PublicKey,
@@ -28,6 +22,7 @@ pub enum Message {
         notarization: wire::Notarization,
 
         // Used to indicate when to drop old notarizations
+        // we are caching in memory.
         last_finalized: View,
     },
 }
@@ -48,6 +43,17 @@ impl Mailbox {
             .send(Message::Proposals { digest, parents })
             .await
             .expect("Failed to send proposals");
+    }
+
+    pub async fn filled_proposals(&self, recipient: PublicKey, proposals: Vec<wire::Proposal>) {
+        self.sender
+            .clone()
+            .send(Message::FilledProposals {
+                recipient,
+                proposals,
+            })
+            .await
+            .expect("Failed to send filled proposals");
     }
 
     pub async fn notarizations(&self, view: View, children: View) {

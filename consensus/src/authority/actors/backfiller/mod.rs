@@ -6,7 +6,7 @@ use crate::Automaton;
 use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};
 use governor::Quota;
-pub use ingress::{Mailbox, Message};
+pub use ingress::Mailbox;
 use std::time::Duration;
 
 pub struct Config<C: Scheme, H: Hasher, A: Automaton> {
@@ -16,7 +16,7 @@ pub struct Config<C: Scheme, H: Hasher, A: Automaton> {
 
     pub namespace: Bytes,
     pub fetch_timeout: Duration,
-    pub max_fetch_count: u32,
+    pub max_fetch_count: u64,
     pub max_fetch_size: usize,
     pub fetch_rate_per_peer: Quota,
 }

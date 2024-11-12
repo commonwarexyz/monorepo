@@ -853,7 +853,11 @@ impl<
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,
                         Message::Finalized { proposal } => self.finalized(proposal).await,
-                        Message::Proposals { digest, parents, size_limit, response} => {
+                        Message::Proposals { digest, parents, size_limit, recipient, deadline} => {
+                            // If we are out of time at start, drop request
+                            if deadline < self.runtime.current() {
+                                continue;
+                            }
                             unimplemented!();
                         }
                         Message::BackfilledProposals { proposals } => {
