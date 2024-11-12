@@ -854,11 +854,56 @@ impl<
                         Message::Notarized { proposal } => self.notarized(proposal).await,
                         Message::Finalized { proposal } => self.finalized(proposal).await,
                         Message::Proposals { digest, parents, size_limit, recipient, deadline} => {
-                            // If we are out of time at start, drop request
-                            if deadline < self.runtime.current() {
+                            // Populate as many proposals as we can
+                            let mut proposal_bytes = 0; // TODO: add a buffer
+                            let mut proposals = Vec::new();
+                            let mut cursor = digest;
+                            let drop = loop {
+                                // If we are out of time at start, drop request
+                                if deadline < self.runtime.current() {
+                                    break true;
+                                }
+
+                                // Check to see if we have proposal
+                                let proposal = match self.containers.get(&cursor).cloned() {
+                                    Some(proposal) => proposal,
+                                    None => {
+                                        break false;
+                                    }
+                                };
+
+                                // If we don't have any more space, stop
+                                proposal_bytes += proposal.encoded_len();
+                                if proposal_bytes > self.max_fetch_size {
+                                    debug!(
+                                        requested = parents + 1,
+                                        found = proposals.len(),
+                                        peer = hex(&recipient),
+                                        "reached max response size",
+                                    );
+                                    break false;
+                                }
+
+                                // If we do have space, add to proposals
+                                cursor = proposal.parent.clone();
+                                proposals.push(proposal);
+
+                                // If we have all parents requested, stop gathering more
+                                let fetched = proposals.len() as u64;
+                                if fetched == parents + 1 || fetched == self.max_fetch_count {
+                                    break false;
+                                }
+                            };
+                            if drop {
+                                debug!(
+                                    requested = parents + 1,
+                                    found = proposals.len(),
+                                    peer = hex(&recipient),
+                                    "dropping expired backfill request"
+                                );
                                 continue;
                             }
-                            unimplemented!();
+                            backfiller.filled_proposals(recipient, proposals).await;
                         }
                         Message::BackfilledProposals { proposals } => {
                             unimplemented!()

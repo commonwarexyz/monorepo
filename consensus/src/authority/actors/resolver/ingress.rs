@@ -24,7 +24,7 @@ pub enum Message {
     // Request from backfiller for some peer
     Proposals {
         digest: Digest,
-        parents: u32,
+        parents: Height,
         size_limit: usize,
 
         // Recipient already rate-limited by p2p layer, this is just functionally
