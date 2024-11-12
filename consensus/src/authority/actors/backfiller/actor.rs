@@ -30,18 +30,10 @@ use std::{
 };
 use tracing::{debug, warn};
 
+#[derive(Default)]
 struct Notarizations {
     digest: Option<wire::Notarization>,
     null: Option<wire::Notarization>,
-}
-
-impl Default for Notarizations {
-    fn default() -> Self {
-        Self {
-            digest: None,
-            null: None,
-        }
-    }
 }
 
 type Status = (PublicKey, SystemTime, SystemTime);

@@ -4,12 +4,11 @@ use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
         actors::{backfiller, voter, Proposal},
-        encoder::proposal_namespace,
         wire, Context, Height, View,
     },
     Automaton, Finalizer, Payload, Supervisor,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::hex;
 use core::panic;
@@ -28,16 +27,10 @@ enum Knowledge {
 
 pub struct Actor<
     E: Clock + Rng + Spawner,
-    C: Scheme,
-    H: Hasher,
     A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
 > {
     runtime: E,
-    crypto: C,
-    hasher: H,
     application: A,
-
-    proposal_namespace: Vec<u8>,
 
     max_fetch_count: u64,
     max_fetch_size: usize,
@@ -76,12 +69,10 @@ pub struct Actor<
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
 impl<
         E: Clock + Rng + Spawner,
-        C: Scheme,
-        H: Hasher,
         A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
-    > Actor<E, C, H, A>
+    > Actor<E, A>
 {
-    pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, mut cfg: Config<A>) -> (Self, Mailbox) {
         // Create genesis container and store it
         let mut verified = HashMap::new();
         let mut knowledge = HashMap::new();
@@ -107,11 +98,7 @@ impl<
         (
             Self {
                 runtime,
-                crypto: cfg.crypto,
-                hasher: cfg.hasher,
                 application: cfg.application,
-
-                proposal_namespace: proposal_namespace(&cfg.namespace),
 
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
@@ -808,7 +795,7 @@ impl<
 
             // Check if notarization request has been resolved and reissue request (if so)
             if let Some(ref view) = outstanding_notarization_request {
-                if self.notarizations.get(view).is_some() {
+                if self.notarizations.contains_key(view) {
                     debug!(
                         view = view,
                         "unexpected resolution of missing notarization out of backfill"
@@ -816,7 +803,7 @@ impl<
                     outstanding_notarization_request = None;
                 }
             }
-            if outstanding_notarization_request.is_none() && self.notarizations.len() > 0 {
+            if outstanding_notarization_request.is_none() && !self.notarizations.is_empty() {
                 // Find first gap and count the number of missing children at the gap (to the highest notarization)
                 let max = self
                     .notarizations

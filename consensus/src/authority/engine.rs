@@ -20,11 +20,11 @@ pub struct Engine<
 > {
     runtime: E,
 
-    resolver: resolver::Actor<E, C, H, A>,
-    resolver_mailbox: resolver::Mailbox,
-
     voter: voter::Actor<E, C, H, A>,
     voter_mailbox: voter::Mailbox,
+
+    resolver: resolver::Actor<E, A>,
+    resolver_mailbox: resolver::Mailbox,
 
     backfiller: backfiller::Actor<E, C, H, A>,
     backfiller_mailbox: backfiller::Mailbox,
@@ -49,19 +49,6 @@ impl<
             validators.sort();
         }
 
-        // Create resolver
-        let (resolver, resolver_mailbox) = resolver::Actor::new(
-            runtime.clone(),
-            resolver::Config {
-                crypto: cfg.crypto.clone(),
-                hasher: cfg.hasher.clone(),
-                application: cfg.application.clone(),
-                namespace: cfg.namespace.clone(),
-                max_fetch_count: cfg.max_fetch_count,
-                max_fetch_size: cfg.max_fetch_size,
-            },
-        );
-
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
             runtime.clone(),
@@ -76,6 +63,16 @@ impl<
                 null_vote_retry: cfg.null_vote_retry,
                 proposal_retry: cfg.proposal_retry,
                 activity_timeout: cfg.activity_timeout,
+            },
+        );
+
+        // Create resolver
+        let (resolver, resolver_mailbox) = resolver::Actor::new(
+            runtime.clone(),
+            resolver::Config {
+                application: cfg.application.clone(),
+                max_fetch_count: cfg.max_fetch_count,
+                max_fetch_size: cfg.max_fetch_size,
             },
         );
 
@@ -114,29 +111,23 @@ impl<
         voter_network: (impl Sender, impl Receiver),
         backfiller_network: (impl Sender, impl Receiver),
     ) {
-        // Start the resolver
-        let mut resolver = self.runtime.spawn("resolver", {
-            let voter = self.voter_mailbox.clone();
-            let backfiller = self.backfiller_mailbox.clone();
-            async move {
-                self.resolver.run(voter, backfiller).await;
-            }
-        });
-
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
         let mut voter = self.runtime.spawn("voter", {
             let resolver = self.resolver_mailbox.clone();
+            let backfiller = self.backfiller_mailbox.clone();
             async move {
                 self.voter
-                    .run(
-                        resolver,
-                        self.backfiller_mailbox,
-                        voter_sender,
-                        voter_receiver,
-                    )
+                    .run(resolver, backfiller, voter_sender, voter_receiver)
                     .await;
             }
+        });
+
+        // Start the resolver
+        let mut resolver = self.runtime.spawn("resolver", async move {
+            self.resolver
+                .run(self.voter_mailbox, self.backfiller_mailbox)
+                .await;
         });
 
         // Start the backfiller

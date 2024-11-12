@@ -1153,7 +1153,9 @@ impl<
         };
         let notarization_view = notarization.view;
         resolver.notarized(proposal).await;
-        backfiller.notarized(notarization_view, notarization, self.last_finalized);
+        backfiller
+            .notarized(notarization_view, notarization, self.last_finalized)
+            .await;
 
         // Enter next view
         self.enter_view(notarization_view + 1);
@@ -1666,33 +1668,6 @@ impl<
             );
             self.handle_finalization(resolver, finalization).await;
         };
-    }
-
-    fn notarization_observed(&self, view: View) -> bool {
-        if let Some(view_obj) = self.views.get(&view) {
-            if view_obj.broadcast_proposal_notarization {
-                return true;
-            }
-            if view_obj.broadcast_null_notarization {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn get_next_missing(&self) -> Option<(View, View)> {
-        let mut base = None;
-        let mut next = self.last_finalized + 1;
-        while next < self.view {
-            if self.notarization_observed(next) {
-                break;
-            }
-            if base.is_none() {
-                base = Some(next);
-            }
-            next += 1;
-        }
-        base.map(|base| (base, next - base - 1))
     }
 
     pub async fn run(
