@@ -3,7 +3,7 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
-        actors::{voter, Proposal},
+        actors::{backfiller, voter, Proposal},
         encoder::{proposal_message, proposal_namespace},
         wire, Context, Height, View,
     },
@@ -733,12 +733,7 @@ impl<
         }
     }
 
-    async fn send_request(
-        &mut self,
-        height: Height,
-        digest: Digest,
-        sender: &mut impl Sender,
-    ) -> PublicKey {
+    async fn send_request(&mut self, height: Height) -> Height {
         // Compute missing containers from digest
         let mut parents = 0;
         loop {
@@ -780,106 +775,19 @@ impl<
             // If we have no knowledge of a height, we need to fetch it
             parents += 1;
         }
-
-        // Send the request
-        let msg: Bytes = wire::Backfill {
-            payload: Some(wire::backfill::Payload::Request(wire::Request {
-                digest: digest.clone(),
-                parents,
-            })),
-        }
-        .encode_to_vec()
-        .into();
-
-        // Get validators from highest view we know about
-        let validators = self.application.participants(self.last_notarized).unwrap();
-
-        // Generate a shuffle
-        let mut validator_indices = (0..validators.len()).collect::<Vec<_>>();
-        validator_indices.shuffle(&mut self.runtime);
-
-        // Minimize footprint of rate limiter
-        self.fetch_rate_limiter.shrink_to_fit();
-
-        // Loop until we send a message
-        let mut index = 0;
-        loop {
-            // Check if we have exhausted all validators
-            if index == validators.len() {
-                warn!(
-                    height,
-                    last_notarized = self.last_notarized,
-                    "failed to send request to any validator"
-                );
-
-                // Avoid busy looping when disconnected
-                self.runtime.sleep(self.fetch_timeout).await;
-                index = 0;
-            }
-
-            // Select random validator to fetch from
-            let validator = validators[validator_indices[index]].clone();
-            if validator == self.crypto.public_key() {
-                index += 1;
-                continue;
-            }
-
-            // Check if rate limit is exceeded
-            if self.fetch_rate_limiter.check_key(&validator).is_err() {
-                debug!(
-                    height,
-                    digest = hex(&digest),
-                    peer = hex(&validator),
-                    "skipping request because rate limited"
-                );
-                index += 1;
-                continue;
-            }
-
-            // Send message
-            if !sender
-                .send(Recipients::One(validator.clone()), msg.clone(), true)
-                .await
-                .unwrap()
-                .is_empty()
-            {
-                debug!(
-                    height,
-                    digest = hex(&digest),
-                    peer = hex(&validator),
-                    parents,
-                    last_notarized = self.last_notarized,
-                    "requested missing proposal"
-                );
-                return validator;
-            }
-
-            // Try again
-            debug!(
-                height,
-                digest = hex(&digest),
-                peer = hex(&validator),
-                "failed to send backfill request"
-            );
-            index += 1;
-        }
+        parents
     }
 
-    pub async fn run(
-        mut self,
-        voter: &mut voter::Mailbox,
-        mut sender: impl Sender,
-        mut receiver: impl Receiver,
-    ) {
-        let mut outstanding_task: Option<(PublicKey, Height, Digest, SystemTime)> = None;
+    pub async fn run(mut self, voter: &mut voter::Mailbox, backfiller: &mut backfiller::Mailbox) {
+        let mut outstanding_task: Option<(Height, Digest)> = None;
         loop {
             // Ensure task has not been resolved
-            if let Some((_, ref height, ref digest, _)) = outstanding_task {
+            if let Some((ref height, ref digest)) = outstanding_task {
                 if self.containers.contains_key(digest) {
                     debug!(
                         height,
                         digest = hex(digest),
-                        "unexpeted resolution of missing proposal out of backfill"
+                        "unexpected resolution of missing proposal out of backfill"
                     );
                     outstanding_task = None;
                 }
@@ -895,41 +803,21 @@ impl<
                     }
 
                     // Send request
-                    let validator = self.send_request(height, digest.clone(), &mut sender).await;
+                    let parents = self.send_request(height).await;
 
-                    // Set timeout
-                    debug!(
-                        height,
-                        digest = hex(&digest),
-                        peer = hex(&validator),
-                        "requesting missing proposal"
-                    );
-                    outstanding_task = Some((
-                        validator,
-                        height,
-                        digest,
-                        self.runtime.current() + self.fetch_timeout,
-                    ));
+                    // Send to backfiller
+                    //
+                    // This will overwrite any existing request in the backfiller.
+                    debug!(height, digest = hex(&digest), "requesting missing proposal");
+                    outstanding_task = Some((height, digest));
+                    backfiller.proposals(digest, parents).await;
                 }
             };
 
-            // Avoid arbitrarily long sleep
-            let missing_timeout = if let Some((_, _, _, ref deadline)) = outstanding_task {
-                Either::Left(self.runtime.sleep_until(*deadline))
-            } else {
-                Either::Right(futures::future::pending())
-            };
+            // TODO: look for next missing notarization above finalization
 
             // Wait for an event
             select! {
-                _ = missing_timeout => {
-                    // Send request again
-                    let (_, height, digest, _)= outstanding_task.take().unwrap();
-                    let validator = self.send_request(height, digest.clone(), &mut sender).await;
-
-                    // Reset timeout
-                    outstanding_task = Some((validator, height, digest, self.runtime.current() + self.fetch_timeout));
-                },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
@@ -965,6 +853,15 @@ impl<
                         }
                         Message::Notarized { proposal } => self.notarized(proposal).await,
                         Message::Finalized { proposal } => self.finalized(proposal).await,
+                        Message::Proposals { digest, parents, size_limit, response} => {
+                            unimplemented!();
+                        }
+                        Message::BackfilledProposals { proposals } => {
+                            unimplemented!()
+                        }
+                        Message::BackfilledNotarizations { notarizations } => {
+                            unimplemented!();
+                        }
                     };
                 },
                 network = receiver.recv() => {

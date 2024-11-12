@@ -1,4 +1,4 @@
-use crate::authority::{wire, View};
+use crate::authority::{wire, Height, View};
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 
@@ -6,11 +6,11 @@ pub enum Message {
     // From resolver
     Proposals {
         digest: Digest,
-        parents: u32,
+        parents: Height,
     },
     Notarizations {
         view: View,
-        children: u32,
+        children: View,
     },
     // From voter
     Notarized {
@@ -32,7 +32,7 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn proposals(&self, digest: Digest, parents: u32) {
+    pub async fn proposals(&self, digest: Digest, parents: Height) {
         self.sender
             .clone()
             .send(Message::Proposals { digest, parents })
@@ -40,7 +40,7 @@ impl Mailbox {
             .expect("Failed to send proposals");
     }
 
-    pub async fn notarizations(&self, view: View, children: u32) {
+    pub async fn notarizations(&self, view: View, children: View) {
         self.sender
             .clone()
             .send(Message::Notarizations { view, children })
