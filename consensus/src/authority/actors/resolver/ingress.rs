@@ -23,9 +23,7 @@ pub enum Message {
     Proposals {
         digest: Digest,
         parents: u32,
-
         size_limit: usize,
-        response: oneshot::Sender<Vec<wire::Proposal>>,
     },
     BackfilledProposals {
         proposals: Vec<wire::Proposal>,

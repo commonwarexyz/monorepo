@@ -1,5 +1,7 @@
+use std::time::SystemTime;
+
 use crate::authority::{wire, Height, View};
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {
@@ -7,6 +9,14 @@ pub enum Message {
     Proposals {
         digest: Digest,
         parents: Height,
+
+        // Avoid processing anything that is past the deadline
+        recipient: PublicKey,
+        deadline: SystemTime,
+    },
+    FilledProposals {
+        recipient: PublicKey,
+        proposals: Vec<wire::Proposal>,
     },
     Notarizations {
         view: View,
