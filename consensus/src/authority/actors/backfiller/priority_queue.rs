@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 #[derive(Eq, PartialEq, Clone)]
-struct Entry {
+pub struct Entry {
     duration: Duration,
     pub public_key: PublicKey,
 }

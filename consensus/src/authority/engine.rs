@@ -1,5 +1,5 @@
 use super::{
-    actors::{resolver, voter},
+    actors::{backfiller, resolver, voter},
     config::Config,
     Context, View,
 };
@@ -25,6 +25,9 @@ pub struct Engine<
 
     voter: voter::Actor<E, C, H, A>,
     voter_mailbox: voter::Mailbox,
+
+    backfiller: backfiller::Actor<E, C, H, A>,
+    backfiller_mailbox: backfiller::Mailbox,
 }
 
 impl<
@@ -54,10 +57,8 @@ impl<
                 hasher: cfg.hasher.clone(),
                 application: cfg.application.clone(),
                 namespace: cfg.namespace.clone(),
-                fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
-                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
             },
         );
 
@@ -65,20 +66,31 @@ impl<
         let (voter, voter_mailbox) = voter::Actor::new(
             runtime.clone(),
             voter::Config {
-                crypto: cfg.crypto,
-                hasher: cfg.hasher,
-                application: cfg.application,
+                crypto: cfg.crypto.clone(),
+                hasher: cfg.hasher.clone(),
+                application: cfg.application.clone(),
                 registry: cfg.registry,
-                namespace: cfg.namespace,
+                namespace: cfg.namespace.clone(),
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 null_vote_retry: cfg.null_vote_retry,
                 proposal_retry: cfg.proposal_retry,
+                activity_timeout: cfg.activity_timeout,
+            },
+        );
+
+        // Create backfiller
+        let (backfiller, backfiller_mailbox) = backfiller::Actor::new(
+            runtime.clone(),
+            backfiller::Config {
+                crypto: cfg.crypto,
+                hasher: cfg.hasher,
+                application: cfg.application,
+                namespace: cfg.namespace,
                 fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
                 fetch_rate_per_peer: cfg.fetch_rate_per_peer,
-                activity_timeout: cfg.activity_timeout,
             },
         );
 
@@ -91,27 +103,52 @@ impl<
 
             voter,
             voter_mailbox,
+
+            backfiller,
+            backfiller_mailbox,
         }
     }
 
     pub async fn run(
-        mut self,
-        resolver_network: (impl Sender, impl Receiver),
+        self,
         voter_network: (impl Sender, impl Receiver),
+        backfiller_network: (impl Sender, impl Receiver),
     ) {
         // Start the resolver
-        let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver = self.runtime.spawn("resolver", async move {
-            self.resolver
-                .run(&mut self.voter_mailbox, resolver_sender, resolver_receiver)
-                .await;
+        let mut resolver = self.runtime.spawn("resolver", {
+            let voter = self.voter_mailbox.clone();
+            let backfiller = self.backfiller_mailbox.clone();
+            async move {
+                self.resolver.run(voter, backfiller).await;
+            }
         });
 
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
-        let mut voter = self.runtime.spawn("voter", async move {
-            self.voter
-                .run(&mut self.resolver_mailbox, voter_sender, voter_receiver)
+        let mut voter = self.runtime.spawn("voter", {
+            let resolver = self.resolver_mailbox.clone();
+            async move {
+                self.voter
+                    .run(
+                        resolver,
+                        self.backfiller_mailbox,
+                        voter_sender,
+                        voter_receiver,
+                    )
+                    .await;
+            }
+        });
+
+        // Start the backfiller
+        let (backfiller_sender, backfiller_receiver) = backfiller_network;
+        let mut backfiller = self.runtime.spawn("backfiller", async move {
+            self.backfiller
+                .run(
+                    0,
+                    self.resolver_mailbox,
+                    backfiller_sender,
+                    backfiller_receiver,
+                )
                 .await;
         });
 
@@ -120,10 +157,17 @@ impl<
             _ = &mut resolver => {
                 debug!("resolver finished");
                 voter.abort();
+                backfiller.abort();
             },
             _ = &mut voter => {
                 debug!("voter finished");
                 resolver.abort();
+                backfiller.abort();
+            },
+            _ = &mut backfiller => {
+                debug!("backfiller finished");
+                resolver.abort();
+                voter.abort();
             },
         }
     }

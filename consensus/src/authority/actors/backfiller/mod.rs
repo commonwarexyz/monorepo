@@ -3,6 +3,7 @@ mod ingress;
 mod priority_queue;
 
 use crate::Automaton;
+pub use actor::Actor;
 use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};
 use governor::Quota;

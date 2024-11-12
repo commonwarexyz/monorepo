@@ -45,13 +45,13 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
 
     pub async fn run(
         mut self,
-        _resolver_network: (impl Sender, impl Receiver),
         voter_network: (impl Sender, impl Receiver),
+        _backfiller_network: (impl Sender, impl Receiver),
     ) {
         let (mut sender, mut receiver) = voter_network;
         while let Ok((s, msg)) = receiver.recv().await {
             // Parse message
-            let msg = match wire::Consensus::decode(msg) {
+            let msg = match wire::Voter::decode(msg) {
                 Ok(msg) => msg,
                 Err(err) => {
                     debug!(?err, sender = hex(&s), "failed to decode message");
@@ -68,7 +68,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
 
             // Process message
             match payload {
-                wire::consensus::Payload::Vote(vote) => {
+                wire::voter::Payload::Vote(vote) => {
                     // If null vote, skip
                     if vote.height.is_none() || vote.digest.is_none() {
                         continue;
@@ -89,8 +89,8 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                             ),
                         }),
                     };
-                    let msg = wire::Consensus {
-                        payload: Some(wire::consensus::Payload::Vote(vo)),
+                    let msg = wire::Voter {
+                        payload: Some(wire::voter::Payload::Vote(vo)),
                     }
                     .encode_to_vec();
                     sender
@@ -112,8 +112,8 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                             ),
                         }),
                     };
-                    let msg = wire::Consensus {
-                        payload: Some(wire::consensus::Payload::Vote(vo)),
+                    let msg = wire::Voter {
+                        payload: Some(wire::voter::Payload::Vote(vo)),
                     }
                     .encode_to_vec();
                     sender
@@ -121,7 +121,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                         .await
                         .unwrap();
                 }
-                wire::consensus::Payload::Finalize(finalize) => {
+                wire::voter::Payload::Finalize(finalize) => {
                     // Finalize provided digest
                     let fin = wire::Finalize {
                         view: finalize.view,
@@ -135,8 +135,8 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                             ),
                         }),
                     };
-                    let msg = wire::Consensus {
-                        payload: Some(wire::consensus::Payload::Finalize(fin)),
+                    let msg = wire::Voter {
+                        payload: Some(wire::voter::Payload::Finalize(fin)),
                     }
                     .encode_to_vec();
                     sender
@@ -158,8 +158,8 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                             ),
                         }),
                     };
-                    let msg = wire::Consensus {
-                        payload: Some(wire::consensus::Payload::Finalize(fin)),
+                    let msg = wire::Voter {
+                        payload: Some(wire::voter::Payload::Finalize(fin)),
                     }
                     .encode_to_vec();
                     sender
@@ -192,8 +192,8 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher> Conflicter<E, C
                                     .sign(&self.proposal_namespace, &proposal_message),
                             }),
                         };
-                        let msg = wire::Consensus {
-                            payload: Some(wire::consensus::Payload::Proposal(proposal)),
+                        let msg = wire::Voter {
+                            payload: Some(wire::voter::Payload::Proposal(proposal)),
                         }
                         .encode_to_vec();
                         sender

@@ -274,7 +274,7 @@ impl<
     pub async fn run(
         mut self,
         last_notarized: View,
-        resolver: &mut resolver::Mailbox,
+        mut resolver: resolver::Mailbox,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {

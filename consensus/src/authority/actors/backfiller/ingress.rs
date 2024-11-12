@@ -37,17 +37,15 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn proposals(&self, digest: Digest, parents: Height) {
+    pub async fn proposals(&mut self, digest: Digest, parents: Height) {
         self.sender
-            .clone()
             .send(Message::Proposals { digest, parents })
             .await
             .expect("Failed to send proposals");
     }
 
-    pub async fn filled_proposals(&self, recipient: PublicKey, proposals: Vec<wire::Proposal>) {
+    pub async fn filled_proposals(&mut self, recipient: PublicKey, proposals: Vec<wire::Proposal>) {
         self.sender
-            .clone()
             .send(Message::FilledProposals {
                 recipient,
                 proposals,
@@ -56,22 +54,20 @@ impl Mailbox {
             .expect("Failed to send filled proposals");
     }
 
-    pub async fn notarizations(&self, view: View, children: View) {
+    pub async fn notarizations(&mut self, view: View, children: View) {
         self.sender
-            .clone()
             .send(Message::Notarizations { view, children })
             .await
             .expect("Failed to send notarizations");
     }
 
     pub async fn notarized(
-        &self,
+        &mut self,
         view: View,
         notarization: wire::Notarization,
         last_finalized: View,
     ) {
         self.sender
-            .clone()
             .send(Message::Notarized {
                 view,
                 notarization,

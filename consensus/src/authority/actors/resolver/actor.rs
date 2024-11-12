@@ -771,7 +771,7 @@ impl<
         parents
     }
 
-    pub async fn run(mut self, voter: &mut voter::Mailbox, backfiller: &mut backfiller::Mailbox) {
+    pub async fn run(mut self, mut voter: voter::Mailbox, mut backfiller: backfiller::Mailbox) {
         let mut outstanding_proposal_request: Option<(Height, Digest)> = None;
         let mut outstanding_notarization_request: Option<View> = None;
         loop {

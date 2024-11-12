@@ -1697,8 +1697,8 @@ impl<
 
     pub async fn run(
         mut self,
-        resolver: &mut resolver::Mailbox,
-        backfiller: &mut backfiller::Mailbox,
+        mut resolver: resolver::Mailbox,
+        mut backfiller: backfiller::Mailbox,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
@@ -1712,7 +1712,7 @@ impl<
         // Process messages
         loop {
             // Attempt to propose a container
-            let propose_retry = match self.propose(resolver).await {
+            let propose_retry = match self.propose(&mut resolver).await {
                 Some(retry) => Either::Left(self.runtime.sleep_until(retry)),
                 None => Either::Right(futures::future::pending()),
             };
@@ -1821,7 +1821,7 @@ impl<
                                 continue;
                             }
                             view = proposal.view;
-                            self.peer_proposal(resolver, proposal).await;
+                            self.peer_proposal(&mut resolver, proposal).await;
                         }
                         wire::voter::Payload::Vote(vote) => {
                             if let Some(vote_digest) = vote.digest.as_ref() {
@@ -1855,7 +1855,7 @@ impl<
                                 continue;
                             }
                             view = notarization.view;
-                            self.notarization(resolver, backfiller, notarization).await;
+                            self.notarization(&mut resolver, &mut backfiller, notarization).await;
                         }
                         wire::voter::Payload::Finalize(finalize) => {
                             if !H::validate(&finalize.digest) {
@@ -1871,14 +1871,14 @@ impl<
                                 continue;
                             }
                             view = finalization.view;
-                            self.finalization(resolver, finalization).await;
+                            self.finalization(&mut resolver, finalization).await;
                         }
                     };
                 },
             };
 
             // Attempt to send any new view messages
-            self.broadcast(resolver, backfiller, &mut sender, view)
+            self.broadcast(&mut resolver, &mut backfiller, &mut sender, view)
                 .await;
 
             // After sending all required messages, prune any views
