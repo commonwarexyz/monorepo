@@ -930,7 +930,14 @@ impl<
 
                         }
                         Message::BackfilledNotarizations { notarizations } => {
-                            unimplemented!();
+                            for notarization in notarizations {
+                                let notarization = if notarization.digest.is_none() {
+                                    Proposal::Null(notarization.view)
+                                } else {
+                                    Proposal::Reference(notarization.view, notarization.height.unwrap(), notarization.digest.unwrap())
+                                };
+                                self.notarized(notarization).await;
+                            }
                         }
                     };
                 },
