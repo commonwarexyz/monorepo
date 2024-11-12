@@ -809,7 +809,7 @@ impl<
                     //
                     // This will overwrite any existing request in the backfiller.
                     debug!(height, digest = hex(&digest), "requesting missing proposal");
-                    outstanding_task = Some((height, digest));
+                    outstanding_task = Some((height, digest.clone()));
                     backfiller.proposals(digest, parents).await;
                 }
             };
@@ -817,326 +817,142 @@ impl<
             // TODO: look for next missing notarization above finalization
 
             // Wait for an event
-            select! {
-                mailbox = self.mailbox_receiver.next() => {
-                    let msg = mailbox.unwrap();
-                    match msg {
-                        Message::Propose { view, proposer } => {
-                            let (parent, height, payload, payload_digest)= match self.propose(view, proposer).await{
-                                Some(proposal) => proposal,
-                                None => {
-                                    voter.proposal_failed(view).await;
-                                    continue;
-                                }
-                            };
-                            voter.proposal(view, parent, height, payload, payload_digest).await;
-                        }
-                        Message::Verify { container, proposal } => {
-                            // If proposal height is already finalized, fail
-                            //
-                            // We will only verify old proposals via notify loop.
-                            if proposal.height <= self.last_finalized {
-                                debug!(
-                                    height = proposal.height,
-                                    finalized = self.last_finalized,
-                                    "already finalized"
-                                );
+            let msg = self.mailbox_receiver.next().await.unwrap();
+            match msg {
+                Message::Propose { view, proposer } => {
+                    let (parent, height, payload, payload_digest) =
+                        match self.propose(view, proposer).await {
+                            Some(proposal) => proposal,
+                            None => {
+                                voter.proposal_failed(view).await;
                                 continue;
                             }
+                        };
+                    voter
+                        .proposal(view, parent, height, payload, payload_digest)
+                        .await;
+                }
+                Message::Verify {
+                    container,
+                    proposal,
+                } => {
+                    // If proposal height is already finalized, fail
+                    //
+                    // We will only verify old proposals via notify loop.
+                    if proposal.height <= self.last_finalized {
+                        debug!(
+                            height = proposal.height,
+                            finalized = self.last_finalized,
+                            "already finalized"
+                        );
+                        continue;
+                    }
 
-                            // Attempt to verify proposal
-                            let proposal_view = proposal.view;
-                            if !self.verify(container, proposal).await {
-                                continue;
-                            }
-                            voter.verified(proposal_view).await;
+                    // Attempt to verify proposal
+                    let proposal_view = proposal.view;
+                    if !self.verify(container, proposal).await {
+                        continue;
+                    }
+                    voter.verified(proposal_view).await;
+                }
+                Message::Notarized { proposal } => self.notarized(proposal).await,
+                Message::Finalized { proposal } => self.finalized(proposal).await,
+                Message::Proposals {
+                    digest,
+                    parents,
+                    size_limit,
+                    recipient,
+                    deadline,
+                } => {
+                    // Populate as many proposals as we can
+                    let mut proposal_bytes = 0; // TODO: add a buffer
+                    let mut proposals = Vec::new();
+                    let mut cursor = digest;
+                    let drop = loop {
+                        // If we are out of time at start, drop request
+                        if deadline < self.runtime.current() {
+                            break true;
                         }
-                        Message::Notarized { proposal } => self.notarized(proposal).await,
-                        Message::Finalized { proposal } => self.finalized(proposal).await,
-                        Message::Proposals { digest, parents, size_limit, recipient, deadline} => {
-                            // Populate as many proposals as we can
-                            let mut proposal_bytes = 0; // TODO: add a buffer
-                            let mut proposals = Vec::new();
-                            let mut cursor = digest;
-                            let drop = loop {
-                                // If we are out of time at start, drop request
-                                if deadline < self.runtime.current() {
-                                    break true;
-                                }
 
-                                // Check to see if we have proposal
-                                let proposal = match self.containers.get(&cursor).cloned() {
-                                    Some(proposal) => proposal,
-                                    None => {
-                                        break false;
-                                    }
-                                };
-
-                                // If we don't have any more space, stop
-                                proposal_bytes += proposal.encoded_len();
-                                if proposal_bytes > self.max_fetch_size {
-                                    debug!(
-                                        requested = parents + 1,
-                                        found = proposals.len(),
-                                        peer = hex(&recipient),
-                                        "reached max response size",
-                                    );
-                                    break false;
-                                }
-
-                                // If we do have space, add to proposals
-                                cursor = proposal.parent.clone();
-                                proposals.push(proposal);
-
-                                // If we have all parents requested, stop gathering more
-                                let fetched = proposals.len() as u64;
-                                if fetched == parents + 1 || fetched == self.max_fetch_count {
-                                    break false;
-                                }
-                            };
-                            if drop {
-                                debug!(
-                                    requested = parents + 1,
-                                    found = proposals.len(),
-                                    peer = hex(&recipient),
-                                    "dropping expired backfill request"
-                                );
-                                continue;
+                        // Check to see if we have proposal
+                        let proposal = match self.containers.get(&cursor).cloned() {
+                            Some(proposal) => proposal,
+                            None => {
+                                break false;
                             }
-                            backfiller.filled_proposals(recipient, proposals).await;
+                        };
+
+                        // If we don't have any more space, stop
+                        proposal_bytes += proposal.encoded_len();
+                        if proposal_bytes > self.max_fetch_size {
+                            debug!(
+                                requested = parents + 1,
+                                found = proposals.len(),
+                                peer = hex(&recipient),
+                                "reached max response size",
+                            );
+                            break false;
                         }
-                        Message::BackfilledProposals { proposals } => {
-                            let mut next = None;
-                            for (digest, proposal) in proposals {
-                                // Ensure this is the container we want
-                                let proposal = Proposal::Populated(digest, proposal);
-                                next = self.resolve(proposal);
 
-                                // Notify application if we can
-                                self.notify().await;
+                        // If we do have space, add to proposals
+                        cursor = proposal.parent.clone();
+                        proposals.push(proposal);
 
-                                // Stop processing if we don't need anything else
-                                if next.is_none() {
-                                    break;
-                                }
-                            }
-
-                            // Notify missing if next is not none
-                            if let Some((height, digest)) = next {
-                                // By waiting to register missing until the end, we avoid a bunch of unnecessary
-                                // backfill request additions.
-                                self.register_missing(height, digest).await;
-                            }
-
-                        }
-                        Message::BackfilledNotarizations { notarizations } => {
-                            for notarization in notarizations {
-                                let notarization = if notarization.digest.is_none() {
-                                    Proposal::Null(notarization.view)
-                                } else {
-                                    Proposal::Reference(notarization.view, notarization.height.unwrap(), notarization.digest.unwrap())
-                                };
-                                self.notarized(notarization).await;
-                            }
+                        // If we have all parents requested, stop gathering more
+                        let fetched = proposals.len() as u64;
+                        if fetched == parents + 1 || fetched == self.max_fetch_count {
+                            break false;
                         }
                     };
-                },
-                network = receiver.recv() => {
-                    let (s, msg) = network.unwrap();
-                    let msg = match wire::Backfill::decode(msg) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            warn!(?err, sender = hex(&s), "failed to decode message");
-                            continue;
-                        }
-                    };
-                    let payload = match msg.payload {
-                        Some(payload) => payload,
-                        None => {
-                            warn!(sender = hex(&s), "message missing payload");
-                            continue;
-                        }
-                    };
-                    match payload {
-                        wire::backfill::Payload::Request(request) => {
-                            // Confirm request is valid
-                            if !H::validate(&request.digest) {
-                                warn!(sender = hex(&s), "invalid request digest size");
-                                continue;
-                            }
+                    if drop {
+                        debug!(
+                            requested = parents + 1,
+                            found = proposals.len(),
+                            peer = hex(&recipient),
+                            "dropping expired backfill request"
+                        );
+                        continue;
+                    }
+                    backfiller.filled_proposals(recipient, proposals).await;
+                }
+                Message::BackfilledProposals { proposals } => {
+                    let mut next = None;
+                    for (digest, proposal) in proposals {
+                        // Ensure this is the container we want
+                        let proposal = Proposal::Populated(digest, proposal);
+                        next = self.resolve(proposal);
 
-                            // Populate as many proposals as we can
-                            let mut proposal_bytes = 0; // TODO: add a buffer
-                            let mut proposals = Vec::new();
-                            let mut cursor = request.digest.clone();
-                            loop {
-                                // Check to see if we have proposal
-                                let proposal = match self.containers.get(&cursor).cloned() {
-                                    Some(proposal) => proposal,
-                                    None => {
-                                        break;
-                                    }
-                                };
+                        // Notify application if we can
+                        self.notify().await;
 
-                                // If we don't have any more space, stop
-                                proposal_bytes += proposal.encoded_len();
-                                if proposal_bytes > self.max_fetch_size {
-                                    debug!(
-                                        requested = request.parents + 1,
-                                        found = proposals.len(),
-                                        peer = hex(&s),
-                                        "reached max response size",
-                                    );
-                                    break;
-                                }
-
-                                // If we do have space, add to proposals
-                                cursor = proposal.parent.clone();
-                                proposals.push(proposal);
-
-                                // If we have all parents requested, stop gathering more
-                                let fetched = proposals.len() as u64;
-                                if fetched == request.parents + 1 || fetched == self.max_fetch_count {
-                                    break;
-                                }
-                            }
-
-                            // Send messages
-                            debug!(digest = hex(&request.digest), requested = request.parents + 1, found = proposals.len(), peer = hex(&s), "responding to backfill request");
-                            let msg =  wire::Backfill {
-                                payload: Some(wire::backfill::Payload::Resolution(wire::Resolution {
-                                    proposals,
-                                })),
-                            };
-                            sender.send(Recipients::One(s), msg.encode_to_vec().into(), false).await.unwrap();
-                        }
-                        wire::backfill::Payload::Resolution(resolution) => {
-                            // If we arent' expecting any proposals, ignore
-                            if let Some((ref mut validator, _, _, _)) = outstanding_task {
-                                if *validator != s {
-                                    continue;
-                                }
-                            }
-
-                            // Parse proposals
-                            let mut next = None;
-                            for proposal in resolution.proposals {
-                                // Ensure this is the container we want
-                                if !H::validate(&proposal.parent) {
-                                    warn!(sender = hex(&s), "invalid proposal parent digest size");
-                                    break;
-                                }
-                                let payload_digest = match self.application.parse(proposal.payload.clone()).await {
-                                    Some(payload_digest) => payload_digest,
-                                    None => {
-                                        warn!(sender = hex(&s), "unable to parse notarized/finalized payload");
-                                        break;
-                                    }
-                                };
-                                let proposal_message = proposal_message(
-                                    proposal.view,
-                                    proposal.height,
-                                    &proposal.parent,
-                                    &payload_digest,
-                                );
-                                self.hasher.update(&proposal_message);
-                                let proposal_digest = self.hasher.finalize();
-                                if let Some((height, ref digest)) = next {
-                                    if proposal.height != height || proposal_digest != digest {
-                                        warn!(sender = hex(&s), "received invalid batch proposal");
-                                        break;
-                                    }
-                                }
-
-                                // Verify leader signature
-                                //
-                                // TODO: remove duplicate code shared with voter
-                                let signature = match &proposal.signature {
-                                    Some(signature) => signature,
-                                    None => {
-                                        warn!(sender = hex(&s), "missing proposal signature");
-                                        break;
-                                    }
-                                };
-                                if !C::validate(&signature.public_key) {
-                                    warn!(sender = hex(&s), "invalid proposal public key");
-                                    break;
-                                }
-                                let expected_leader = match self.leader(proposal.view) {
-                                    Some(leader) => leader,
-                                    None => {
-                                        debug!(
-                                            proposal_leader = hex(&signature.public_key),
-                                            reason = "unable to compute leader",
-                                            "dropping proposal"
-                                        );
-                                        break;
-                                    }
-                                };
-                                if expected_leader != signature.public_key {
-                                    debug!(
-                                        proposal_leader = hex(&signature.public_key),
-                                        view_leader = hex(&expected_leader),
-                                        reason = "leader mismatch",
-                                        "dropping proposal"
-                                    );
-                                    break;
-                                }
-                                if !C::verify(
-                                    &self.proposal_namespace,
-                                    &proposal_message,
-                                    &signature.public_key,
-                                    &signature.signature,
-                                ) {
-                                    warn!(sender = hex(&s), "invalid proposal signature");
-                                    break;
-                                }
-
-
-                                // Record the proposal
-                                let height = proposal.height;
-                                debug!(height, digest = hex(&proposal_digest), peer = hex(&s), "received proposal via backfill");
-                                let proposal = Proposal::Populated(proposal_digest.clone(), proposal.clone());
-                                next = self.resolve(proposal);
-
-                                // Remove outstanding task if we were waiting on this
-                                //
-                                // Note, we don't care if we are sent the proposal from someone unexpected (although
-                                // this is unexpected).
-                                if let Some(ref outstanding) = outstanding_task {
-                                    if outstanding.2 == proposal_digest {
-                                        debug!(height = outstanding.1, digest = hex(&proposal_digest), peer = hex(&s), "resolved missing proposal via backfill");
-                                        outstanding_task = None;
-                                    }
-                                }
-
-                                // Notify application if we can
-                                self.notify().await;
-
-                                // Stop processing if we don't need anything else
-                                if next.is_none() {
-                                    break;
-                                }
-                            }
-
-                            // Notify missing if next is not none
-                            if let Some((height, digest)) = next {
-                                // By waiting to register missing until the end, we avoid a bunch of unnecessary
-                                // backfill request additions.
-                                self.register_missing(height, digest).await;
-                            }
-
-                            // Reset outstanding task if it was not resolved
-                            //
-                            // Missing is a channel and thus we need to re-enqueue request if not satisfied.
-                            if let Some(outstanding) = outstanding_task {
-                                let validator = self.send_request(outstanding.1, outstanding.2.clone(), &mut sender).await;
-                                outstanding_task = Some((validator, outstanding.1, outstanding.2, self.runtime.current() + self.fetch_timeout));
-                            }
+                        // Stop processing if we don't need anything else
+                        if next.is_none() {
+                            break;
                         }
                     }
-                },
-            }
+
+                    // Notify missing if next is not none
+                    if let Some((height, digest)) = next {
+                        // By waiting to register missing until the end, we avoid a bunch of unnecessary
+                        // backfill request additions.
+                        self.register_missing(height, digest).await;
+                    }
+                }
+                Message::BackfilledNotarizations { notarizations } => {
+                    for notarization in notarizations {
+                        let notarization = if notarization.digest.is_none() {
+                            Proposal::Null(notarization.view)
+                        } else {
+                            Proposal::Reference(
+                                notarization.view,
+                                notarization.height.unwrap(),
+                                notarization.digest.unwrap(),
+                            )
+                        };
+                        self.notarized(notarization).await;
+                    }
+                }
+            };
         }
     }
 }
