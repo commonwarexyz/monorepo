@@ -1,6 +1,9 @@
 use crate::authority::{actors::Proposal, wire, View};
 use commonware_cryptography::{Digest, PublicKey};
-use futures::{channel::mpsc, SinkExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt,
+};
 
 pub enum Message {
     Propose {
@@ -16,6 +19,19 @@ pub enum Message {
     },
     Finalized {
         proposal: Proposal,
+    },
+    Proposals {
+        digest: Digest,
+        parents: u32,
+
+        size_limit: usize,
+        response: oneshot::Sender<Vec<wire::Proposal>>,
+    },
+    BackfilledProposals {
+        proposals: Vec<wire::Proposal>,
+    },
+    BackfilledNotarizations {
+        notarizations: Vec<wire::Notarization>,
     },
 }
 
@@ -56,6 +72,38 @@ impl Mailbox {
     pub async fn finalized(&mut self, proposal: Proposal) {
         self.sender
             .send(Message::Finalized { proposal })
+            .await
+            .unwrap();
+    }
+
+    pub async fn proposals(
+        &mut self,
+        digest: Digest,
+        parents: u32,
+        size_limit: usize,
+        response: oneshot::Sender<Vec<wire::Proposal>>,
+    ) {
+        self.sender
+            .send(Message::Proposals {
+                digest,
+                parents,
+                size_limit,
+                response,
+            })
+            .await
+            .unwrap();
+    }
+
+    pub async fn backfilled_proposals(&mut self, proposals: Vec<wire::Proposal>) {
+        self.sender
+            .send(Message::BackfilledProposals { proposals })
+            .await
+            .unwrap();
+    }
+
+    pub async fn backfilled_notarizations(&mut self, notarizations: Vec<wire::Notarization>) {
+        self.sender
+            .send(Message::BackfilledNotarizations { notarizations })
             .await
             .unwrap();
     }
