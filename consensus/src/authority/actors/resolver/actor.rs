@@ -56,7 +56,6 @@ pub struct Actor<
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
-    null_notarizations: BTreeSet<View>,
     knowledge: HashMap<Height, Knowledge>,
     containers: HashMap<Digest, wire::Proposal>,
 
@@ -68,6 +67,10 @@ pub struct Actor<
     // Track notarization/finalization
     last_notarized: Height,
     last_finalized: Height,
+
+    // Track notarizations
+    last_finalized_view: View,
+    notarizations: BTreeMap<View, (bool, bool)>, // (digest, null)
 
     // Fetch missing proposals
     missing: HashMap<Digest, Height>,
@@ -127,7 +130,6 @@ impl<
 
                 mailbox_receiver,
 
-                null_notarizations: BTreeSet::new(),
                 knowledge,
                 containers,
 
@@ -135,6 +137,9 @@ impl<
 
                 last_notarized: 0,
                 last_finalized: 0,
+
+                last_finalized_view: 0,
+                notarizations: BTreeMap::new(),
 
                 missing: HashMap::new(),
                 missing_sender,
@@ -390,7 +395,11 @@ impl<
         // just be missing containers and should try again later)
         let height = parent.2 + 1;
         for gap_view in (parent.1 + 1)..view {
-            if !self.null_notarizations.contains(&gap_view) {
+            if !self
+                .notarizations
+                .get(&gap_view)
+                .map_or(false, |(_, null)| *null)
+            {
                 debug!(
                     height,
                     view,
@@ -451,7 +460,11 @@ impl<
             // We broadcast any notarizations we see for a view, so everyone should be able to recover even at tip (as long
             // as we have not finalized past the view)?
             for view in (parent.view + 1)..proposal.view {
-                if !self.null_notarizations.contains(&view) {
+                if !self
+                    .notarizations
+                    .get(&view)
+                    .map_or(false, |(_, null)| *null)
+                {
                     debug!(
                         height = proposal.height,
                         view,
@@ -545,10 +558,13 @@ impl<
             Proposal::Null(view) => {
                 // TODO: write up explanation for why we don't set last_notarized here (which
                 // is really just used to select the best parent for building)
-                self.null_notarizations.insert(*view);
+                let entry = self.notarizations.entry(*view).or_default();
+                entry.1 = true;
                 return;
             }
         };
+        let entry = self.notarizations.entry(view).or_default();
+        entry.0 = true;
 
         // Set last notarized
         if height > self.last_notarized {
@@ -680,20 +696,17 @@ impl<
         if height > self.last_finalized {
             self.last_finalized = height;
         }
+        if view > self.last_finalized_view {
+            self.last_finalized_view = view;
+        }
 
         // Also update last notarized (if necessary)
         if height > self.last_notarized {
             self.last_notarized = height;
         }
 
-        // Prune all null notarizations below this view
-        while let Some(null_view) = self.null_notarizations.iter().next().cloned() {
-            if null_view > view {
-                break;
-            }
-            self.null_notarizations.remove(&null_view);
-            debug!(view = null_view, "pruned null notarization");
-        }
+        // Prune all notarizations below this view
+        self.notarizations.retain(|k, _| *k > view);
 
         // Finalize this container and all containers we have that are ancestors of this container
         self.backfill_finalization(height, digest);
@@ -707,7 +720,7 @@ impl<
         self.notify().await;
     }
 
-    fn get_next_missing(&mut self) -> Option<(Height, Digest)> {
+    fn get_next_missing_proposal(&mut self) -> Option<(Height, Digest)> {
         loop {
             // See if we have any missing proposals
             let (height, digest) = match self.missing_receiver.try_next() {
@@ -771,23 +784,22 @@ impl<
     }
 
     pub async fn run(mut self, voter: &mut voter::Mailbox, backfiller: &mut backfiller::Mailbox) {
-        let mut outstanding_task: Option<(Height, Digest)> = None;
+        let mut outstanding_proposal_request: Option<(Height, Digest)> = None;
+        let mut outstanding_notarization_request: Option<View> = None;
         loop {
-            // Ensure task has not been resolved
-            if let Some((ref height, ref digest)) = outstanding_task {
+            // Check if proposal request has been resolved and reissue request (if so)
+            if let Some((ref height, ref digest)) = outstanding_proposal_request {
                 if self.containers.contains_key(digest) {
                     debug!(
                         height,
                         digest = hex(digest),
                         "unexpected resolution of missing proposal out of backfill"
                     );
-                    outstanding_task = None;
+                    outstanding_proposal_request = None;
                 }
             }
-
-            // Look for next task if nothing
-            if outstanding_task.is_none() {
-                let missing = self.get_next_missing();
+            if outstanding_proposal_request.is_none() {
+                let missing = self.get_next_missing_proposal();
                 if let Some((height, digest)) = missing {
                     // Check if already have
                     if self.containers.contains_key(&digest) {
@@ -801,12 +813,51 @@ impl<
                     //
                     // This will override any existing request in the backfiller.
                     debug!(height, digest = hex(&digest), "requesting missing proposal");
-                    outstanding_task = Some((height, digest.clone()));
+                    outstanding_proposal_request = Some((height, digest.clone()));
                     backfiller.proposals(digest, parents).await;
                 }
             };
 
-            // TODO: look for next missing notarization above finalization
+            // Check if notarization request has been resolved and reissue request (if so)
+            if let Some(ref view) = outstanding_notarization_request {
+                if self.notarizations.get(view).is_some() {
+                    debug!(
+                        view = view,
+                        "unexpected resolution of missing notarization out of backfill"
+                    );
+                    outstanding_notarization_request = None;
+                }
+            }
+            if outstanding_notarization_request.is_none() && self.notarizations.len() > 0 {
+                // Find first gap and count the number of missing children at the gap (to the highest notarization)
+                let max = self
+                    .notarizations
+                    .last_key_value()
+                    .map(|(k, _)| *k)
+                    .unwrap();
+                let mut start = None;
+                let mut children = 0;
+                for view in (self.last_finalized_view + 1)..max {
+                    if self.notarizations.contains_key(&view) {
+                        if start.is_some() {
+                            break;
+                        }
+                        continue;
+                    }
+                    if start.is_none() {
+                        start = Some(view);
+                    } else {
+                        children += 1;
+                    }
+                }
+
+                // Send to backfiller
+                if let Some(start) = start {
+                    debug!(view = start, children, "requesting missing notarizations");
+                    outstanding_notarization_request = Some(start);
+                    backfiller.notarizations(start, children).await;
+                }
+            }
 
             // Wait for an event
             let msg = self.mailbox_receiver.next().await.unwrap();
