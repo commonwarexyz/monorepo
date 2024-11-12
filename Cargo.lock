@@ -532,6 +532,7 @@ dependencies = [
  "futures-util",
  "prometheus-client",
  "rand",
+ "rangemap",
  "thiserror",
  "tracing",
  "tracing-subscriber",
@@ -1639,6 +1640,12 @@ checksum = "d25bf25ec5ae4a3f1b92f929810509a2f53d7dca2f50b794ff57e3face536c8f"
 dependencies = [
  "rand_core",
 ]
+
+[[package]]
+name = "rangemap"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f60fcc7d6849342eff22c4350c8b9a989ee8ceabc4b481253e8946b9fe83d684"
 
 [[package]]
 name = "ratatui"
