@@ -4,33 +4,21 @@ use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
         actors::{backfiller, voter, Proposal},
-        encoder::{proposal_message, proposal_namespace},
+        encoder::proposal_namespace,
         wire, Context, Height, View,
     },
     Automaton, Finalizer, Payload, Supervisor,
 };
-use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
-use commonware_macros::select;
-use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::hex;
 use core::panic;
-use futures::{channel::mpsc, future::Either};
+use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
-    RateLimiter,
-};
 use prost::Message as _;
-use rand::seq::SliceRandom;
 use rand::Rng;
-use std::time::Duration;
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    time::SystemTime,
-};
-use tracing::{debug, trace, warn};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use tracing::{debug, trace};
 
 #[derive(Clone)]
 enum Knowledge {
@@ -39,7 +27,7 @@ enum Knowledge {
 }
 
 pub struct Actor<
-    E: Clock + GClock + Rng + Spawner,
+    E: Clock + Rng + Spawner,
     C: Scheme,
     H: Hasher,
     A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
@@ -87,7 +75,7 @@ pub struct Actor<
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
 impl<
-        E: Clock + GClock + Rng + Spawner,
+        E: Clock + Rng + Spawner,
         C: Scheme,
         H: Hasher,
         A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
@@ -903,7 +891,6 @@ impl<
                 Message::Proposals {
                     digest,
                     parents,
-                    size_limit,
                     recipient,
                     deadline,
                 } => {

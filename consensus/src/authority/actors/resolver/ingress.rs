@@ -25,7 +25,6 @@ pub enum Message {
     Proposals {
         digest: Digest,
         parents: Height,
-        size_limit: usize,
 
         // Recipient already rate-limited by p2p layer, this is just functionally
         // required to send the response back.
@@ -88,7 +87,6 @@ impl Mailbox {
         &mut self,
         digest: Digest,
         parents: Height,
-        size_limit: usize,
         recipient: PublicKey,
         deadline: SystemTime,
     ) {
@@ -96,7 +94,6 @@ impl Mailbox {
             .send(Message::Proposals {
                 digest,
                 parents,
-                size_limit,
                 recipient,
                 deadline,
             })

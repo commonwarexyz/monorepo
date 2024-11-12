@@ -6,7 +6,6 @@ use crate::{Automaton, Finalizer, Supervisor};
 pub use actor::Actor;
 use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};
-use governor::Quota;
 pub use ingress::{Mailbox, Message};
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -22,9 +21,5 @@ pub struct Config<C: Scheme, H: Hasher, A: Automaton + Supervisor + Finalizer> {
     pub notarization_timeout: Duration,
     pub null_vote_retry: Duration,
     pub proposal_retry: Duration,
-    pub fetch_timeout: Duration,
-    pub max_fetch_count: u64,
-    pub max_fetch_size: usize,
-    pub fetch_rate_per_peer: Quota,
     pub activity_timeout: View,
 }

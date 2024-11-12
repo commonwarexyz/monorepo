@@ -17,11 +17,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::{hex, quorum};
-use futures::{
-    channel::{mpsc, oneshot},
-    future::Either,
-    StreamExt,
-};
+use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
     RateLimiter,
@@ -411,7 +407,7 @@ impl<
                             }
 
                             // Request proposals from resolver
-                            resolver.proposals(request.digest.clone(), request.parents, self.max_fetch_size, s, request_deadline).await;
+                            resolver.proposals(request.digest.clone(), request.parents, s, request_deadline).await;
                         },
                         wire::backfiller::Payload::ProposalResponse(response) => {
                             // Ensure this proposal is expected
@@ -558,6 +554,15 @@ impl<
                             }
                         },
                         wire::backfiller::Payload::NotarizationRequest(request) => {
+                            // Confirm deadline is valid
+                            let request_deadline = SystemTime::UNIX_EPOCH + Duration::from_secs(request.deadline);
+                            let min_deadline = self.runtime.current();
+                            let max_deadline = min_deadline + self.fetch_timeout;
+                            if request_deadline < min_deadline || request_deadline > max_deadline {
+                                warn!(sender = hex(&s), "invalid deadline");
+                                continue;
+                            }
+
                             // Populate as many notarizations as we can
                             let mut notarization_bytes = 0; // TODO: add a buffer
                             let mut notarizations_found = Vec::new();
