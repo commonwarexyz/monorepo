@@ -56,7 +56,7 @@ impl PriorityQueue {
         self.keys.insert(public_key, duration);
     }
 
-    pub fn retain(&mut self, initial: Duration, keys: &Vec<PublicKey>) {
+    pub fn retain(&mut self, initial: Duration, keys: &[PublicKey]) {
         // Turn new keys into a set
         let new_keys: HashSet<_> = keys.iter().cloned().collect();
 
@@ -134,7 +134,7 @@ mod tests {
         pq.put(key1.clone(), Duration::from_secs(10));
         pq.put(key2.clone(), Duration::from_secs(5));
 
-        pq.retain(Duration::from_secs(2), &vec![key1.clone(), key3.clone()]);
+        pq.retain(Duration::from_secs(2), &[key1.clone(), key3.clone()]);
 
         let entries: Vec<_> = pq.iter().cloned().collect();
         assert_eq!(entries.len(), 2);

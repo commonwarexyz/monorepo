@@ -136,8 +136,8 @@ impl<
     ) -> Status {
         // Loop until we find a recipient
         loop {
-            let mut iter = self.fetch_performance.iter();
-            while let Some(next) = iter.next() {
+            let iter = self.fetch_performance.iter();
+            for next in iter {
                 // Check if self
                 if next.public_key == self.crypto.public_key() {
                     continue;
@@ -165,7 +165,7 @@ impl<
                 let validator = &next.public_key;
                 if self.fetch_rate_limiter.check_key(validator).is_err() {
                     debug!(
-                        peer = hex(&validator),
+                        peer = hex(validator),
                         "skipping request because rate limited"
                     );
                     continue;
@@ -179,10 +179,10 @@ impl<
                     .is_empty()
                 {
                     // Try again
-                    debug!(peer = hex(&validator), "failed to send request");
+                    debug!(peer = hex(validator), "failed to send request");
                     continue;
                 }
-                debug!(peer = hex(&validator), "sent request");
+                debug!(peer = hex(validator), "sent request");
                 sent.insert(validator.clone());
                 let start = self.runtime.current();
                 let deadline = start + self.fetch_timeout;
@@ -332,13 +332,7 @@ impl<
                             }
 
                             // Remove notarization from cache less than last finalized
-                            self.notarizations.retain(|view, _| {
-                                if *view < last_finalized {
-                                    false
-                                } else {
-                                    true
-                                }
-                            });
+                            self.notarizations.retain(|view, _| *view >= last_finalized);
                         }
                         Message::Proposals {digest, parents} => {
                             // Send message
@@ -414,7 +408,7 @@ impl<
 
                                     // Check if this is an empty response (go to next recipient)
                                     if response.proposals.is_empty() {
-                                        debug!(digest = hex(&digest), peer = hex(&s), "received empty proposal response");
+                                        debug!(digest = hex(digest), peer = hex(&s), "received empty proposal response");
 
                                         // Pick new recipient
                                         let (digest, parents, mut sent, _) = outstanding_proposal.take().unwrap();

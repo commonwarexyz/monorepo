@@ -127,15 +127,6 @@ impl<
         )
     }
 
-    // TODO: remove duplicatred code
-    fn leader(&self, view: View) -> Option<PublicKey> {
-        let validators = match self.application.participants(view) {
-            Some(validators) => validators,
-            None => return None,
-        };
-        Some(validators[view as usize % validators.len()].clone())
-    }
-
     async fn register_missing(&mut self, height: Height, digest: Digest) {
         // Check if we have the proposal
         if self.containers.contains_key(&digest) {
