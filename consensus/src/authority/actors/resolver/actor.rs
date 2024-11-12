@@ -906,7 +906,28 @@ impl<
                             backfiller.filled_proposals(recipient, proposals).await;
                         }
                         Message::BackfilledProposals { proposals } => {
-                            unimplemented!()
+                            let mut next = None;
+                            for (digest, proposal) in proposals {
+                                // Ensure this is the container we want
+                                let proposal = Proposal::Populated(digest, proposal);
+                                next = self.resolve(proposal);
+
+                                // Notify application if we can
+                                self.notify().await;
+
+                                // Stop processing if we don't need anything else
+                                if next.is_none() {
+                                    break;
+                                }
+                            }
+
+                            // Notify missing if next is not none
+                            if let Some((height, digest)) = next {
+                                // By waiting to register missing until the end, we avoid a bunch of unnecessary
+                                // backfill request additions.
+                                self.register_missing(height, digest).await;
+                            }
+
                         }
                         Message::BackfilledNotarizations { notarizations } => {
                             unimplemented!();

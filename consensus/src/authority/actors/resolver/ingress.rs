@@ -36,7 +36,7 @@ pub enum Message {
 
     // Resolved requests from peers
     BackfilledProposals {
-        proposals: Vec<wire::Proposal>,
+        proposals: Vec<(Digest, wire::Proposal)>,
     },
     BackfilledNotarizations {
         notarizations: Vec<wire::Notarization>,
@@ -104,7 +104,7 @@ impl Mailbox {
             .unwrap();
     }
 
-    pub async fn backfilled_proposals(&mut self, proposals: Vec<wire::Proposal>) {
+    pub async fn backfilled_proposals(&mut self, proposals: Vec<(Digest, wire::Proposal)>) {
         self.sender
             .send(Message::BackfilledProposals { proposals })
             .await

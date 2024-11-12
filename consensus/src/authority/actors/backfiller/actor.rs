@@ -550,7 +550,6 @@ impl<
                             if resolved {
                                 let outstanding = outstanding_proposal.take().unwrap();
                                 debug!(height = outstanding.1, digest = hex(&outstanding.0), peer = hex(&s), "resolved missing proposal via backfill");
-                                let proposals_found = proposals_found.into_iter().map(|(_, proposal)| proposal).collect();
                                 resolver.backfilled_proposals(proposals_found).await;
 
                                 // Update performance
