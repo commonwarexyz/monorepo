@@ -1853,6 +1853,8 @@ impl<
                                 continue;
                             }
                             view = verified_view;
+
+                            // TODO: journal the proposal
                         },
                         Message::Backfilled { view, notarizations} => {
                             unimplemented!();
