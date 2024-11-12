@@ -35,6 +35,15 @@ struct Notarizations {
     null: Option<wire::Notarization>,
 }
 
+impl Default for Notarizations {
+    fn default() -> Self {
+        Self {
+            digest: None,
+            null: None,
+        }
+    }
+}
+
 type Status = (PublicKey, SystemTime, SystemTime);
 
 pub struct Actor<
@@ -294,7 +303,33 @@ impl<
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
-                    unimplemented!();
+                    match msg {
+                        Message::Notarized {view, notarization, last_finalized} => {
+                            // Update stored validators
+                            let validators = self.application.participants(view).unwrap();
+                            self.fetch_performance.retain(self.fetch_timeout, validators);
+
+                            // Add notarization to cache
+                            {
+                                let notarizations = self.notarizations.entry(view).or_default();
+                                if notarization.digest.is_none() {
+                                    notarizations.null = Some(notarization);
+                                } else {
+                                    notarizations.digest = Some(notarization);
+                                }
+                            }
+
+                            // Remove notarization from cache less than last finalized
+                            self.notarizations.retain(|view, _| {
+                                if *view < last_finalized {
+                                    false
+                                } else {
+                                    true
+                                }
+                            });
+                        }
+                        _ => unimplemented!(),
+                    }
                 },
                 network = receiver.recv() => {
                     let (s, msg) = network.unwrap();

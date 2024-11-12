@@ -13,7 +13,7 @@ pub enum Message {
         children: u32,
     },
     // From voter
-    Notarization {
+    Notarized {
         view: View,
         notarization: wire::Notarization,
 
@@ -48,7 +48,7 @@ impl Mailbox {
             .expect("Failed to send notarizations");
     }
 
-    pub async fn notarization(
+    pub async fn notarized(
         &self,
         view: View,
         notarization: wire::Notarization,
@@ -56,7 +56,7 @@ impl Mailbox {
     ) {
         self.sender
             .clone()
-            .send(Message::Notarization {
+            .send(Message::Notarized {
                 view,
                 notarization,
                 last_finalized,
