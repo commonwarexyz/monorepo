@@ -771,6 +771,9 @@ impl<
                         }
 
                         // We only want to batch fill finalized data.
+                        //
+                        // TODO: remove this (otherwise we'll fall behind when
+                        // there is a finalization lag)
                         break;
                     }
                     Knowledge::Finalized(digest) => {
