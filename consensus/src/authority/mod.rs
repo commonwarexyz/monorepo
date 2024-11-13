@@ -49,7 +49,7 @@
 //! * Broadcast null notarization for `v`
 //! * Enter `v+1`
 //! * If leader:
-//!    * Dependent Notarizations: Send notarization for `c_parent` and all null notarizations for views between `c_parent` and `c` to anyone
+//!    * Dependent Notarizations: Send notarization for `c_parent` and `j` random null notarizations for views between `c_parent` and `c` to anyone
 //!      that didn't vote for `c` (if node was offline or messages dropped, may never be able to vote without this)
 //!
 //! Upon receiving `2f+1` finalizes for `c`:
@@ -72,6 +72,12 @@
 //! * Only multicast proposal `c` in `v` on transition to `v+1  to peers that haven't already voted for `c`
 //! * Only multicast dependent notarizations (notarization for `c_parent` and null notarizations between `c_parent` and `c`) for `v` to peers that
 //!   didn't vote for `c`
+//!
+//! # What is a good fit?
+//!
+//! * Desire fast block times (as fast as possible): No message relay through leader
+//! * Proposals are small (include references to application data rather than application data itself): Each notarization may require broadcasting the proposal
+//! * Small to medium number of validators (< 500): All messages are broadcast
 
 mod actors;
 pub mod byzantine;
