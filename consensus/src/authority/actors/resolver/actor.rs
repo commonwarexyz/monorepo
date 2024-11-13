@@ -194,12 +194,9 @@ impl<
                 _ => {}
             }
         } else {
-            // TODO: clean this up
-
-            // Insert as final (in case it doesn't exist)
+            // If the proposal we are resolving is finalized, start backfilling at its parent
             let mut start = (proposal.height, digest.clone());
             if let Some(Knowledge::Finalized(_)) = self.knowledge.get(&proposal.height) {
-                debug!("overriding backfill start to parent");
                 start = (proposal.height - 1, proposal.parent.clone());
             }
 

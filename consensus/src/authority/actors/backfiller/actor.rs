@@ -435,6 +435,7 @@ impl<
 
 
                             // Parse proposals
+                            let start = next.clone();
                             let received = self.runtime.current();
                             let mut resolved = false;
                             let mut proposals_found = Vec::new();
@@ -509,7 +510,6 @@ impl<
                                 let height = proposal.height;
                                 let parent = proposal.parent.clone();
                                 proposals_found.push((proposal_digest.clone(), proposal));
-                                debug!(height, digest = hex(&proposal_digest), parents = proposals_found.len(), "received batch proposal");
 
                                 // Remove outstanding task if we were waiting on this
                                 //
@@ -536,6 +536,7 @@ impl<
                                 outstanding_proposal = Some((digest, parents, sent, status));
                                 continue;
                             }
+                            debug!(digest = hex(&start), parents = proposals_found.len()-1, "received batch proposal");
 
                             // Send resolution
                             if resolved {
@@ -648,6 +649,7 @@ impl<
                             };
 
                             // Parse notarizations
+                            let start = next;
                             let received = self.runtime.current();
                             let mut resolved = false;
                             let mut notarizations_found = Vec::new();
@@ -744,7 +746,6 @@ impl<
                                 }
                                 let view = notarization.view;
                                 notarizations_found.push(notarization);
-                                debug!(view, children = notarizations_found.len(), "received batch notarization");
 
                                 // Remove outstanding task if we were waiting on this
                                 if let Some(ref outstanding) = outstanding_notarization {
@@ -768,6 +769,7 @@ impl<
                                 outstanding_notarization = Some((view, children, sent, status));
                                 continue;
                             }
+                            debug!(start, children = notarizations_found.len()-1, "received batch notarization");
 
                             // Persist notarizations
                             for notarization in &notarizations_found {
