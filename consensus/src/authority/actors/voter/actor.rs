@@ -16,7 +16,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::{hex, quorum};
-use futures::{channel::mpsc, future::Either, StreamExt};
+use futures::{channel::mpsc, future::Either, join, StreamExt};
 use prometheus_client::metrics::gauge::Gauge;
 use prost::Message as _;
 use rand::Rng;
@@ -1151,11 +1151,13 @@ impl<
         } else {
             Proposal::Null(notarization.view)
         };
+
+        // Wait for proposal to be resolved
         let notarization_view = notarization.view;
-        resolver.notarized(proposal).await;
-        backfiller
-            .notarized(notarization_view, notarization, self.last_finalized)
-            .await;
+        join!(
+            resolver.notarized(proposal),
+            backfiller.notarized(notarization_view, notarization, self.last_finalized)
+        );
 
         // Enter next view
         self.enter_view(notarization_view + 1);
@@ -1556,11 +1558,9 @@ impl<
             let msg = wire::Voter {
                 payload: Some(wire::voter::Payload::Vote(vote.clone())),
             }
-            .encode_to_vec();
-            sender
-                .send(Recipients::All, msg.into(), true)
-                .await
-                .unwrap();
+            .encode_to_vec()
+            .into();
+            sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the vote
             let digest = vote.digest.clone().unwrap();
@@ -1574,11 +1574,9 @@ impl<
             let msg = wire::Voter {
                 payload: Some(wire::voter::Payload::Notarization(notarization.clone())),
             }
-            .encode_to_vec();
-            sender
-                .send(Recipients::All, msg.into(), true)
-                .await
-                .unwrap();
+            .encode_to_vec()
+            .into();
+            sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the notarization
             let null_broadcast = notarization.digest.is_none();
@@ -1604,11 +1602,9 @@ impl<
                         let msg = wire::Voter {
                             payload: Some(wire::voter::Payload::Finalization(finalization.clone())),
                         }
-                        .encode_to_vec();
-                        sender
-                            .send(Recipients::All, msg.into(), true)
-                            .await
-                            .unwrap();
+                        .encode_to_vec()
+                        .into();
+                        sender.send(Recipients::All, msg, true).await.unwrap();
                         debug!(
                             finalized_view = finalization.view,
                             finalized_height = finalization.height,
@@ -1632,12 +1628,10 @@ impl<
             // Broadcast the finalize
             let msg = wire::Voter {
                 payload: Some(wire::voter::Payload::Finalize(finalize.clone())),
-            };
-            let msg = msg.encode_to_vec();
-            sender
-                .send(Recipients::All, msg.into(), true)
-                .await
-                .unwrap();
+            }
+            .encode_to_vec()
+            .into();
+            sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the finalize
             debug!(
@@ -1653,12 +1647,10 @@ impl<
             // Broadcast the finalization
             let msg = wire::Voter {
                 payload: Some(wire::voter::Payload::Finalization(finalization.clone())),
-            };
-            let msg = msg.encode_to_vec();
-            sender
-                .send(Recipients::All, msg.into(), true)
-                .await
-                .unwrap();
+            }
+            .encode_to_vec()
+            .into();
+            sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the finalization
             debug!(
@@ -1740,9 +1732,9 @@ impl<
                             // Broadcast the proposal
                             let msg = wire::Voter{
                                 payload: Some(wire::voter::Payload::Proposal(proposal.clone())),
-                            }.encode_to_vec();
+                            }.encode_to_vec().into();
                             sender
-                                .send(Recipients::All, msg.into(), true)
+                                .send(Recipients::All, msg, true)
                                 .await
                                 .unwrap();
                         },
