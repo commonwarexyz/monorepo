@@ -40,7 +40,9 @@
 //!
 //! Upon receiving `2f+1` votes for `c`:
 //! * Cancel `t_a`
-//! * Broadcast `c` to all nodes that didn't vote for `c` (otherwise won't vote for next honest proposal)
+//! * Broadcast `c` to all nodes that didn't vote for `c` (otherwise won't vote for next honest proposal -> other constructions typically don't handle this case and instead
+//!   rely on some form of leader backfill in their slot or aim to fetch as soon as they realize they are missing a block but by then in this construction, their slot
+//!   has already started as they'd only want to backfill after seeing `2f+1` votes for the proposal)
 //! * Broadcast notarization for `c`
 //! * If have not broadcast null vote for view `v`, broadcast finalize for `c`
 //! * Enter `v+1`
