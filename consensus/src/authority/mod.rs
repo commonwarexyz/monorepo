@@ -50,7 +50,7 @@
 //!
 //! Upon receiving `2f+1` votes for `c` (if `t_l` and `t_a` have not fired):
 //! * Cancel `t_a`
-//! * Broadcast `c` to next leader (if didn't vote for `c`)
+//! * Broadcast `c` to all nodes that didn't vote for `c` (otherwise won't vote for next honest proposal)
 //! * Broadcast notarization for `c`
 //! * Broadcast finalize for `c`
 //! * Enter `v+1`
