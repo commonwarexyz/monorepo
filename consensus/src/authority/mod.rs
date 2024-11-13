@@ -2210,7 +2210,7 @@ mod tests {
             }
         });
 
-        // Return audior state
+        // Return auditor state
         auditor.state()
     }
 
