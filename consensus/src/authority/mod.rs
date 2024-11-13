@@ -80,6 +80,8 @@
 //! * Desire fast block times (as fast as possible): No message relay through leader
 //! * Proposals are small (include references to application data rather than application data itself): Each notarization may require each party to re-broadcast the proposal
 //! * Small to medium number of validators (< 500): All messages are broadcast
+//! * Strong robustness against Byzantine leaders? (still can trigger later than desired start to verification) but can't force a fetch
+//!     * Saves at least 1 RTT (and more if first recipient doesn't have/is byzantine)
 //!
 //! # Performance Degradation
 //!
