@@ -342,6 +342,8 @@ impl<
                                 let container = self.containers.get(digest).unwrap();
                                 return Some((digest.clone(), container.view, container.height));
                             }
+
+                            // TODO: break as soon as we are at the first notarized height and can't process the block?
                         }
                         views_checked.push(*view);
                     }
