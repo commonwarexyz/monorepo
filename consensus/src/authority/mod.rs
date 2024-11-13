@@ -99,7 +99,7 @@
 //!
 //! Crazy Idea: What if there is no proposal and the vote/notarization contains all info (only ever include a hash of the proposal)? Would this undermine
 //! an application's ability to build a useful product (as wouldn't know contents of block until an arbitrary point in the future, potentially after asked to produce
-//! a new block)?
+//! a new block/may also not know parent yet)?
 
 mod actors;
 pub mod byzantine;
