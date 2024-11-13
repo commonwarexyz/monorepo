@@ -64,6 +64,7 @@
 //!
 //! Upon receiving `2f+1` finalizes for `c`:
 //! * Broadcast finalization for `c`
+//! * Finalize `c` at height `h` (and recursively finalize its parents)
 //!
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast null vote for view `v`
