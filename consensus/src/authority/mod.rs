@@ -52,7 +52,9 @@
 //! * Enter `v+1`
 //! * If leader:
 //!    * Dependent Notarizations: Send notarization for `c_parent` and `j` random null notarizations for views between `c_parent` and `c` to anyone
-//!      that didn't vote for `c` (if node was offline or messages dropped, may never be able to vote without this)
+//!      that didn't vote for `c` (if node was offline or messages dropped, may never be able to vote without this) -> only send to nodes that have
+//!      been active in the last `r` views
+//! TODO: If more than `f+1` votes, attempt backfill for missing notarizations?
 //!
 //! Upon receiving `2f+1` finalizes for `c`:
 //! * Broadcast finalization for `c`
@@ -83,6 +85,8 @@
 //! * Strong robustness against Byzantine leaders? (still can trigger later than desired start to verification) but can't force a fetch
 //!     * Saves at least 1 RTT (and more if first recipient doesn't have/is byzantine)
 //!     * Minimal ability to impact performance in next view (still can timeout current view)
+//!
+//! # Tradeoff: Bandwidth Efficiency or Robustness
 //!
 //! # Performance Degradation
 //!
