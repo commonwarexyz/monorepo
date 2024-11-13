@@ -335,17 +335,18 @@ impl<
         // Find highest container that we have notified the application of
         let mut next = self.last_notarized;
         loop {
+            let mut views_checked = Vec::new();
             match self.knowledge.get(&next) {
                 Some(Knowledge::Notarized(hashes)) => {
                     // Select latest view at a height that we have notified the application of (minimizes need for null notarization fetching)
-                    for (_, digest) in hashes.iter().rev() {
-                        //
+                    for (view, digest) in hashes.iter().rev() {
                         if let Some(notifications) = self.notarization_notifications.get(&next) {
                             if notifications.contains(digest) {
                                 let container = self.containers.get(digest).unwrap();
                                 return Some((digest.clone(), container.view, container.height));
                             }
                         }
+                        views_checked.push(*view);
                     }
                 }
                 Some(Knowledge::Finalized(digest)) => {
@@ -357,6 +358,11 @@ impl<
                     }
 
                     // Once we hit a finalized container and can't build off it, we should stop.
+                    debug!(
+                        height = next,
+                        digest = hex(digest),
+                        "finalized container not verified, nothing to propose"
+                    );
                     return None;
                 }
                 None => return None,
@@ -366,7 +372,11 @@ impl<
             if next == 0 {
                 return None;
             }
-            debug!(view = next, "no valid parent at last notarized view");
+            debug!(
+                height = next,
+                ?views_checked,
+                "no processed parent at last notarized height"
+            );
             next -= 1;
         }
     }
