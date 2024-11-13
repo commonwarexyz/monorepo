@@ -67,8 +67,8 @@ pub struct Actor<
     //
     // We only increase this once we notify of finalization at some height.
     // It is not guaranteed that we will notify every notarization (may just be finalizes).
-    notarizations_sent: HashMap<Height, HashSet<Digest>>,
-    last_notified: Height,
+    notarization_notifications: HashMap<Height, HashSet<Digest>>,
+    last_finalized_notification: Height,
 }
 
 // Sender/Receiver here are different than one used in consensus (separate rate limits and compression settings).
@@ -127,8 +127,8 @@ impl<
                 missing_sender,
                 missing_receiver,
 
-                notarizations_sent: HashMap::new(),
-                last_notified: 0,
+                notarization_notifications: HashMap::new(),
+                last_finalized_notification: 0,
             },
             Mailbox::new(low_sender, high_sender),
         )
@@ -221,7 +221,7 @@ impl<
 
     async fn notify(&mut self) {
         // Notify application of all finalized proposals
-        let mut next = self.last_notified + 1;
+        let mut next = self.last_finalized_notification + 1;
         loop {
             // Get info
             let knowledge = match self.knowledge.get(&next).cloned() {
@@ -254,7 +254,7 @@ impl<
                     // Send fulfilled unsent notarizations
                     for (_, digest) in hashes {
                         let already_notified = self
-                            .notarizations_sent
+                            .notarization_notifications
                             .get(&next)
                             .map_or(false, |notifications| notifications.contains(&digest));
                         if already_notified {
@@ -263,6 +263,11 @@ impl<
                         let proposal = match self.containers.get(&digest) {
                             Some(proposal) => proposal,
                             None => {
+                                debug!(
+                                    height = next,
+                                    digest = hex(&digest),
+                                    "missing notarized proposal"
+                                );
                                 continue;
                             }
                         };
@@ -279,7 +284,7 @@ impl<
                             digest = hex(&digest),
                             "notifying application notarization"
                         );
-                        self.notarizations_sent
+                        self.notarization_notifications
                             .entry(next)
                             .or_default()
                             .insert(digest.clone());
@@ -294,7 +299,7 @@ impl<
                             debug!(
                                 height = next,
                                 digest = hex(&digest),
-                                "missing finalized proposal, exiting backfill"
+                                "missing finalized proposal"
                             );
                             return;
                         }
@@ -310,8 +315,8 @@ impl<
                         return;
                     };
                     self.verified.remove(&(next - 1)); // parent of finalized must be accessible
-                    self.notarizations_sent.remove(&next);
-                    self.last_notified = next;
+                    self.notarization_notifications.remove(&next);
+                    self.last_finalized_notification = next;
                     debug!(
                         height = next,
                         digest = hex(&digest),
@@ -332,10 +337,10 @@ impl<
         loop {
             match self.knowledge.get(&next) {
                 Some(Knowledge::Notarized(hashes)) => {
-                    // Select latest view (minimizes need for null notarization fetching)
+                    // Select latest view at a height that we have notified the application of (minimizes need for null notarization fetching)
                     for (_, digest) in hashes.iter().rev() {
-                        // TODO: if no null notarization back to last_notarized, do something different
-                        if let Some(notifications) = self.notarizations_sent.get(&next) {
+                        //
+                        if let Some(notifications) = self.notarization_notifications.get(&next) {
                             if notifications.contains(digest) {
                                 let container = self.containers.get(digest).unwrap();
                                 return Some((digest.clone(), container.view, container.height));
@@ -344,12 +349,15 @@ impl<
                     }
                 }
                 Some(Knowledge::Finalized(digest)) => {
-                    // TODO: populate comment (while we may have finalized a block, we may not have notified the application yet)
-                    if self.last_notified >= next {
+                    // We can only build off finalized containers that the application has verified.
+                    if self.last_finalized_notification >= next {
+                        // If a container has been verified, we assume that it exists.
                         let container = self.containers.get(digest).unwrap();
                         return Some((digest.clone(), container.view, container.height));
                     }
-                    // TODO: should return none here? we'll just go backwards and propose something off of something before finalized
+
+                    // Once we hit a finalized container and can't build off it, we should stop.
+                    return None;
                 }
                 None => return None,
             }
@@ -358,6 +366,7 @@ impl<
             if next == 0 {
                 return None;
             }
+            debug!(view = next, "no valid parent at last notarized view");
             next -= 1;
         }
     }
@@ -368,7 +377,7 @@ impl<
         proposer: PublicKey,
     ) -> Option<(Digest, Height, Digest, Payload)> {
         // If don't have ancestry to last notarized container fulfilled, do nothing.
-        let parent = match self.best_parent() {
+        let (parent_digest, parent_view, parent_height) = match self.best_parent() {
             Some(parent) => parent,
             None => {
                 return None;
@@ -377,8 +386,8 @@ impl<
 
         // Ensure we have null notarizations back to best parent container (if not, we may
         // just be missing containers and should try again later)
-        let height = parent.2 + 1;
-        for gap_view in (parent.1 + 1)..view {
+        let height = parent_height + 1;
+        for gap_view in (parent_view + 1)..view {
             if !self
                 .notarizations
                 .get(&gap_view)
@@ -387,7 +396,7 @@ impl<
                 debug!(
                     height,
                     view,
-                    parent_view = parent.1,
+                    parent_view,
                     missing = gap_view,
                     reason = "missing null notarization",
                     "skipping propose"
@@ -396,10 +405,7 @@ impl<
             } else {
                 debug!(
                     height,
-                    view,
-                    parent_view = parent.1,
-                    gap_view,
-                    "depending on null notarization"
+                    view, parent_view, gap_view, "depending on null notarization"
                 );
             }
         }
@@ -407,7 +413,7 @@ impl<
         // Propose container
         let context = Context {
             view,
-            parent: parent.0.clone(),
+            parent: parent_digest.clone(),
             height,
             proposer,
         };
@@ -427,7 +433,7 @@ impl<
         };
 
         // Generate proposal
-        Some((parent.0, height, payload, payload_digest))
+        Some((parent_digest, height, payload, payload_digest))
     }
 
     fn valid_ancestry(&self, proposal: &wire::Proposal) -> bool {
@@ -876,6 +882,8 @@ impl<
                 msg = self.high_receiver.next() => {
                     msg.unwrap()
                 },
+                // By relegating all backfill requests to low priority, we ensure that activity unrelated to
+                // consensus does not degrade the performance of the consensus.
                 msg = self.low_receiver.next() => {
                     msg.unwrap()
                 },
@@ -926,6 +934,8 @@ impl<
                     deadline,
                 } => {
                     // Populate as many proposals as we can
+                    //
+                    // TODO: fetch proposals in parallel from storage
                     let mut proposal_bytes = 0; // TODO: add a buffer
                     let mut proposals = Vec::new();
                     let mut cursor = digest;
