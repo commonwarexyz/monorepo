@@ -88,6 +88,9 @@
 //!
 //! # Tradeoff: Bandwidth Efficiency or Robustness
 //!
+//! * This is the difference between broadcasting a proposal to the next leader if they didn't vote for the block and waiting for them
+//!   to fetch the block themselves.
+//!
 //! # Performance Degradation
 //!
 //! * Ever-growing unfinalized tip: processing views are cached in-memory
