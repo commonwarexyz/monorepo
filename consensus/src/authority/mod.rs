@@ -76,7 +76,7 @@
 //! # What is a good fit?
 //!
 //! * Desire fast block times (as fast as possible): No message relay through leader
-//! * Proposals are small (include references to application data rather than application data itself): Each notarization may require broadcasting the proposal
+//! * Proposals are small (include references to application data rather than application data itself): Each notarization may require each party to re-broadcast the proposal
 //! * Small to medium number of validators (< 500): All messages are broadcast
 //!
 //! # Performance Degradation
