@@ -67,8 +67,6 @@
 //!     * Skip leader timeout/notarization timeout if we haven't seen a participant vote in some number of views
 //! * Periodically retry building of proposal
 //! * [NOT SAFE] Backfill containers from notarizing peers rather than passing along with notarization message
-//! * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
-//!   more votes)
 //! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)/no dedicated
 //!   "sync" phase
 //! * Only multicast proposal `c` in `v` on transition to `v+1  to peers that haven't already voted for `c`
@@ -78,6 +76,8 @@
 //! # What is a good fit?
 //!
 //! * Desire fast block times (as fast as possible): No message relay through leader
+//!     * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
+//!       more votes) -> means there is no wait at the end of a view to collect more votes/finalizes
 //! * Proposals are small (include references to application data rather than application data itself): Each notarization may require each party to re-broadcast the proposal
 //! * Small to medium number of validators (< 500): All messages are broadcast
 //! * Strong robustness against Byzantine leaders? (still can trigger later than desired start to verification) but can't force a fetch
