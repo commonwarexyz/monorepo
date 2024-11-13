@@ -82,6 +82,7 @@
 //! * Small to medium number of validators (< 500): All messages are broadcast
 //! * Strong robustness against Byzantine leaders? (still can trigger later than desired start to verification) but can't force a fetch
 //!     * Saves at least 1 RTT (and more if first recipient doesn't have/is byzantine)
+//!     * Minimal ability to impact performance in next view (still can timeout current view)
 //!
 //! # Performance Degradation
 //!
