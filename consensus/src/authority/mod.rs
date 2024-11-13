@@ -39,7 +39,7 @@
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
-//! * Set timeout for leader proposal `t_l` and advance `t_a`
+//! * Set timer for leader proposal `t_l` and advance `t_a`
 //!     * If leader `l` has not been active (no votes) in last `r` views, set `t_l` to 0.
 //! * If leader, propose container `c` for view `v`
 //!
@@ -48,11 +48,11 @@
 //! * If we have `c_parent`, have verified `c_parent`, `c_parent` is notarized (either implicitly or explicitly), and we have null notarizations
 //!   for all views between `c_parent` and `c`, then broadcast vote for `c`.
 //!
-//! Upon receiving `2f+1` votes for `c` (if `t_l` and `t_a` have not fired):
+//! Upon receiving `2f+1` votes for `c`:
 //! * Cancel `t_a`
 //! * Broadcast `c` to all nodes that didn't vote for `c` (otherwise won't vote for next honest proposal)
 //! * Broadcast notarization for `c`
-//! * Broadcast finalize for `c`
+//! * If have not broadcast null vote for view `v`, broadcast finalize for `c`
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` null votes for `v`:
