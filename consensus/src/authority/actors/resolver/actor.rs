@@ -873,6 +873,11 @@ impl<
                     } else {
                         children += 1;
                     }
+
+                    // If we have max fetch, let's exit
+                    if children + 1 == self.max_fetch_count {
+                        break;
+                    }
                 }
 
                 // Send to backfiller
@@ -1004,6 +1009,7 @@ impl<
                     backfiller.filled_proposals(recipient, proposals).await;
                 }
                 Message::BackfilledProposals { proposals } => {
+                    let fetched = proposals.len();
                     let mut next = None;
                     for (digest, proposal) in proposals {
                         // Check if we are resolving the current outstanding (may have been overwritten)
@@ -1012,6 +1018,7 @@ impl<
                                 debug!(
                                     height = proposal.height,
                                     digest = hex(&digest),
+                                    parents = fetched - 1,
                                     "fetched outstanding proposal"
                                 );
                                 outstanding_proposal_request = None;
@@ -1039,12 +1046,14 @@ impl<
                     }
                 }
                 Message::BackfilledNotarizations { notarizations } => {
+                    let fetched = notarizations.len();
                     for notarization in notarizations {
                         // Check if we are resolving the current outstanding (may have been overwritten)
                         if let Some(outstanding) = &outstanding_notarization_request {
                             if *outstanding == notarization.view {
                                 debug!(
                                     view = notarization.view,
+                                    children = fetched - 1,
                                     "fetched outstanding notarization"
                                 );
                                 outstanding_notarization_request = None;
