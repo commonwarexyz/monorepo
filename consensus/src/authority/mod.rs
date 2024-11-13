@@ -30,10 +30,11 @@
 //! * Leader timeout in addition to notarization timeout
 //! * Skip leader timeout if we haven't seen a participant vote in some number of views
 //! * Periodically retry building of proposal
-//! * Backfill containers from notarizing peers rather than passing along with notarization message
+//! * [NOT SAFE] Backfill containers from notarizing peers rather than passing along with notarization message
 //! * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
 //!   more votes)
-//! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)
+//! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)/no dedicated
+//!   "sync" phase
 //!
 //! # Specification for View `v`
 //!
