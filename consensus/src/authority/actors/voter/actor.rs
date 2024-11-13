@@ -1775,6 +1775,9 @@ impl<
                                 continue;
                             }
                             view = verified_view;
+
+                            // TODO: Have resolver hold on to verified proposals in case they become notarized or if they are notarized
+                            // but learned about later.
                         },
                     }
                 },
