@@ -332,10 +332,9 @@ impl<
         loop {
             match self.knowledge.get(&next) {
                 Some(Knowledge::Notarized(hashes)) => {
-                    // Find earliest view that we also sent notification for
-                    for (_, digest) in hashes.iter() {
-                        // TODO: ensure we have all null notarizations to this block view (otherwise we'll
-                        // fail to propose)
+                    // Select latest view (minimizes need for null notarization fetching)
+                    for (_, digest) in hashes.iter().rev() {
+                        // TODO: if no null notarization back to last_notarized, do something different
                         if let Some(notifications) = self.notarizations_sent.get(&next) {
                             if notifications.contains(digest) {
                                 let container = self.containers.get(digest).unwrap();
@@ -345,10 +344,12 @@ impl<
                     }
                 }
                 Some(Knowledge::Finalized(digest)) => {
+                    // TODO: populate comment (while we may have finalized a block, we may not have notified the application yet)
                     if self.last_notified >= next {
                         let container = self.containers.get(digest).unwrap();
                         return Some((digest.clone(), container.view, container.height));
                     }
+                    // TODO: should return none here? we'll just go backwards and propose something off of something before finalized
                 }
                 None => return None,
             }
