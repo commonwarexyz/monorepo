@@ -1605,6 +1605,8 @@ impl<
             //
             // In cases like this, it is possible that other peers cannot verify the proposal because they do not
             // have the latest finalization and null notarizations.
+            //
+            // TODO: why not send last notarized here rather than last finalized?
             let view_obj = self.views.get(&view).expect("view missing");
             if null_broadcast
                 && view_obj.leader == self.crypto.public_key()
