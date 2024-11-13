@@ -25,17 +25,6 @@
 //! All peer interaction related to consensus is strictly prioritized over any other messages (i.e. helping new
 //! peers sync to the network).
 //!
-//! # Differences from Simplex Paper
-//!
-//! * Leader timeout in addition to notarization timeout
-//! * Skip leader timeout if we haven't seen a participant vote in some number of views
-//! * Periodically retry building of proposal
-//! * [NOT SAFE] Backfill containers from notarizing peers rather than passing along with notarization message
-//! * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
-//!   more votes)
-//! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)/no dedicated
-//!   "sync" phase
-//!
 //! # Specification for View `v`
 //!
 //! Upon entering view `v`:
@@ -60,7 +49,7 @@
 //! * Broadcast null notarization for `v`
 //! * Enter `v+1`
 //! * If leader:
-//!    * Send notarization for `c_parent` and all null notarizations for views between `c_parent` and `c` to anyone
+//!    * Dependent Notarizations: Send notarization for `c_parent` and all null notarizations for views between `c_parent` and `c` to anyone
 //!      that didn't vote for `c` (if node was offline or messages dropped, may never be able to vote without this)
 //!
 //! Upon receiving `2f+1` finalizes for `c`:
@@ -69,6 +58,20 @@
 //!
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast null vote for view `v`
+//!
+//! ## Differences from Simplex
+//!
+//! * Distinct Leader timeout (in addition to notarization timeout)
+//!     * Skip leader timeout/notarization timeout if we haven't seen a participant vote in some number of views
+//! * Periodically retry building of proposal
+//! * [NOT SAFE] Backfill containers from notarizing peers rather than passing along with notarization message
+//! * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
+//!   more votes)
+//! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)/no dedicated
+//!   "sync" phase
+//! * Only multicast proposal `c` in `v` on transition to `v+1  to peers that haven't already voted for `c`
+//! * Only multicast dependent notarizations (notarization for `c_parent` and null notarizations between `c_parent` and `c`) for `v` to peers that
+//!   didn't vote for `c`
 
 mod actors;
 pub mod byzantine;
