@@ -63,7 +63,7 @@
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast null vote for view `v`
 //!
-//! ## Adapting Simplex to Real-World: Syncing, Restarts, and Message Drops
+//! ## Adapting Simplex to Real-World: Syncing, Restarts, and Dropped Messages
 //!
 //! * Distinct Leader timeout (in addition to notarization timeout)
 //!     * Skip leader timeout/notarization timeout if we haven't seen a participant vote in some number of views
