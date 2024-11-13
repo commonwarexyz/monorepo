@@ -1138,6 +1138,11 @@ impl<
 
         // Notify resolver of notarization
         let proposal = if let Some(notarization_digest) = &notarization.digest {
+            debug!(
+                view = notarization.view,
+                digest = hex(notarization_digest),
+                "processed digest notarization"
+            );
             match view.proposal.as_ref() {
                 Some((digest, _, proposal)) => {
                     Proposal::Populated(digest.clone(), proposal.clone())
@@ -1149,6 +1154,7 @@ impl<
                 ),
             }
         } else {
+            debug!(view = notarization.view, "processed null notarization");
             Proposal::Null(notarization.view)
         };
 

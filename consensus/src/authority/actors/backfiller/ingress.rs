@@ -8,6 +8,7 @@ pub enum Message {
         digest: Digest,
         parents: Height,
     },
+    CancelProposals {},
     FilledProposals {
         recipient: PublicKey,
         proposals: Vec<wire::Proposal>,
@@ -16,6 +17,7 @@ pub enum Message {
         view: View,
         children: View,
     },
+    CancelNotarizations {},
     // From voter
     Notarized {
         view: View,
@@ -44,6 +46,13 @@ impl Mailbox {
             .expect("Failed to send proposals");
     }
 
+    pub async fn cancel_proposals(&mut self) {
+        self.sender
+            .send(Message::CancelProposals {})
+            .await
+            .expect("Failed to send cancel proposals");
+    }
+
     pub async fn filled_proposals(&mut self, recipient: PublicKey, proposals: Vec<wire::Proposal>) {
         self.sender
             .send(Message::FilledProposals {
@@ -59,6 +68,13 @@ impl Mailbox {
             .send(Message::Notarizations { view, children })
             .await
             .expect("Failed to send notarizations");
+    }
+
+    pub async fn cancel_notarizations(&mut self) {
+        self.sender
+            .send(Message::CancelNotarizations {})
+            .await
+            .expect("Failed to send cancel notarizations");
     }
 
     pub async fn notarized(

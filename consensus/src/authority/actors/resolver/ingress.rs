@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 use crate::authority::{actors::Proposal, wire, Height, View};
 use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};
@@ -30,7 +28,7 @@ pub enum Message {
         // required to send the response back.
         recipient: PublicKey,
         // Avoid processing anything that is past the deadline (would occur if there is a backup of requests).
-        deadline: SystemTime,
+        deadline: u64, // TODO: change to UNIX_SECONDS type
     },
 
     // Resolved requests from peers
@@ -44,23 +42,26 @@ pub enum Message {
 
 #[derive(Clone)]
 pub struct Mailbox {
-    sender: mpsc::Sender<Message>,
+    // Messages from Backfiller
+    low: mpsc::Sender<Message>,
+    // Messages from Voter
+    high: mpsc::Sender<Message>,
 }
 
 impl Mailbox {
-    pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
-        Self { sender }
+    pub(super) fn new(low: mpsc::Sender<Message>, high: mpsc::Sender<Message>) -> Self {
+        Self { low, high }
     }
 
     pub async fn propose(&mut self, view: View, proposer: PublicKey) {
-        self.sender
+        self.high
             .send(Message::Propose { view, proposer })
             .await
             .unwrap();
     }
 
     pub async fn verify(&mut self, container: Digest, proposal: wire::Proposal) {
-        self.sender
+        self.high
             .send(Message::Verify {
                 container,
                 proposal,
@@ -70,14 +71,14 @@ impl Mailbox {
     }
 
     pub async fn notarized(&mut self, proposal: Proposal) {
-        self.sender
+        self.high
             .send(Message::Notarized { proposal })
             .await
             .unwrap();
     }
 
     pub async fn finalized(&mut self, proposal: Proposal) {
-        self.sender
+        self.high
             .send(Message::Finalized { proposal })
             .await
             .unwrap();
@@ -88,9 +89,9 @@ impl Mailbox {
         digest: Digest,
         parents: Height,
         recipient: PublicKey,
-        deadline: SystemTime,
+        deadline: u64,
     ) {
-        self.sender
+        self.low
             .send(Message::Proposals {
                 digest,
                 parents,
@@ -102,14 +103,14 @@ impl Mailbox {
     }
 
     pub async fn backfilled_proposals(&mut self, proposals: Vec<(Digest, wire::Proposal)>) {
-        self.sender
+        self.low
             .send(Message::BackfilledProposals { proposals })
             .await
             .unwrap();
     }
 
     pub async fn backfilled_notarizations(&mut self, notarizations: Vec<wire::Notarization>) {
-        self.sender
+        self.low
             .send(Message::BackfilledNotarizations { notarizations })
             .await
             .unwrap();

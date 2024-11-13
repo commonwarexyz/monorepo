@@ -9,6 +9,7 @@ use crate::{
     Automaton, Finalizer, Payload, Supervisor,
 };
 use commonware_cryptography::{Digest, PublicKey};
+use commonware_macros::select;
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::hex;
 use core::panic;
@@ -16,7 +17,10 @@ use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use prost::Message as _;
 use rand::Rng;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    time::UNIX_EPOCH,
+};
 use tracing::{debug, trace};
 
 #[derive(Clone)]
@@ -35,7 +39,8 @@ pub struct Actor<
     max_fetch_count: u64,
     max_fetch_size: usize,
 
-    mailbox_receiver: mpsc::Receiver<Message>,
+    low_receiver: mpsc::Receiver<Message>,
+    high_receiver: mpsc::Receiver<Message>,
 
     knowledge: HashMap<Height, Knowledge>,
     containers: HashMap<Digest, wire::Proposal>,
@@ -93,7 +98,8 @@ impl<
         );
 
         // Initialize mailbox
-        let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
+        let (low_sender, low_receiver) = mpsc::channel(1024);
+        let (high_sender, high_receiver) = mpsc::channel(1024);
         let (missing_sender, missing_receiver) = mpsc::channel(1024);
         (
             Self {
@@ -103,7 +109,8 @@ impl<
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
 
-                mailbox_receiver,
+                low_receiver,
+                high_receiver,
 
                 knowledge,
                 containers,
@@ -123,7 +130,7 @@ impl<
                 notarizations_sent: HashMap::new(),
                 last_notified: 0,
             },
-            Mailbox::new(mailbox_sender),
+            Mailbox::new(low_sender, high_sender),
         )
     }
 
@@ -267,13 +274,17 @@ impl<
                             );
                             continue;
                         }
+                        debug!(
+                            height = next,
+                            digest = hex(&digest),
+                            "notifying application notarization"
+                        );
                         self.notarizations_sent
                             .entry(next)
                             .or_default()
                             .insert(digest.clone());
                         self.application.prepared(digest).await;
                     }
-                    debug!(height = next, "notified application notarization");
                 }
                 Knowledge::Finalized(digest) => {
                     // Send finalized proposal
@@ -301,8 +312,12 @@ impl<
                     self.verified.remove(&(next - 1)); // parent of finalized must be accessible
                     self.notarizations_sent.remove(&next);
                     self.last_notified = next;
+                    debug!(
+                        height = next,
+                        digest = hex(&digest),
+                        "notifying application finalization"
+                    );
                     self.application.finalized(digest).await;
-                    debug!(height = next, "notified application finalization");
                 }
             }
 
@@ -319,6 +334,8 @@ impl<
                 Some(Knowledge::Notarized(hashes)) => {
                     // Find earliest view that we also sent notification for
                     for (_, digest) in hashes.iter() {
+                        // TODO: ensure we have all null notarizations to this block view (otherwise we'll
+                        // fail to propose)
                         if let Some(notifications) = self.notarizations_sent.get(&next) {
                             if notifications.contains(digest) {
                                 let container = self.containers.get(digest).unwrap();
@@ -375,6 +392,14 @@ impl<
                     "skipping propose"
                 );
                 return None;
+            } else {
+                debug!(
+                    height,
+                    view,
+                    parent_view = parent.1,
+                    gap_view,
+                    "depending on null notarization"
+                );
             }
         }
 
@@ -440,7 +465,7 @@ impl<
                     );
                     return false;
                 } else {
-                    trace!(
+                    debug!(
                         height = proposal.height,
                         view,
                         proposal_view = proposal.view,
@@ -754,6 +779,7 @@ impl<
         let mut outstanding_notarization_request: Option<View> = None;
         loop {
             // Check if proposal request has been resolved and reissue request (if so)
+            let mut send_cancel = false;
             if let Some((ref height, ref digest)) = outstanding_proposal_request {
                 if self.containers.contains_key(digest) {
                     debug!(
@@ -762,6 +788,7 @@ impl<
                         "unexpected resolution of missing proposal out of backfill"
                     );
                     outstanding_proposal_request = None;
+                    send_cancel = true;
                 }
             }
             if outstanding_proposal_request.is_none() {
@@ -781,10 +808,15 @@ impl<
                     debug!(height, digest = hex(&digest), "requesting missing proposal");
                     outstanding_proposal_request = Some((height, digest.clone()));
                     backfiller.proposals(digest, parents).await;
+                    send_cancel = false;
                 }
             };
+            if send_cancel {
+                backfiller.cancel_proposals().await;
+            }
 
             // Check if notarization request has been resolved and reissue request (if so)
+            let mut send_cancel = false;
             if let Some(ref view) = outstanding_notarization_request {
                 if self.notarizations.contains_key(view) {
                     debug!(
@@ -792,6 +824,15 @@ impl<
                         "unexpected resolution of missing notarization out of backfill"
                     );
                     outstanding_notarization_request = None;
+                    send_cancel = true;
+                } else if self.last_finalized_view >= *view {
+                    debug!(
+                        view = view,
+                        last_finalized = self.last_finalized_view,
+                        "finalized view is greater than missing notarization"
+                    );
+                    outstanding_notarization_request = None;
+                    send_cancel = true;
                 }
             }
             if outstanding_notarization_request.is_none() && !self.notarizations.is_empty() {
@@ -822,11 +863,22 @@ impl<
                     debug!(view = start, children, "requesting missing notarizations");
                     outstanding_notarization_request = Some(start);
                     backfiller.notarizations(start, children).await;
+                    send_cancel = false;
                 }
             }
+            if send_cancel {
+                backfiller.cancel_notarizations().await;
+            }
 
-            // Wait for an event
-            let msg = self.mailbox_receiver.next().await.unwrap();
+            // Wait for an event (preferring high-priority first)
+            let msg = select! {
+                msg = self.high_receiver.next() => {
+                    msg.unwrap()
+                },
+                msg = self.low_receiver.next() => {
+                    msg.unwrap()
+                },
+            };
             match msg {
                 Message::Propose { view, proposer } => {
                     let (parent, height, payload, payload_digest) =
@@ -878,7 +930,14 @@ impl<
                     let mut cursor = digest;
                     let drop = loop {
                         // If we are out of time at start, drop request
-                        if deadline < self.runtime.current() {
+                        if deadline
+                            < self
+                                .runtime
+                                .current()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs()
+                        {
                             break true;
                         }
 

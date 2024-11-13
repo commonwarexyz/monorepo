@@ -340,6 +340,11 @@ impl<
                             let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
                             outstanding_proposal = Some((digest, parents, sent, status));
                         },
+                        Message::CancelProposals {} => {
+                            // Cancel outstanding proposal
+                            outstanding_proposal = None;
+                            debug!("canceled outstanding proposal");
+                        },
                         Message::FilledProposals {recipient, proposals} => {
                             // Send message
                             let msg = wire::Backfiller {
@@ -356,6 +361,11 @@ impl<
                             let mut sent = HashSet::new();
                             let status = self.send_notarization_request(view, children, &mut sent, &mut sender).await;
                             outstanding_notarization = Some((view, children, sent, status));
+                        },
+                        Message::CancelNotarizations {} => {
+                            // Cancel outstanding notarization
+                            outstanding_notarization = None;
+                            debug!("canceled outstanding notarization");
                         },
                     }
                 },
@@ -384,16 +394,15 @@ impl<
                             }
 
                             // Confirm deadline is valid
-                            let request_deadline = SystemTime::UNIX_EPOCH + Duration::from_secs(request.deadline);
-                            let min_deadline = self.runtime.current();
-                            let max_deadline = min_deadline + self.fetch_timeout;
-                            if request_deadline < min_deadline || request_deadline > max_deadline {
+                            let min_deadline = self.runtime.current().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+                            let max_deadline = min_deadline + self.fetch_timeout.as_secs();
+                            if request.deadline < min_deadline || request.deadline > max_deadline {
                                 warn!(sender = hex(&s), "invalid deadline");
                                 continue;
                             }
 
                             // Request proposals from resolver
-                            resolver.proposals(request.digest.clone(), request.parents, s, request_deadline).await;
+                            resolver.proposals(request.digest.clone(), request.parents, s, request.deadline).await;
                         },
                         wire::backfiller::Payload::ProposalResponse(response) => {
                             // Ensure this proposal is expected
@@ -500,7 +509,7 @@ impl<
                                 let height = proposal.height;
                                 let parent = proposal.parent.clone();
                                 proposals_found.push((proposal_digest.clone(), proposal));
-                                debug!(height, digest = hex(&proposal_digest), peer = hex(&s), "received batch proposal");
+                                debug!(height, digest = hex(&proposal_digest), parents = proposals_found.len(), "received batch proposal");
 
                                 // Remove outstanding task if we were waiting on this
                                 //
@@ -735,7 +744,7 @@ impl<
                                 }
                                 let view = notarization.view;
                                 notarizations_found.push(notarization);
-                                debug!(view, "received batch notarization");
+                                debug!(view, children = notarizations_found.len(), "received batch notarization");
 
                                 // Remove outstanding task if we were waiting on this
                                 if let Some(ref outstanding) = outstanding_notarization {
