@@ -838,6 +838,7 @@ impl<
 
         // Check if we should fast exit this view
         if view < self.activity_timeout || leader == self.crypto.public_key() {
+            // Don't fast exit the view
             return;
         }
         let mut next = view - 1;
@@ -862,7 +863,7 @@ impl<
         }
 
         // Reduce leader deadline to now
-        debug!(view, "skipping leader timeout");
+        debug!(view, leader = hex(&leader), "skipping leader timeout");
         self.views.get_mut(&view).unwrap().leader_deadline = Some(self.runtime.current());
     }
 
@@ -1743,6 +1744,11 @@ impl<
                                 .send(Recipients::All, msg, true)
                                 .await
                                 .unwrap();
+                            debug!(
+                                view = proposal_view,
+                                height,
+                                "broadcast proposal",
+                            );
                         },
                         Message::ProposalFailed {view} => {
                             if self.view != view {

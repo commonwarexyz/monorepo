@@ -20,6 +20,11 @@
 //! All application interaction occurs asynchronously, meaning that the engine can continue processing messages
 //! while a payload is being built or verified (usually take hundreds of milliseconds).
 //!
+//! # Dedicated Processing for Consensus Messages
+//!
+//! All peer interaction related to consensus is strictly prioritized over any other messages (i.e. helping new
+//! peers sync to the network).
+//!
 //! # Differences from Simplex Paper
 //!
 //! * Leader timeout in addition to notarization timeout
