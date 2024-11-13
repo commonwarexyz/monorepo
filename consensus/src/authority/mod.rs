@@ -78,6 +78,11 @@
 //! * Desire fast block times (as fast as possible): No message relay through leader
 //! * Proposals are small (include references to application data rather than application data itself): Each notarization may require broadcasting the proposal
 //! * Small to medium number of validators (< 500): All messages are broadcast
+//!
+//! # Performance Degradation
+//!
+//! * Ever-growing unfinalized tip: processing views are cached in-memory
+//!     * Particularly bad if composed of null notarizations
 
 mod actors;
 pub mod byzantine;
