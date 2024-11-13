@@ -21,7 +21,7 @@ use tracing::{debug, trace};
 
 #[derive(Clone)]
 enum Knowledge {
-    Notarized(BTreeMap<View, Digest>), // priotize building off of earliest view (avoid wasting work)
+    Notarized(BTreeMap<View, Digest>), // prioritize building off of earliest view (avoid wasting work)
     Finalized(Digest),
 }
 
@@ -926,6 +926,18 @@ impl<
                 Message::BackfilledProposals { proposals } => {
                     let mut next = None;
                     for (digest, proposal) in proposals {
+                        // Check if we are resolving the current outstanding (may have been overwritten)
+                        if let Some((_, outstanding)) = &outstanding_proposal_request {
+                            if *outstanding == digest {
+                                debug!(
+                                    height = proposal.height,
+                                    digest = hex(&digest),
+                                    "fetched outstanding proposal"
+                                );
+                                outstanding_proposal_request = None;
+                            }
+                        }
+
                         // Ensure this is the container we want
                         let proposal = Proposal::Populated(digest, proposal);
                         next = self.resolve(proposal);
@@ -948,6 +960,18 @@ impl<
                 }
                 Message::BackfilledNotarizations { notarizations } => {
                     for notarization in notarizations {
+                        // Check if we are resolving the current outstanding (may have been overwritten)
+                        if let Some(outstanding) = &outstanding_notarization_request {
+                            if *outstanding == notarization.view {
+                                debug!(
+                                    view = notarization.view,
+                                    "fetched outstanding notarization"
+                                );
+                                outstanding_notarization_request = None;
+                            }
+                        }
+
+                        // Handle notarization
                         let notarization = if notarization.digest.is_none() {
                             Proposal::Null(notarization.view)
                         } else {
