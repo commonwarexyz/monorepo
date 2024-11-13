@@ -633,6 +633,8 @@ impl<
         };
 
         // Ensure we are in the right view to process this message
+        //
+        // TODO: convert this to interesting?
         if proposal.view != self.view && proposal.view != self.view + 1 {
             debug!(
                 proposal_view = proposal.view,
@@ -642,6 +644,10 @@ impl<
             );
             return;
         }
+
+        // TODO: sanity check that we don't already have a proposal before doing verification
+        //
+        // This would mean we couldn't collect faults...
 
         // Check expected leader
         if !C::validate(&signature.public_key) {
