@@ -60,7 +60,7 @@
 //! * Enter `v+1`
 //! * If leader:
 //!    * Send notarization for `c_parent` and all null notarizations for views between `c_parent` and `c` to anyone
-//!      that didn't vote for `c`
+//!      that didn't vote for `c` (if node was offline or messages dropped, may never be able to vote without this)
 //!
 //! Upon receiving `2f+1` finalizes for `c`:
 //! * Broadcast finalization for `c`
