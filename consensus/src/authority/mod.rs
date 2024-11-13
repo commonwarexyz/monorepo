@@ -96,6 +96,10 @@
 //!
 //! * Ever-growing unfinalized tip: processing views are cached in-memory
 //!     * Particularly bad if composed of null notarizations
+//!
+//! Crazy Idea: What if there is no proposal and the vote/notarization contains all info (only ever include a hash of the proposal)? Would this undermine
+//! an application's ability to build a useful product (as wouldn't know contents of block until an arbitrary point in the future, potentially after asked to produce
+//! a new block)?
 
 mod actors;
 pub mod byzantine;
