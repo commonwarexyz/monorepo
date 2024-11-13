@@ -35,7 +35,7 @@
 //!   more votes)
 //! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)
 //!
-//! # Specification
+//! # Specification for View `v`
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
@@ -50,6 +50,7 @@
 //!
 //! Upon receiving `2f+1` votes for `c` (if `t_l` and `t_a` have not fired):
 //! * Cancel `t_a`
+//! * Broadcast `c` to next leader (if didn't vote for `c`)
 //! * Broadcast notarization for `c`
 //! * Broadcast finalize for `c`
 //! * Enter `v+1`
@@ -57,6 +58,9 @@
 //! Upon receiving `2f+1` null votes for `v`:
 //! * Broadcast null notarization for `v`
 //! * Enter `v+1`
+//! * If leader:
+//!    * Send notarization for `c_parent` and all null notarizations for views between `c_parent` and `c` to anyone
+//!      that didn't vote for `c`
 //!
 //! Upon receiving `2f+1` finalizes for `c`:
 //! * Broadcast finalization for `c`
