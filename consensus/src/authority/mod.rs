@@ -12,7 +12,7 @@
 //!
 //! # Sync
 //!
-//! Wait for container finalization at tip (2f+1), fetch heights backwards (don't
+//! Wait for container notarization at tip (2f+1), fetch heights backwards (don't
 //! need to backfill views).
 //!
 //! # Async Handling
