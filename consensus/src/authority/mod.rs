@@ -103,6 +103,8 @@
 //! * Could leave to the builder to decide whether to wait to produce a block until they've seen finalized parent or not. Would anyone ever want not? Could also
 //!   leave constructing/disseminating the block to the builder. We agree on hashes, you can do whatever you want to get to that point?
 //! * TL;DR: Agreement isn't Dissemination -> Tension: Agreement is most reliable with all-to-all broadcast but dissemnination is definitely not most efficient that way
+//! * Verify returns as soon as get the proposal rather than immediately if don't have it. This will ensure that consensus messages that get to participant before payload
+//!   won't just immediately be dropped?
 
 mod actors;
 pub mod byzantine;
