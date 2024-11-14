@@ -102,6 +102,7 @@
 //! a new block/may also not know parent yet)?
 //! * Could leave to the builder to decide whether to wait to produce a block until they've seen finalized parent or not. Would anyone ever want not? Could also
 //!   leave constructing/disseminating the block to the builder. We agree on hashes, you can do whatever you want to get to that point?
+//! * TL;DR: Agreement isn't Dissemination
 
 mod actors;
 pub mod byzantine;
