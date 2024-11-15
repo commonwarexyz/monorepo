@@ -45,6 +45,9 @@
 //! * Broadcast `c` to all nodes that didn't vote for `c` (otherwise won't vote for next honest proposal -> other constructions typically don't handle this case and instead
 //!   rely on some form of leader backfill in their slot or aim to fetch as soon as they realize they are missing a block but by then in this construction, their slot
 //!   has already started as they'd only want to backfill after seeing `2f+1` votes for the proposal)
+//!     * We don't want to be able to trick honest nodes into making unnecessary requests for null notarizations if they can't verify some
+//!       proposal at a given height (and the root cause appears to be missing notarizations) -> could probably work around this by only
+//!       having people start fetching if f+1 votes for such a proposal are seen
 //! * Broadcast notarization for `c`
 //! * If have not broadcast null vote for view `v`, broadcast finalize for `c`
 //! * Enter `v+1`
