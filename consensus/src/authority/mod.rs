@@ -62,6 +62,8 @@
 //!
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast null vote for view `v`
+//! * Every x after null vote that we are still in view `v`:
+//!    * For nodes that have yet to vote null, rebroadcast null vote for view `v` and notarization from `v-1` (not last notarization?)
 //!
 //! ## Adapting Simplex to Real-World: Syncing, Restarts, and Dropped Messages
 //!
