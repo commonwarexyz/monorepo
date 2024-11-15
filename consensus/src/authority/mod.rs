@@ -27,6 +27,8 @@
 //!
 //! # Specification for View `v`
 //!
+//! _We don't assume that messages are eventually delivered and instead tolerate arbitrary drops._
+//!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l` and advance `t_a`
