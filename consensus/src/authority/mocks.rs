@@ -297,13 +297,20 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Finalizer
 impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Supervisor
     for Application<E, H, S>
 {
+    type Seed = View;
     type Index = View;
 
-    fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>> {
+    fn leader(&self, seed: View) -> Option<PublicKey> {
+        let participants = self.supervisor.participants(seed)?;
+        let index = seed % participants.len() as u64;
+        Some(participants[index as usize].clone())
+    }
+
+    fn participants(&self, index: View) -> Option<&Vec<PublicKey>> {
         self.supervisor.participants(index)
     }
 
-    fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<bool> {
+    fn is_participant(&self, index: View, candidate: &PublicKey) -> Option<bool> {
         self.supervisor.is_participant(index, candidate)
     }
 
@@ -331,7 +338,13 @@ mod tests {
     }
 
     impl Supervisor for NoReportSupervisor {
+        type Seed = View;
         type Index = View;
+
+        fn leader(&self, seed: View) -> Option<PublicKey> {
+            let index = seed % self.participants.len() as u64;
+            Some(self.participants[index as usize].clone())
+        }
 
         fn participants(&self, _view: View) -> Option<&Vec<PublicKey>> {
             Some(&self.participants)

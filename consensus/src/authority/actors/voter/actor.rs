@@ -407,7 +407,7 @@ impl<
         E: Clock + Rng,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
+        A: Automaton<Context = Context> + Supervisor<Seed = View, Index = View> + Finalizer,
     > Actor<E, C, H, A>
 {
     pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {
@@ -654,7 +654,7 @@ impl<
             debug!(reason = "invalid signature", "dropping proposal");
             return;
         }
-        let expected_leader = match self.leader(proposal.view) {
+        let expected_leader = match self.application.leader(proposal.view) {
             Some(leader) => leader,
             None => {
                 debug!(
@@ -832,7 +832,7 @@ impl<
         }
 
         // Setup new view
-        let leader = self.leader(view).expect("unable to get leader");
+        let leader = self.application.leader(view).expect("unable to get leader");
         let entry = self
             .views
             .entry(view)
@@ -979,7 +979,7 @@ impl<
 
     async fn handle_vote(&mut self, vote: wire::Vote) {
         // Check to see if vote is for proposal in view
-        let leader = match self.leader(vote.view) {
+        let leader = match self.application.leader(vote.view) {
             Some(leader) => leader,
             None => {
                 debug!(
@@ -1248,7 +1248,10 @@ impl<
 
     async fn handle_finalize(&mut self, finalize: wire::Finalize) {
         // Get view for finalize
-        let leader = self.leader(finalize.view).expect("unable to get leader");
+        let leader = self
+            .application
+            .leader(finalize.view)
+            .expect("unable to get leader");
         let view = self
             .views
             .entry(finalize.view)
