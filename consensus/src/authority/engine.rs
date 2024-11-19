@@ -1,5 +1,5 @@
 use super::{
-    actors::{backfiller, resolver, voter},
+    actors::{backfiller, voter},
     config::Config,
     Context, View,
 };
@@ -22,9 +22,6 @@ pub struct Engine<
 
     voter: voter::Actor<E, C, H, A>,
     voter_mailbox: voter::Mailbox,
-
-    resolver: resolver::Actor<E, A>,
-    resolver_mailbox: resolver::Mailbox,
 
     backfiller: backfiller::Actor<E, C, H, A>,
     backfiller_mailbox: backfiller::Mailbox,
@@ -66,16 +63,6 @@ impl<
             },
         );
 
-        // Create resolver
-        let (resolver, resolver_mailbox) = resolver::Actor::new(
-            runtime.clone(),
-            resolver::Config {
-                application: cfg.application.clone(),
-                max_fetch_count: cfg.max_fetch_count,
-                max_fetch_size: cfg.max_fetch_size,
-            },
-        );
-
         // Create backfiller
         let (backfiller, backfiller_mailbox) = backfiller::Actor::new(
             runtime.clone(),
@@ -95,9 +82,6 @@ impl<
         Self {
             runtime,
 
-            resolver,
-            resolver_mailbox,
-
             voter,
             voter_mailbox,
 
@@ -113,20 +97,9 @@ impl<
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
-        let mut voter = self.runtime.spawn("voter", {
-            let resolver = self.resolver_mailbox.clone();
-            let backfiller = self.backfiller_mailbox.clone();
-            async move {
-                self.voter
-                    .run(resolver, backfiller, voter_sender, voter_receiver)
-                    .await;
-            }
-        });
-
-        // Start the resolver
-        let mut resolver = self.runtime.spawn("resolver", async move {
-            self.resolver
-                .run(self.voter_mailbox, self.backfiller_mailbox)
+        let mut voter = self.runtime.spawn("voter", async move {
+            self.voter
+                .run(self.backfiller_mailbox, voter_sender, voter_receiver)
                 .await;
         });
 
@@ -134,30 +107,18 @@ impl<
         let (backfiller_sender, backfiller_receiver) = backfiller_network;
         let mut backfiller = self.runtime.spawn("backfiller", async move {
             self.backfiller
-                .run(
-                    0,
-                    self.resolver_mailbox,
-                    backfiller_sender,
-                    backfiller_receiver,
-                )
+                .run(self.voter_mailbox, backfiller_sender, backfiller_receiver)
                 .await;
         });
 
         // Wait for the resolver or voter to finish
         select! {
-            _ = &mut resolver => {
-                debug!("resolver finished");
-                voter.abort();
-                backfiller.abort();
-            },
             _ = &mut voter => {
                 debug!("voter finished");
-                resolver.abort();
                 backfiller.abort();
             },
             _ = &mut backfiller => {
                 debug!("backfiller finished");
-                resolver.abort();
                 voter.abort();
             },
         }

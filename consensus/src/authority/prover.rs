@@ -5,8 +5,7 @@
 
 use super::{
     encoder::{
-        finalize_message, finalize_namespace, proposal_message, proposal_namespace, vote_message,
-        vote_namespace,
+        finalize_namespace, null_message, proposal_message, proposal_namespace, vote_namespace,
     },
     wire, Height, View,
 };
@@ -31,6 +30,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self {
             _crypto: PhantomData,
             hasher,
+
             proposal_namespace: proposal_namespace(&namespace),
             vote_namespace: vote_namespace(&namespace),
             finalize_namespace: finalize_namespace(&namespace),
