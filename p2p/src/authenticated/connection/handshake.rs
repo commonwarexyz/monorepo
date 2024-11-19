@@ -10,6 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const NAMESPACE_SUFFIX_HANDSHAKE: &[u8] = b"_HANDSHAKE";
 
+fn suffix_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, NAMESPACE_SUFFIX_HANDSHAKE)
+}
+
 pub fn create_handshake<E: Clock, C: Scheme>(
     runtime: E,
     crypto: &mut C,
@@ -25,12 +29,11 @@ pub fn create_handshake<E: Clock, C: Scheme>(
         .as_secs();
 
     // Sign their public key
-    let namespace_suffixed = union(namespace, NAMESPACE_SUFFIX_HANDSHAKE);
     let mut payload = Vec::new();
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key.as_bytes());
     payload.extend_from_slice(&timestamp.to_be_bytes());
-    let signature = crypto.sign(&namespace_suffixed, &payload);
+    let signature = crypto.sign(&suffix_namespace(namespace), &payload);
 
     // Send handshake
     Ok(wire::Message {
@@ -122,7 +125,7 @@ impl Handshake {
 
         // Verify signature
         if !C::verify(
-            &union(namespace,NAMESPACE_SUFFIX_HANDSHAKE),
+            &suffix_namespace(namespace),
             &payload,
             &public_key,
             &signature.signature,
@@ -171,8 +174,14 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
         };
 
         // Verify handshake message from peer
-        let handshake =
-            Handshake::verify(runtime, crypto, namespace, synchrony_bound, max_handshake_age, msg)?;
+        let handshake = Handshake::verify(
+            runtime,
+            crypto,
+            namespace,
+            synchrony_bound,
+            max_handshake_age,
+            msg,
+        )?;
         Ok(Self {
             sink,
             stream,
@@ -246,7 +255,7 @@ mod tests {
 
             // Verify signature
             assert!(Ed25519::verify(
-                &union(TEST_NAMESPACE, NAMESPACE_SUFFIX_HANDSHAKE),
+                &suffix_namespace(TEST_NAMESPACE),
                 &payload,
                 &sender.public_key(),
                 &handshake.signature.unwrap().signature,
@@ -640,5 +649,12 @@ mod tests {
             );
             assert!(matches!(result, Err(Error::InvalidTimestamp)));
         });
+    }
+
+    #[test]
+    fn test_suffix_namespace() {
+        let namespace = b"test_namespace";
+        let expected = b"test_namespace_HANDSHAKE".to_vec();
+        assert_eq!(suffix_namespace(namespace), expected);
     }
 }

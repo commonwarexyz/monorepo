@@ -8,7 +8,7 @@
 //! checking the value of `p2p_connections` in the "Metrics Panel" in the right corner of the window. This metric should
 //! be equal to `count(friends)- 1` (you don't connect to yourself).
 //!
-//! # Synchonized Friends
+//! # Synchronized Friends
 //!
 //! `commonware-p2p::authenticated` requires all friends to have the same set of friends for friend discovery to work
 //! correctly. If you do not synchronize friends, you may be able to form connections between specific friends but may
@@ -68,6 +68,8 @@ use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tracing::info;
+
+const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
 
 #[doc(hidden)]
 fn main() {
@@ -156,7 +158,7 @@ fn main() {
     let p2p_registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        b"chat",
+        APPLICATION_NAMESPACE,
         p2p_registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),

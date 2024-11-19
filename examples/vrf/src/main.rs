@@ -97,6 +97,8 @@ use std::{
 use std::{str::FromStr, time::Duration};
 use tracing::info;
 
+const APPLICATION_NAMESPACE: &[u8] = b"commonware-vrf";
+
 fn main() {
     // Initialize runtime
     let runtime_cfg = tokio::Config::default();
@@ -208,7 +210,7 @@ fn main() {
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        b"TestName",
+        APPLICATION_NAMESPACE,
         Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),

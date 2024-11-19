@@ -199,10 +199,11 @@
 //! // Configure network
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
+//! let application_namespace = b"my-app";
 //! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
 //! let p2p_cfg = authenticated::Config::aggressive(
 //!     signer.clone(),
-//!     b"my-app",
+//!     application_namespace,
 //!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,

@@ -190,7 +190,7 @@ impl<C: Scheme> Config<C> {
     ) -> Self {
         Self {
             crypto,
-            namespace: b"_COMMONWARE_P2P_".to_vec(),
+            namespace: b"_COMMONWARE_P2P_TEST_".to_vec(),
             registry,
             listen,
             dialable: listen,

@@ -29,6 +29,10 @@ use tracing::{debug, trace};
 
 const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
+fn suffix_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, NAMESPACE_SUFFIX_IP)
+}
+
 struct PeerSet {
     index: u64,
     sorted: Vec<PublicKey>,
@@ -166,8 +170,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             .expect("failed to get current time")
             .as_secs();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
-        let namespace_suffixed = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let ip_signature = cfg.crypto.sign(&namespace_suffixed, &payload_bytes);
+        let ip_signature = cfg.crypto.sign(&suffix_namespace(&cfg.namespace), &payload_bytes);
         let ip_signature = wire::Peer {
             socket: socket_bytes,
             timestamp: current_time,
@@ -422,7 +425,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
             if !C::verify(
-                &union(&self.namespace, NAMESPACE_SUFFIX_IP),
+                &suffix_namespace(&self.namespace),
                 &payload,
                 public_key,
                 &signature.signature,
@@ -785,7 +788,7 @@ mod tests {
             // Provide peer address
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let (socket_bytes, payload_bytes) = socket_peer_payload(&socket, 0);
-            let ip_signature = peer1_signer.sign(&union(&cfg_namespace, NAMESPACE_SUFFIX_IP), &payload_bytes);
+            let ip_signature = peer1_signer.sign(&suffix_namespace(&cfg_namespace), &payload_bytes);
             let peers = wire::Peers {
                 peers: vec![wire::Peer {
                     socket: socket_bytes,
@@ -886,5 +889,12 @@ mod tests {
                 };
             }
         });
+    }
+
+    #[test]
+    fn test_suffix_namespace() {
+        let namespace = b"test_namespace";
+        let expected = b"test_namespace_IP".to_vec();
+        assert_eq!(suffix_namespace(namespace), expected);
     }
 }
