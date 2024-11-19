@@ -37,9 +37,9 @@ pub trait Automaton: Clone + Send + 'static {
 
     /// Verify the payload is valid.
     ///
-    /// Verify is a stateful operation and must be called in-order. Automatons should
-    /// maintain a mapping of containers to payloads to handle invocations from the
-    /// `Finalizer`.
+    /// If `Mailbox::verified` is called with this payload, the consensus will vote to support
+    /// the payload. If the payload has not been received or describes an invalid payload, the consensus
+    /// instance should not be notified using `Mailbox::verified`.
     fn verify(
         &mut self,
         context: Self::Context,
