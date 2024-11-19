@@ -1,13 +1,12 @@
 //! TBD
 
-pub mod authority;
-
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use std::future::Future;
 
-/// Byte array representing the externally-provided payload of a container.
-pub type Payload = Bytes;
+/// Header contains information specific to consensus that can be used, among other things,
+/// to verify that a given container was signed by some participant at some height.
+type Header = Bytes;
 
 /// Automaton is the interface for the consensus engine to inform of progress.
 ///
@@ -18,19 +17,23 @@ pub trait Automaton: Clone + Send + 'static {
     type Context;
 
     /// Initialize the application with the genesis container.
-    fn genesis(&mut self) -> (Payload, Digest);
+    fn genesis(&mut self) -> Digest;
 
     /// Generate a new payload for the given parent digest.
     ///
     /// If state is not yet ready, this will return None.
-    fn propose(&mut self, context: Self::Context) -> impl Future<Output = Option<Payload>> + Send;
+    fn propose(&mut self, context: Self::Context) -> impl Future<Output = ()> + Send;
 
-    /// Parse the payload and return the digest of the payload. We don't just digest
-    /// the payload because it may be more efficient to prove against a digest
-    /// that is specifically formatted (like a trie root).
+    /// Called once consensus locks on a proposal. At this point the application can
+    /// broadcast the raw contents to the network with the given consensus header.
     ///
-    /// Parse is a stateless operation and may be called out-of-order.
-    fn parse(&mut self, payload: Payload) -> impl Future<Output = Option<Digest>> + Send;
+    /// It is up to the developer to efficiently handle broadcast to the rest of the network.
+    fn broadcast(
+        &mut self,
+        context: Self::Context,
+        header: Header,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
 
     /// Verify the payload is valid.
     ///
@@ -40,9 +43,29 @@ pub trait Automaton: Clone + Send + 'static {
     fn verify(
         &mut self,
         context: Self::Context,
-        payload: Payload,
-        container: Digest,
-    ) -> impl Future<Output = bool> + Send;
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
+}
+
+/// Mailbox is implemented by the consensus engine to receive messages from the Automaton.
+pub trait Mailbox: Clone + Send + 'static {
+    type Context;
+
+    /// Proposed is called after a payload is constructed.
+    ///
+    /// If the `Context` is no longer active/relevant, this will be dropped.
+    fn proposed(
+        &mut self,
+        context: Self::Context,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// Verified is called after a payload is verified.
+    fn verified(
+        &mut self,
+        context: Self::Context,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not
@@ -84,11 +107,21 @@ pub trait Supervisor: Clone + Send + 'static {
 }
 
 pub trait Finalizer: Clone + Send + 'static {
+    type Context;
+
     /// Event that the container has been prepared.
     ///
     /// No guarantee will send notarized event for all heights.
-    fn prepared(&mut self, container: Digest) -> impl Future<Output = ()> + Send;
+    fn prepared(
+        &mut self,
+        context: Self::Context,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
 
     /// Event that the container has been finalized.
-    fn finalized(&mut self, container: Digest) -> impl Future<Output = ()> + Send;
+    fn finalized(
+        &mut self,
+        context: Self::Context,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
 }
