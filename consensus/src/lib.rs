@@ -29,8 +29,11 @@ use std::future::Future;
 /// ```
 ///
 /// It is possible for payloads to also link to each other and bypass header info, however,
-/// there may be some information in the header useful for interpreting the payload/proving
-/// a payload was in fact finalized by consensus (like a threshold signature).
+/// there may be some information in the header useful for interpreting the payload (which
+/// will be wrapped by the header in exported consensus decisions).
+///
+/// Header is a serialized version of Context that includes a payload digest and typically
+/// a signature.
 type Header = Bytes;
 
 /// Automaton is the interface for the consensus engine to inform of progress.
