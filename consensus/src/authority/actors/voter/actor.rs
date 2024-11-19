@@ -5,6 +5,7 @@ use crate::{
         encoder::{
             finalize_namespace, null_message, proposal_message, proposal_namespace, vote_namespace,
         },
+        prover::Prover,
         wire, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_VOTE, FINALIZE,
         NULL_AND_FINALIZE, VOTE,
     },
@@ -33,9 +34,9 @@ type Notarizable<'a> = Option<(
 )>;
 
 struct Round<C: Scheme, H: Hasher, A: Supervisor> {
+    hasher: H,
     application: A,
     _crypto: PhantomData<C>,
-    _hasher: PhantomData<H>,
 
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
@@ -73,15 +74,16 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
 
 impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
     pub fn new(
+        hasher: H,
         application: A,
         leader: PublicKey,
         leader_deadline: Option<SystemTime>,
         advance_deadline: Option<SystemTime>,
     ) -> Self {
         Self {
+            hasher,
             application,
             _crypto: PhantomData,
-            _hasher: PhantomData,
 
             leader,
             leader_deadline,
@@ -113,88 +115,103 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
     async fn add_verified_vote(&mut self, vote: wire::Vote) {
         // Determine whether or not this is a null vote
         let public_key = &vote.signature.as_ref().unwrap().public_key;
-        if vote.digest.is_none() {
-            // Check if already issued finalize
-            let finalize = self.finalizers.get(public_key);
-            if finalize.is_none() {
-                // Store the null vote
-                self.null_votes.insert(public_key.clone(), vote);
-                return;
+
+        match vote.container.unwrap().payload.unwrap() {
+            wire::container::Payload::Proposal(proposal) => {
+                // Compute proposal digest
+                let message = proposal_message(
+                    proposal.view,
+                    proposal.height,
+                    proposal.parent,
+                    &proposal.payload,
+                );
+                self.hasher.update(&message);
+                let digest = self.hasher.finalize();
+
+                // Check if already voted
+                if let Some(previous_vote) = self.proposal_voters.get(public_key) {
+                    let view = proposal.view;
+                    if previous_vote == &digest {
+                        trace!(
+                            view,
+                            signer = hex(public_key),
+                            previous_vote = hex(previous_vote),
+                            "already voted"
+                        );
+                        return;
+                    }
+
+                    // Create fault
+                    let previous_vote = self
+                        .proposal_votes
+                        .get(previous_vote)
+                        .unwrap()
+                        .get(public_key)
+                        .unwrap();
+                    let proof = Prover::<C, H>::serialize_conflicting_vote(
+                        vote.view,
+                        previous_vote.height.unwrap(),
+                        previous_vote.digest.clone().unwrap(),
+                        previous_vote.signature.clone().unwrap(),
+                        vote.height.unwrap(),
+                        digest.clone(),
+                        vote.signature.clone().unwrap(),
+                    );
+                    self.application.report(CONFLICTING_VOTE, proof).await;
+                    warn!(
+                        view,
+                        signer = hex(public_key),
+                        activity = CONFLICTING_VOTE,
+                        "recorded fault"
+                    );
+                    return;
+                }
+
+                // Store the vote
+                self.proposal_voters
+                    .insert(public_key.clone(), digest.clone());
+                let entry = self.proposal_votes.entry(digest).or_default();
+                entry.insert(public_key.clone(), vote.clone());
+
+                // Report the vote
+                let proof = Prover::<C, H>::serialize_vote(vote);
+                self.application.report(VOTE, proof).await;
             }
-            let finalize = finalize.unwrap();
+            wire::container::Payload::Null(null) => {
+                // Check if already issued finalize
+                let finalize = self.finalizers.get(public_key);
+                if finalize.is_none() {
+                    // Store the null vote
+                    self.null_votes.insert(public_key.clone(), vote);
+                    return;
+                }
+                let finalize = finalize.unwrap();
 
-            // Create fault
-            let finalize = self
-                .finalizes
-                .get(finalize)
-                .unwrap()
-                .get(public_key)
-                .unwrap();
-            let proof = Prover::<C, H>::serialize_null_finalize(
-                vote.view,
-                finalize.height,
-                finalize.digest.clone(),
-                finalize.signature.clone().unwrap(),
-                vote.signature.clone().unwrap(),
-            );
-            self.application.report(NULL_AND_FINALIZE, proof).await;
-            warn!(
-                view = vote.view,
-                signer = hex(public_key),
-                activity = NULL_AND_FINALIZE,
-                "recorded fault"
-            );
-            return;
-        }
-        let digest = vote.digest.clone().unwrap();
-
-        // Check if already voted
-        if let Some(previous_vote) = self.proposal_voters.get(public_key) {
-            if previous_vote == &digest {
-                trace!(
-                    view = vote.view,
+                // Create fault
+                let view = null.view;
+                let finalize = self
+                    .finalizes
+                    .get(finalize)
+                    .unwrap()
+                    .get(public_key)
+                    .unwrap();
+                let proof = Prover::<C, H>::serialize_null_finalize(
+                    view,
+                    finalize.height,
+                    finalize.digest.clone(),
+                    finalize.signature.clone().unwrap(),
+                    vote.signature.clone().unwrap(),
+                );
+                self.application.report(NULL_AND_FINALIZE, proof).await;
+                warn!(
+                    view,
                     signer = hex(public_key),
-                    previous_vote = hex(previous_vote),
-                    "already voted"
+                    activity = NULL_AND_FINALIZE,
+                    "recorded fault"
                 );
                 return;
             }
-
-            // Create fault
-            let previous_vote = self
-                .proposal_votes
-                .get(previous_vote)
-                .unwrap()
-                .get(public_key)
-                .unwrap();
-            let proof = Prover::<C, H>::serialize_conflicting_vote(
-                vote.view,
-                previous_vote.height.unwrap(),
-                previous_vote.digest.clone().unwrap(),
-                previous_vote.signature.clone().unwrap(),
-                vote.height.unwrap(),
-                digest.clone(),
-                vote.signature.clone().unwrap(),
-            );
-            self.application.report(CONFLICTING_VOTE, proof).await;
-            warn!(
-                view = vote.view,
-                signer = hex(public_key),
-                activity = CONFLICTING_VOTE,
-                "recorded fault"
-            );
-            return;
         }
-
-        // Store the vote
-        self.proposal_voters
-            .insert(public_key.clone(), digest.clone());
-        let entry = self.proposal_votes.entry(digest).or_default();
-        entry.insert(public_key.clone(), vote.clone());
-
-        // Report the vote
-        let proof = Prover::<C, H>::serialize_vote(vote);
-        self.application.report(VOTE, proof).await;
     }
 
     fn notarizable_proposal(&mut self, threshold: u32, force: bool) -> Notarizable {
