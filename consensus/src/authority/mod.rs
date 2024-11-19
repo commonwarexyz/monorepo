@@ -42,7 +42,7 @@
 //!
 //! Upon receiving `2f+1` votes for `c`:
 //! * Cancel `t_a`
-//! * Broadcast `c` (for efficiency, this will likely be `hash(c)`) and notarization for `c`
+//! * Broadcast `c` and notarization for `c`
 //! * Notarize `c` at height `h` (and recursively notarize its parents)
 //! * If have not broadcast null vote for view `v`, broadcast finalize for `c`
 //! * Enter `v+1`
@@ -50,10 +50,8 @@
 //! Upon receiving `2f+1` null votes for `v`:
 //! * Broadcast null notarization for `v`
 //! * Enter `v+1`
-//! * If leader, broadcast last non-null notarization (for `c_parent`)
-//! * If observe `>= f+1` votes for some proposal `c` in a view, fetch any missing null notarizations between `c_parent` and `c` (don't know `c_parent` view here?)
-//!
-//! _We broadcast the last non-null notarization so that we can restore progress in the case of a large crash fault. Is this sound?_
+//! * If observe `>= f+1` votes for some proposal `c` in a view, fetch the non-null notarization for `c_parent` and any missing null notarizations
+//!   between `c_parent` and `c`
 //!
 //! Upon receiving `2f+1` finalizes for `c`:
 //! * Broadcast finalization for `c`
@@ -63,6 +61,8 @@
 //! * Broadcast null vote for view `v`
 //! * Every `t_r` after null vote that we are still in view `v`:
 //!    * For nodes that have yet to vote null, rebroadcast null vote for view `v` and notarization from `v-1`
+//!
+//! _For efficiency, `c` is `hash(c)` and it is up to an external mechanism to ensure that the contents of `c` are available to all participants._
 //!
 //! ## Adapting Simplex to Real-World: Syncing, Restarts, and Dropped Messages
 //!
