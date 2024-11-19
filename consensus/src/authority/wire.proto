@@ -67,7 +67,7 @@ message Backfiller {
 }
 
 message Request {
-    repeated uint64 populated = 1;
+    repeated uint64 containers = 1;
     repeated uint64 null = 2;
 }
 
