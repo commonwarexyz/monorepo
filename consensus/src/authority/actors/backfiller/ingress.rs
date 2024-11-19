@@ -1,9 +1,8 @@
-use crate::authority::{wire, Height, View};
-use commonware_cryptography::{Digest, PublicKey};
+use crate::authority::{wire, View};
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {
-    Notarizations {
+    Fetch {
         containers: Vec<View>,
         null: Vec<View>,
     },
@@ -29,18 +28,11 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn notarizations(&mut self, containers: Vec<View>, null: Vec<View>) {
+    pub async fn fetch(&mut self, containers: Vec<View>, null: Vec<View>) {
         self.sender
-            .send(Message::Notarizations { view, children })
+            .send(Message::Fetch { containers, null })
             .await
             .expect("Failed to send notarizations");
-    }
-
-    pub async fn cancel_notarizations(&mut self) {
-        self.sender
-            .send(Message::CancelNotarizations {})
-            .await
-            .expect("Failed to send cancel notarizations");
     }
 
     pub async fn notarized(

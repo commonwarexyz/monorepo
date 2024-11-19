@@ -11,13 +11,13 @@ message Voter {
 }
 
 // To ensure all participants stay informed, Container is included in all vote messages.
-message Container {
+message Proposal {
     uint64 view = 1;
     // TODO: does parent need to include some hash or can we get away
     // with just a view number (as there can only ever be 1 non-null notarization
     // at a given view)?
-    uint64 parent = 2; // View
-    uint64 height = 3;
+    uint64 height = 2;
+    uint64 parent = 3; // View
     bytes payload = 4; // This is a hash
 }
 
@@ -25,9 +25,9 @@ message Null {
     uint64 view = 1;
 }
 
-message Proposal {
+message Container {
     oneof type {
-        Container container = 1;
+        Proposal proposal = 1;
         Null null = 2;
     }
 }
@@ -40,22 +40,22 @@ message Signature {
 // A vote from the leader for a view is also treated as a proposal
 // for that view.
 message Vote {
-    Proposal proposal = 1; 
+    Container container = 1; 
     Signature signature = 2;
 }
 
 message Notarization {
-    Proposal proposal = 1;
+    Container container = 1;
     repeated Signature signatures = 2;
 }
 
 message Finalize {
-    Proposal proposal = 1;
+    Container container = 1;
     Signature signature = 2;
 }
 
 message Finalization {
-    Proposal proposal = 1;
+    Container container = 1;
     repeated Signature signatures = 2;
 }
 

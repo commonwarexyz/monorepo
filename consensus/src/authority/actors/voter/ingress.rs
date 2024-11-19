@@ -1,17 +1,11 @@
-use crate::authority::{Height, View};
-use bytes::Bytes;
+use crate::authority::View;
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message {
-    Proposed {
-        view: View,
-        payload: Digest,
-    },
-    Verified {
-        view: View,
-    },
+    Proposed { view: View, payload: Digest },
+    Verified { view: View },
 }
 
 #[derive(Clone)]
@@ -24,16 +18,9 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn proposed(
-        &mut self,
-        view: View,
-        payload: Digest,
-    ) {
+    pub async fn proposed(&mut self, view: View, payload: Digest) {
         self.sender
-            .send(Message::Proposal {
-                view,
-                payload,
-            })
+            .send(Message::Proposed { view, payload })
             .await
             .unwrap();
     }

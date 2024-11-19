@@ -109,6 +109,11 @@
 //!   won't just immediately be dropped?
 
 mod actors;
+mod config;
+mod encoder;
+mod engine;
+mod prover;
+
 use commonware_cryptography::{Digest, PublicKey};
 
 mod wire {
@@ -142,12 +147,11 @@ pub enum Error {
     InvalidSignature,
 }
 
-pub const PROPOSAL: Activity = 0;
-pub const VOTE: Activity = 1;
-pub const FINALIZE: Activity = 2;
-pub const CONFLICTING_PROPOSAL: Activity = 3;
+/// Vote for leader is considered a proposal and a vote.
+pub const VOTE: Activity = 0;
+pub const FINALIZE: Activity = 1;
 /// Note: it is ok to have both a vote for a proposal and the null
 /// container in the same view.
-pub const CONFLICTING_VOTE: Activity = 4;
-pub const CONFLICTING_FINALIZE: Activity = 5;
-pub const NULL_AND_FINALIZE: Activity = 6;
+pub const CONFLICTING_VOTE: Activity = 2;
+pub const CONFLICTING_FINALIZE: Activity = 3;
+pub const NULL_AND_FINALIZE: Activity = 4;
