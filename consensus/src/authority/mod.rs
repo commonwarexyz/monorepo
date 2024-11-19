@@ -108,6 +108,7 @@
 //! * Verify returns as soon as get the proposal rather than immediately if don't have it. This will ensure that consensus messages that get to participant before payload
 //!   won't just immediately be dropped?
 
+mod actors;
 use commonware_cryptography::{Digest, PublicKey};
 
 mod wire {
