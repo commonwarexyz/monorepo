@@ -229,12 +229,12 @@ mod tests {
     }
 
     impl<C: Scheme, H: Hasher> Supervisor for TestSupervisor<C, H> {
-        type Seed = View;
         type Index = View;
+        type Seed = ();
 
-        fn leader(&self, seed: View) -> Option<PublicKey> {
-            let participants = self.participants(seed)?;
-            let index = seed % participants.len() as u64;
+        fn leader(&self, index: View, _seed: ()) -> Option<PublicKey> {
+            let participants = self.participants(index)?;
+            let index = index % participants.len() as u64;
             Some(participants[index as usize].clone())
         }
 

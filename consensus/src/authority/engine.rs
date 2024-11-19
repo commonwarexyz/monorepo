@@ -34,7 +34,7 @@ impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context> + Supervisor<Seed = View, Index = View> + Finalizer,
+        A: Automaton<Context = Context> + Supervisor<Seed = (), Index = View> + Finalizer,
     > Engine<E, C, H, A>
 {
     pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> Self {

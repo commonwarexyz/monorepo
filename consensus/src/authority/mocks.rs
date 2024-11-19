@@ -294,15 +294,16 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Finalizer
     }
 }
 
-impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Supervisor
+// TODO: do we actually need to provide supervisor here?
+impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Seed = (), Index = View>> Supervisor
     for Application<E, H, S>
 {
-    type Seed = View;
-    type Index = View;
+    type Index = S::Index;
+    type Seed = S::Seed;
 
-    fn leader(&self, seed: View) -> Option<PublicKey> {
-        let participants = self.supervisor.participants(seed)?;
-        let index = seed % participants.len() as u64;
+    fn leader(&self, index: View, _seed: ()) -> Option<PublicKey> {
+        let participants = self.supervisor.participants(index)?;
+        let index = index % participants.len() as u64;
         Some(participants[index as usize].clone())
     }
 
@@ -338,11 +339,11 @@ mod tests {
     }
 
     impl Supervisor for NoReportSupervisor {
-        type Seed = View;
         type Index = View;
+        type Seed = ();
 
-        fn leader(&self, seed: View) -> Option<PublicKey> {
-            let index = seed % self.participants.len() as u64;
+        fn leader(&self, index: View, _seed: ()) -> Option<PublicKey> {
+            let index = index % self.participants.len() as u64;
             Some(self.participants[index as usize].clone())
         }
 

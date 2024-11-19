@@ -55,11 +55,11 @@ pub type Activity = u8;
 pub type Proof = Bytes;
 
 pub trait Supervisor: Clone + Send + 'static {
-    type Seed;
     type Index;
+    type Seed;
 
-    /// Get the leader for a given seed.
-    fn leader(&self, seed: Self::Seed) -> Option<PublicKey>;
+    /// Get the leader at a given index for the provided seed.
+    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
 
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.
