@@ -16,6 +16,7 @@ pub use instance::{Instance, Sender};
 #[derive(Clone)]
 pub struct Config<C: Scheme> {
     pub crypto: C,
+    pub namespace: &'static[u8],
     pub max_message_size: usize,
     pub synchrony_bound: Duration,
     pub max_handshake_age: Duration,

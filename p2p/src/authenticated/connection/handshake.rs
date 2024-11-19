@@ -7,11 +7,10 @@ use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use prost::Message;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_AUTHENTICATED_HANDSHAKE_";
-
 pub fn create_handshake<E: Clock, C: Scheme>(
     runtime: E,
     crypto: &mut C,
+    namespace: &[u8],
     recipient_public_key: PublicKey,
     ephemeral_public_key: x25519_dalek::PublicKey,
 ) -> Result<Bytes, Error> {
@@ -27,7 +26,7 @@ pub fn create_handshake<E: Clock, C: Scheme>(
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key.as_bytes());
     payload.extend_from_slice(&timestamp.to_be_bytes());
-    let signature = crypto.sign(NAMESPACE, &payload);
+    let signature = crypto.sign(namespace, &payload);
 
     // Send handshake
     Ok(wire::Message {
@@ -54,6 +53,7 @@ impl Handshake {
     pub fn verify<E: Clock, C: Scheme>(
         runtime: E,
         crypto: &C,
+        namespace: &[u8],
         synchrony_bound: Duration,
         max_handshake_age: Duration,
         msg: Bytes,
@@ -117,7 +117,7 @@ impl Handshake {
         payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
 
         // Verify signature
-        if !C::verify(NAMESPACE, &payload, &public_key, &signature.signature) {
+        if !C::verify(namespace, &payload, &public_key, &signature.signature) {
             return Err(Error::InvalidSignature);
         }
 
@@ -140,6 +140,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
     pub async fn verify<E: Clock + Spawner, C: Scheme>(
         runtime: E,
         crypto: &C,
+        namespace: &[u8],
         synchrony_bound: Duration,
         max_handshake_age: Duration,
         handshake_timeout: Duration,
@@ -161,7 +162,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 
         // Verify handshake message from peer
         let handshake =
-            Handshake::verify(runtime, crypto, synchrony_bound, max_handshake_age, msg)?;
+            Handshake::verify(runtime, crypto, namespace, synchrony_bound, max_handshake_age, msg)?;
         Ok(Self {
             sink,
             stream,
@@ -184,6 +185,8 @@ mod tests {
     use futures::SinkExt;
     use x25519_dalek::PublicKey;
 
+    const TEST_NAMESPACE: &[u8] = b"_TEST_NAMESPACE_";
+
     #[test]
     fn test_handshake_create_verify() {
         // Initialize runtime
@@ -198,6 +201,7 @@ mod tests {
             let handshake_bytes = create_handshake(
                 runtime.clone(),
                 &mut sender,
+                TEST_NAMESPACE,
                 recipient.public_key(),
                 ephemeral_public_key,
             )
@@ -232,7 +236,7 @@ mod tests {
 
             // Verify signature
             assert!(Ed25519::verify(
-                NAMESPACE,
+                namespace,
                 &payload,
                 &sender.public_key(),
                 &handshake.signature.unwrap().signature,
@@ -242,6 +246,7 @@ mod tests {
             let handshake = Handshake::verify(
                 runtime,
                 &recipient,
+                namespace,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 handshake_bytes,
@@ -266,6 +271,7 @@ mod tests {
             let handshake_bytes = create_handshake(
                 runtime.clone(),
                 &mut sender,
+                TEST_NAMESPACE,
                 recipient.public_key(),
                 ephemeral_public_key,
             )
@@ -312,6 +318,7 @@ mod tests {
             let handshake_bytes = create_handshake(
                 runtime.clone(),
                 &mut sender,
+                TEST_NAMESPACE,
                 Ed25519::from_seed(1).public_key(),
                 ephemeral_public_key,
             )
@@ -397,6 +404,7 @@ mod tests {
                     let handshake_bytes = create_handshake(
                         runtime,
                         &mut sender,
+                        TEST_NAMESPACE,
                         recipient.public_key(),
                         ephemeral_public_key,
                     )
@@ -433,6 +441,7 @@ mod tests {
             let handshake = create_handshake(
                 runtime.clone(),
                 &mut crypto,
+                TEST_NAMESPACE,
                 recipient_public_key,
                 ephemeral_public_key,
             )
@@ -466,6 +475,7 @@ mod tests {
             let result = Handshake::verify(
                 runtime,
                 &crypto,
+                namespace,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 handshake,
@@ -485,6 +495,7 @@ mod tests {
             let handshake = create_handshake(
                 runtime.clone(),
                 &mut crypto,
+                TEST_NAMESPACE,
                 recipient_public_key,
                 ephemeral_public_key,
             )
@@ -527,6 +538,7 @@ mod tests {
             let handshake = create_handshake(
                 runtime.clone(),
                 &mut crypto,
+                TEST_NAMESPACE,
                 recipient_public_key,
                 ephemeral_public_key,
             )
@@ -583,6 +595,7 @@ mod tests {
             let handshake = create_handshake(
                 runtime.clone(),
                 &mut crypto,
+                TEST_NAMESPACE,
                 recipient_public_key,
                 ephemeral_public_key,
             )

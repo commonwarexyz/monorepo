@@ -15,13 +15,16 @@ pub type Bootstrapper = (PublicKey, SocketAddr);
 ///
 /// # Warning
 /// It is recommended to synchronize this configuration across peers in the network (with the
-/// exection of `crypto`, `registry`, `address`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
-/// If this is not sycnhronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
+/// exception of `crypto`, `registry`, `listen`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
+/// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
 /// and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
 pub struct Config<C: Scheme> {
     /// Cryptographic primitives.
     pub crypto: C,
+
+    /// Prefix for crytographic hashes.
+    pub namespace: &'static [u8],
 
     /// Registry for prometheus metrics.
     pub registry: Arc<Mutex<Registry>>,
@@ -106,6 +109,7 @@ impl<C: Scheme> Config<C> {
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         crypto: C,
+        namespace: &'static [u8],
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
@@ -113,6 +117,7 @@ impl<C: Scheme> Config<C> {
     ) -> Self {
         Self {
             crypto,
+            namespace,
             registry,
             listen,
             dialable: listen,
@@ -143,6 +148,7 @@ impl<C: Scheme> Config<C> {
     /// It is not recommended to use this configuration in production.
     pub fn aggressive(
         crypto: C,
+        namespace: &'static [u8],
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
@@ -150,6 +156,7 @@ impl<C: Scheme> Config<C> {
     ) -> Self {
         Self {
             crypto,
+            namespace,
             registry,
             listen,
             dialable: listen,
@@ -183,6 +190,7 @@ impl<C: Scheme> Config<C> {
     ) -> Self {
         Self {
             crypto,
+            namespace: b"_COMMONWARE_P2P_",
             registry,
             listen,
             dialable: listen,

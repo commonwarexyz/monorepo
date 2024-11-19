@@ -27,8 +27,6 @@ use std::{
 };
 use tracing::{debug, trace};
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_P2P_AUTHENTICATED_IP_";
-
 struct PeerSet {
     index: u64,
     sorted: Vec<PublicKey>,
@@ -135,6 +133,7 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
     runtime: E,
 
     crypto: C,
+    namespace: &'static [u8],
     allow_private_ips: bool,
     synchrony_bound: Duration,
     tracked_peer_sets: usize,
@@ -165,7 +164,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             .expect("failed to get current time")
             .as_secs();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
-        let ip_signature = cfg.crypto.sign(NAMESPACE, &payload_bytes);
+        let ip_signature = cfg.crypto.sign(cfg.namespace, &payload_bytes);
         let ip_signature = wire::Peer {
             socket: socket_bytes,
             timestamp: current_time,
@@ -231,6 +230,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
+                namespace: cfg.namespace,
 
                 ip_signature,
 
@@ -418,7 +418,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
-            if !C::verify(NAMESPACE, &payload, public_key, &signature.signature) {
+            if !C::verify(self.namespace, &payload, public_key, &signature.signature) {
                 return Err(Error::InvalidSignature);
             }
 
@@ -655,6 +655,7 @@ mod tests {
     fn test_config<C: Scheme>(crypto: C, bootstrappers: Vec<Bootstrapper>) -> Config<C> {
         Config {
             crypto,
+            namespace: b"_CW_P2P_AUTHENTICATED_IP_",
             registry: Arc::new(Mutex::new(prometheus_client::registry::Registry::default())),
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bootstrappers,
@@ -775,7 +776,7 @@ mod tests {
             // Provide peer address
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let (socket_bytes, payload_bytes) = socket_peer_payload(&socket, 0);
-            let ip_signature = peer1_signer.sign(NAMESPACE, &payload_bytes);
+            let ip_signature = peer1_signer.sign(cfg.namespace, &payload_bytes);
             let peers = wire::Peers {
                 peers: vec![wire::Peer {
                     socket: socket_bytes,
