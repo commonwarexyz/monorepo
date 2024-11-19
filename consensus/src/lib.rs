@@ -111,10 +111,10 @@ pub trait Supervisor: Clone + Send + 'static {
 pub trait Finalizer: Clone + Send + 'static {
     type Context;
 
-    /// Event that the container has been prepared.
+    /// Event that the container has been notarized (seen by `2f+1` participants).
     ///
     /// No guarantee will send notarized event for all heights.
-    fn prepared(
+    fn notarized(
         &mut self,
         context: Self::Context,
         payload: Digest,
