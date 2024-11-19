@@ -38,28 +38,22 @@
 //! Upon receiving first container `c` from `l`:
 //! * Cancel `t_l`
 //! * If we have `c_parent`, have verified `c_parent`, `c_parent` is notarized (either implicitly or explicitly), and we have null notarizations
-//!   for all views between `c_parent` and `c`, then broadcast vote for `c`.
+//!   for all views between `c_parent` and `c`, then verify `c` and broadcast vote for `c`.
 //!
 //! Upon receiving `2f+1` votes for `c`:
 //! * Cancel `t_a`
-//! * Broadcast `c` to all nodes that didn't vote for `c` (otherwise won't vote for next honest proposal -> other constructions typically don't handle this case and instead
-//!   rely on some form of leader backfill in their slot or aim to fetch as soon as they realize they are missing a block but by then in this construction, their slot
-//!   has already started as they'd only want to backfill after seeing `2f+1` votes for the proposal)
-//!     * We don't want to be able to trick honest nodes into making unnecessary requests for null notarizations if they can't verify some
-//!       proposal at a given height (and the root cause appears to be missing notarizations) -> could probably work around this by only
-//!       having people start fetching if f+1 votes for such a proposal are seen
-//! * Broadcast notarization for `c`
+//! * Broadcast `c` (for efficiency, this will likely be `hash(c)`) and notarization for `c`
+//! * Notarize `c` at height `h` (and recursively notarize its parents)
 //! * If have not broadcast null vote for view `v`, broadcast finalize for `c`
 //! * Enter `v+1`
 //!
 //! Upon receiving `2f+1` null votes for `v`:
 //! * Broadcast null notarization for `v`
 //! * Enter `v+1`
-//! * If leader:
-//!    * Dependent Notarizations: Send notarization for `c_parent` and `j` random null notarizations for views between `c_parent` and `c` to anyone
-//!      that didn't vote for `c` (if node was offline or messages dropped, may never be able to vote without this) -> only send to nodes that have
-//!      been active in the last `r` views
-//! TODO: If more than `f+1` votes, attempt backfill for missing notarizations (by view number, not random selection)?
+//! * If leader, broadcast last non-null notarization (for `c_parent`)
+//! * If observe `>= f+1` votes for some proposal `c` in a view, fetch any missing null notarizations between `c_parent` and `c` (don't know `c_parent` view here?)
+//!
+//! _We broadcast the last non-null notarization so that we can restore progress in the case of a large crash fault. Is this sound?_
 //!
 //! Upon receiving `2f+1` finalizes for `c`:
 //! * Broadcast finalization for `c`
@@ -67,13 +61,14 @@
 //!
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast null vote for view `v`
-//! * Every x after null vote that we are still in view `v`:
-//!    * For nodes that have yet to vote null, rebroadcast null vote for view `v` and notarization from `v-1` (not last notarization?)
+//! * Every `t_r` after null vote that we are still in view `v`:
+//!    * For nodes that have yet to vote null, rebroadcast null vote for view `v` and notarization from `v-1`
 //!
 //! ## Adapting Simplex to Real-World: Syncing, Restarts, and Dropped Messages
 //!
 //! * Distinct Leader timeout (in addition to notarization timeout)
 //!     * Skip leader timeout/notarization timeout if we haven't seen a participant vote in some number of views
+//! * Don't assume that all notarizations are sent with each proposal
 //! * Periodically retry building of proposal
 //! * [NOT SAFE] Backfill containers from notarizing peers rather than passing along with notarization message
 //! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)/no dedicated
