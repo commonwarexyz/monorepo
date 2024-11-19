@@ -8,6 +8,25 @@ use std::future::Future;
 
 /// Header contains information specific to consensus that can be used, among other things,
 /// to verify that a given container was signed by some participant at some height.
+///
+/// Headers link payloads together in a chain like so:
+/// ```txt
+/// ┌─────────────┐               ┌─────────────┐
+/// │             │               │             │
+/// │   Header    │◄──────────────┤   Header    │
+/// │             │               │             │
+/// └──────┬──────┘               └──────┬──────┘
+///        ▼                             ▼       
+/// ┌─────────────┐               ┌─────────────┐
+/// │             │               │             │
+/// │             │               │             │
+/// │             │               │             │
+/// │   Payload   │               │   Payload   │
+/// │             │               │             │
+/// │             │               │             │
+/// │             │               │             │
+/// └─────────────┘               └─────────────┘
+/// ```
 type Header = Bytes;
 
 /// Automaton is the interface for the consensus engine to inform of progress.
@@ -27,15 +46,15 @@ pub trait Automaton: Clone + Send + 'static {
     fn propose(&mut self, context: Self::Context) -> impl Future<Output = ()> + Send;
 
     /// Called once consensus locks on a proposal. At this point the application can
-    /// broadcast the raw contents to the network with the given consensus header.
+    /// broadcast the raw contents to the network with the given consensus header (which
+    /// references the payload).
     ///
-    /// It is up to the developer to efficiently handle broadcast to the rest of the network.
-    fn broadcast(
-        &mut self,
-        context: Self::Context,
-        header: Header,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
+    /// It is up to the developer to efficiently handle broadcast/backfill to/from the rest of the network.
+    ///
+    ///
+    /// TODO: must be specific about how payloads are linked...if we only use payloads then we can't
+    /// verify broader object from consensus, so parent should instead be over headers.
+    fn broadcast(&mut self, header: Header, payload: Digest) -> impl Future<Output = ()> + Send;
 
     /// Verify the payload is valid.
     ///
