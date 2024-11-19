@@ -1,13 +1,12 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
-        actors::{backfiller, resolver, Proposal},
+        actors::backfiller,
         encoder::{
-            finalize_message, finalize_namespace, proposal_message, proposal_namespace,
-            vote_message, vote_namespace,
+            finalize_namespace, null_message, proposal_message, proposal_namespace, vote_namespace,
         },
-        wire, Context, Height, Prover, View, CONFLICTING_FINALIZE, CONFLICTING_PROPOSAL,
-        CONFLICTING_VOTE, FINALIZE, NULL_AND_FINALIZE, PROPOSAL, VOTE,
+        wire, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_VOTE, FINALIZE,
+        NULL_AND_FINALIZE, VOTE,
     },
     Automaton, Finalizer, Supervisor,
 };
@@ -533,31 +532,14 @@ impl<
         view.advance_deadline = None;
         view.null_vote_retry = None;
 
-        // Broadcast notarization that led to entrance to this view
-        let past_view = self.view - 1;
-        if retry && past_view > 0 {
-            match self.construct_notarization(past_view, true) {
-                Some(notarization) => {
-                    debug!(view = past_view, "rebroadcasting notarization");
-                    let msg = wire::Voter {
-                        payload: Some(wire::voter::Payload::Notarization(notarization)),
-                    }
-                    .encode_to_vec()
-                    .into();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
-                }
-                None => {
-                    warn!(view = past_view, "no notarization to rebroadcast");
-                }
-            }
-        }
-
         // Construct null vote
-        let message = vote_message(self.view, None, None);
+        let message = null_message(self.view);
         let vote = wire::Vote {
-            view: self.view,
-            height: None,
-            digest: None,
+            container: Some(wire::Container {
+                payload: Some(wire::container::Payload::Null(wire::Null {
+                    view: self.view,
+                })),
+            }),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(&self.vote_namespace, &message),

@@ -1,8 +1,7 @@
 mod actor;
 mod ingress;
 
-use super::View;
-use crate::{Automaton, Finalizer, Supervisor};
+use crate::{authority::View, Automaton, Finalizer, Supervisor};
 pub use actor::Actor;
 use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};

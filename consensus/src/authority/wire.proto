@@ -26,7 +26,7 @@ message Null {
 }
 
 message Container {
-    oneof type {
+    oneof payload {
         Proposal proposal = 1;
         Null null = 2;
     }
