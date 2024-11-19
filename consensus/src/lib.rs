@@ -1,4 +1,6 @@
 //! TBD
+//!
+//! Focused on linear consensus protocols that can support concurrent proposals via `broadcast`.
 
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
@@ -19,9 +21,9 @@ pub trait Automaton: Clone + Send + 'static {
     /// Initialize the application with the genesis container.
     fn genesis(&mut self) -> Digest;
 
-    /// Generate a new payload for the given parent digest.
+    /// Generate a new payload for the given context.
     ///
-    /// If state is not yet ready, this will return None.
+    /// If it is possible to generate a payload, the `Automaton` should call `Mailbox::proposed`.
     fn propose(&mut self, context: Self::Context) -> impl Future<Output = ()> + Send;
 
     /// Called once consensus locks on a proposal. At this point the application can
