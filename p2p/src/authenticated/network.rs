@@ -60,7 +60,7 @@ impl<
             runtime.clone(),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
-                namespace: cfg.namespace,
+                namespace: cfg.namespace.clone(),
                 registry: cfg.registry.clone(),
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),

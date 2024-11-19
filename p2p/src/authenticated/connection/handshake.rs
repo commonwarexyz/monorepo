@@ -4,8 +4,11 @@ use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
+use commonware_utils::union;
 use prost::Message;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const NAMESPACE_SUFFIX_HANDSHAKE: &[u8] = b"_HANDSHAKE";
 
 pub fn create_handshake<E: Clock, C: Scheme>(
     runtime: E,
@@ -22,11 +25,12 @@ pub fn create_handshake<E: Clock, C: Scheme>(
         .as_secs();
 
     // Sign their public key
+    let namespace_suffixed = union(namespace, NAMESPACE_SUFFIX_HANDSHAKE);
     let mut payload = Vec::new();
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key.as_bytes());
     payload.extend_from_slice(&timestamp.to_be_bytes());
-    let signature = crypto.sign(namespace, &payload);
+    let signature = crypto.sign(&namespace_suffixed, &payload);
 
     // Send handshake
     Ok(wire::Message {
@@ -117,7 +121,12 @@ impl Handshake {
         payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
 
         // Verify signature
-        if !C::verify(namespace, &payload, &public_key, &signature.signature) {
+        if !C::verify(
+            &union(namespace,NAMESPACE_SUFFIX_HANDSHAKE),
+            &payload,
+            &public_key,
+            &signature.signature,
+        ) {
             return Err(Error::InvalidSignature);
         }
 
@@ -236,7 +245,7 @@ mod tests {
 
             // Verify signature
             assert!(Ed25519::verify(
-                namespace,
+                &union(TEST_NAMESPACE, NAMESPACE_SUFFIX_HANDSHAKE),
                 &payload,
                 &sender.public_key(),
                 &handshake.signature.unwrap().signature,
@@ -246,7 +255,7 @@ mod tests {
             let handshake = Handshake::verify(
                 runtime,
                 &recipient,
-                namespace,
+                TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 handshake_bytes,
@@ -290,6 +299,7 @@ mod tests {
             let result = IncomingHandshake::verify(
                 runtime,
                 &recipient,
+                TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -337,6 +347,7 @@ mod tests {
             let result = IncomingHandshake::verify(
                 runtime,
                 &Ed25519::from_seed(2),
+                TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -368,6 +379,7 @@ mod tests {
             let result = IncomingHandshake::verify(
                 runtime,
                 &Ed25519::from_seed(0),
+                TEST_NAMESPACE,
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
@@ -417,6 +429,7 @@ mod tests {
             let result = IncomingHandshake::verify(
                 runtime,
                 &recipient,
+                TEST_NAMESPACE,
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
@@ -475,7 +488,7 @@ mod tests {
             let result = Handshake::verify(
                 runtime,
                 &crypto,
-                namespace,
+                TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 handshake,
@@ -519,6 +532,7 @@ mod tests {
             let result = Handshake::verify(
                 runtime,
                 &crypto,
+                TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 handshake,
@@ -572,6 +586,7 @@ mod tests {
             let result = Handshake::verify(
                 runtime,
                 &crypto,
+                TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 handshake,
@@ -617,6 +632,7 @@ mod tests {
             let result = Handshake::verify(
                 runtime,
                 &crypto,
+                TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 handshake,

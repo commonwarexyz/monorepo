@@ -19,7 +19,7 @@ pub use ingress::{Mailbox, Oracle, Reservation};
 
 pub struct Config<C: Scheme> {
     pub crypto: C,
-    pub namespace: &'static[u8],
+    pub namespace: Vec<u8>,
     pub registry: Arc<Mutex<Registry>>,
     pub address: SocketAddr,
     pub bootstrappers: Vec<Bootstrapper>,

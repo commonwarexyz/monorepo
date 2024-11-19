@@ -24,7 +24,7 @@ pub struct Config<C: Scheme> {
     pub crypto: C,
 
     /// Prefix for crytographic hashes.
-    pub namespace: &'static [u8],
+    pub namespace: Vec<u8>,
 
     /// Registry for prometheus metrics.
     pub registry: Arc<Mutex<Registry>>,
@@ -109,7 +109,7 @@ impl<C: Scheme> Config<C> {
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         crypto: C,
-        namespace: &'static [u8],
+        namespace: &[u8],
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
@@ -117,7 +117,7 @@ impl<C: Scheme> Config<C> {
     ) -> Self {
         Self {
             crypto,
-            namespace,
+            namespace: namespace.to_vec(),
             registry,
             listen,
             dialable: listen,
@@ -148,7 +148,7 @@ impl<C: Scheme> Config<C> {
     /// It is not recommended to use this configuration in production.
     pub fn aggressive(
         crypto: C,
-        namespace: &'static [u8],
+        namespace: &[u8],
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
@@ -156,7 +156,7 @@ impl<C: Scheme> Config<C> {
     ) -> Self {
         Self {
             crypto,
-            namespace,
+            namespace: namespace.to_vec(),
             registry,
             listen,
             dialable: listen,
@@ -190,7 +190,7 @@ impl<C: Scheme> Config<C> {
     ) -> Self {
         Self {
             crypto,
-            namespace: b"_COMMONWARE_P2P_",
+            namespace: b"_COMMONWARE_P2P_".to_vec(),
             registry,
             listen,
             dialable: listen,

@@ -7,7 +7,7 @@ use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::hex;
+use commonware_utils::{hex, union};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
@@ -26,6 +26,8 @@ use std::{
     net::SocketAddr,
 };
 use tracing::{debug, trace};
+
+const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
 
 struct PeerSet {
     index: u64,
@@ -133,7 +135,7 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
     runtime: E,
 
     crypto: C,
-    namespace: &'static [u8],
+    namespace: Vec<u8>,
     allow_private_ips: bool,
     synchrony_bound: Duration,
     tracked_peer_sets: usize,
@@ -164,7 +166,8 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             .expect("failed to get current time")
             .as_secs();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
-        let ip_signature = cfg.crypto.sign(cfg.namespace, &payload_bytes);
+        let namespace_suffixed = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
+        let ip_signature = cfg.crypto.sign(&namespace_suffixed, &payload_bytes);
         let ip_signature = wire::Peer {
             socket: socket_bytes,
             timestamp: current_time,
@@ -418,7 +421,12 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
 
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
-            if !C::verify(self.namespace, &payload, public_key, &signature.signature) {
+            if !C::verify(
+                &union(&self.namespace, NAMESPACE_SUFFIX_IP),
+                &payload,
+                public_key,
+                &signature.signature,
+            ) {
                 return Err(Error::InvalidSignature);
             }
 
@@ -655,7 +663,7 @@ mod tests {
     fn test_config<C: Scheme>(crypto: C, bootstrappers: Vec<Bootstrapper>) -> Config<C> {
         Config {
             crypto,
-            namespace: b"_CW_P2P_AUTHENTICATED_IP_",
+            namespace: b"CW_P2P_AUTHENTICATED_TEST".to_vec(),
             registry: Arc::new(Mutex::new(prometheus_client::registry::Registry::default())),
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bootstrappers,
@@ -719,6 +727,7 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         let peer0 = Ed25519::from_seed(0);
         let cfg = test_config(peer0.clone(), Vec::new());
+        let cfg_namespace = cfg.namespace.clone();
         executor.start(async move {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
 
@@ -776,7 +785,7 @@ mod tests {
             // Provide peer address
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let (socket_bytes, payload_bytes) = socket_peer_payload(&socket, 0);
-            let ip_signature = peer1_signer.sign(cfg.namespace, &payload_bytes);
+            let ip_signature = peer1_signer.sign(&union(&cfg_namespace, NAMESPACE_SUFFIX_IP), &payload_bytes);
             let peers = wire::Peers {
                 peers: vec![wire::Peer {
                     socket: socket_bytes,
