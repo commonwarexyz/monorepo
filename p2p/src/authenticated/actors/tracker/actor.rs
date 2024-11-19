@@ -27,12 +27,6 @@ use std::{
 };
 use tracing::{debug, trace};
 
-const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
-
-fn suffix_namespace(namespace: &[u8]) -> Vec<u8> {
-    union(namespace, NAMESPACE_SUFFIX_IP)
-}
-
 struct PeerSet {
     index: u64,
     sorted: Vec<PublicKey>,
@@ -139,7 +133,7 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
     runtime: E,
 
     crypto: C,
-    namespace: Vec<u8>,
+    suffixed_namespace: Vec<u8>,
     allow_private_ips: bool,
     synchrony_bound: Duration,
     tracked_peer_sets: usize,
@@ -162,6 +156,8 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
 }
 
 impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
+    const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
+
     pub fn new(runtime: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
         // Construct IP signature
         let current_time = runtime
@@ -170,7 +166,8 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             .expect("failed to get current time")
             .as_secs();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
-        let ip_signature = cfg.crypto.sign(&suffix_namespace(&cfg.namespace), &payload_bytes);
+        let suffixed_namespace = union(&cfg.namespace, Self::NAMESPACE_SUFFIX_IP);
+        let ip_signature = cfg.crypto.sign(&suffixed_namespace, &payload_bytes);
         let ip_signature = wire::Peer {
             socket: socket_bytes,
             timestamp: current_time,
@@ -232,11 +229,11 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             Self {
                 runtime,
                 crypto: cfg.crypto,
+                suffixed_namespace,
                 allow_private_ips: cfg.allow_private_ips,
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
-                namespace: cfg.namespace,
 
                 ip_signature,
 
@@ -425,7 +422,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
             if !C::verify(
-                &suffix_namespace(&self.namespace),
+                &self.suffixed_namespace,
                 &payload,
                 public_key,
                 &signature.signature,
@@ -666,7 +663,7 @@ mod tests {
     fn test_config<C: Scheme>(crypto: C, bootstrappers: Vec<Bootstrapper>) -> Config<C> {
         Config {
             crypto,
-            namespace: b"CW_P2P_AUTHENTICATED_TEST".to_vec(),
+            namespace: b"test_namespace".to_vec(),
             registry: Arc::new(Mutex::new(prometheus_client::registry::Registry::default())),
             address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             bootstrappers,
@@ -730,9 +727,9 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         let peer0 = Ed25519::from_seed(0);
         let cfg = test_config(peer0.clone(), Vec::new());
-        let cfg_namespace = cfg.namespace.clone();
         executor.start(async move {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
+            let suffixed_namespace = actor.suffixed_namespace.clone();
 
             // Run actor in background
             runtime.spawn("actor", async move {
@@ -788,7 +785,7 @@ mod tests {
             // Provide peer address
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let (socket_bytes, payload_bytes) = socket_peer_payload(&socket, 0);
-            let ip_signature = peer1_signer.sign(&suffix_namespace(&cfg_namespace), &payload_bytes);
+            let ip_signature = peer1_signer.sign(&suffixed_namespace, &payload_bytes);
             let peers = wire::Peers {
                 peers: vec![wire::Peer {
                     socket: socket_bytes,
@@ -889,12 +886,5 @@ mod tests {
                 };
             }
         });
-    }
-
-    #[test]
-    fn test_suffix_namespace() {
-        let namespace = b"test_namespace";
-        let expected = b"test_namespace_IP".to_vec();
-        assert_eq!(suffix_namespace(namespace), expected);
     }
 }

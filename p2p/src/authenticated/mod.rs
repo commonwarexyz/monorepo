@@ -198,6 +198,7 @@
 //!
 //! // Configure network
 //! //
+//! // In production, use a unique application namespace to prevent cryptographic replay attacks.
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! let application_namespace = b"my-app";
 //! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));

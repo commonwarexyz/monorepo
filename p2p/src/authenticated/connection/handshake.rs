@@ -204,7 +204,7 @@ mod tests {
     use futures::SinkExt;
     use x25519_dalek::PublicKey;
 
-    const TEST_NAMESPACE: &[u8] = b"_TEST_NAMESPACE_";
+    const TEST_NAMESPACE: &[u8] = b"test_namespace";
 
     #[test]
     fn test_handshake_create_verify() {

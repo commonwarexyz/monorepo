@@ -97,6 +97,7 @@ use std::{
 use std::{str::FromStr, time::Duration};
 use tracing::info;
 
+// Unique namespace to avoid cryptographic hash collisions.
 const APPLICATION_NAMESPACE: &[u8] = b"commonware-vrf";
 
 fn main() {
