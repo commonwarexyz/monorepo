@@ -133,7 +133,7 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
     runtime: E,
 
     crypto: C,
-    suffixed_namespace: Vec<u8>,
+    ip_namespace: Vec<u8>,
     allow_private_ips: bool,
     synchrony_bound: Duration,
     tracked_peer_sets: usize,
@@ -166,8 +166,8 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             .expect("failed to get current time")
             .as_secs();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
-        let suffixed_namespace = union(&cfg.namespace, Self::NAMESPACE_SUFFIX_IP);
-        let ip_signature = cfg.crypto.sign(&suffixed_namespace, &payload_bytes);
+        let ip_namespace = union(&cfg.namespace, Self::NAMESPACE_SUFFIX_IP);
+        let ip_signature = cfg.crypto.sign(&ip_namespace, &payload_bytes);
         let ip_signature = wire::Peer {
             socket: socket_bytes,
             timestamp: current_time,
@@ -229,7 +229,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             Self {
                 runtime,
                 crypto: cfg.crypto,
-                suffixed_namespace,
+                ip_namespace,
                 allow_private_ips: cfg.allow_private_ips,
                 synchrony_bound: cfg.synchrony_bound,
                 tracked_peer_sets,
@@ -422,7 +422,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
             if !C::verify(
-                &self.suffixed_namespace,
+                &self.ip_namespace,
                 &payload,
                 public_key,
                 &signature.signature,
@@ -729,7 +729,7 @@ mod tests {
         let cfg = test_config(peer0.clone(), Vec::new());
         executor.start(async move {
             let (actor, mut mailbox, mut oracle) = Actor::new(runtime.clone(), cfg);
-            let suffixed_namespace = actor.suffixed_namespace.clone();
+            let ip_namespace = actor.ip_namespace.clone();
 
             // Run actor in background
             runtime.spawn("actor", async move {
@@ -785,7 +785,7 @@ mod tests {
             // Provide peer address
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let (socket_bytes, payload_bytes) = socket_peer_payload(&socket, 0);
-            let ip_signature = peer1_signer.sign(&suffixed_namespace, &payload_bytes);
+            let ip_signature = peer1_signer.sign(&ip_namespace, &payload_bytes);
             let peers = wire::Peers {
                 peers: vec![wire::Peer {
                     socket: socket_bytes,
