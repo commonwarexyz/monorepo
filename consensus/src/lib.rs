@@ -2,6 +2,8 @@
 //!
 //! Focused on linear consensus protocols that can support concurrent proposals via `broadcast`.
 
+pub mod authority;
+
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use std::future::Future;

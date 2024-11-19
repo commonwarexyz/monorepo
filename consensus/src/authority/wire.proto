@@ -1,0 +1,74 @@
+syntax = "proto3";
+package wire;
+
+message Voter {
+    oneof payload {
+        Vote vote = 1;
+        Notarization notarization = 2;
+        Finalize finalize = 3;  
+        Finalization finalization = 4;
+    }
+}
+
+message Parent {
+    uint64 view = 1;
+    bytes digest = 2;
+}
+
+message Populated {
+    uint64 view = 1;
+    Parent parent = 2;
+    uint64 height = 3;
+    bytes payload = 4;
+}
+
+message Null {
+    uint64 view = 1;
+}
+
+message Proposal {
+    oneof type {
+        Populated populated = 1;
+        Null null = 2;
+    }
+}
+
+message Signature {
+    bytes public_key = 1;
+    bytes signature = 2;
+}
+
+message Vote {
+    Proposal proposal = 1; 
+    Signature signature = 2;
+}
+
+message Notarization {
+    Proposal proposal = 1;
+    repeated Signature signatures = 2;
+}
+
+message Finalize {
+    Proposal proposal = 1;
+    Signature signature = 2;
+}
+
+message Finalization {
+    Proposal proposal = 1;
+    repeated Signature signatures = 2;
+}
+
+message Backfiller {
+    oneof payload {
+        Request request = 1;
+        Response response = 2;
+    }
+}
+message Request {
+    repeated uint64 populated = 1;
+    repeated uint64 null = 2;
+}
+
+message Response {
+    repeated Notarization notarizations = 1;
+}
