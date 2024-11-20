@@ -24,6 +24,7 @@ use prost::Message as _;
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    ptr::null,
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
@@ -1175,27 +1176,28 @@ impl<
         self.enter_view(notarization_view + 1);
     }
 
-    async fn handle_nullification(
-        &mut self,
-        backfiller: &mut backfiller::Mailbox,
-        nullification: wire::Nullification,
-    ) {
+    async fn handle_nullification(&mut self, nullification: wire::Nullification) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let leader = self
-            .leader(notarization.view)
+            .application
+            .leader(nullification.view, ())
             .expect("unable to get leader");
-        let view = self
-            .views
-            .entry(notarization.view)
-            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
-        for signature in &notarization.signatures {
-            let vote = wire::Vote {
-                view: notarization.view,
-                height: notarization.height,
-                digest: notarization.digest.clone(),
+        let view = self.views.entry(nullification.view).or_insert_with(|| {
+            Round::new(
+                self.hasher.clone(),
+                self.application.clone(),
+                nullification.view,
+                leader,
+                None,
+                None,
+            )
+        });
+        for signature in &nullification.signatures {
+            let null = wire::Null {
+                view: nullification.view,
                 signature: Some(signature.clone()),
             };
-            view.add_verified_vote(vote).await
+            view.add_verified_null(null).await
         }
 
         // Clear leader and advance deadlines (if they exist)
