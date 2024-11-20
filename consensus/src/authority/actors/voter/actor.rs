@@ -727,9 +727,9 @@ impl<
             }
         }
 
+        // TODO: Ensure we have all null notarizations between the parent and this proposal
+
         // Verify the proposal
-        //
-        // This will fail if we haven't notified the application of this parent.
         let round = self.views.entry(index.view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
@@ -1254,14 +1254,21 @@ impl<
 
     async fn handle_finalize(&mut self, finalize: wire::Finalize) {
         // Get view for finalize
+        let view = finalize.proposal.as_ref().unwrap().index.unwrap().view;
         let leader = self
             .application
-            .leader(finalize.view, ())
+            .leader(view, ())
             .expect("unable to get leader");
-        let view = self
-            .views
-            .entry(finalize.view)
-            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
+        let view = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.hasher.clone(),
+                self.application.clone(),
+                view,
+                leader,
+                None,
+                None,
+            )
+        });
 
         // Handle finalize
         view.add_verified_finalize(finalize).await;
