@@ -25,7 +25,7 @@ pub struct Config<
 
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
-    pub null_vote_retry: Duration,
+    pub null_retry: Duration,
     pub proposal_retry: Duration,
 
     /// Number of views behind finalized tip to track
