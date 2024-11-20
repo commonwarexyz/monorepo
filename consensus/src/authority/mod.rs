@@ -126,14 +126,8 @@ pub type Height = u64;
 /// Context is a collection of information about the context in which a container is built.
 #[derive(Clone)]
 pub struct Context {
-    pub view: View,
-    pub height: Height,
-
-    // TODO: pass view parent as u64 or digest?
-    pub parent: Digest,
-
-    // TODO: move to separate part (application should have access to verify)
-    pub signer: PublicKey,
+    pub index: wire::Index,
+    pub parent: wire::Parent,
 }
 
 use crate::Activity;
@@ -152,10 +146,11 @@ pub enum Error {
 }
 
 /// Vote for leader is considered a proposal and a vote.
-pub const VOTE: Activity = 0;
-pub const FINALIZE: Activity = 1;
+///
 /// Note: it is ok to have both a vote for a proposal and the null
 /// container in the same view.
+pub const VOTE: Activity = 0;
+pub const FINALIZE: Activity = 1;
 pub const CONFLICTING_VOTE: Activity = 2;
 pub const CONFLICTING_FINALIZE: Activity = 3;
 pub const NULL_AND_FINALIZE: Activity = 4;

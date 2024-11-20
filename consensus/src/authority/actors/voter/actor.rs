@@ -45,11 +45,7 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     // Track one proposal per view
     next_proposal_request: Option<SystemTime>,
     requested_proposal: bool,
-    proposal: Option<(
-        Digest, /* proposal */
-        Digest, /* payload */
-        wire::Proposal,
-    )>,
+    proposal: Option<(Digest /* proposal */, wire::Proposal)>,
     verified_proposal: bool,
 
     // Track broadcast
@@ -250,7 +246,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
 
             // Ensure we have the proposal we are going to broadcast a notarization for
             let proposal = match &self.proposal {
-                Some((digest, _, pro)) => {
+                Some((digest, pro)) => {
                     if digest != proposal {
                         debug!(
                             view = self.view,
@@ -396,7 +392,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
 
             // Ensure we have the proposal we are going to broadcast a finalization for
             let proposal = match &self.proposal {
-                Some((digest, _, pro)) => {
+                Some((digest, pro)) => {
                     if digest != proposal {
                         debug!(
                             proposal = hex(proposal),
@@ -433,7 +429,7 @@ pub struct Actor<
     hasher: H,
     application: A,
 
-    proposal_namespace: Vec<u8>,
+    header_namespace: Vec<u8>,
     vote_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 
@@ -484,7 +480,7 @@ impl<
                 hasher: cfg.hasher,
                 application: cfg.application,
 
-                proposal_namespace: proposal_namespace(&cfg.namespace),
+                header_namespace: header_namespace(&cfg.namespace),
                 vote_namespace: vote_namespace(&cfg.namespace),
                 finalize_namespace: finalize_namespace(&cfg.namespace),
 
@@ -508,41 +504,66 @@ impl<
         )
     }
 
-    fn leader(&self, view: View) -> Option<PublicKey> {
-        let validators = match self.application.participants(view) {
-            Some(validators) => validators,
-            None => return None,
-        };
-        Some(validators[view as usize % validators.len()].clone())
-    }
-
-    async fn propose(&mut self, resolver: &mut resolver::Mailbox) -> Option<SystemTime> {
-        // Check if we are leader
-        let view = self.views.get_mut(&self.view).unwrap();
-        if view.leader != self.crypto.public_key() {
-            return None;
-        }
-
-        // Check if we need to wait to propose
-        if let Some(next_proposal_request) = view.next_proposal_request {
-            if next_proposal_request > self.runtime.current() {
-                return Some(next_proposal_request);
+    fn find_parent(&self) -> Option<(wire::Parent, Height)> {
+        for view in (0..self.view).rev() {
+            let round = self.views.get(&view)?;
+            if round.broadcast_proposal_notarization {
+                let (digest, proposal) = round.proposal.as_ref()?;
+                return Some((
+                    wire::Parent {
+                        view,
+                        digest: digest.clone(),
+                    },
+                    proposal.index.unwrap().height,
+                ));
             }
         }
+        None
+    }
 
-        // Check if we have already requested a proposal
-        if view.requested_proposal {
-            return None;
+    async fn propose(&mut self) -> Option<SystemTime> {
+        // Check if we are leader
+        {
+            let round = self.views.get_mut(&self.view).unwrap();
+            if round.leader != self.crypto.public_key() {
+                return None;
+            }
+
+            // Check if we need to wait to propose
+            if let Some(next_proposal_request) = round.next_proposal_request {
+                if next_proposal_request > self.runtime.current() {
+                    return Some(next_proposal_request);
+                }
+            }
+
+            // Check if we have already requested a proposal
+            if round.requested_proposal {
+                return None;
+            }
+
+            // Check if we have already proposed
+            if round.proposal.is_some() {
+                return None;
+            }
+
+            // Consider proposal requested, even if parent doesn't exist to prevent
+            // frequent parent searches
+            round.requested_proposal = true;
         }
 
-        // Check if we have already proposed
-        if view.proposal.is_some() {
-            return None;
-        }
+        // Find best parent
+        let (parent, parent_height) = self.find_parent()?;
 
-        // Request proposal from resolver
-        view.requested_proposal = true;
-        resolver.propose(self.view, self.crypto.public_key()).await;
+        // Request proposal from application
+        self.application
+            .propose(Context {
+                index: wire::Index {
+                    view: self.view,
+                    height: parent_height + 1,
+                },
+                parent,
+            })
+            .await;
         debug!(view = self.view, "requested proposal");
         None
     }
@@ -755,7 +776,7 @@ impl<
         // Verify the signature
         let public_key = &signature.public_key;
         if !C::verify(
-            &self.proposal_namespace,
+            &self.header_namespace,
             &proposal_message,
             public_key,
             &signature.signature,
@@ -1718,7 +1739,6 @@ impl<
 
     pub async fn run(
         mut self,
-        mut resolver: resolver::Mailbox,
         mut backfiller: backfiller::Mailbox,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
@@ -1771,7 +1791,7 @@ impl<
                                 payload,
                                 signature: Some(wire::Signature {
                                     public_key: self.crypto.public_key(),
-                                    signature: self.crypto.sign(&self.proposal_namespace, &proposal_digest),
+                                    signature: self.crypto.sign(&self.header_namespace, &proposal_digest),
                                 }),
                             };
 
