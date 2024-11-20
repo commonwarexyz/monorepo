@@ -123,10 +123,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
     pub(crate) fn serialize_vote(vote: &wire::Vote) -> Proof {
         // Extract proposal
-        let container = vote.container.as_ref().expect("missing container");
-        let wire::vote::Container::Proposal(proposal) = container else {
-            panic!("container is not proposal")
-        };
+        let proposal = vote.proposal.as_ref().expect("missing proposal");
 
         // Setup proof
         Self::serialize_proposal(

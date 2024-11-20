@@ -5,8 +5,10 @@ message Voter {
     oneof payload {
         Vote vote = 1;
         Notarization notarization = 2;
-        Finalize finalize = 3;  
-        Finalization finalization = 4;
+        Null null = 3;
+        Nullification nullification = 4;
+        Finalize finalize = 5;  
+        Finalization finalization = 6;
     }
 }
 
@@ -42,20 +44,24 @@ message Signature {
 // A vote from the leader for a view is also treated as a proposal
 // for that view.
 message Vote {
-    oneof container {
-        Proposal proposal = 1;
-        uint64 null = 2;
-    }
-    Signature signature = 3;
+    Proposal proposal = 1;
+    Signature signature = 2;
 }
 
 message Notarization {
-    oneof container {
-        Proposal proposal = 1;
-        uint64 null = 2;
-    }
-    repeated Signature signatures = 3;
+    Proposal proposal = 1;
+    repeated Signature signatures = 2;
 }
+
+message Null {
+    uint64 view = 1;
+    Signature signature = 2;
+}
+
+message Nullification {
+    uint64 view = 1;
+    repeated Signature signatures = 2;
+} 
 
 message Finalize {
     Proposal proposal = 1;

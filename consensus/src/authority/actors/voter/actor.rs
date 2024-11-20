@@ -28,10 +28,7 @@ use std::{
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
-type Notarizable<'a> = Option<(
-    wire::notarization::Container,
-    &'a HashMap<PublicKey, wire::Vote>,
-)>;
+type Notarizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Vote>)>;
 type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Finalize>)>;
 
 struct Round<C: Scheme, H: Hasher, A: Supervisor> {
@@ -61,8 +58,8 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     broadcast_proposal_notarization: bool,
 
     timeout_fired: bool,
-    null_votes: HashMap<PublicKey, wire::Vote>,
-    broadcast_null_notarization: bool,
+    nulls: HashMap<PublicKey, wire::Null>,
+    broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
     finalizers: HashMap<PublicKey, Digest>,
@@ -218,6 +215,41 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 return;
             }
         }
+    }
+
+    async fn add_verified_null(&mut self, null: wire::Null) {
+        // Check if already issued finalize
+        let public_key = &null.signature.as_ref().unwrap().public_key;
+        let finalize = self.finalizers.get(public_key);
+        if finalize.is_none() {
+            // Store the null vote
+            self.null_votes.insert(public_key.clone(), vote);
+            return;
+        }
+        let finalize = finalize.unwrap();
+
+        // Create fault
+        let finalize = self
+            .finalizes
+            .get(finalize)
+            .unwrap()
+            .get(public_key)
+            .unwrap();
+        let finalize_proposal = finalize.proposal.as_ref().unwrap();
+        let proof = Prover::<C, H>::serialize_null_finalize(
+            &finalize_proposal.index.as_ref().unwrap(),
+            &finalize_proposal.parent.as_ref().unwrap(),
+            &finalize_proposal.payload,
+            &finalize.signature.as_ref().unwrap(),
+            &vote.signature.as_ref().unwrap(),
+        );
+        self.application.report(NULL_AND_FINALIZE, proof).await;
+        warn!(
+            view = self.view,
+            signer = hex(public_key),
+            activity = NULL_AND_FINALIZE,
+            "recorded fault"
+        );
     }
 
     fn notarizable_proposal(&mut self, threshold: u32, force: bool) -> Notarizable {
