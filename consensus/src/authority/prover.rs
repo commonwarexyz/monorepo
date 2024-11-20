@@ -153,16 +153,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
     pub(crate) fn serialize_finalize(finalize: wire::Finalize) -> Proof {
         // Extract proposal
-        let container = finalize
-            .container
-            .as_ref()
-            .expect("missing container")
-            .payload
-            .as_ref()
-            .expect("missing payload");
-        let wire::container::Payload::Proposal(proposal) = container else {
-            panic!("container is not proposal")
-        };
+        let proposal = finalize.proposal.as_ref().expect("missing proposal");
 
         // Setup proof
         Self::serialize_proposal(

@@ -63,12 +63,12 @@ message Notarization {
 }
 
 message Finalize {
-    Container container = 1;
+    Proposal proposal = 1;
     Signature signature = 2;
 }
 
 message Finalization {
-    Container container = 1;
+    Proposal proposal = 1;
     repeated Signature signatures = 2;
 }
 

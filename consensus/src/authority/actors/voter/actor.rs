@@ -118,8 +118,10 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
 
         match vote
             .container
+            .as_ref()
             .expect("missing container")
             .payload
+            .as_ref()
             .expect("missing payload")
         {
             wire::container::Payload::Proposal(proposal) => {
@@ -152,20 +154,26 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                         .unwrap()
                         .get(public_key)
                         .unwrap();
-                    let previous_proposal = match previous_vote.container.unwrap().payload.unwrap()
+                    let previous_proposal = match previous_vote
+                        .container
+                        .as_ref()
+                        .unwrap()
+                        .payload
+                        .as_ref()
+                        .unwrap()
                     {
                         wire::container::Payload::Proposal(proposal) => proposal,
                         _ => unreachable!(),
                     };
                     let proof = Prover::<C, H>::serialize_conflicting_vote(
                         &previous_proposal.index.unwrap(),
-                        &previous_proposal.parent.unwrap(),
+                        &previous_proposal.parent.as_ref().unwrap(),
                         &previous_proposal.payload,
-                        &previous_vote.signature.unwrap(),
+                        &previous_vote.signature.as_ref().unwrap(),
                         &proposal.index.unwrap(),
-                        &proposal.parent.unwrap(),
+                        &proposal.parent.as_ref().unwrap(),
                         &proposal.payload,
-                        &vote.signature.unwrap(),
+                        &vote.signature.as_ref().unwrap(),
                     );
                     self.application.report(CONFLICTING_VOTE, proof).await;
                     warn!(
@@ -177,14 +185,16 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                     return;
                 }
 
+                // Generate vote report
+                let proof = Prover::<C, H>::serialize_vote(&vote);
+
                 // Store the vote
                 self.proposal_voters
                     .insert(public_key.clone(), digest.clone());
                 let entry = self.proposal_votes.entry(digest).or_default();
-                entry.insert(public_key.clone(), vote.clone());
+                entry.insert(public_key.clone(), vote);
 
-                // Report the vote
-                let proof = Prover::<C, H>::serialize_vote(&vote);
+                // Report vote
                 self.application.report(VOTE, proof).await;
             }
             wire::container::Payload::Null(null) => {
@@ -205,12 +215,13 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                     .unwrap()
                     .get(public_key)
                     .unwrap();
+                let finalize_proposal = finalize.proposal.as_ref().unwrap();
                 let proof = Prover::<C, H>::serialize_null_finalize(
-                    view,
-                    finalize.height,
-                    finalize.digest.clone(),
-                    finalize.signature.clone().unwrap(),
-                    vote.signature.clone().unwrap(),
+                    &finalize_proposal.index.as_ref().unwrap(),
+                    &finalize_proposal.parent.as_ref().unwrap(),
+                    &finalize_proposal.payload,
+                    &finalize.signature.as_ref().unwrap(),
+                    &vote.signature.as_ref().unwrap(),
                 );
                 self.application.report(NULL_AND_FINALIZE, proof).await;
                 warn!(
