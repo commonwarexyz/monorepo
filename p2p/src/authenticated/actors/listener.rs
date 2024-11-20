@@ -1,12 +1,10 @@
 //! Listener
 
-use crate::authenticated::{
-    actors::{spawner, tracker},
-    connection::{self, IncomingHandshake, Instance},
-};
+use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
 use commonware_utils::hex;
+use commonware_stream::connection::{self, IncomingHandshake, Instance};
 use governor::{
     clock::ReasonablyRealtime,
     middleware::NoOpMiddleware,

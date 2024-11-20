@@ -2,11 +2,11 @@
 
 use crate::authenticated::{
     actors::{spawner, tracker},
-    connection::{self, Instance},
     metrics,
 };
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
+use commonware_stream::connection::{self, Instance};
 use commonware_utils::hex;
 use governor::{
     clock::Clock as GClock,

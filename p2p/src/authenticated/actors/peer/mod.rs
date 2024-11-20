@@ -1,8 +1,10 @@
 //! Peer
 
-use crate::authenticated::{connection, metrics};
+use crate::authenticated::metrics;
+use commonware_stream::connection;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
+use prost::DecodeError;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -33,9 +35,9 @@ pub enum Error {
     PeerDisconnected,
     #[error("receive failed: {0}")]
     ReceiveFailed(connection::Error),
+    #[error("decode failed: {0}")]
+    DecodeFailed(DecodeError),
     #[error("unexpected handshake message")]
-    UnexpectedHandshake,
-    #[error("unexpected failure: {0}")]
     UnexpectedFailure(commonware_runtime::Error),
     #[error("message dropped")]
     MessageDropped,

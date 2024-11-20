@@ -8,6 +8,9 @@ use thiserror::Error;
 mod handshake;
 mod instance;
 mod utils;
+mod wire {
+    include!(concat!(env!("OUT_DIR"), "/wire.rs"));
+}
 mod x25519;
 
 pub use handshake::IncomingHandshake;

@@ -4,28 +4,10 @@ package wire;
 // Message is the only allowed message format that can be sent between peers.
 message Message {
     oneof payload {
-        Handshake handshake = 1;
-        BitVec bit_vec = 2;
-        Peers peers = 3;
-        Chunk chunk = 4;
+        BitVec bit_vec = 1;
+        Peers peers = 2;
+        Chunk chunk = 3;
     }
-}
-
-// Allows recipient to verify that the sender has the private key
-// of public key before sending any data.
-//
-// By requiring the server to have their public key signed, they prevent
-// a malicious peer from forwarding a handshake message from a previous
-// connection with public key (which could be used to convince the server
-// to start a useless handshake). Alternatively, we could require the
-// dialer to sign some random bytes provided by the server but this would
-// require the server to send a message to a peer before authorizing that
-// it should connect to them.
-message Handshake {
-    bytes recipient_public_key = 1;
-    bytes ephemeral_public_key = 2;
-    uint64 timestamp = 3;
-    Signature signature = 4;
 }
 
 // BitVec is a bit vector that represents the peers a peer
@@ -53,7 +35,6 @@ message Peer {
 message Peers {
     repeated Peer peers = 1;
 }
-
 
 // Chunk is one of potentially many parts of a message
 // sent by a peer.

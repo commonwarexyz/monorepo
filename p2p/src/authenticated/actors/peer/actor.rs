@@ -2,17 +2,18 @@ use super::{ingress::Data, Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{
     actors::tracker,
     channels::Channels,
-    connection::{Instance, Sender},
     metrics, wire,
 };
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
+use commonware_stream::connection::{Instance, Sender};
 use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
+use prost::Message as _;
 use rand::{CryptoRng, Rng};
 use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, trace};
@@ -102,14 +103,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                         content,
                     }
                 })),
-            };
+            }.encode_to_vec();
             trace!(
                 part = part,
                 total_parts = total_parts - 1,
                 peer = hex(peer),
                 "sending chunk",
             );
-            sender.send(msg).await.map_err(Error::SendFailed)?;
+            sender.send(Bytes::from(msg)).await.map_err(Error::SendFailed)?;
             sent_messages
                 .get_or_create(&metrics::Message::new_chunk(peer, channel))
                 .inc();
@@ -161,17 +162,21 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                             };
                             match msg {
                                 Message::BitVec { bit_vec } => {
-                                    conn_sender.send(wire::Message{
+                                    let msg = wire::Message{
                                         payload: Some(wire::message::Payload::BitVec(bit_vec)),
-                                    }).await.map_err(Error::SendFailed)?;
+                                    }.encode_to_vec();
+                                    conn_sender.send(Bytes::from(msg))
+                                        .await
+                                        .map_err(Error::SendFailed)?;
                                     self.sent_messages
                                         .get_or_create(&metrics::Message::new_bit_vec(&peer))
                                         .inc();
                                 }
                                 Message::Peers { peers: msg } => {
-                                    conn_sender.send(wire::Message{
+                                    let msg = wire::Message{
                                         payload: Some(wire::message::Payload::Peers(msg)),
-                                    }).await.map_err(Error::SendFailed)?;
+                                    }.encode_to_vec();
+                                    conn_sender.send(Bytes::from(msg)).await.map_err(Error::SendFailed)?;
                                     self.sent_messages
                                         .get_or_create(&metrics::Message::new_peers(&peer))
                                         .inc();
@@ -217,11 +222,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                 let peers_rate_limiter =
                     RateLimiter::direct_with_clock(self.allowed_peers_rate, &runtime);
                 loop {
-                    match conn_receiver
+                    let msg = conn_receiver
                         .receive()
                         .await
-                        .map_err(Error::ReceiveFailed)?
-                        .payload
+                        .map_err(Error::ReceiveFailed)?;
+                    let msg = wire::Message::decode(&msg[..])
+                        .map_err(Error::DecodeFailed)?;
+                    match msg.payload
                     {
                         Some(wire::message::Payload::BitVec(bit_vec)) => {
                             self.received_messages
@@ -290,7 +297,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 }
                             }
 
-                            // Ensure messasge is not too large
+                            // Ensure message is not too large
                             let chunk_len = chunk.content.len();
                             if chunk_len > *max_size {
                                 return Err(Error::MessageTooLarge(chunk_len));
@@ -309,12 +316,13 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 let channel = chunk.channel;
                                 let mut next_part = chunk.part + 1;
                                 while next_part < total_parts {
-                                    let chunk = match conn_receiver
+                                    let msg = conn_receiver
                                         .receive()
                                         .await
-                                        .map_err(Error::ReceiveFailed)?
-                                        .payload
-                                    {
+                                        .map_err(Error::ReceiveFailed)?;
+                                    let msg = wire::Message::decode(&msg[..])
+                                        .map_err(Error::DecodeFailed)?;
+                                    let chunk = match msg.payload {
                                         Some(wire::message::Payload::Chunk(chunk)) => chunk,
                                         _ => return Err(Error::InvalidChunk),
                                     };
@@ -354,12 +362,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                             {
                                 debug!(err=?e, "failed to send message to client");
                             }
-                        }
-                        Some(wire::message::Payload::Handshake(_)) => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_handshake(&peer))
-                                .inc();
-                            return Err(Error::UnexpectedHandshake);
                         }
                         _ => {
                             self.received_messages

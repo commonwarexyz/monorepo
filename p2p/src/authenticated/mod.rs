@@ -249,7 +249,6 @@
 mod actors;
 mod channels;
 mod config;
-mod connection;
 mod ip;
 mod metrics;
 mod network;

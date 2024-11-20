@@ -5,8 +5,9 @@ fn main() -> Result<()> {
     config.bytes([
         "Signature.public_key",
         "Signature.signature",
-        "Chunk.content",
+        "Handshake.recipient_public_key",
+        "Handshake.ephemeral_public_key",
     ]);
-    config.compile_protos(&["src/authenticated/wire.proto"], &["src/authenticated/"])?;
+    config.compile_protos(&["src/connection/wire.proto"], &["src/connection/"])?;
     Ok(())
 }
