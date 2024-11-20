@@ -23,7 +23,7 @@ pub struct Config<C: Scheme> {
     /// Cryptographic primitives.
     pub crypto: C,
 
-    /// Prefix for crytographic hashes.
+    /// Prefix for all signed messages to avoid replay attacks.
     pub namespace: Vec<u8>,
 
     /// Registry for prometheus metrics.

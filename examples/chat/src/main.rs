@@ -69,7 +69,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
-// Unique namespace to avoid cryptographic hash collisions.
+// Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
 
 #[doc(hidden)]

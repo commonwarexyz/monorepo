@@ -27,6 +27,9 @@ use std::{
 };
 use tracing::{debug, trace};
 
+// Bytes to add to the namespace to prevent replay attacks.
+const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
+
 struct PeerSet {
     index: u64,
     sorted: Vec<PublicKey>,
@@ -156,8 +159,6 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
 }
 
 impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
-    const NAMESPACE_SUFFIX_IP: &[u8] = b"_IP";
-
     pub fn new(runtime: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
         // Construct IP signature
         let current_time = runtime
@@ -166,7 +167,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             .expect("failed to get current time")
             .as_secs();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
-        let ip_namespace = union(&cfg.namespace, Self::NAMESPACE_SUFFIX_IP);
+        let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
         let ip_signature = cfg.crypto.sign(&ip_namespace, &payload_bytes);
         let ip_signature = wire::Peer {
             socket: socket_bytes,
