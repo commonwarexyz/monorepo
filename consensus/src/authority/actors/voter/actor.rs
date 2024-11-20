@@ -1274,15 +1274,34 @@ impl<
         view.add_verified_finalize(finalize).await;
     }
 
-    async fn finalization(
-        &mut self,
-        resolver: &mut resolver::Mailbox,
-        finalization: wire::Finalization,
-    ) {
+    async fn finalization(&mut self, finalization: wire::Finalization) {
+        // Extract proposal
+        let proposal = match &finalization.proposal {
+            Some(proposal) => proposal,
+            _ => {
+                debug!(reason = "missing proposal", "dropping finalize");
+                return;
+            }
+        };
+        let proposal_index = match &proposal.index {
+            Some(index) => index,
+            _ => {
+                debug!(reason = "missing index", "dropping finalize");
+                return;
+            }
+        };
+        let proposal_parent = match &proposal.parent {
+            Some(parent) => parent,
+            _ => {
+                debug!(reason = "missing parent", "dropping finalize");
+                return;
+            }
+        };
+
         // Check if we are still in a view where this finalization could help
-        if !self.interesting(finalization.view, true) {
+        if !self.interesting(proposal_index.view, true) {
             trace!(
-                finalization_view = finalization.view,
+                finalization_view = proposal_index.view,
                 our_view = self.view,
                 reason = "outdated finalization",
                 "dropping finalization"
@@ -1292,12 +1311,12 @@ impl<
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
-        let view = self.views.get_mut(&finalization.view);
-        if let Some(ref view) = view {
-            if view.broadcast_finalization {
+        let view = self.views.get_mut(&proposal_index.view);
+        if let Some(ref round) = view {
+            if round.broadcast_finalization {
                 trace!(
-                    view = finalization.view,
-                    height = finalization.height,
+                    view = proposal_index.view,
+                    height = proposal_index.height,
                     reason = "already broadcast finalization",
                     "dropping finalization"
                 );
@@ -1306,11 +1325,11 @@ impl<
         }
 
         // Ensure finalization has valid number of signatures
-        let (threshold, count) = match self.threshold(finalization.view) {
+        let (threshold, count) = match self.threshold(proposal_index.view) {
             Some(participation) => participation,
             None => {
                 debug!(
-                    view = finalization.view,
+                    view = proposal_index.view,
                     reason = "unable to compute participants for view",
                     "dropping finalization"
                 );
@@ -1337,6 +1356,7 @@ impl<
         }
 
         // Verify threshold finalization
+        let message = proposal_message(proposal_index, proposal_parent, &proposal.payload);
         let mut seen = HashSet::new();
         for signature in finalization.signatures.iter() {
             // Verify signature
@@ -1363,61 +1383,55 @@ impl<
             // Verify signature
             if !C::verify(
                 &self.finalize_namespace,
-                &finalize_message(finalization.view, finalization.height, &finalization.digest),
+                &message,
                 &signature.public_key,
                 &signature.signature,
             ) {
                 debug!(reason = "invalid signature", "dropping finalization");
                 return;
             }
+
+            // Handle peer proposal
+            self.peer_proposal(proposal, &signature.public_key).await;
         }
-        debug!(view = finalization.view, "finalization verified");
+        debug!(view = proposal_index.view, "finalization verified");
 
         // Process finalization
-        self.handle_finalization(resolver, finalization).await;
+        self.handle_finalization(finalization).await;
     }
 
-    async fn handle_finalization(
-        &mut self,
-        resolver: &mut resolver::Mailbox,
-        finalization: wire::Finalization,
-    ) {
+    async fn handle_finalization(&mut self, finalization: wire::Finalization) {
         // Add signatures to view (needed to broadcast finalization if we get proposal)
+        let view = finalization.proposal.as_ref().unwrap().index.unwrap().view;
         let leader = self
-            .leader(finalization.view)
+            .application
+            .leader(view, ())
             .expect("unable to get leader");
-        let view = self
-            .views
-            .entry(finalization.view)
-            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
+        let round = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.hasher.clone(),
+                self.application.clone(),
+                view,
+                leader,
+                None,
+                None,
+            )
+        });
         for signature in finalization.signatures.iter() {
             let finalize = wire::Finalize {
-                view: finalization.view,
-                height: finalization.height,
-                digest: finalization.digest.clone(),
+                proposal: Some(finalization.proposal.as_ref().unwrap().clone()),
                 signature: Some(signature.clone()),
             };
-            view.add_verified_finalize(finalize).await;
+            round.add_verified_finalize(finalize).await;
         }
 
         // Track view finalized
-        if finalization.view > self.last_finalized {
-            self.last_finalized = finalization.view;
+        if view > self.last_finalized {
+            self.last_finalized = view;
         }
 
-        // Inform resolver of finalization
-        let proposal = match view.proposal.as_ref() {
-            Some((digest, _, proposal)) => Proposal::Populated(digest.clone(), proposal.clone()),
-            None => Proposal::Reference(
-                finalization.view,
-                finalization.height,
-                finalization.digest.clone(),
-            ),
-        };
-        resolver.finalized(proposal).await;
-
         // Enter next view
-        self.enter_view(finalization.view + 1);
+        self.enter_view(view + 1);
     }
 
     fn construct_proposal_vote(&mut self, view: u64) -> Option<wire::Vote> {
@@ -1449,7 +1463,11 @@ impl<
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
                     &self.vote_namespace,
-                    &vote_message(view, Some(proposal.height), Some(digest)),
+                    &proposal_message(
+                        proposal.index.as_ref().unwrap(),
+                        proposal.parent.as_ref().unwrap(),
+                        &proposal.payload,
+                    ),
                 ),
             }),
         })
