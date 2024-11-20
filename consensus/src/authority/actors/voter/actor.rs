@@ -625,6 +625,34 @@ impl<
         self.handle_null(null).await;
     }
 
+    async fn handle_null(&mut self, null: wire::Null) {
+        // Check to see if vote is for proposal in view
+        let leader = match self.application.leader(vote.view, ()) {
+            Some(leader) => leader,
+            None => {
+                debug!(
+                    view = vote.view,
+                    reason = "unable to compute leader",
+                    "dropping vote"
+                );
+                return;
+            }
+        };
+        let view = self.views.entry(vote.view).or_insert_with(|| {
+            Round::new(
+                self.hasher.clone(),
+                self.application.clone(),
+                vote.view,
+                leader,
+                None,
+                None,
+            )
+        });
+
+        // Handle vote
+        view.add_verified_null(null).await;
+    }
+
     async fn our_proposal(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {
         // Store the proposal
         let index = proposal.index.unwrap();
@@ -1503,6 +1531,41 @@ impl<
         Some(notarization)
     }
 
+    fn construct_nullification(&mut self, view: u64, force: bool) -> Option<wire::Nullification> {
+        // Get requested view
+        let round = match self.views.get_mut(&view) {
+            Some(view) => view,
+            None => {
+                return None;
+            }
+        };
+
+        // Attempt to construct notarization
+        let validators = match self.application.participants(view) {
+            Some(validators) => validators,
+            None => {
+                return None;
+            }
+        };
+        let threshold =
+            quorum(validators.len() as u32).expect("not enough validators for a quorum");
+        let result = round.notarizable_null(threshold, force);
+        let (container, votes) = result?;
+
+        // Construct notarization
+        let mut signatures = Vec::new();
+        for validator in validators.iter() {
+            if let Some(vote) = votes.get(validator) {
+                signatures.push(vote.signature.clone().unwrap());
+            }
+        }
+        let notarization = wire::Notarization {
+            container: Some(container),
+            signatures,
+        };
+        Some(notarization)
+    }
+
     fn construct_finalize(&mut self, view: u64) -> Option<wire::Finalize> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
@@ -1613,6 +1676,20 @@ impl<
             // Handle the notarization
             self.handle_notarization(backfiller, notarization).await;
         };
+
+        // Attempt to nullify
+        if let Some(nullification) = self.construct_nullification(view, false) {
+            // Broadcast the nullification
+            let msg = wire::Voter {
+                payload: Some(wire::voter::Payload::Notarization(nullification.clone())),
+            }
+            .encode_to_vec()
+            .into();
+            sender.send(Recipients::All, msg, true).await.unwrap();
+
+            // Handle the nullification
+            self.handle_nullification(backfiller, nullification).await;
+        }
 
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
