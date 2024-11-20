@@ -5,7 +5,7 @@
 
 use super::{
     encoder::{
-        finalize_namespace, null_message, proposal_message, proposal_namespace, vote_namespace,
+        finalize_namespace, header_namespace, null_message, proposal_message, vote_namespace,
     },
     wire, Height, View,
 };
@@ -20,7 +20,7 @@ pub struct Prover<C: Scheme, H: Hasher> {
     _crypto: PhantomData<C>,
     hasher: H,
 
-    proposal_namespace: Vec<u8>,
+    header_namespace: Vec<u8>,
     vote_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 }
@@ -31,175 +31,137 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             _crypto: PhantomData,
             hasher,
 
-            proposal_namespace: proposal_namespace(&namespace),
+            header_namespace: header_namespace(&namespace),
             vote_namespace: vote_namespace(&namespace),
             finalize_namespace: finalize_namespace(&namespace),
         }
     }
 
-    pub(crate) fn serialize_proposal(
+    fn serialize_proposal(
         view: View,
         height: Height,
-        parent: Digest,
+        parent: View,
         payload: Digest,
         signature: wire::Signature,
     ) -> Proof {
         // Setup proof
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        let len = 8 + 8 + digest_len + digest_len + public_key_len + signature_len;
+        let len = 8 + 8 + 8 + digest_len + public_key_len + signature_len;
         let mut proof = Vec::with_capacity(len);
 
         // Encode proof
         proof.put_u64(view);
         proof.put_u64(height);
-        proof.put(parent);
+        proof.put_u64(parent);
         proof.put(payload);
         proof.put(signature.public_key);
         proof.put(signature.signature);
         proof.into()
     }
 
-    pub fn deserialize_proposal(
-        &mut self,
+    fn deserialize_proposal(
         mut proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View, Height, Digest)> {
+        namespace: &[u8],
+    ) -> Option<(View, Height, View, Digest, PublicKey)> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        if proof.len() != 8 + 8 + digest_len + digest_len + public_key_len + signature_len {
+        if proof.len() != 8 + 8 + 8 + digest_len + public_key_len + signature_len {
             return None;
         }
 
         // Decode proof
         let view = proof.get_u64();
         let height = proof.get_u64();
-        let parent = proof.copy_to_bytes(digest_len);
+        let parent = proof.get_u64();
         let payload = proof.copy_to_bytes(digest_len);
         let public_key = proof.copy_to_bytes(public_key_len);
         let signature = proof.copy_to_bytes(signature_len);
 
         // Verify signature
-        let proposal_message = proposal_message(view, height, &parent, &payload);
+        let proposal_message = proposal_message(view, height, parent, &payload);
         if check_sig {
             if !C::validate(&public_key) {
                 return None;
             }
-            if !C::verify(
-                &self.proposal_namespace,
-                &proposal_message,
-                &public_key,
-                &signature,
-            ) {
+            if !C::verify(namespace, &proposal_message, &public_key, &signature) {
                 return None;
             }
         }
 
-        // Compute digest
-        self.hasher.update(&proposal_message);
-        Some((public_key, view, height, self.hasher.finalize()))
+        Some((view, height, parent, payload, public_key))
+    }
+
+    pub(crate) fn serialize_header(
+        view: View,
+        height: Height,
+        parent: View,
+        payload: Digest,
+        signature: wire::Signature,
+    ) -> Proof {
+        Self::serialize_proposal(view, height, parent, payload, signature)
+    }
+
+    pub fn deserialize_header(
+        &mut self,
+        proof: Proof,
+        check_sig: bool,
+    ) -> Option<(View, Height, View, Digest, PublicKey)> {
+        Self::deserialize_proposal(proof, check_sig, &self.header_namespace)
     }
 
     pub(crate) fn serialize_vote(vote: wire::Vote) -> Proof {
-        // Setup proof
-        let (public_key_len, signature_len) = C::len();
-        let len = 8 + 8 + H::len() + public_key_len + signature_len;
-        let mut proof = Vec::with_capacity(len);
+        // Extract container
+        let container = vote.container.unwrap().payload.unwrap();
+        let proposal = match container {
+            wire::container::Payload::Proposal(proposal) => proposal,
+            _ => panic!("invalid container"),
+        };
 
-        // Encode proofs
-        proof.put_u64(vote.view);
-        proof.put_u64(vote.height.expect("height not populated"));
-        proof.put(vote.digest.expect("digest not populated"));
-        let signature = vote.signature.expect("signature not populated");
-        proof.put(signature.public_key);
-        proof.put(signature.signature);
-        proof.into()
+        // Setup proof
+        Self::serialize_proposal(
+            proposal.view,
+            proposal.height,
+            proposal.parent,
+            proposal.payload,
+            vote.signature.unwrap(),
+        )
     }
 
     pub fn deserialize_vote(
         &self,
-        mut proof: Proof,
+        proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View, Height, Digest)> {
-        // Ensure proof is big enough
-        let digest_len = H::len();
-        let (public_key_len, signature_len) = C::len();
-        if proof.len() != 8 + 8 + digest_len + public_key_len + signature_len {
-            return None;
-        }
-
-        // Decode proof
-        let view = proof.get_u64();
-        let height = proof.get_u64();
-        let digest = proof.copy_to_bytes(digest_len);
-        let public_key = proof.copy_to_bytes(public_key_len);
-        let signature = proof.copy_to_bytes(signature_len);
-
-        // Verify signature
-        if check_sig {
-            if !C::validate(&public_key) {
-                return None;
-            }
-            let vote_message = vote_message(view, Some(height), Some(&digest));
-            if !C::verify(&self.vote_namespace, &vote_message, &public_key, &signature) {
-                return None;
-            }
-        }
-        Some((public_key, view, height, digest))
+    ) -> Option<(View, Height, View, Digest, PublicKey)> {
+        Self::deserialize_proposal(proof, check_sig, &self.vote_namespace)
     }
 
     pub(crate) fn serialize_finalize(finalize: wire::Finalize) -> Proof {
-        // Setup proof
-        let (public_key_len, signature_len) = C::len();
-        let len = 8 + 8 + H::len() + public_key_len + signature_len;
-        let mut proof = Vec::with_capacity(len);
+        // Extract container
+        let container = finalize.container.unwrap().payload.unwrap();
+        let proposal = match container {
+            wire::container::Payload::Proposal(proposal) => proposal,
+            _ => panic!("invalid container"),
+        };
 
-        // Encode proof
-        proof.put_u64(finalize.view);
-        proof.put_u64(finalize.height);
-        proof.put(finalize.digest);
-        let signature = finalize.signature.expect("signature not populated");
-        proof.put(signature.public_key);
-        proof.put(signature.signature);
-        proof.into()
+        // Setup proof
+        Self::serialize_proposal(
+            proposal.view,
+            proposal.height,
+            proposal.parent,
+            proposal.payload,
+            finalize.signature.unwrap(),
+        )
     }
 
     pub fn deserialize_finalize(
         &self,
-        mut proof: Proof,
+        proof: Proof,
         check_sig: bool,
-    ) -> Option<(PublicKey, View, Height, Digest)> {
-        // Ensure proof is big enough
-        let digest_len = H::len();
-        let (public_key_len, signature_len) = C::len();
-        if proof.len() != 8 + 8 + digest_len + public_key_len + signature_len {
-            return None;
-        }
-
-        // Decode proof
-        let view = proof.get_u64();
-        let height = proof.get_u64();
-        let digest = proof.copy_to_bytes(digest_len);
-        let public_key = proof.copy_to_bytes(public_key_len);
-        let signature = proof.copy_to_bytes(signature_len);
-
-        // Verify signature
-        if check_sig {
-            if !C::validate(&public_key) {
-                return None;
-            }
-            let finalize_message = finalize_message(view, height, &digest);
-            if !C::verify(
-                &self.finalize_namespace,
-                &finalize_message,
-                &public_key,
-                &signature,
-            ) {
-                return None;
-            }
-        }
-        Some((public_key, view, height, digest))
+    ) -> Option<(View, Height, View, Digest, PublicKey)> {
+        Self::deserialize_proposal(proof, check_sig, &self.finalize_namespace)
     }
 
     #[allow(clippy::too_many_arguments)]

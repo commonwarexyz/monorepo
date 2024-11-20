@@ -127,9 +127,13 @@ pub type Height = u64;
 #[derive(Clone)]
 pub struct Context {
     pub view: View,
-    pub parent: Digest,
     pub height: Height,
-    pub proposer: PublicKey,
+
+    // TODO: pass view parent as u64 or digest?
+    pub parent: Digest,
+
+    // TODO: move to separate part (application should have access to verify)
+    pub signer: PublicKey,
 }
 
 use crate::Activity;
