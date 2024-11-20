@@ -398,7 +398,6 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
         // Decode proof
         let view = proof.get_u64();
-        let null = wire::Null { view };
         let public_key = proof.copy_to_bytes(public_key_len);
         let height = proof.get_u64();
         let index = wire::Index { view, height };
@@ -418,7 +417,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
                 return None;
             }
             let finalize_message = proposal_message(&index, &parent, &payload);
-            let null_message = null_message(&null);
+            let null_message = null_message(view);
             if !C::verify(
                 &self.finalize_namespace,
                 &finalize_message,

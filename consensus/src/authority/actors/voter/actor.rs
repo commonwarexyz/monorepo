@@ -279,7 +279,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         }
         self.broadcast_null_notarization = true;
         Some((
-            wire::notarization::Container::Null(wire::Null { view: self.view }),
+            wire::notarization::Container::Null(self.view),
             &self.null_votes,
         ))
     }
@@ -593,11 +593,29 @@ impl<
         view.advance_deadline = None;
         view.null_vote_retry = None;
 
+        // If retry, broadcast notarization that led us to enter this view
+        let past_view = self.view - 1;
+        if retry && past_view > 0 {
+            match self.construct_notarization(past_view, true) {
+                Some(notarization) => {
+                    let msg = wire::Voter {
+                        payload: Some(wire::voter::Payload::Notarization(notarization)),
+                    }
+                    .encode_to_vec()
+                    .into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    debug!(view = past_view, "rebroadcast entry notarization");
+                }
+                None => {
+                    warn!(view = past_view, "no notarization to rebroadcast");
+                }
+            }
+        }
+
         // Construct null vote
-        let null = wire::Null { view: self.view };
-        let message = null_message(&null);
+        let message = null_message(self.view);
         let vote = wire::Vote {
-            container: Some(wire::vote::Container::Null(null)),
+            container: Some(wire::vote::Container::Null(self.view)),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(&self.vote_namespace, &message),
@@ -609,8 +627,6 @@ impl<
         .encode_to_vec()
         .into();
         sender.send(Recipients::All, msg, true).await.unwrap();
-
-        // TODO: broadcast notarization that led to entering view if retry
 
         // Handle the vote
         debug!(view = self.view, "broadcasted null vote");

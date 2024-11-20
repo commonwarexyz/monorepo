@@ -17,8 +17,8 @@ pub fn proposal_message(index: &wire::Index, parent: &wire::Parent, payload: &Di
     msg.into()
 }
 
-pub fn null_message(null: &wire::Null) -> Bytes {
-    null.view.to_be_bytes().to_vec().into()
+pub fn null_message(null: u64) -> Bytes {
+    null.to_be_bytes().to_vec().into()
 }
 
 pub fn header_namespace(namespace: &Bytes) -> Vec<u8> {
