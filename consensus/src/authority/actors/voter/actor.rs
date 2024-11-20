@@ -16,6 +16,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::{hex, quorum};
+use core::panic;
 use futures::{channel::mpsc, future::Either, join, StreamExt};
 use prometheus_client::metrics::gauge::Gauge;
 use prost::Message as _;
@@ -28,6 +29,7 @@ use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
 type Notarizable<'a> = Option<(wire::Container, &'a HashMap<PublicKey, wire::Vote>)>;
+type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Finalize>)>;
 
 struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     hasher: H,
@@ -135,10 +137,9 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
 
                 // Check if already voted
                 if let Some(previous_vote) = self.proposal_voters.get(public_key) {
-                    let view = proposal.index.unwrap().view;
                     if previous_vote == &digest {
                         trace!(
-                            view,
+                            view = self.view,
                             signer = hex(public_key),
                             previous_vote = hex(previous_vote),
                             "already voted"
@@ -153,16 +154,15 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                         .unwrap()
                         .get(public_key)
                         .unwrap();
-                    let previous_proposal = match previous_vote
+                    let wire::container::Payload::Proposal(previous_proposal) = previous_vote
                         .container
                         .as_ref()
                         .unwrap()
                         .payload
                         .as_ref()
                         .unwrap()
-                    {
-                        wire::container::Payload::Proposal(proposal) => proposal,
-                        _ => unreachable!(),
+                    else {
+                        panic!("expected proposal payload");
                     };
                     let proof = Prover::<C, H>::serialize_conflicting_vote(
                         &previous_proposal.index.unwrap(),
@@ -176,7 +176,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                     );
                     self.application.report(CONFLICTING_VOTE, proof).await;
                     warn!(
-                        view,
+                        view = self.view,
                         signer = hex(public_key),
                         activity = CONFLICTING_VOTE,
                         "recorded fault"
@@ -196,7 +196,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 // Report vote
                 self.application.report(VOTE, proof).await;
             }
-            wire::container::Payload::Null(null) => {
+            wire::container::Payload::Null(_) => {
                 // Check if already issued finalize
                 let finalize = self.finalizers.get(public_key);
                 if finalize.is_none() {
@@ -207,7 +207,6 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 let finalize = finalize.unwrap();
 
                 // Create fault
-                let view = null.view;
                 let finalize = self
                     .finalizes
                     .get(finalize)
@@ -224,7 +223,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 );
                 self.application.report(NULL_AND_FINALIZE, proof).await;
                 warn!(
-                    view,
+                    view = self.view,
                     signer = hex(public_key),
                     activity = NULL_AND_FINALIZE,
                     "recorded fault"
@@ -252,10 +251,9 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             // Ensure we have the proposal we are going to broadcast a notarization for
             let proposal = match &self.proposal {
                 Some((digest, _, pro)) => {
-                    let index = pro.index.as_ref().unwrap();
                     if digest != proposal {
                         debug!(
-                            view = index.view,
+                            view = self.view,
                             proposal = hex(proposal),
                             reason = "proposal mismatch",
                             "skipping notarization broadcast"
@@ -263,7 +261,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                         continue;
                     }
                     debug!(
-                        view = index.view,
+                        view = self.view,
                         proposal = hex(proposal),
                         "broadcasting notarization"
                     );
@@ -303,32 +301,41 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
 
     async fn add_verified_finalize(&mut self, finalize: wire::Finalize) {
         // Check if also issued null vote
+        let proposal = finalize.proposal.as_ref().unwrap();
         let public_key = &finalize.signature.as_ref().unwrap().public_key;
         let null_vote = self.null_votes.get(public_key);
         if let Some(null_vote) = null_vote {
             // Create fault
             let proof = Prover::<C, H>::serialize_null_finalize(
-                finalize.view,
-                finalize.height,
-                finalize.digest.clone(),
-                finalize.signature.clone().unwrap(),
-                null_vote.signature.clone().unwrap(),
+                &proposal.index.as_ref().unwrap(),
+                &proposal.parent.as_ref().unwrap(),
+                &proposal.payload,
+                &finalize.signature.as_ref().unwrap(),
+                &null_vote.signature.as_ref().unwrap(),
             );
             self.application.report(NULL_AND_FINALIZE, proof).await;
             warn!(
-                view = finalize.view,
+                view = self.view,
                 signer = hex(public_key),
                 activity = NULL_AND_FINALIZE,
                 "recorded fault"
             );
             return;
         }
+        // Compute proposal digest
+        let message = proposal_message(
+            proposal.index.as_ref().expect("missing index"),
+            proposal.parent.as_ref().expect("missing parent"),
+            &proposal.payload,
+        );
+        self.hasher.update(&message);
+        let digest = self.hasher.finalize();
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(public_key) {
-            if previous_finalize == &finalize.digest {
+            if previous_finalize == &digest {
                 trace!(
-                    view = finalize.view,
+                    view = self.view,
                     signer = hex(public_key),
                     previous_finalize = hex(previous_finalize),
                     "already finalize"
@@ -343,18 +350,20 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 .unwrap()
                 .get(public_key)
                 .unwrap();
+            let previous_proposal = previous_finalize.proposal.as_ref().unwrap();
             let proof = Prover::<C, H>::serialize_conflicting_finalize(
-                finalize.view,
-                previous_finalize.height,
-                previous_finalize.digest.clone(),
-                previous_finalize.signature.clone().unwrap(),
-                finalize.height,
-                finalize.digest.clone(),
-                finalize.signature.clone().unwrap(),
+                &previous_proposal.index.as_ref().unwrap(),
+                &previous_proposal.parent.as_ref().unwrap(),
+                &previous_proposal.payload,
+                &previous_finalize.signature.as_ref().unwrap(),
+                &proposal.index.as_ref().unwrap(),
+                &proposal.parent.as_ref().unwrap(),
+                &proposal.payload,
+                &finalize.signature.as_ref().unwrap(),
             );
             self.application.report(CONFLICTING_FINALIZE, proof).await;
             warn!(
-                view = finalize.view,
+                view = self.view,
                 signer = hex(public_key),
                 activity = CONFLICTING_FINALIZE,
                 "recorded fault"
@@ -362,22 +371,19 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             return;
         }
 
+        // Generate finalize report
+        let proof = Prover::<C, H>::serialize_finalize(&finalize);
+
         // Store the finalize
-        self.finalizers
-            .insert(public_key.clone(), finalize.digest.clone());
-        let entry = self.finalizes.entry(finalize.digest.clone()).or_default();
-        entry.insert(public_key.clone(), finalize.clone());
+        self.finalizers.insert(public_key.clone(), digest.clone());
+        let entry = self.finalizes.entry(digest).or_default();
+        entry.insert(public_key.clone(), finalize);
 
         // Report the finalize
-        let proof = Prover::<C, H>::serialize_finalize(finalize);
         self.application.report(FINALIZE, proof).await;
     }
 
-    fn finalizable_proposal(
-        &mut self,
-        threshold: u32,
-        force: bool,
-    ) -> Option<(Digest, Height, &HashMap<PublicKey, wire::Finalize>)> {
+    fn finalizable_proposal(&mut self, threshold: u32, force: bool) -> Finalizable {
         if !force && (self.broadcast_finalization || !self.verified_proposal) {
             // We only want to broadcast a finalization if we have verified some proposal at
             // this point.
@@ -389,7 +395,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             }
 
             // Ensure we have the proposal we are going to broadcast a finalization for
-            let height = match &self.proposal {
+            let proposal = match &self.proposal {
                 Some((digest, _, pro)) => {
                     if digest != proposal {
                         debug!(
@@ -400,7 +406,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                         );
                         continue;
                     }
-                    pro.height
+                    pro
                 }
                 None => {
                     continue;
@@ -410,7 +416,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             // There should never exist enough finalizes for multiple proposals, so it doesn't
             // matter which one we choose.
             self.broadcast_finalization = true;
-            return Some((proposal.clone(), height, finalizes));
+            return Some((proposal.clone(), finalizes));
         }
         None
     }

@@ -151,7 +151,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_proposal(proof, check_sig, &self.vote_namespace)
     }
 
-    pub(crate) fn serialize_finalize(finalize: wire::Finalize) -> Proof {
+    pub(crate) fn serialize_finalize(finalize: &wire::Finalize) -> Proof {
         // Extract proposal
         let proposal = finalize.proposal.as_ref().expect("missing proposal");
 
