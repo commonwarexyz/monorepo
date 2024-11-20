@@ -1,6 +1,6 @@
 use std::io::Result;
 fn main() -> Result<()> {
-    // Proto compilation rules for `authenticated` dialect
+    // Proto compilation rules for `connection` dialect
     let mut config = prost_build::Config::new();
     config.bytes([
         "Signature.public_key",

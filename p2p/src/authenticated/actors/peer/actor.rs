@@ -176,7 +176,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                     let msg = wire::Message{
                                         payload: Some(wire::message::Payload::Peers(msg)),
                                     }.encode_to_vec();
-                                    conn_sender.send(Bytes::from(msg)).await.map_err(Error::SendFailed)?;
+                                    conn_sender.send(Bytes::from(msg))
+                                        .await
+                                        .map_err(Error::SendFailed)?;
                                     self.sent_messages
                                         .get_or_create(&metrics::Message::new_peers(&peer))
                                         .inc();
@@ -226,10 +228,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let msg = wire::Message::decode(&msg[..])
+                    let msg = wire::Message::decode(msg)
                         .map_err(Error::DecodeFailed)?;
-                    match msg.payload
-                    {
+                    match msg.payload {
                         Some(wire::message::Payload::BitVec(bit_vec)) => {
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_bit_vec(&peer))
@@ -320,7 +321,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                         .receive()
                                         .await
                                         .map_err(Error::ReceiveFailed)?;
-                                    let msg = wire::Message::decode(&msg[..])
+                                    let msg = wire::Message::decode(msg)
                                         .map_err(Error::DecodeFailed)?;
                                     let chunk = match msg.payload {
                                         Some(wire::message::Payload::Chunk(chunk)) => chunk,

@@ -8,7 +8,6 @@ use commonware_utils::union;
 use prost::Message;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-
 const NAMESPACE_SUFFIX_HANDSHAKE: &[u8] = b"_HANDSHAKE";
 
 fn suffix_namespace(namespace: &[u8]) -> Vec<u8> {

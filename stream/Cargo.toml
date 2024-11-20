@@ -2,7 +2,7 @@
 name = "commonware-stream"
 edition = "2021"
 publish = true
-version = "0.0.1"
+version = "0.0.2"
 license = "MIT OR Apache-2.0"
 description = "Connect to peers using cryptographically-authenticated connections."
 readme = "README.md"
@@ -16,18 +16,12 @@ commonware-macros = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
-futures-util = { workspace = true }
-governor = { workspace = true }
-prometheus-client = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
-zstd = { workspace = true }
 chacha20poly1305 = "0.10"
 x25519-dalek = "2"
-bitvec = "1"
 
 [build-dependencies]
 prost-build = { workspace = true }

@@ -17,7 +17,7 @@ commonware-macros = { version = "0.0.4", path = "macros" }
 commonware-p2p = { version = "0.0.23", path = "p2p" }
 commonware-runtime = { version = "0.0.9", path = "runtime" }
 commonware-storage = { version = "0.0.4", path = "storage" }
-commonware-stream = { version = "0.0.1", path = "stream" }
+commonware-stream = { version = "0.0.2", path = "stream" }
 commonware-utils = { version = "0.0.4", path = "utils" }
 thiserror = "1.0.63"
 bytes = "1.7.1"
