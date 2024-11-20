@@ -605,12 +605,11 @@ impl<
         view.null_vote_retry = None;
 
         // Construct null vote
-        let message = null_message(self.view);
+        let null = wire::Null { view: self.view };
+        let message = null_message(&null);
         let vote = wire::Vote {
             container: Some(wire::Container {
-                payload: Some(wire::container::Payload::Null(wire::Null {
-                    view: self.view,
-                })),
+                payload: Some(wire::container::Payload::Null(null)),
             }),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
@@ -629,19 +628,15 @@ impl<
         self.handle_vote(vote).await;
     }
 
-    async fn our_proposal(
-        &mut self,
-        proposal_digest: Digest,
-        payload_digest: Digest,
-        proposal: wire::Proposal,
-    ) -> bool {
+    async fn our_proposal(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {
         // Store the proposal
-        let view = self.views.get_mut(&proposal.view).expect("view missing");
+        let index = proposal.index.unwrap();
+        let round = self.views.get_mut(&index.view).expect("view missing");
 
         // Check if view timed out
-        if view.timeout_fired {
+        if round.timeout_fired {
             debug!(
-                view = proposal.view,
+                view = index.view,
                 reason = "view timed out",
                 "dropping our proposal"
             );
@@ -649,34 +644,20 @@ impl<
         }
 
         // Store the proposal
-        let proposal_view = proposal.view;
-        let proposal_height = proposal.height;
-        let proposal_parent = proposal.parent.clone();
-        let proposal_signature = proposal.signature.clone().unwrap();
         debug!(
-            view = proposal_view,
-            height = proposal_height,
-            digest = hex(&proposal_digest),
-            retried = view.next_proposal_request.is_some(),
+            view = index.view,
+            height = index.height,
+            digest = hex(&digest),
+            retried = round.next_proposal_request.is_some(),
             "generated proposal"
         );
-        view.proposal = Some((proposal_digest, payload_digest.clone(), proposal));
-        view.verified_proposal = true;
-        view.leader_deadline = None;
-
-        // Report the proposal
-        let proof = Prover::<C, H>::serialize_proposal(
-            proposal_view,
-            proposal_height,
-            proposal_parent,
-            payload_digest,
-            proposal_signature,
-        );
-        self.application.report(PROPOSAL, proof).await;
+        round.proposal = Some((digest, proposal));
+        round.verified_proposal = true;
+        round.leader_deadline = None;
         true
     }
 
-    async fn peer_proposal(&mut self, resolver: &mut resolver::Mailbox, proposal: wire::Proposal) {
+    async fn peer_proposal(&mut self, proposal: wire::Proposal) {
         // Parse signature
         let signature = match &proposal.signature {
             Some(signature) => signature,
@@ -836,7 +817,7 @@ impl<
 
     async fn verified(&mut self, view: View) -> bool {
         // Check if view still relevant
-        let view_obj = match self.views.get_mut(&view) {
+        let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
                 debug!(view, reason = "view missing", "dropping verified proposal");
@@ -845,7 +826,7 @@ impl<
         };
 
         // Ensure we haven't timed out
-        if view_obj.timeout_fired {
+        if round.timeout_fired {
             debug!(
                 view,
                 reason = "view timed out",
@@ -855,22 +836,11 @@ impl<
         }
 
         // Mark proposal as verified
-        view_obj.leader_deadline = None;
-        view_obj.verified_proposal = true;
-
-        // Report the proposal
-        let proposal = view_obj.proposal.as_ref().unwrap();
-        let proof = Prover::<C, H>::serialize_proposal(
-            view,
-            proposal.2.height,
-            proposal.2.parent.clone(),
-            proposal.1.clone(),
-            proposal.2.signature.clone().unwrap(),
-        );
-        self.application.report(PROPOSAL, proof).await;
+        round.leader_deadline = None;
+        round.verified_proposal = true;
 
         // Indicate that verification is done
-        debug!(view, height = proposal.2.height, "verified proposal");
+        debug!(view, "verified proposal");
         true
     }
 
@@ -890,10 +860,16 @@ impl<
             .application
             .leader(view, ())
             .expect("unable to get leader");
-        let entry = self
-            .views
-            .entry(view)
-            .or_insert_with(|| Round::new(self.application.clone(), leader.clone(), None, None));
+        let entry = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.hasher.clone(),
+                self.application.clone(),
+                self.view,
+                leader.clone(),
+                None,
+                None,
+            )
+        });
         entry.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
         entry.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         self.view = view;
