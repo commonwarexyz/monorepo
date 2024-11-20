@@ -1786,6 +1786,9 @@ impl<
                             }
                             view = proposal_view;
 
+                            // TODO: produce header and send back to application
+                            // TODO: broadcast vote
+
                             // Broadcast the proposal
                             let msg = wire::Voter{
                                 payload: Some(wire::voter::Payload::Proposal(proposal.clone())),
