@@ -657,6 +657,7 @@ impl<
         true
     }
 
+    // TODO: redo handling of proposal (as part of any other message)
     async fn peer_proposal(&mut self, proposal: wire::Proposal) {
         // Parse signature
         let signature = match &proposal.signature {
@@ -804,7 +805,7 @@ impl<
             payload_digest.clone(),
             proposal.clone(),
         ));
-        resolver
+        self.application
             .verify(proposal_digest.clone(), proposal.clone())
             .await;
         trace!(
@@ -864,7 +865,7 @@ impl<
             Round::new(
                 self.hasher.clone(),
                 self.application.clone(),
-                self.view,
+                view,
                 leader.clone(),
                 None,
                 None,
@@ -1023,10 +1024,16 @@ impl<
                 return;
             }
         };
-        let view = self
-            .views
-            .entry(vote.view)
-            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
+        let view = self.views.entry(vote.view).or_insert_with(|| {
+            Round::new(
+                self.hasher.clone(),
+                self.application.clone(),
+                vote.view,
+                leader,
+                None,
+                None,
+            )
+        });
 
         // Handle vote
         view.add_verified_vote(vote).await;
@@ -1034,7 +1041,6 @@ impl<
 
     async fn notarization(
         &mut self,
-        resolver: &mut resolver::Mailbox,
         backfiller: &mut backfiller::Mailbox,
         notarization: wire::Notarization,
     ) {
@@ -1150,7 +1156,6 @@ impl<
 
     async fn handle_notarization(
         &mut self,
-        resolver: &mut resolver::Mailbox,
         backfiller: &mut backfiller::Mailbox,
         notarization: wire::Notarization,
     ) {
