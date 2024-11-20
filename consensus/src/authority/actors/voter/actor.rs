@@ -3,7 +3,7 @@ use crate::{
     authority::{
         actors::backfiller,
         encoder::{
-            finalize_namespace, null_message, proposal_message, proposal_namespace, vote_namespace,
+            finalize_namespace, header_namespace, null_message, proposal_message, vote_namespace,
         },
         prover::Prover,
         wire, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_VOTE, FINALIZE,
@@ -148,12 +148,18 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                         .unwrap()
                         .get(public_key)
                         .unwrap();
+                    let previous_proposal = match previous_vote.container.unwrap().payload.unwrap()
+                    {
+                        wire::container::Payload::Proposal(proposal) => proposal,
+                        _ => unreachable!(),
+                    };
                     let proof = Prover::<C, H>::serialize_conflicting_vote(
-                        vote.view,
-                        previous_vote.height.unwrap(),
-                        previous_vote.digest.clone().unwrap(),
+                        view,
+                        previous_proposal.height,
+                        previous_proposal.parent,
+                        previous_proposal.payload.clone(),
                         previous_vote.signature.clone().unwrap(),
-                        vote.height.unwrap(),
+                        vote.height,
                         digest.clone(),
                         vote.signature.clone().unwrap(),
                     );
