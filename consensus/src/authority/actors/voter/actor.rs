@@ -116,13 +116,17 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         // Determine whether or not this is a null vote
         let public_key = &vote.signature.as_ref().unwrap().public_key;
 
-        match vote.container.unwrap().payload.unwrap() {
+        match vote
+            .container
+            .expect("missing container")
+            .payload
+            .expect("missing payload")
+        {
             wire::container::Payload::Proposal(proposal) => {
                 // Compute proposal digest
                 let message = proposal_message(
-                    proposal.view,
-                    proposal.height,
-                    proposal.parent,
+                    proposal.index.as_ref().expect("missing index"),
+                    proposal.parent.as_ref().expect("missing parent"),
                     &proposal.payload,
                 );
                 self.hasher.update(&message);
@@ -130,7 +134,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
 
                 // Check if already voted
                 if let Some(previous_vote) = self.proposal_voters.get(public_key) {
-                    let view = proposal.view;
+                    let view = proposal.index.unwrap().view;
                     if previous_vote == &digest {
                         trace!(
                             view,
@@ -154,14 +158,14 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                         _ => unreachable!(),
                     };
                     let proof = Prover::<C, H>::serialize_conflicting_vote(
-                        view,
-                        previous_proposal.height,
-                        previous_proposal.parent,
-                        previous_proposal.payload.clone(),
-                        previous_vote.signature.clone().unwrap(),
-                        vote.height,
-                        digest.clone(),
-                        vote.signature.clone().unwrap(),
+                        &previous_proposal.index.unwrap(),
+                        &previous_proposal.parent.unwrap(),
+                        &previous_proposal.payload,
+                        &previous_vote.signature.unwrap(),
+                        &proposal.index.unwrap(),
+                        &proposal.parent.unwrap(),
+                        &proposal.payload,
+                        &vote.signature.unwrap(),
                     );
                     self.application.report(CONFLICTING_VOTE, proof).await;
                     warn!(
@@ -180,7 +184,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 entry.insert(public_key.clone(), vote.clone());
 
                 // Report the vote
-                let proof = Prover::<C, H>::serialize_vote(vote);
+                let proof = Prover::<C, H>::serialize_vote(&vote);
                 self.application.report(VOTE, proof).await;
             }
             wire::container::Payload::Null(null) => {
