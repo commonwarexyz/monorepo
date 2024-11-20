@@ -1122,18 +1122,24 @@ impl<
         notarization: wire::Notarization,
     ) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
+        let view = notarization.proposal.as_ref().unwrap().index.unwrap().view;
         let leader = self
-            .leader(notarization.view)
+            .application
+            .leader(view, ())
             .expect("unable to get leader");
-        let view = self
-            .views
-            .entry(notarization.view)
-            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
+        let view = self.views.entry(view).or_insert_with(|| {
+            Round::new(
+                self.hasher.clone(),
+                self.application.clone(),
+                view,
+                leader,
+                None,
+                None,
+            )
+        });
         for signature in &notarization.signatures {
             let vote = wire::Vote {
-                view: notarization.view,
-                height: notarization.height,
-                digest: notarization.digest.clone(),
+                proposal: Some(notarization.proposal.as_ref().unwrap().clone()),
                 signature: Some(signature.clone()),
             };
             view.add_verified_vote(vote).await
