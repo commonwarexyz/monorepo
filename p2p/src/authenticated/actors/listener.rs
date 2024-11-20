@@ -103,6 +103,7 @@ impl<
         let handshake = match IncomingHandshake::verify(
             runtime.clone(),
             &connection.crypto,
+            &connection.namespace,
             connection.synchrony_bound,
             connection.max_handshake_age,
             connection.handshake_timeout,

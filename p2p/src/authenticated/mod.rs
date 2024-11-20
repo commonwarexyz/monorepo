@@ -178,6 +178,9 @@
 //! let runtime_cfg = tokio::Config::default();
 //! let (executor, runtime) = Executor::init(runtime_cfg.clone());
 //!
+//! // Configure prometheus registry
+//! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+//! 
 //! // Generate identity
 //! //
 //! // In production, the signer should be generated from a secure source of entropy.
@@ -196,12 +199,17 @@
 //! // In production, it is likely that the address of bootstrappers will be some public address.
 //! let bootstrappers = vec![(peer1.clone(), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001))];
 //!
+//! // Configure namespace
+//! //
+//! // In production, use a unique application namespace to prevent cryptographic replay attacks.
+//! let application_namespace = b"my-app-namespace";
+//! 
 //! // Configure network
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
-//! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
 //! let p2p_cfg = authenticated::Config::aggressive(
 //!     signer.clone(),
+//!     application_namespace,
 //!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,

@@ -41,7 +41,13 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
-        let msg = create_handshake(runtime.clone(), &mut config.crypto, peer.clone(), ephemeral)?;
+        let msg = create_handshake(
+            runtime.clone(),
+            &mut config.crypto,
+            &config.namespace,
+            peer.clone(),
+            ephemeral,
+        )?;
 
         // Wait for up to handshake timeout to send
         select! {
@@ -67,6 +73,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let handshake = Handshake::verify(
             runtime,
             &config.crypto,
+            &config.namespace,
             config.synchrony_bound,
             config.max_handshake_age,
             msg,
@@ -105,6 +112,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let msg = create_handshake(
             runtime.clone(),
             &mut config.crypto,
+            &config.namespace,
             handshake.peer_public_key.clone(),
             ephemeral,
         )?;

@@ -60,6 +60,7 @@ impl<
             runtime.clone(),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
+                namespace: cfg.namespace.clone(),
                 registry: cfg.registry.clone(),
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
@@ -151,6 +152,7 @@ impl<
         // Start listener
         let connection = connection::Config {
             crypto: self.cfg.crypto,
+            namespace: self.cfg.namespace,
             max_message_size: self.cfg.max_message_size,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
