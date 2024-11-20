@@ -7,7 +7,7 @@ pub const HEADER_SUFFIX: &[u8] = b"_HEADER";
 pub const VOTE_SUFFIX: &[u8] = b"_VOTE";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
-pub fn proposal_message(index: wire::Index, parent: wire::Parent, payload: &Digest) -> Bytes {
+pub fn proposal_message(index: &wire::Index, parent: &wire::Parent, payload: &Digest) -> Bytes {
     let mut msg = Vec::with_capacity(8 + 8 + 8 + parent.digest.len() + payload.len());
     msg.put_u64(index.view);
     msg.put_u64(index.height);
@@ -17,7 +17,7 @@ pub fn proposal_message(index: wire::Index, parent: wire::Parent, payload: &Dige
     msg.into()
 }
 
-pub fn null_message(null: wire::Null) -> Bytes {
+pub fn null_message(null: &wire::Null) -> Bytes {
     null.view.to_be_bytes().to_vec().into()
 }
 
