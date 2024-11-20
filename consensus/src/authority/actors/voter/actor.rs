@@ -1175,6 +1175,66 @@ impl<
         self.enter_view(notarization_view + 1);
     }
 
+    async fn handle_nullification(
+        &mut self,
+        backfiller: &mut backfiller::Mailbox,
+        nullification: wire::Nullification,
+    ) {
+        // Add signatures to view (needed to broadcast notarization if we get proposal)
+        let leader = self
+            .leader(notarization.view)
+            .expect("unable to get leader");
+        let view = self
+            .views
+            .entry(notarization.view)
+            .or_insert_with(|| Round::new(self.application.clone(), leader, None, None));
+        for signature in &notarization.signatures {
+            let vote = wire::Vote {
+                view: notarization.view,
+                height: notarization.height,
+                digest: notarization.digest.clone(),
+                signature: Some(signature.clone()),
+            };
+            view.add_verified_vote(vote).await
+        }
+
+        // Clear leader and advance deadlines (if they exist)
+        view.leader_deadline = None;
+        view.advance_deadline = None;
+
+        // Notify resolver of notarization
+        let proposal = if let Some(notarization_digest) = &notarization.digest {
+            debug!(
+                view = notarization.view,
+                digest = hex(notarization_digest),
+                "processed digest notarization"
+            );
+            match view.proposal.as_ref() {
+                Some((digest, _, proposal)) => {
+                    Proposal::Populated(digest.clone(), proposal.clone())
+                }
+                None => Proposal::Reference(
+                    notarization.view,
+                    notarization.height.unwrap(),
+                    notarization_digest.clone(),
+                ),
+            }
+        } else {
+            debug!(view = notarization.view, "processed null notarization");
+            Proposal::Null(notarization.view)
+        };
+
+        // Wait for proposal to be resolved
+        let notarization_view = notarization.view;
+        join!(
+            resolver.notarized(proposal),
+            backfiller.notarized(notarization_view, notarization, self.last_finalized)
+        );
+
+        // Enter next view
+        self.enter_view(notarization_view + 1);
+    }
+
     async fn finalize(&mut self, finalize: wire::Finalize) {
         // Extract proposal
         let proposal = match &finalize.proposal {
@@ -1671,7 +1731,7 @@ impl<
         if let Some(nullification) = self.construct_nullification(view, false) {
             // Broadcast the nullification
             let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Notarization(nullification.clone())),
+                payload: Some(wire::voter::Payload::Nullification(nullification.clone())),
             }
             .encode_to_vec()
             .into();
