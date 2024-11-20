@@ -1495,7 +1495,7 @@ impl<
         if result.is_none() {
             result = round.notarizable_null(threshold, force);
         }
-        let (digest, height, votes) = result?;
+        let (container, votes) = result?;
 
         // Construct notarization
         let mut signatures = Vec::new();
@@ -1505,9 +1505,7 @@ impl<
             }
         }
         let notarization = wire::Notarization {
-            view,
-            height,
-            digest,
+            container: Some(container),
             signatures,
         };
         Some(notarization)
@@ -1574,7 +1572,7 @@ impl<
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (digest, height, finalizes) = round.finalizable_proposal(threshold, force)?;
+        let (proposal, finalizes) = round.finalizable_proposal(threshold, force)?;
 
         // Construct finalization
         let mut signatures = Vec::new();
@@ -1584,9 +1582,7 @@ impl<
             }
         }
         let finalization = wire::Finalization {
-            view,
-            height,
-            digest,
+            proposal: Some(proposal),
             signatures,
         };
         Some(finalization)
@@ -1594,7 +1590,6 @@ impl<
 
     async fn broadcast(
         &mut self,
-        resolver: &mut resolver::Mailbox,
         backfiller: &mut backfiller::Mailbox,
         sender: &mut impl Sender,
         view: u64,
@@ -1610,8 +1605,6 @@ impl<
             sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the vote
-            let digest = vote.digest.clone().unwrap();
-            debug!(view = vote.view, digest = hex(&digest), "broadcast vote");
             self.handle_vote(vote).await;
         };
 
@@ -1626,48 +1619,7 @@ impl<
             sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the notarization
-            let null_broadcast = notarization.digest.is_none();
-            debug!(
-                view = notarization.view,
-                null = null_broadcast,
-                "broadcast notarization"
-            );
-            self.handle_notarization(resolver, backfiller, notarization)
-                .await;
-
-            // If we built the proposal and are broadcasting null, also broadcast most recent finalization
-            //
-            // In cases like this, it is possible that other peers cannot verify the proposal because they do not
-            // have the latest finalization and null notarizations.
-            //
-            // TODO: why not send last notarized here rather than last finalized?
-            let round = self.views.get(&view).expect("view missing");
-            if null_broadcast && round.leader == self.crypto.public_key() && round.verified_proposal
-            {
-                match self.construct_finalization(self.last_finalized, true) {
-                    Some(finalization) => {
-                        let msg = wire::Voter {
-                            payload: Some(wire::voter::Payload::Finalization(finalization.clone())),
-                        }
-                        .encode_to_vec()
-                        .into();
-                        sender.send(Recipients::All, msg, true).await.unwrap();
-                        debug!(
-                            finalized_view = finalization.view,
-                            finalized_height = finalization.height,
-                            current_view = view,
-                            "broadcast last finalized after null notarization on our proposal"
-                        );
-                    }
-                    None => {
-                        debug!(
-                            finalized_view = self.last_finalized,
-                            current_view = view,
-                            "missing last finalized view, unable to broadcast finalization"
-                        );
-                    }
-                }
-            }
+            self.handle_notarization(backfiller, notarization).await;
         };
 
         // Attempt to finalize
@@ -1681,11 +1633,6 @@ impl<
             sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the finalize
-            debug!(
-                view = finalize.view,
-                height = finalize.height,
-                "broadcast finalize"
-            );
             self.handle_finalize(finalize).await;
         };
 
@@ -1700,12 +1647,7 @@ impl<
             sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the finalization
-            debug!(
-                view = finalization.view,
-                height = finalization.height,
-                "broadcast finalization"
-            );
-            self.handle_finalization(resolver, finalization).await;
+            self.handle_finalization(finalization).await;
         };
     }
 
