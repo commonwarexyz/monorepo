@@ -1731,10 +1731,12 @@ impl<
         self.current_view.set(1);
         self.tracked_views.set(1);
 
+        // TODO: rebuild from journal
+
         // Process messages
         loop {
             // Attempt to propose a container
-            let propose_retry = match self.propose(&mut resolver).await {
+            let propose_retry = match self.propose().await {
                 Some(retry) => Either::Left(self.runtime.sleep_until(retry)),
                 None => Either::Right(futures::future::pending()),
             };
@@ -1755,7 +1757,7 @@ impl<
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Proposal{ view: proposal_view, parent, height, payload, payload_digest} => {
+                        Message::Proposed{ view: proposal_view, parent, height, payload, payload_digest} => {
                             // If we have already moved to another view, drop the response as we will
                             // not broadcast it
                             if self.view != proposal_view {
@@ -1798,19 +1800,6 @@ impl<
                                 "broadcast proposal",
                             );
                         },
-                        Message::ProposalFailed {view} => {
-                            if self.view != view {
-                                debug!(view = view, our_view = self.view, reason = "no longer in required view", "dropping proposal failure");
-                                continue;
-                            }
-
-                            // Handle proposal failure
-                            let view_obj = self.views.get_mut(&view).expect("view missing");
-                            view_obj.requested_proposal = false;
-                            view_obj.next_proposal_request = Some(self.runtime.current() + self.proposal_retry);
-                            debug!(view = view, "proposal failed");
-                            continue;
-                        }
                         Message::Verified { view: verified_view } => {
                             // Handle verified proposal
                             if !self.verified(verified_view).await {
@@ -1820,6 +1809,9 @@ impl<
 
                             // TODO: Have resolver hold on to verified proposals in case they become notarized or if they are notarized
                             // but learned about later.
+                        },
+                        Message::Backfilled { notarizations } => {
+                            // TODO: store verified notarizations we've backfilled
                         },
                     }
                 },
@@ -1845,14 +1837,6 @@ impl<
                     //
                     // All messages are semantically verified before being passed to the `voter`.
                     match payload {
-                        wire::voter::Payload::Proposal(proposal) => {
-                            if !H::validate(&proposal.parent) {
-                                debug!(sender = hex(&s), "invalid proposal parent digest size");
-                                continue;
-                            }
-                            view = proposal.view;
-                            self.peer_proposal(&mut resolver, proposal).await;
-                        }
                         wire::voter::Payload::Vote(vote) => {
                             if let Some(vote_digest) = vote.digest.as_ref() {
                                 if !H::validate(vote_digest) {
@@ -1914,6 +1898,9 @@ impl<
             // After sending all required messages, prune any views
             // we no longer need
             self.prune_views();
+
+            // TODO: update backfiller if we've gone to a new view
+            // TODO: we need to provide each view, not just latest (maybe ok)?
 
             // Update metrics
             self.current_view.set(view as i64);

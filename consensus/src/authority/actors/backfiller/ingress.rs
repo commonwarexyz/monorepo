@@ -3,7 +3,7 @@ use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {
     Fetch {
-        containers: Vec<View>,
+        proposals: Vec<View>,
         null: Vec<View>,
     },
     Notarized {
@@ -28,9 +28,9 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn fetch(&mut self, containers: Vec<View>, null: Vec<View>) {
+    pub async fn fetch(&mut self, proposals: Vec<View>, null: Vec<View>) {
         self.sender
-            .send(Message::Fetch { containers, null })
+            .send(Message::Fetch { proposals, null })
             .await
             .expect("Failed to send notarizations");
     }
