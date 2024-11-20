@@ -5,6 +5,7 @@ use commonware_utils::union;
 
 pub const HEADER_SUFFIX: &[u8] = b"_HEADER";
 pub const VOTE_SUFFIX: &[u8] = b"_VOTE";
+pub const NULL_SUFFIX: &[u8] = b"_NULL";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
 pub fn proposal_message(index: &wire::Index, parent: &wire::Parent, payload: &Digest) -> Bytes {
@@ -27,6 +28,10 @@ pub fn header_namespace(namespace: &Bytes) -> Vec<u8> {
 
 pub fn vote_namespace(namespace: &Bytes) -> Vec<u8> {
     union(namespace, VOTE_SUFFIX)
+}
+
+pub fn null_namespace(namespace: &Bytes) -> Vec<u8> {
+    union(namespace, NULL_SUFFIX)
 }
 
 pub fn finalize_namespace(namespace: &Bytes) -> Vec<u8> {

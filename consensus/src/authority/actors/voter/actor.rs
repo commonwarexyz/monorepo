@@ -3,7 +3,8 @@ use crate::{
     authority::{
         actors::backfiller,
         encoder::{
-            finalize_namespace, header_namespace, null_message, proposal_message, vote_namespace,
+            finalize_namespace, header_namespace, null_message, null_namespace, proposal_message,
+            vote_namespace,
         },
         prover::Prover,
         wire, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_VOTE, FINALIZE,
@@ -23,6 +24,7 @@ use prost::Message as _;
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    ptr::null,
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
@@ -40,7 +42,7 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
-    null_vote_retry: Option<SystemTime>,
+    null_retry: Option<SystemTime>,
 
     // Track one proposal per view
     next_proposal_request: Option<SystemTime>,
@@ -85,7 +87,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             leader,
             leader_deadline,
             advance_deadline,
-            null_vote_retry: None,
+            null_retry: None,
 
             next_proposal_request: None,
             requested_proposal: false,
@@ -100,8 +102,8 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             broadcast_proposal_notarization: false,
 
             timeout_fired: false,
-            null_votes: HashMap::new(),
-            broadcast_null_notarization: false,
+            nulls: HashMap::new(),
+            broadcast_nullification: false,
 
             finalizers: HashMap::new(),
             finalizes: HashMap::new(),
@@ -223,7 +225,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         let finalize = self.finalizers.get(public_key);
         if finalize.is_none() {
             // Store the null vote
-            self.null_votes.insert(public_key.clone(), vote);
+            self.nulls.insert(public_key.clone(), null);
             return;
         }
         let finalize = finalize.unwrap();
@@ -241,7 +243,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             &finalize_proposal.parent.as_ref().unwrap(),
             &finalize_proposal.payload,
             &finalize.signature.as_ref().unwrap(),
-            &vote.signature.as_ref().unwrap(),
+            &null.signature.as_ref().unwrap(),
         );
         self.application.report(NULL_AND_FINALIZE, proof).await;
         warn!(
@@ -452,6 +454,7 @@ pub struct Actor<
 
     header_namespace: Vec<u8>,
     vote_namespace: Vec<u8>,
+    null_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 
     leader_timeout: Duration,
@@ -503,6 +506,7 @@ impl<
 
                 header_namespace: header_namespace(&cfg.namespace),
                 vote_namespace: vote_namespace(&cfg.namespace),
+                null_namespace: null_namespace(&cfg.namespace),
                 finalize_namespace: finalize_namespace(&cfg.namespace),
 
                 leader_timeout: cfg.leader_timeout,
@@ -623,7 +627,7 @@ impl<
         // Remove deadlines
         view.leader_deadline = None;
         view.advance_deadline = None;
-        view.null_vote_retry = None;
+        view.null_retry = None;
 
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
@@ -646,15 +650,15 @@ impl<
 
         // Construct null vote
         let message = null_message(self.view);
-        let vote = wire::Vote {
-            container: Some(wire::vote::Container::Null(self.view)),
+        let null = wire::Null {
+            view: self.view,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
-                signature: self.crypto.sign(&self.vote_namespace, &message),
+                signature: self.crypto.sign(&self.null_namespace, &message),
             }),
         };
         let msg = wire::Voter {
-            payload: Some(wire::voter::Payload::Vote(vote.clone())),
+            payload: Some(wire::voter::Payload::Null(null.clone())),
         }
         .encode_to_vec()
         .into();
@@ -662,7 +666,7 @@ impl<
 
         // Handle the vote
         debug!(view = self.view, "broadcasted null vote");
-        self.handle_vote(vote).await;
+        self.handle_null(null).await;
     }
 
     async fn our_proposal(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {
@@ -1466,7 +1470,7 @@ impl<
         self.enter_view(view + 1);
     }
 
-    fn construct_proposal_vote(&mut self, view: u64) -> Option<wire::Vote> {
+    fn construct_vote(&mut self, view: u64) -> Option<wire::Vote> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
@@ -1627,7 +1631,7 @@ impl<
         view: u64,
     ) {
         // Attempt to vote
-        if let Some(vote) = self.construct_proposal_vote(view) {
+        if let Some(vote) = self.construct_vote(view) {
             // Broadcast the vote
             let msg = wire::Voter {
                 payload: Some(wire::voter::Payload::Vote(vote.clone())),

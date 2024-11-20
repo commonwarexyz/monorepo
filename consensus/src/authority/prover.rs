@@ -5,7 +5,8 @@
 
 use super::{
     encoder::{
-        finalize_namespace, header_namespace, null_message, proposal_message, vote_namespace,
+        finalize_namespace, header_namespace, null_message, null_namespace, proposal_message,
+        vote_namespace,
     },
     wire, View,
 };
@@ -22,6 +23,7 @@ pub struct Prover<C: Scheme, H: Hasher> {
 
     header_namespace: Vec<u8>,
     vote_namespace: Vec<u8>,
+    null_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 }
 
@@ -33,6 +35,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
             header_namespace: header_namespace(&namespace),
             vote_namespace: vote_namespace(&namespace),
+            null_namespace: null_namespace(&namespace),
             finalize_namespace: finalize_namespace(&namespace),
         }
     }
@@ -421,7 +424,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
                 &public_key,
                 &signature_finalize,
             ) || !C::verify(
-                &self.vote_namespace,
+                &self.null_namespace,
                 &null_message,
                 &public_key,
                 &signature_null,
