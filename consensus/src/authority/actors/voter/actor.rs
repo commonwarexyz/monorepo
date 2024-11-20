@@ -27,17 +27,14 @@ use std::{
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
-type Notarizable<'a> = Option<(
-    Option<Digest>,
-    Option<Height>,
-    &'a HashMap<PublicKey, wire::Vote>,
-)>;
+type Notarizable<'a> = Option<(wire::Container, &'a HashMap<PublicKey, wire::Vote>)>;
 
 struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     hasher: H,
     application: A,
     _crypto: PhantomData<C>,
 
+    view: View,
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
@@ -76,6 +73,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
     pub fn new(
         hasher: H,
         application: A,
+        view: View,
         leader: PublicKey,
         leader_deadline: Option<SystemTime>,
         advance_deadline: Option<SystemTime>,
@@ -85,6 +83,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             application,
             _crypto: PhantomData,
 
+            view,
             leader,
             leader_deadline,
             advance_deadline,
@@ -251,11 +250,12 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             }
 
             // Ensure we have the proposal we are going to broadcast a notarization for
-            let height = match &self.proposal {
+            let proposal = match &self.proposal {
                 Some((digest, _, pro)) => {
+                    let index = pro.index.as_ref().unwrap();
                     if digest != proposal {
                         debug!(
-                            view = pro.view,
+                            view = index.view,
                             proposal = hex(proposal),
                             reason = "proposal mismatch",
                             "skipping notarization broadcast"
@@ -263,12 +263,11 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                         continue;
                     }
                     debug!(
-                        view = pro.view,
-                        height = pro.height,
+                        view = index.view,
                         proposal = hex(proposal),
                         "broadcasting notarization"
                     );
-                    pro.height
+                    pro
                 }
                 None => {
                     continue;
@@ -278,7 +277,10 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             // There should never exist enough votes for multiple proposals, so it doesn't
             // matter which one we choose.
             self.broadcast_proposal_notarization = true;
-            return Some((Some(proposal.clone()), Some(height), votes));
+            let container = wire::Container {
+                payload: Some(wire::container::Payload::Proposal(proposal.clone())),
+            };
+            return Some((container, votes));
         }
         None
     }
@@ -291,7 +293,12 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             return None;
         }
         self.broadcast_null_notarization = true;
-        Some((None, None, &self.null_votes))
+        let container = wire::Container {
+            payload: Some(wire::container::Payload::Null(wire::Null {
+                view: self.view,
+            })),
+        };
+        Some((container, &self.null_votes))
     }
 
     async fn add_verified_finalize(&mut self, finalize: wire::Finalize) {
