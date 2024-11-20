@@ -662,161 +662,99 @@ impl<
         true
     }
 
-    // TODO: redo handling of proposal (as part of any other message)
-    async fn peer_proposal(&mut self, proposal: wire::Proposal) {
-        // Parse signature
-        let signature = match &proposal.signature {
-            Some(signature) => signature,
-            _ => {
-                debug!(reason = "missing signature", "dropping proposal");
-                return;
-            }
-        };
-
-        // Ensure we are in the right view to process this message
-        //
-        // TODO: convert this to interesting?
-        if proposal.view != self.view && proposal.view != self.view + 1 {
-            debug!(
-                proposal_view = proposal.view,
-                our_view = self.view,
-                reason = "incorrect view",
-                "dropping proposal"
-            );
-            return;
-        }
-
-        // TODO: sanity check that we don't already have a proposal before doing verification
-        //
-        // This would mean we couldn't collect faults...
-
-        // Check expected leader
-        if !C::validate(&signature.public_key) {
-            debug!(reason = "invalid signature", "dropping proposal");
-            return;
-        }
-        let expected_leader = match self.application.leader(proposal.view, ()) {
+    // Attempt to set proposal from each message received over the wire
+    async fn peer_proposal(&mut self, proposal: wire::Proposal, sender: PublicKey) {
+        // Determine if proposal from leader
+        let index = proposal.index.as_ref().unwrap();
+        let expected_leader = match self.application.leader(index.view, ()) {
             Some(leader) => leader,
             None => {
                 debug!(
-                    proposal_leader = hex(&signature.public_key),
+                    sender = hex(&sender),
                     reason = "unable to compute leader",
                     "dropping proposal"
                 );
                 return;
             }
         };
-        if expected_leader != signature.public_key {
-            debug!(
-                proposal_leader = hex(&signature.public_key),
+        if expected_leader != sender {
+            trace!(
+                sender = hex(&sender),
                 view_leader = hex(&expected_leader),
-                reason = "leader mismatch",
+                reason = "not leader",
                 "dropping proposal"
             );
             return;
         }
 
         // Compute digest
-        let payload_digest = match self.application.parse(proposal.payload.clone()).await {
-            Some(digest) => digest,
-            None => {
-                debug!(reason = "invalid payload", "dropping proposal");
-                return;
-            }
-        };
-        let proposal_message = proposal_message(
-            proposal.view,
-            proposal.height,
-            &proposal.parent,
-            &payload_digest,
-        );
+        let proposal_message =
+            proposal_message(index, proposal.parent.as_ref().unwrap(), &proposal.payload);
         self.hasher.update(&proposal_message);
         let proposal_digest = self.hasher.finalize();
 
         // Check if duplicate or conflicting
-        let mut previous = None;
-        if let Some(view) = self.views.get_mut(&proposal.view) {
-            if view.timeout_fired {
+        if let Some(round) = self.views.get_mut(&index.view) {
+            if round.timeout_fired {
                 warn!(
                     leader = hex(&expected_leader),
-                    view = proposal.view,
+                    view = round.view,
                     reason = "view already timed out",
                     "dropping proposal"
                 );
                 return;
             }
-            if view.proposal.is_some() {
-                let incoming_digest = &view.proposal.as_ref().unwrap().0;
-                if *incoming_digest == proposal_digest {
+            if round.proposal.is_some() {
+                let round_digest = &round.proposal.as_ref().unwrap().0;
+                if *round_digest == proposal_digest {
                     debug!(
                         leader = hex(&expected_leader),
-                        view = proposal.view,
+                        view = round.view,
                         reason = "already received proposal",
                         "dropping proposal"
                     );
                     return;
+                } else {
+                    // This will be handled as a conflicting vote.
+                    warn!(
+                        leader = hex(&expected_leader),
+                        view = round.view,
+                        round_digest = hex(round_digest),
+                        proposal_digest = hex(&proposal_digest),
+                        "conflicting proposal"
+                    )
                 }
-                previous = view.proposal.as_ref();
             }
-        }
-
-        // Verify the signature
-        let public_key = &signature.public_key;
-        if !C::verify(
-            &self.header_namespace,
-            &proposal_message,
-            public_key,
-            &signature.signature,
-        ) {
-            debug!(reason = "invalid signature", "dropping proposal");
-            return;
-        }
-
-        // Collect fault for leader
-        if let Some(previous) = previous {
-            // Record fault
-            let signature_1 = previous.2.signature.clone().unwrap();
-            let signature_2 = proposal.signature.clone().unwrap();
-            let proof = Prover::<C, H>::serialize_conflicting_proposal(
-                proposal.view,
-                previous.2.height,
-                previous.2.parent.clone(),
-                previous.1.clone(),
-                signature_1,
-                proposal.height,
-                proposal.parent.clone(),
-                payload_digest.clone(),
-                signature_2,
-            );
-            self.application.report(CONFLICTING_PROPOSAL, proof).await;
-            warn!(
-                leader = hex(&expected_leader),
-                view = proposal.view,
-                activity = CONFLICTING_PROPOSAL,
-                "recorded fault"
-            );
-            return;
         }
 
         // Verify the proposal
         //
         // This will fail if we haven't notified the application of this parent.
-        let view = self
-            .views
-            .entry(proposal.view)
-            .or_insert_with(|| Round::new(self.application.clone(), expected_leader, None, None));
-        view.proposal = Some((
-            proposal_digest.clone(),
-            payload_digest.clone(),
-            proposal.clone(),
-        ));
+        let view = self.views.entry(index.view).or_insert_with(|| {
+            Round::new(
+                self.hasher.clone(),
+                self.application.clone(),
+                index.view,
+                expected_leader,
+                None,
+                None,
+            )
+        });
+        view.proposal = Some((proposal_digest.clone(), proposal.clone()));
         self.application
-            .verify(proposal_digest.clone(), proposal.clone())
+            .verify(
+                Context {
+                    index: index.clone(),
+                    parent: proposal.parent.as_ref().unwrap().clone(),
+                },
+                proposal.payload.clone(),
+            )
             .await;
-        trace!(
-            view = proposal.view,
-            height = proposal.height,
+        debug!(
+            view = index.view,
+            height = index.height,
             digest = hex(&proposal_digest),
+            payload = hex(&proposal.payload),
             "requested proposal verification",
         );
     }
