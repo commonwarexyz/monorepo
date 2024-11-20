@@ -663,7 +663,7 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
-    async fn peer_proposal(&mut self, proposal: wire::Proposal, sender: PublicKey) {
+    async fn peer_proposal(&mut self, proposal: &wire::Proposal, sender: &PublicKey) {
         // Determine if proposal from leader
         let index = proposal.index.as_ref().unwrap();
         let expected_leader = match self.application.leader(index.view, ()) {
@@ -730,7 +730,7 @@ impl<
         // Verify the proposal
         //
         // This will fail if we haven't notified the application of this parent.
-        let view = self.views.entry(index.view).or_insert_with(|| {
+        let round = self.views.entry(index.view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
                 self.application.clone(),
@@ -740,7 +740,7 @@ impl<
                 None,
             )
         });
-        view.proposal = Some((proposal_digest.clone(), proposal.clone()));
+        round.proposal = Some((proposal_digest.clone(), proposal.clone()));
         self.application
             .verify(
                 Context {
@@ -1157,10 +1157,33 @@ impl<
     }
 
     async fn finalize(&mut self, finalize: wire::Finalize) {
+        // Extract proposal
+        let proposal = match &finalize.proposal {
+            Some(proposal) => proposal,
+            _ => {
+                debug!(reason = "missing proposal", "dropping finalize");
+                return;
+            }
+        };
+        let proposal_index = match &proposal.index {
+            Some(index) => index,
+            _ => {
+                debug!(reason = "missing index", "dropping finalize");
+                return;
+            }
+        };
+        let proposal_parent = match &proposal.parent {
+            Some(parent) => parent,
+            _ => {
+                debug!(reason = "missing parent", "dropping finalize");
+                return;
+            }
+        };
+
         // Ensure we are in the right view to process this message
-        if !self.interesting(finalize.view, false) {
+        if !self.interesting(proposal_index.view, false) {
             debug!(
-                finalize_view = finalize.view,
+                finalize_view = proposal_index.view,
                 our_view = self.view,
                 reason = "incorrect view",
                 "dropping finalize"
@@ -1184,7 +1207,7 @@ impl<
         // Verify that signer is a validator
         let is_participant = match self
             .application
-            .is_participant(finalize.view, &signature.public_key)
+            .is_participant(proposal_index.view, &signature.public_key)
         {
             Some(is) => is,
             None => {
@@ -1206,7 +1229,7 @@ impl<
         }
 
         // Verify the signature
-        let finalize_message = finalize_message(finalize.view, finalize.height, &finalize.digest);
+        let finalize_message = proposal_message(proposal_index, proposal_parent, &proposal.payload);
         if !C::verify(
             &self.finalize_namespace,
             &finalize_message,
@@ -1221,6 +1244,9 @@ impl<
             );
             return;
         }
+
+        // Handle peer proposal
+        self.peer_proposal(proposal, &signature.public_key).await;
 
         // Handle finalize
         self.handle_finalize(finalize).await;
@@ -1783,52 +1809,18 @@ impl<
                     // All messages are semantically verified before being passed to the `voter`.
                     match payload {
                         wire::voter::Payload::Vote(vote) => {
-                            if let Some(vote_digest) = vote.digest.as_ref() {
-                                if !H::validate(vote_digest) {
-                                    debug!(sender = hex(&s), "invalid vote digest size");
-                                    continue;
-                                }
-                                if vote.height.is_none() {
-                                    debug!(sender = hex(&s), "missing vote height");
-                                    continue;
-                                }
-                            } else if vote.height.is_some() {
-                                debug!(sender = hex(&s), "invalid vote height for null container");
-                                continue;
-                            }
                             view = vote.view;
                             self.vote(vote).await;
                         }
                         wire::voter::Payload::Notarization(notarization) => {
-                            if let Some(notarization_digest) = notarization.digest.as_ref() {
-                                if !H::validate(notarization_digest) {
-                                    debug!(sender = hex(&s), "invalid notarization digest size");
-                                    continue;
-                                }
-                                if notarization.height.is_none() {
-                                    debug!(sender = hex(&s), "missing notarization height");
-                                    continue;
-                                }
-                            } else if notarization.height.is_some() {
-                                debug!(sender = hex(&s), "invalid notarization height for null container");
-                                continue;
-                            }
                             view = notarization.view;
                             self.notarization(&mut resolver, &mut backfiller, notarization).await;
                         }
                         wire::voter::Payload::Finalize(finalize) => {
-                            if !H::validate(&finalize.digest) {
-                                debug!(sender = hex(&s), "invalid finalize digest size");
-                                continue;
-                            }
                             view = finalize.view;
                             self.finalize(finalize).await;
                         }
                         wire::voter::Payload::Finalization(finalization) => {
-                            if !H::validate(&finalization.digest) {
-                                debug!(sender = hex(&s), "invalid finalization digest size");
-                                continue;
-                            }
                             view = finalization.view;
                             self.finalization(&mut resolver, finalization).await;
                         }
