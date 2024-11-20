@@ -38,13 +38,6 @@ message Null {
     uint64 view = 1;
 }
 
-message Container {
-    oneof payload {
-        Proposal proposal = 1;
-        Null null = 2;
-    }
-}
-
 message Signature {
     bytes public_key = 1;
     bytes signature = 2;
@@ -53,13 +46,19 @@ message Signature {
 // A vote from the leader for a view is also treated as a proposal
 // for that view.
 message Vote {
-    Container container = 1; 
-    Signature signature = 2;
+    oneof container {
+        Proposal proposal = 1;
+        Null null = 2;
+    }
+    Signature signature = 3;
 }
 
 message Notarization {
-    Container container = 1;
-    repeated Signature signatures = 2;
+    oneof container {
+        Proposal proposal = 1;
+        Null null = 2;
+    }
+    repeated Signature signatures = 3;
 }
 
 message Finalize {

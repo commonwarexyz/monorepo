@@ -28,7 +28,10 @@ use std::{
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
-type Notarizable<'a> = Option<(wire::Container, &'a HashMap<PublicKey, wire::Vote>)>;
+type Notarizable<'a> = Option<(
+    wire::notarization::Container,
+    &'a HashMap<PublicKey, wire::Vote>,
+)>;
 type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Finalize>)>;
 
 struct Round<C: Scheme, H: Hasher, A: Supervisor> {
@@ -113,15 +116,8 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         // Determine whether or not this is a null vote
         let public_key = &vote.signature.as_ref().unwrap().public_key;
 
-        match vote
-            .container
-            .as_ref()
-            .expect("missing container")
-            .payload
-            .as_ref()
-            .expect("missing payload")
-        {
-            wire::container::Payload::Proposal(proposal) => {
+        match vote.container.as_ref().expect("missing container") {
+            wire::vote::Container::Proposal(proposal) => {
                 // Compute proposal digest
                 let message = proposal_message(
                     proposal.index.as_ref().expect("missing index"),
@@ -150,13 +146,8 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                         .unwrap()
                         .get(public_key)
                         .unwrap();
-                    let wire::container::Payload::Proposal(previous_proposal) = previous_vote
-                        .container
-                        .as_ref()
-                        .unwrap()
-                        .payload
-                        .as_ref()
-                        .unwrap()
+                    let wire::vote::Container::Proposal(previous_proposal) =
+                        previous_vote.container.as_ref().unwrap()
                     else {
                         panic!("expected proposal payload");
                     };
@@ -192,7 +183,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 // Report vote
                 self.application.report(VOTE, proof).await;
             }
-            wire::container::Payload::Null(_) => {
+            wire::vote::Container::Null(_) => {
                 // Check if already issued finalize
                 let finalize = self.finalizers.get(public_key);
                 if finalize.is_none() {
@@ -271,10 +262,10 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             // There should never exist enough votes for multiple proposals, so it doesn't
             // matter which one we choose.
             self.broadcast_proposal_notarization = true;
-            let container = wire::Container {
-                payload: Some(wire::container::Payload::Proposal(proposal.clone())),
-            };
-            return Some((container, votes));
+            return Some((
+                wire::notarization::Container::Proposal(proposal.clone()),
+                votes,
+            ));
         }
         None
     }
@@ -287,12 +278,10 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             return None;
         }
         self.broadcast_null_notarization = true;
-        let container = wire::Container {
-            payload: Some(wire::container::Payload::Null(wire::Null {
-                view: self.view,
-            })),
-        };
-        Some((container, &self.null_votes))
+        Some((
+            wire::notarization::Container::Null(wire::Null { view: self.view }),
+            &self.null_votes,
+        ))
     }
 
     async fn add_verified_finalize(&mut self, finalize: wire::Finalize) {
@@ -608,9 +597,7 @@ impl<
         let null = wire::Null { view: self.view };
         let message = null_message(&null);
         let vote = wire::Vote {
-            container: Some(wire::Container {
-                payload: Some(wire::container::Payload::Null(null)),
-            }),
+            container: Some(wire::vote::Container::Null(null)),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(&self.vote_namespace, &message),
@@ -622,6 +609,8 @@ impl<
         .encode_to_vec()
         .into();
         sender.send(Recipients::All, msg, true).await.unwrap();
+
+        // TODO: broadcast notarization that led to entering view if retry
 
         // Handle the vote
         debug!(view = self.view, "broadcasted null vote");
@@ -888,14 +877,13 @@ impl<
                 // the lookback window.
                 return;
             }
-            let view_obj = match self.views.get(&next) {
-                Some(view_obj) => view_obj,
+            let round = match self.views.get(&next) {
+                Some(round) => round,
                 None => {
                     return;
                 }
             };
-            if view_obj.proposal_voters.contains_key(&leader)
-                || view_obj.null_votes.contains_key(&leader)
+            if round.proposal_voters.contains_key(&leader) || round.null_votes.contains_key(&leader)
             {
                 return;
             }
@@ -1446,32 +1434,30 @@ impl<
     }
 
     fn construct_proposal_vote(&mut self, view: u64) -> Option<wire::Vote> {
-        let view_obj = match self.views.get_mut(&view) {
+        let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
                 return None;
             }
         };
-        if view_obj.broadcast_vote {
+        if round.broadcast_vote {
             return None;
         }
-        if view_obj.timeout_fired {
+        if round.timeout_fired {
             return None;
         }
-        if !view_obj.verified_proposal {
+        if !round.verified_proposal {
             return None;
         }
-        let (digest, proposal) = match &view_obj.proposal {
-            Some((digest, _, proposal)) => (digest, proposal),
+        let proposal = match &round.proposal {
+            Some((_, proposal)) => proposal,
             None => {
                 return None;
             }
         };
-        view_obj.broadcast_vote = true;
+        round.broadcast_vote = true;
         Some(wire::Vote {
-            view,
-            height: Some(proposal.height),
-            digest: Some(digest.clone()),
+            container: Some(wire::vote::Container::Proposal(proposal.clone())),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
@@ -1484,7 +1470,7 @@ impl<
 
     fn construct_notarization(&mut self, view: u64, force: bool) -> Option<wire::Notarization> {
         // Get requested view
-        let view_obj = match self.views.get_mut(&view) {
+        let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
                 return None;
@@ -1500,9 +1486,9 @@ impl<
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let mut result = view_obj.notarizable_proposal(threshold, force);
+        let mut result = round.notarizable_proposal(threshold, force);
         if result.is_none() {
-            result = view_obj.notarizable_null(threshold, force);
+            result = round.notarizable_null(threshold, force);
         }
         let (digest, height, votes) = result?;
 
@@ -1523,49 +1509,51 @@ impl<
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<wire::Finalize> {
-        let view_obj = match self.views.get_mut(&view) {
+        let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
                 return None;
             }
         };
-        if view_obj.timeout_fired {
+        if round.timeout_fired {
             return None;
         }
-        if !view_obj.broadcast_vote {
+        if !round.broadcast_vote {
             // Ensure we vote before we finalize
             return None;
         }
-        if !view_obj.broadcast_proposal_notarization {
+        if !round.broadcast_proposal_notarization {
             // Ensure we notarize before we finalize
             return None;
         }
-        if view_obj.broadcast_finalize {
+        if round.broadcast_finalize {
             return None;
         }
-        let (digest, proposal) = match &view_obj.proposal {
-            Some((digest, _, proposal)) => (digest, proposal),
+        let proposal = match &round.proposal {
+            Some((_, proposal)) => proposal,
             None => {
                 return None;
             }
         };
-        view_obj.broadcast_finalize = true;
+        round.broadcast_finalize = true;
         Some(wire::Finalize {
-            view,
-            height: proposal.height,
-            digest: digest.clone(),
+            proposal: Some(proposal.clone()),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
                     &self.finalize_namespace,
-                    &finalize_message(view, proposal.height, digest),
+                    &proposal_message(
+                        proposal.index.as_ref().unwrap(),
+                        proposal.parent.as_ref().unwrap(),
+                        &proposal.payload,
+                    ),
                 ),
             }),
         })
     }
 
     fn construct_finalization(&mut self, view: u64, force: bool) -> Option<wire::Finalization> {
-        let view_obj = match self.views.get_mut(&view) {
+        let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
                 return None;
@@ -1581,7 +1569,7 @@ impl<
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (digest, height, finalizes) = view_obj.finalizable_proposal(threshold, force)?;
+        let (digest, height, finalizes) = round.finalizable_proposal(threshold, force)?;
 
         // Construct finalization
         let mut signatures = Vec::new();
@@ -1648,10 +1636,8 @@ impl<
             // have the latest finalization and null notarizations.
             //
             // TODO: why not send last notarized here rather than last finalized?
-            let view_obj = self.views.get(&view).expect("view missing");
-            if null_broadcast
-                && view_obj.leader == self.crypto.public_key()
-                && view_obj.verified_proposal
+            let round = self.views.get(&view).expect("view missing");
+            if null_broadcast && round.leader == self.crypto.public_key() && round.verified_proposal
             {
                 match self.construct_finalization(self.last_finalized, true) {
                     Some(finalization) => {
@@ -1787,7 +1773,9 @@ impl<
                             view = proposal_view;
 
                             // TODO: produce header and send back to application
-                            // TODO: broadcast vote
+                            self.application.broadcast().await;
+
+                            // TODO: broadcast vote containing new proposal
 
                             // Broadcast the proposal
                             let msg = wire::Voter{
