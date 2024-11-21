@@ -4,7 +4,11 @@ use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
 use commonware_utils::hex;
-use commonware_stream::connection::{self, IncomingHandshake, Instance};
+use commonware_stream::connection::{
+    Config as ConnectionConfig,
+    IncomingHandshake,
+    Instance,
+};
 use governor::{
     clock::ReasonablyRealtime,
     middleware::NoOpMiddleware,
@@ -24,7 +28,7 @@ use tracing::debug;
 pub struct Config<C: Scheme> {
     pub registry: Arc<Mutex<Registry>>,
     pub address: SocketAddr,
-    pub connection: connection::Config<C>,
+    pub connection: ConnectionConfig<C>,
     pub allowed_incoming_connectioned_rate: Quota,
 }
 
@@ -38,7 +42,7 @@ pub struct Actor<
     runtime: E,
 
     address: SocketAddr,
-    connection: connection::Config<C>,
+    connection: ConnectionConfig<C>,
     rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
 
     handshakes_rate_limited: Counter,
@@ -88,7 +92,7 @@ impl<
 
     async fn handshake(
         runtime: E,
-        connection: connection::Config<C>,
+        connection: ConnectionConfig<C>,
         sink: Si,
         stream: St,
         mut tracker: tracker::Mailbox<E>,

@@ -37,7 +37,7 @@ pub enum Error {
     ReceiveFailed(connection::Error),
     #[error("decode failed: {0}")]
     DecodeFailed(DecodeError),
-    #[error("unexpected handshake message")]
+    #[error("unexpected failure: {0}")]
     UnexpectedFailure(commonware_runtime::Error),
     #[error("message dropped")]
     MessageDropped,

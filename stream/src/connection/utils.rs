@@ -5,7 +5,9 @@ pub fn nonce_bytes(dialer: bool, iter: u16, seq: u64) -> Nonce {
     if dialer {
         nonce_bytes[0] = 0b10000000; // Set the first bit of the byte
     }
-    nonce_bytes[2..4].copy_from_slice(&iter.to_be_bytes());
+    if iter > 0 {
+        nonce_bytes[2..4].copy_from_slice(&iter.to_be_bytes());
+    }
     nonce_bytes[4..].copy_from_slice(&seq.to_be_bytes());
     nonce_bytes
 }
@@ -32,6 +34,12 @@ mod tests {
         let nonce = nonce_bytes(true, 65535, 123456789);
         assert_eq!(nonce[0], 0b10000000);
         assert_eq!(&nonce[2..4], &65535u16.to_be_bytes());
+        assert_eq!(&nonce[4..], &123456789u64.to_be_bytes());
+
+        // Test case 4: iter is 0
+        let nonce = nonce_bytes(true, 0, 123456789);
+        assert_eq!(nonce[0], 0b10000000);
+        assert_eq!(&nonce[2..4], &0u16.to_be_bytes());
         assert_eq!(&nonce[4..], &123456789u64.to_be_bytes());
     }
 }

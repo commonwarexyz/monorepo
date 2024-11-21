@@ -6,7 +6,10 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use commonware_stream::connection::{self, Instance};
+use commonware_stream::connection::{
+    Config as ConnectionConfig,
+    Instance,
+};
 use commonware_utils::hex;
 use governor::{
     clock::Clock as GClock,
@@ -24,7 +27,7 @@ use tracing::debug;
 
 pub struct Config<C: Scheme> {
     pub registry: Arc<Mutex<Registry>>,
-    pub connection: connection::Config<C>,
+    pub connection: ConnectionConfig<C>,
     pub dial_frequency: Duration,
     pub dial_rate: Quota,
 }
@@ -38,7 +41,7 @@ pub struct Actor<
 > {
     runtime: E,
 
-    connection: connection::Config<C>,
+    connection: ConnectionConfig<C>,
     dial_frequency: Duration,
 
     dial_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
