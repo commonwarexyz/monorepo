@@ -31,7 +31,7 @@ use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
 type Notarizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Vote>)>;
-type Nullifiable<'a> = Option<&'a HashMap<PublicKey, wire::Null>>;
+type Nullifiable<'a> = Option<&'a HashMap<PublicKey, wire::Nullify>>;
 type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Finalize>)>;
 
 struct Round<C: Scheme, H: Hasher, A: Supervisor> {
@@ -61,7 +61,7 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     broadcast_notarization: bool,
 
     timeout_fired: bool,
-    nulls: HashMap<PublicKey, wire::Null>,
+    nullifies: HashMap<PublicKey, wire::Nullify>,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
@@ -181,9 +181,9 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         self.application.report(VOTE, proof).await;
     }
 
-    async fn add_verified_null(&mut self, null: wire::Null) {
+    async fn add_verified_nullify(&mut self, nullify: wire::Nullify) {
         // Check if already issued finalize
-        let public_key = &null.signature.as_ref().unwrap().public_key;
+        let public_key = &nullify.signature.as_ref().unwrap().public_key;
         let finalize = self.finalizers.get(public_key);
         if finalize.is_none() {
             // Store the null vote
@@ -607,7 +607,7 @@ impl<
 
         // Construct null vote
         let message = null_message(self.view);
-        let null = wire::Null {
+        let null = wire::Nullify {
             view: self.view,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
@@ -615,35 +615,35 @@ impl<
             }),
         };
         let msg = wire::Voter {
-            payload: Some(wire::voter::Payload::Null(null.clone())),
+            payload: Some(wire::voter::Payload::Nullify(null.clone())),
         }
         .encode_to_vec()
         .into();
         sender.send(Recipients::All, msg, true).await.unwrap();
 
         // Handle the vote
-        debug!(view = self.view, "broadcasted null vote");
+        debug!(view = self.view, "broadcasted nullify");
         self.handle_null(null).await;
     }
 
-    async fn handle_null(&mut self, null: wire::Null) {
+    async fn handle_null(&mut self, nullify: wire::Nullify) {
         // Check to see if vote is for proposal in view
-        let leader = match self.application.leader(null.view, ()) {
+        let leader = match self.application.leader(nullify.view, ()) {
             Some(leader) => leader,
             None => {
                 debug!(
-                    view = null.view,
+                    view = nullify.view,
                     reason = "unable to compute leader",
                     "dropping null"
                 );
                 return;
             }
         };
-        let round = self.views.entry(null.view).or_insert_with(|| {
+        let round = self.views.entry(nullify.view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
                 self.application.clone(),
-                null.view,
+                nullify.view,
                 leader,
                 None,
                 None,
@@ -651,7 +651,7 @@ impl<
         });
 
         // Handle vote
-        round.add_verified_null(null).await;
+        round.add_verified_null(nullify).await;
     }
 
     async fn our_proposal(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {

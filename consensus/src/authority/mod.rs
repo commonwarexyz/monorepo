@@ -149,8 +149,10 @@ pub enum Error {
 ///
 /// Note: it is ok to have both a vote for a proposal and the null
 /// container in the same view.
-pub const VOTE: Activity = 0;
+///
+/// Note: it is ok to notarize/finalize different proposals in the same view.
+pub const NOTARIZE: Activity = 0;
 pub const FINALIZE: Activity = 1;
-pub const CONFLICTING_VOTE: Activity = 2;
+pub const CONFLICTING_NOTARIZE: Activity = 2;
 pub const CONFLICTING_FINALIZE: Activity = 3;
-pub const NULL_AND_FINALIZE: Activity = 4;
+pub const NULLIFY_AND_FINALIZE: Activity = 4;

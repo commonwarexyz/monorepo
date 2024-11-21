@@ -3,9 +3,9 @@ package wire;
 
 message Voter {
     oneof payload {
-        Vote vote = 1;
+        Notarize notarize = 1;
         Notarization notarization = 2;
-        Null null = 3;
+        Nullify nullify = 3;
         Nullification nullification = 4;
         Finalize finalize = 5;  
         Finalization finalization = 6;
@@ -43,7 +43,7 @@ message Signature {
 
 // A vote from the leader for a view is also treated as a proposal
 // for that view.
-message Vote {
+message Notarize {
     Proposal proposal = 1;
     Signature signature = 2;
 }
@@ -53,7 +53,8 @@ message Notarization {
     repeated Signature signatures = 2;
 }
 
-message Null {
+// Nullify is used to indicate that a view should be nullified (skipped).
+message Nullify {
     uint64 view = 1;
     Signature signature = 2;
 }
@@ -81,10 +82,11 @@ message Backfiller {
 }
 
 message Request {
-    repeated uint64 containers = 1;
-    repeated uint64 null = 2;
+    repeated uint64 notarizations = 1;
+    repeated uint64 nullifications = 2;
 }
 
 message Response {
     repeated Notarization notarizations = 1;
+    repeated Nullification nullifications = 2;
 }

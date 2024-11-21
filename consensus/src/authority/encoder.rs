@@ -3,9 +3,8 @@ use bytes::{BufMut, Bytes};
 use commonware_cryptography::Digest;
 use commonware_utils::union;
 
-pub const HEADER_SUFFIX: &[u8] = b"_HEADER";
-pub const VOTE_SUFFIX: &[u8] = b"_VOTE";
-pub const NULL_SUFFIX: &[u8] = b"_NULL";
+pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
+pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
 pub fn proposal_message(index: &wire::Index, parent: &wire::Parent, payload: &Digest) -> Bytes {
@@ -18,20 +17,16 @@ pub fn proposal_message(index: &wire::Index, parent: &wire::Parent, payload: &Di
     msg.into()
 }
 
-pub fn null_message(null: u64) -> Bytes {
-    null.to_be_bytes().to_vec().into()
+pub fn nullify_message(nullify: u64) -> Bytes {
+    nullify.to_be_bytes().to_vec().into()
 }
 
-pub fn header_namespace(namespace: &Bytes) -> Vec<u8> {
-    union(namespace, HEADER_SUFFIX)
+pub fn notarize_namespace(namespace: &Bytes) -> Vec<u8> {
+    union(namespace, NOTARIZE_SUFFIX)
 }
 
-pub fn vote_namespace(namespace: &Bytes) -> Vec<u8> {
-    union(namespace, VOTE_SUFFIX)
-}
-
-pub fn null_namespace(namespace: &Bytes) -> Vec<u8> {
-    union(namespace, NULL_SUFFIX)
+pub fn nullify_namespace(namespace: &Bytes) -> Vec<u8> {
+    union(namespace, NULLIFY_SUFFIX)
 }
 
 pub fn finalize_namespace(namespace: &Bytes) -> Vec<u8> {

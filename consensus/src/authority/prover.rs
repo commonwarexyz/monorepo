@@ -5,8 +5,8 @@
 
 use super::{
     encoder::{
-        finalize_namespace, header_namespace, null_message, null_namespace, proposal_message,
-        vote_namespace,
+        finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
+        proposal_message,
     },
     wire, View,
 };
@@ -21,9 +21,8 @@ pub struct Prover<C: Scheme, H: Hasher> {
     _crypto: PhantomData<C>,
     hasher: H,
 
-    header_namespace: Vec<u8>,
-    vote_namespace: Vec<u8>,
-    null_namespace: Vec<u8>,
+    notarize_namespace: Vec<u8>,
+    nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 }
 
@@ -33,9 +32,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             _crypto: PhantomData,
             hasher,
 
-            header_namespace: header_namespace(&namespace),
-            vote_namespace: vote_namespace(&namespace),
-            null_namespace: null_namespace(&namespace),
+            notarize_namespace: notarize_namespace(&namespace),
+            nullify_namespace: nullify_namespace(&namespace),
             finalize_namespace: finalize_namespace(&namespace),
         }
     }
@@ -107,42 +105,25 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((index, parent, payload, public_key))
     }
 
-    pub(crate) fn serialize_header(
-        index: &wire::Index,
-        parent: &wire::Parent,
-        payload: &Digest,
-        signature: &wire::Signature,
-    ) -> Proof {
-        Self::serialize_proposal(index, parent, payload, signature)
-    }
-
-    pub fn deserialize_header(
-        &mut self,
-        proof: Proof,
-        check_sig: bool,
-    ) -> Option<(wire::Index, wire::Parent, Digest, PublicKey)> {
-        Self::deserialize_proposal(proof, check_sig, &self.header_namespace)
-    }
-
-    pub(crate) fn serialize_vote(vote: &wire::Vote) -> Proof {
+    pub(crate) fn serialize_notarize(notarize: &wire::Notarize) -> Proof {
         // Extract proposal
-        let proposal = vote.proposal.as_ref().expect("missing proposal");
+        let proposal = notarize.proposal.as_ref().expect("missing proposal");
 
         // Setup proof
         Self::serialize_proposal(
             proposal.index.as_ref().expect("missing index"),
             proposal.parent.as_ref().expect("missing parent"),
             &proposal.payload,
-            vote.signature.as_ref().expect("missing signature"),
+            notarize.signature.as_ref().expect("missing signature"),
         )
     }
 
-    pub fn deserialize_vote(
+    pub fn deserialize_notarize(
         &self,
         proof: Proof,
         check_sig: bool,
     ) -> Option<(wire::Index, wire::Parent, Digest, PublicKey)> {
-        Self::deserialize_proposal(proof, check_sig, &self.vote_namespace)
+        Self::deserialize_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
     pub(crate) fn serialize_finalize(finalize: &wire::Finalize) -> Proof {
@@ -290,7 +271,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((public_key, view))
     }
 
-    pub(crate) fn serialize_conflicting_vote(
+    pub(crate) fn serialize_conflicting_notarize(
         index_1: &wire::Index,
         parent_1: &wire::Parent,
         payload_1: &Digest,
@@ -312,12 +293,12 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         )
     }
 
-    pub fn deserialize_conflicting_vote(
+    pub fn deserialize_conflicting_notarize(
         &self,
         proof: Proof,
         check_sig: bool,
     ) -> Option<(PublicKey, View)> {
-        Self::deserialize_conflicting_proposal(proof, check_sig, &self.vote_namespace)
+        Self::deserialize_conflicting_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
     pub(crate) fn serialize_conflicting_finalize(
@@ -417,14 +398,14 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
                 return None;
             }
             let finalize_message = proposal_message(&index, &parent, &payload);
-            let null_message = null_message(view);
+            let null_message = nullify_message(view);
             if !C::verify(
                 &self.finalize_namespace,
                 &finalize_message,
                 &public_key,
                 &signature_finalize,
             ) || !C::verify(
-                &self.null_namespace,
+                &self.nullify_namespace,
                 &null_message,
                 &public_key,
                 &signature_null,
