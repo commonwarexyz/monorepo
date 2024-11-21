@@ -24,7 +24,6 @@ use prost::Message as _;
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    ptr::null,
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
@@ -43,7 +42,7 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
     advance_deadline: Option<SystemTime>,
-    null_retry: Option<SystemTime>,
+    nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view
     next_proposal_request: Option<SystemTime>,
@@ -57,8 +56,8 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
-    timeout_fired: bool,
     nullifies: HashMap<PublicKey, wire::Nullify>,
+    broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
@@ -86,7 +85,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             leader,
             leader_deadline,
             advance_deadline,
-            null_retry: None,
+            nullify_retry: None,
 
             next_proposal_request: None,
             requested_proposal: false,
@@ -98,8 +97,8 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             broadcast_notarize: false,
             broadcast_notarization: false,
 
-            timeout_fired: false,
             nullifies: HashMap::new(),
+            broadcast_nullify: false,
             broadcast_nullification: false,
 
             finalizers: HashMap::new(),
@@ -554,29 +553,29 @@ impl<
 
         // If no deadlines are still set (waiting for null votes),
         // return next try for null container vote
-        if let Some(deadline) = view.null_retry {
+        if let Some(deadline) = view.nullify_retry {
             return deadline;
         }
 
         // Set null vote retry, if none already set
         let null_retry = self.runtime.current() + self.nullify_retry;
-        view.null_retry = Some(null_retry);
+        view.nullify_retry = Some(null_retry);
         null_retry
     }
 
     async fn timeout(&mut self, sender: &mut impl Sender) {
         // Set timeout fired
-        let view = self.views.get_mut(&self.view).unwrap();
+        let round = self.views.get_mut(&self.view).unwrap();
         let mut retry = false;
-        if view.timeout_fired {
+        if round.broadcast_nullify {
             retry = true;
         }
-        view.timeout_fired = true;
+        round.broadcast_nullify = true;
 
         // Remove deadlines
-        view.leader_deadline = None;
-        view.advance_deadline = None;
-        view.null_retry = None;
+        round.leader_deadline = None;
+        round.advance_deadline = None;
+        round.nullify_retry = None;
 
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
@@ -618,6 +617,72 @@ impl<
         self.handle_nullify(null).await;
     }
 
+    async fn nullify(&mut self, nullify: wire::Nullify) {
+        // Ensure we are in the right view to process this message
+        if !self.interesting(nullify.view, false) {
+            debug!(
+                nullify_view = nullify.view,
+                our_view = self.view,
+                "dropping vote"
+            );
+            return;
+        }
+
+        // Parse signature
+        let signature = match &nullify.signature {
+            Some(signature) => signature,
+            _ => {
+                debug!(reason = "missing signature", "dropping vote");
+                return;
+            }
+        };
+        if !C::validate(&signature.public_key) {
+            debug!(reason = "invalid signature", "dropping vote");
+            return;
+        }
+
+        // Verify that signer is a validator
+        let is_participant = match self
+            .application
+            .is_participant(nullify.view, &signature.public_key)
+        {
+            Some(is) => is,
+            None => {
+                debug!(
+                    view = nullify.view,
+                    our_view = self.view,
+                    signer = hex(&signature.public_key),
+                    reason = "unable to compute participants for view",
+                    "dropping vote"
+                );
+                return;
+            }
+        };
+        if !is_participant {
+            debug!(
+                signer = hex(&signature.public_key),
+                reason = "invalid validator",
+                "dropping vote"
+            );
+            return;
+        }
+
+        // Verify the signature
+        let message = nullify_message(nullify.view);
+        if !C::verify(
+            &self.nullify_namespace,
+            &message,
+            &signature.public_key,
+            &signature.signature,
+        ) {
+            debug!(reason = "invalid signature", "dropping vote");
+            return;
+        }
+
+        // Handle nullify
+        self.handle_nullify(nullify).await;
+    }
+
     async fn handle_nullify(&mut self, nullify: wire::Nullify) {
         // Check to see if vote is for proposal in view
         let leader = match self.application.leader(nullify.view, ()) {
@@ -652,7 +717,7 @@ impl<
         let round = self.views.get_mut(&index.view).expect("view missing");
 
         // Check if view timed out
-        if round.timeout_fired {
+        if round.broadcast_nullify {
             debug!(
                 view = index.view,
                 reason = "view timed out",
@@ -708,7 +773,7 @@ impl<
 
         // Check if duplicate or conflicting
         if let Some(round) = self.views.get_mut(&index.view) {
-            if round.timeout_fired {
+            if round.broadcast_nullify {
                 warn!(
                     leader = hex(&expected_leader),
                     view = round.view,
@@ -784,7 +849,7 @@ impl<
         };
 
         // Ensure we haven't timed out
-        if round.timeout_fired {
+        if round.broadcast_nullify {
             debug!(
                 view,
                 reason = "view timed out",
@@ -1589,17 +1654,17 @@ impl<
         self.enter_view(view + 1);
     }
 
-    fn construct_vote(&mut self, view: u64) -> Option<wire::Vote> {
+    fn construct_notarize(&mut self, view: u64) -> Option<wire::Notarize> {
         let round = match self.views.get_mut(&view) {
             Some(view) => view,
             None => {
                 return None;
             }
         };
-        if round.broadcast_vote {
+        if round.broadcast_notarize {
             return None;
         }
-        if round.timeout_fired {
+        if round.broadcast_nullify {
             return None;
         }
         if !round.verified_proposal {
@@ -1611,13 +1676,13 @@ impl<
                 return None;
             }
         };
-        round.broadcast_vote = true;
-        Some(wire::Vote {
+        round.broadcast_notarize = true;
+        Some(wire::Notarize {
             proposal: Some(proposal.clone()),
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
                 signature: self.crypto.sign(
-                    &self.vote_namespace,
+                    &self.notarize_namespace,
                     &proposal_message(
                         proposal.index.as_ref().unwrap(),
                         proposal.parent.as_ref().unwrap(),
@@ -1680,13 +1745,13 @@ impl<
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let nulls = round.nullifiable(threshold, force)?;
+        let (_, nullifies) = round.nullifiable(threshold, force)?;
 
         // Construct nullification
         let mut signatures = Vec::new();
         for validator in validators.iter() {
-            if let Some(null) = nulls.get(validator) {
-                signatures.push(null.signature.clone().unwrap());
+            if let Some(nullify) = nullifies.get(validator) {
+                signatures.push(nullify.signature.clone().unwrap());
             }
         }
         Some(wire::Nullification { view, signatures })
@@ -1699,10 +1764,10 @@ impl<
                 return None;
             }
         };
-        if round.timeout_fired {
+        if round.broadcast_nullify {
             return None;
         }
-        if !round.broadcast_vote {
+        if !round.broadcast_notarize {
             // Ensure we vote before we finalize
             return None;
         }
@@ -1769,27 +1834,22 @@ impl<
         Some(finalization)
     }
 
-    async fn broadcast(
-        &mut self,
-        backfiller: &mut backfiller::Mailbox,
-        sender: &mut impl Sender,
-        view: u64,
-    ) {
-        // Attempt to vote
-        if let Some(vote) = self.construct_vote(view) {
+    async fn broadcast(&mut self, sender: &mut impl Sender, view: u64) {
+        // Attempt to notarize
+        if let Some(notarize) = self.construct_notarize(view) {
             // Broadcast the vote
             let msg = wire::Voter {
-                payload: Some(wire::voter::Payload::Vote(vote.clone())),
+                payload: Some(wire::voter::Payload::Notarize(notarize.clone())),
             }
             .encode_to_vec()
             .into();
             sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the vote
-            self.handle_vote(vote).await;
+            self.handle_notarize(notarize).await;
         };
 
-        // Attempt to notarize
+        // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false) {
             // Broadcast the notarization
             let msg = wire::Voter {
@@ -1800,10 +1860,12 @@ impl<
             sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the notarization
-            self.handle_notarization(backfiller, notarization).await;
+            self.handle_notarization(notarization).await;
         };
 
-        // Attempt to nullify
+        // Attempt to nullification
+        //
+        // We handle broadcast of nullify in `timeout`.
         if let Some(nullification) = self.construct_nullification(view, false) {
             // Broadcast the nullification
             let msg = wire::Voter {
@@ -1814,7 +1876,7 @@ impl<
             sender.send(Recipients::All, msg, true).await.unwrap();
 
             // Handle the nullification
-            self.handle_nullification(backfiller, nullification).await;
+            self.handle_nullification(nullification).await;
         }
 
         // Attempt to finalize
@@ -1970,29 +2032,64 @@ impl<
                     //
                     // All messages are semantically verified before being passed to the `voter`.
                     match payload {
-                        wire::voter::Payload::Vote(vote) => {
-                            view = vote.view;
-                            self.vote(vote).await;
+                        wire::voter::Payload::Notarize(notarize) => {
+                            let parsed_view = notarize.proposal.map(|proposal| proposal.index.map(|index| index.view)).flatten();
+                            view = match parsed_view {
+                                Some(view) => view,
+                                None => {
+                                    debug!(sender = hex(&s), "missing view in notarize");
+                                    continue;
+                                }
+                            };
+                            self.notarize(notarize).await;
                         }
                         wire::voter::Payload::Notarization(notarization) => {
-                            view = notarization.view;
-                            self.notarization(&mut resolver, &mut backfiller, notarization).await;
+                            let parsed_view = notarization.proposal.map(|proposal| proposal.index.map(|index| index.view)).flatten();
+                            view = match parsed_view {
+                                Some(view) => view,
+                                None => {
+                                    debug!(sender = hex(&s), "missing view in notarization");
+                                    continue;
+                                }
+                            };
+                            self.notarization(notarization).await;
+                        }
+                        wire::voter::Payload::Nullify(nullify) => {
+                            view = nullify.view;
+                            self.nullify(nullify).await;
+                        }
+                        wire::voter::Payload::Nullification(nullification) => {
+                            view = nullification.view;
+                            self.nullification(nullification).await;
                         }
                         wire::voter::Payload::Finalize(finalize) => {
-                            view = finalize.view;
+                            let parsed_view = finalize.proposal.map(|proposal| proposal.index.map(|index| index.view)).flatten();
+                            view = match parsed_view {
+                                Some(view) => view,
+                                None => {
+                                    debug!(sender = hex(&s), "missing view in finalize");
+                                    continue;
+                                }
+                            };
                             self.finalize(finalize).await;
                         }
                         wire::voter::Payload::Finalization(finalization) => {
-                            view = finalization.view;
-                            self.finalization(&mut resolver, finalization).await;
+                            let parsed_view = finalization.proposal.map(|proposal| proposal.index.map(|index| index.view)).flatten();
+                            view = match parsed_view {
+                                Some(view) => view,
+                                None => {
+                                    debug!(sender = hex(&s), "missing view in finalization");
+                                    continue;
+                                }
+                            };
+                            self.finalization(finalization).await;
                         }
                     };
                 },
             };
 
             // Attempt to send any new view messages
-            self.broadcast(&mut resolver, &mut backfiller, &mut sender, view)
-                .await;
+            self.broadcast(&mut sender, view).await;
 
             // After sending all required messages, prune any views
             // we no longer need
