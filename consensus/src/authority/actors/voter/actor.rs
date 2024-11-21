@@ -24,6 +24,7 @@ use prost::Message as _;
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    ptr::null,
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
@@ -907,15 +908,42 @@ impl<
         Some((threshold, len))
     }
 
-    async fn vote(&mut self, vote: wire::Vote) {
+    async fn notarize(&mut self, notarize: wire::Notarize) {
+        // Extract proposal
+        let proposal = match &notarize.proposal {
+            Some(proposal) => proposal,
+            _ => {
+                debug!(reason = "missing proposal", "dropping finalize");
+                return;
+            }
+        };
+        let proposal_index = match &proposal.index {
+            Some(index) => index,
+            _ => {
+                debug!(reason = "missing index", "dropping finalize");
+                return;
+            }
+        };
+        let proposal_parent = match &proposal.parent {
+            Some(parent) => parent,
+            _ => {
+                debug!(reason = "missing parent", "dropping finalize");
+                return;
+            }
+        };
+
         // Ensure we are in the right view to process this message
-        if !self.interesting(vote.view, false) {
-            debug!(vote_view = vote.view, our_view = self.view, "dropping vote");
+        if !self.interesting(proposal_index.view, false) {
+            debug!(
+                vote_view = proposal_index.view,
+                our_view = self.view,
+                "dropping vote"
+            );
             return;
         }
 
         // Parse signature
-        let signature = match &vote.signature {
+        let signature = match &notarize.signature {
             Some(signature) => signature,
             _ => {
                 debug!(reason = "missing signature", "dropping vote");
@@ -930,12 +958,12 @@ impl<
         // Verify that signer is a validator
         let is_participant = match self
             .application
-            .is_participant(vote.view, &signature.public_key)
+            .is_participant(proposal_index.view, &signature.public_key)
         {
             Some(is) => is,
             None => {
                 debug!(
-                    view = vote.view,
+                    view = proposal_index.view,
                     our_view = self.view,
                     signer = hex(&signature.public_key),
                     reason = "unable to compute participants for view",
@@ -954,10 +982,10 @@ impl<
         }
 
         // Verify the signature
-        let vote_message = vote_message(vote.view, vote.height, vote.digest.as_ref());
+        let notarize_message = proposal_message(proposal_index, proposal_parent, &proposal.payload);
         if !C::verify(
-            &self.vote_namespace,
-            &vote_message,
+            &self.notarize_namespace,
+            &notarize_message,
             &signature.public_key,
             &signature.signature,
         ) {
@@ -965,28 +993,25 @@ impl<
             return;
         }
 
-        // Handle vote
-        self.handle_vote(vote).await;
+        // Handle peer proposal
+        self.peer_proposal(proposal, &signature.public_key).await;
+
+        // Handle notarize
+        self.handle_notarize(notarize).await;
     }
 
-    async fn handle_vote(&mut self, vote: wire::Vote) {
+    async fn handle_notarize(&mut self, notarize: wire::Notarize) {
         // Check to see if vote is for proposal in view
-        let leader = match self.application.leader(vote.view, ()) {
-            Some(leader) => leader,
-            None => {
-                debug!(
-                    view = vote.view,
-                    reason = "unable to compute leader",
-                    "dropping vote"
-                );
-                return;
-            }
-        };
-        let view = self.views.entry(vote.view).or_insert_with(|| {
+        let view = notarize.proposal.as_ref().unwrap().index.unwrap().view;
+        let leader = self
+            .application
+            .leader(view, ())
+            .expect("unable to get leader");
+        let view = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
                 self.application.clone(),
-                vote.view,
+                view,
                 leader,
                 None,
                 None,
@@ -994,18 +1019,37 @@ impl<
         });
 
         // Handle vote
-        view.add_verified_vote(vote).await;
+        view.add_verified_notarize(notarize).await;
     }
 
-    async fn notarization(
-        &mut self,
-        backfiller: &mut backfiller::Mailbox,
-        notarization: wire::Notarization,
-    ) {
+    async fn notarization(&mut self, notarization: wire::Notarization) {
+        // Extract proposal
+        let proposal = match &notarization.proposal {
+            Some(proposal) => proposal,
+            _ => {
+                debug!(reason = "missing proposal", "dropping finalize");
+                return;
+            }
+        };
+        let proposal_index = match &proposal.index {
+            Some(index) => index,
+            _ => {
+                debug!(reason = "missing index", "dropping finalize");
+                return;
+            }
+        };
+        let proposal_parent = match &proposal.parent {
+            Some(parent) => parent,
+            _ => {
+                debug!(reason = "missing parent", "dropping finalize");
+                return;
+            }
+        };
+
         // Check if we are still in a view where this notarization could help
-        if !self.interesting(notarization.view, true) {
+        if !self.interesting(proposal_index.view, true) {
             trace!(
-                notarization_view = notarization.view,
+                notarization_view = proposal_index.view,
                 our_view = self.view,
                 reason = "outdated notarization",
                 "dropping notarization"
@@ -1015,20 +1059,12 @@ impl<
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
-        let view = self.views.get_mut(&notarization.view);
-        if let Some(ref view) = view {
-            if notarization.digest.is_some() && view.broadcast_proposal_notarization {
+        let round = self.views.get_mut(&proposal_index.view);
+        if let Some(ref round) = round {
+            if round.broadcast_notarization {
                 trace!(
-                    view = notarization.view,
+                    view = proposal_index.view,
                     reason = "already broadcast notarization",
-                    "dropping notarization"
-                );
-                return;
-            }
-            if notarization.digest.is_none() && view.broadcast_null_notarization {
-                trace!(
-                    view = notarization.view,
-                    reason = "already broadcast null notarization",
                     "dropping notarization"
                 );
                 return;
@@ -1036,11 +1072,11 @@ impl<
         }
 
         // Ensure notarization has valid number of signatures
-        let (threshold, count) = match self.threshold(notarization.view) {
+        let (threshold, count) = match self.threshold(proposal_index.view) {
             Some(participation) => participation,
             None => {
                 debug!(
-                    view = notarization.view,
+                    view = proposal_index.view,
                     reason = "unable to compute participants for view",
                     "dropping notarization"
                 );
@@ -1067,6 +1103,7 @@ impl<
         }
 
         // Verify threshold notarization
+        let message = proposal_message(proposal_index, proposal_parent, &proposal.payload);
         let mut seen = HashSet::new();
         for signature in notarization.signatures.iter() {
             // Verify signature
@@ -1092,38 +1129,32 @@ impl<
 
             // Verify signature
             if !C::verify(
-                &self.vote_namespace,
-                &vote_message(
-                    notarization.view,
-                    notarization.height,
-                    notarization.digest.as_ref(),
-                ),
+                &self.notarize_namespace,
+                &message,
                 &signature.public_key,
                 &signature.signature,
             ) {
                 debug!(reason = "invalid signature", "dropping notarization");
                 return;
             }
+
+            // Handle peer proposal
+            self.peer_proposal(proposal, &signature.public_key).await;
         }
-        debug!(view = notarization.view, "notarization verified");
+        debug!(view = proposal_index.view, "notarization verified");
 
         // Handle notarization
-        self.handle_notarization(resolver, backfiller, notarization)
-            .await;
+        self.handle_notarization(notarization).await;
     }
 
-    async fn handle_notarization(
-        &mut self,
-        backfiller: &mut backfiller::Mailbox,
-        notarization: wire::Notarization,
-    ) {
+    async fn handle_notarization(&mut self, notarization: wire::Notarization) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = notarization.proposal.as_ref().unwrap().index.unwrap().view;
         let leader = self
             .application
             .leader(view, ())
             .expect("unable to get leader");
-        let view = self.views.entry(view).or_insert_with(|| {
+        let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
                 self.application.clone(),
@@ -1134,48 +1165,118 @@ impl<
             )
         });
         for signature in &notarization.signatures {
-            let vote = wire::Vote {
+            let notarize = wire::Notarize {
                 proposal: Some(notarization.proposal.as_ref().unwrap().clone()),
                 signature: Some(signature.clone()),
             };
-            view.add_verified_vote(vote).await
+            round.add_verified_notarize(notarize).await
         }
 
         // Clear leader and advance deadlines (if they exist)
-        view.leader_deadline = None;
-        view.advance_deadline = None;
-
-        // Notify resolver of notarization
-        let proposal = if let Some(notarization_digest) = &notarization.digest {
-            debug!(
-                view = notarization.view,
-                digest = hex(notarization_digest),
-                "processed digest notarization"
-            );
-            match view.proposal.as_ref() {
-                Some((digest, _, proposal)) => {
-                    Proposal::Populated(digest.clone(), proposal.clone())
-                }
-                None => Proposal::Reference(
-                    notarization.view,
-                    notarization.height.unwrap(),
-                    notarization_digest.clone(),
-                ),
-            }
-        } else {
-            debug!(view = notarization.view, "processed null notarization");
-            Proposal::Null(notarization.view)
-        };
-
-        // Wait for proposal to be resolved
-        let notarization_view = notarization.view;
-        join!(
-            resolver.notarized(proposal),
-            backfiller.notarized(notarization_view, notarization, self.last_finalized)
-        );
+        round.leader_deadline = None;
+        round.advance_deadline = None;
 
         // Enter next view
-        self.enter_view(notarization_view + 1);
+        self.enter_view(view + 1);
+    }
+
+    async fn nullification(&mut self, nullification: wire::Nullification) {
+        // Check if we are still in a view where this notarization could help
+        if !self.interesting(nullification.view, true) {
+            trace!(
+                nullification_view = nullification.view,
+                our_view = self.view,
+                reason = "outdated",
+                "dropping nullification"
+            );
+            return;
+        }
+
+        // Determine if we already broadcast notarization for this view (in which
+        // case we can ignore this message)
+        let round = self.views.get_mut(&nullification.view);
+        if let Some(ref round) = round {
+            if round.broadcast_notarization {
+                trace!(
+                    view = nullification.view,
+                    reason = "already broadcast notarization",
+                    "dropping notarization"
+                );
+                return;
+            }
+        }
+
+        // Ensure notarization has valid number of signatures
+        let (threshold, count) = match self.threshold(nullification.view) {
+            Some(participation) => participation,
+            None => {
+                debug!(
+                    view = nullification.view,
+                    reason = "unable to compute participants for view",
+                    "dropping notarization"
+                );
+                return;
+            }
+        };
+        if nullification.signatures.len() < threshold as usize {
+            debug!(
+                threshold,
+                signatures = nullification.signatures.len(),
+                reason = "insufficient signatures",
+                "dropping nullification"
+            );
+            return;
+        }
+        if nullification.signatures.len() > count as usize {
+            debug!(
+                threshold,
+                signatures = nullification.signatures.len(),
+                reason = "too many signatures",
+                "dropping nullification"
+            );
+            return;
+        }
+
+        // Verify threshold notarization
+        let message = nullify_message(nullification.view);
+        let mut seen = HashSet::new();
+        for signature in nullification.signatures.iter() {
+            // Verify signature
+            if !C::validate(&signature.public_key) {
+                debug!(
+                    signer = hex(&signature.public_key),
+                    reason = "invalid validator",
+                    "dropping notarization"
+                );
+                return;
+            }
+
+            // Ensure we haven't seen this signature before
+            if seen.contains(&signature.public_key) {
+                debug!(
+                    signer = hex(&signature.public_key),
+                    reason = "duplicate signature",
+                    "dropping notarization"
+                );
+                return;
+            }
+            seen.insert(signature.public_key.clone());
+
+            // Verify signature
+            if !C::verify(
+                &self.nullify_namespace,
+                &message,
+                &signature.public_key,
+                &signature.signature,
+            ) {
+                debug!(reason = "invalid signature", "dropping notarization");
+                return;
+            }
+        }
+        debug!(view = nullification.view, "nullification verified");
+
+        // Handle notarization
+        self.handle_nullification(nullification).await;
     }
 
     async fn handle_nullification(&mut self, nullification: wire::Nullification) {
@@ -1184,7 +1285,7 @@ impl<
             .application
             .leader(nullification.view, ())
             .expect("unable to get leader");
-        let view = self.views.entry(nullification.view).or_insert_with(|| {
+        let round = self.views.entry(nullification.view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
                 self.application.clone(),
@@ -1195,48 +1296,19 @@ impl<
             )
         });
         for signature in &nullification.signatures {
-            let null = wire::Null {
+            let nullify = wire::Nullify {
                 view: nullification.view,
                 signature: Some(signature.clone()),
             };
-            view.add_verified_null(null).await
+            round.add_verified_nullify(nullify).await
         }
 
         // Clear leader and advance deadlines (if they exist)
-        view.leader_deadline = None;
-        view.advance_deadline = None;
-
-        // Notify resolver of notarization
-        let proposal = if let Some(notarization_digest) = &notarization.digest {
-            debug!(
-                view = notarization.view,
-                digest = hex(notarization_digest),
-                "processed digest notarization"
-            );
-            match view.proposal.as_ref() {
-                Some((digest, _, proposal)) => {
-                    Proposal::Populated(digest.clone(), proposal.clone())
-                }
-                None => Proposal::Reference(
-                    notarization.view,
-                    notarization.height.unwrap(),
-                    notarization_digest.clone(),
-                ),
-            }
-        } else {
-            debug!(view = notarization.view, "processed null notarization");
-            Proposal::Null(notarization.view)
-        };
-
-        // Wait for proposal to be resolved
-        let notarization_view = notarization.view;
-        join!(
-            resolver.notarized(proposal),
-            backfiller.notarized(notarization_view, notarization, self.last_finalized)
-        );
+        round.leader_deadline = None;
+        round.advance_deadline = None;
 
         // Enter next view
-        self.enter_view(notarization_view + 1);
+        self.enter_view(nullification.view + 1);
     }
 
     async fn finalize(&mut self, finalize: wire::Finalize) {
@@ -1394,8 +1466,8 @@ impl<
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
-        let view = self.views.get_mut(&proposal_index.view);
-        if let Some(ref round) = view {
+        let round = self.views.get_mut(&proposal_index.view);
+        if let Some(ref round) = round {
             if round.broadcast_finalization {
                 trace!(
                     view = proposal_index.view,
