@@ -1947,7 +1947,7 @@ impl<
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Proposed{ view: proposal_view, parent, height, payload, payload_digest} => {
+                        Message::Proposed{ view: proposal_view, payload } => {
                             // If we have already moved to another view, drop the response as we will
                             // not broadcast it
                             if self.view != proposal_view {
@@ -1971,7 +1971,7 @@ impl<
                             // Handle our proposal
                             self.hasher.update(&proposal_digest);
                             let proposal_digest = self.hasher.finalize();
-                            if !self.our_proposal(proposal_digest, payload_digest, proposal.clone()).await {
+                            if !self.our_proposal(proposal_digest, proposal.clone()).await {
                                 continue;
                             }
                             view = proposal_view;
@@ -1980,20 +1980,6 @@ impl<
                             self.application.broadcast().await;
 
                             // TODO: broadcast vote containing new proposal
-
-                            // Broadcast the proposal
-                            let msg = wire::Voter{
-                                payload: Some(wire::voter::Payload::Proposal(proposal.clone())),
-                            }.encode_to_vec().into();
-                            sender
-                                .send(Recipients::All, msg, true)
-                                .await
-                                .unwrap();
-                            debug!(
-                                view = proposal_view,
-                                height,
-                                "broadcast proposal",
-                            );
                         },
                         Message::Verified { view: verified_view } => {
                             // Handle verified proposal
@@ -2006,7 +1992,7 @@ impl<
                             // but learned about later.
                         },
                         Message::Backfilled { notarizations } => {
-                            // TODO: store verified notarizations we've backfilled
+                            // TODO: store notarizations we've backfilled (verified in backfiller to avoid using compute in this loop)
                         },
                     }
                 },
