@@ -164,8 +164,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 Message::BitVec { bit_vec } => {
                                     let msg = wire::Message{
                                         payload: Some(wire::message::Payload::BitVec(bit_vec)),
-                                    }.encode_to_vec();
-                                    conn_sender.send(Bytes::from(msg))
+                                    }.encode_to_vec().into();
+                                    conn_sender.send(msg)
                                         .await
                                         .map_err(Error::SendFailed)?;
                                     self.sent_messages
@@ -175,8 +175,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 Message::Peers { peers: msg } => {
                                     let msg = wire::Message{
                                         payload: Some(wire::message::Payload::Peers(msg)),
-                                    }.encode_to_vec();
-                                    conn_sender.send(Bytes::from(msg))
+                                    }.encode_to_vec().into();
+                                    conn_sender.send(msg)
                                         .await
                                         .map_err(Error::SendFailed)?;
                                     self.sent_messages

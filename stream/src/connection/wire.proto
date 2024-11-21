@@ -1,13 +1,6 @@
 syntax = "proto3";
 package wire;
 
-// Message is the only allowed message format that can be sent between peers.
-message Message {
-    oneof payload {
-        Handshake handshake = 1;
-    }
-}
-
 // Allows recipient to verify that the sender has the private key
 // of public key before sending any data.
 //

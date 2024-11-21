@@ -36,16 +36,14 @@ pub fn create_handshake<E: Clock, C: Scheme>(
     let signature = crypto.sign(&suffix_namespace(namespace), &payload);
 
     // Send handshake
-    Ok(wire::Message {
-        payload: Some(wire::message::Payload::Handshake(wire::Handshake {
-            recipient_public_key,
-            ephemeral_public_key: x25519::encode_public_key(ephemeral_public_key),
-            timestamp,
-            signature: Some(wire::Signature {
-                public_key: crypto.public_key(),
-                signature,
-            }),
-        })),
+    Ok(wire::Handshake {
+        recipient_public_key,
+        ephemeral_public_key: x25519::encode_public_key(ephemeral_public_key),
+        timestamp,
+        signature: Some(wire::Signature {
+            public_key: crypto.public_key(),
+            signature,
+        }),
     }
     .encode_to_vec()
     .into())
@@ -66,13 +64,8 @@ impl Handshake {
         msg: Bytes,
     ) -> Result<Self, Error> {
         // Parse handshake message
-        let handshake = match wire::Message::decode(msg)
-            .map_err(Error::UnableToDecode)?
-            .payload
-        {
-            Some(wire::message::Payload::Handshake(handshake)) => handshake,
-            _ => return Err(Error::UnexpectedMessage),
-        };
+        let handshake = wire::Handshake::decode(msg)
+            .map_err(Error::UnableToDecode)?;
 
         // Verify that ephemeral public key is valid
         let ephemeral_public_key = x25519::decode_public_key(&handshake.ephemeral_public_key)
@@ -80,7 +73,7 @@ impl Handshake {
 
         // Verify that the signature is for us
         //
-        // If we didn't verify this, it would be trivial for any peer to impersonate another peer (eventhough
+        // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
         // they would not be able to decrypt any messages from the shared secret). This would prevent us
         // from making a legitimate connection to the intended peer.
         let our_public_key: PublicKey = handshake.recipient_public_key;
@@ -223,15 +216,11 @@ mod tests {
                 TEST_NAMESPACE,
                 recipient.public_key(),
                 ephemeral_public_key,
-            )
-            .unwrap();
+            ).unwrap();
 
             // Decode the handshake message
-            let message = wire::Message::decode(handshake_bytes.clone()).unwrap();
-            let handshake = match message.payload {
-                Some(wire::message::Payload::Handshake(handshake)) => handshake,
-                _ => panic!("unexpected message"),
-            };
+            let handshake = wire::Handshake::decode(handshake_bytes.clone())
+                .expect("failed to decode handshake");
 
             // Verify the timestamp
             let current_timestamp = runtime
@@ -471,10 +460,8 @@ mod tests {
             .unwrap();
 
             // Tamper with the handshake to make the signature invalid
-            let mut handshake = match wire::Message::decode(handshake).unwrap().payload {
-                Some(wire::message::Payload::Handshake(handshake)) => handshake,
-                _ => panic!("unexpected message"),
-            };
+            let mut handshake = wire::Handshake::decode(handshake)
+                .expect("failed to decode handshake");
             let (public_key, signature) = match handshake.signature {
                 Some(wire::Signature {
                     public_key,
@@ -488,11 +475,6 @@ mod tests {
                 public_key: public_key.into(),
                 signature,
             });
-            let handshake = wire::Message {
-                payload: Some(wire::message::Payload::Handshake(handshake)),
-            }
-            .encode_to_vec()
-            .into();
 
             // Verify the handshake
             let result = Handshake::verify(
@@ -501,7 +483,7 @@ mod tests {
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
-                handshake,
+                handshake.encode_to_vec().into(),
             );
             assert!(matches!(result, Err(Error::InvalidPeerPublicKey)));
         });
@@ -525,18 +507,11 @@ mod tests {
             .unwrap();
 
             // Tamper with the handshake to make the signature invalid
-            let mut handshake = match wire::Message::decode(handshake).unwrap().payload {
-                Some(wire::message::Payload::Handshake(handshake)) => handshake,
-                _ => panic!("unexpected message"),
-            };
+            let mut handshake = wire::Handshake::decode(handshake)
+                .expect("failed to decode handshake");
             let mut ephemeral_public_key = handshake.ephemeral_public_key.to_vec();
             ephemeral_public_key.truncate(28);
             handshake.ephemeral_public_key = ephemeral_public_key.into();
-            let handshake = wire::Message {
-                payload: Some(wire::message::Payload::Handshake(handshake)),
-            }
-            .encode_to_vec()
-            .into();
 
             // Verify the handshake
             let result = Handshake::verify(
@@ -545,7 +520,7 @@ mod tests {
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
-                handshake,
+                handshake.encode_to_vec().into(),
             );
             assert!(matches!(result, Err(Error::InvalidEphemeralPublicKey)));
         });
@@ -569,10 +544,8 @@ mod tests {
             .unwrap();
 
             // Tamper with the handshake to make the signature invalid
-            let mut handshake = match wire::Message::decode(handshake).unwrap().payload {
-                Some(wire::message::Payload::Handshake(handshake)) => handshake,
-                _ => panic!("unexpected message"),
-            };
+            let mut handshake = wire::Handshake::decode(handshake)
+                .expect("failed to decode handshake");
             let (public_key, signature) = match handshake.signature {
                 Some(wire::Signature {
                     public_key,
@@ -586,11 +559,6 @@ mod tests {
                 public_key,
                 signature: signature.into(),
             });
-            let handshake = wire::Message {
-                payload: Some(wire::message::Payload::Handshake(handshake)),
-            }
-            .encode_to_vec()
-            .into();
 
             // Verify the handshake
             let result = Handshake::verify(
@@ -599,7 +567,7 @@ mod tests {
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
-                handshake,
+                handshake.encode_to_vec().into(),
             );
             assert!(matches!(result, Err(Error::InvalidSignature)));
         });
@@ -627,16 +595,9 @@ mod tests {
             .unwrap();
 
             // Tamper with the handshake to make the timestamp invalid
-            let mut handshake = match wire::Message::decode(handshake).unwrap().payload {
-                Some(wire::message::Payload::Handshake(handshake)) => handshake,
-                _ => panic!("unexpected message"),
-            };
+            let mut handshake = wire::Handshake::decode(handshake)
+                .expect("failed to decode handshake");
             handshake.timestamp = 0;
-            let handshake = wire::Message {
-                payload: Some(wire::message::Payload::Handshake(handshake)),
-            }
-            .encode_to_vec()
-            .into();
 
             // Verify the handshake
             let result = Handshake::verify(
@@ -645,7 +606,7 @@ mod tests {
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
-                handshake,
+                handshake.encode_to_vec().into(),
             );
             assert!(matches!(result, Err(Error::InvalidTimestamp)));
         });
