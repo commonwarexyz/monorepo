@@ -3,12 +3,12 @@ use crate::{
     authority::{
         actors::backfiller,
         encoder::{
-            finalize_namespace, header_namespace, null_message, null_namespace, proposal_message,
-            vote_namespace,
+            finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
+            proposal_message,
         },
         prover::Prover,
-        wire, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_VOTE, FINALIZE,
-        NULL_AND_FINALIZE, VOTE,
+        wire, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
+        NOTARIZE, NULLIFY_AND_FINALIZE,
     },
     Automaton, Finalizer, Supervisor,
 };
@@ -24,14 +24,13 @@ use prost::Message as _;
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    ptr::null,
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
-type Notarizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Vote>)>;
-type Nullifiable<'a> = Option<&'a HashMap<PublicKey, wire::Nullify>>;
+type Notarizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Notarize>)>;
+type Nullifiable<'a> = Option<(View, &'a HashMap<PublicKey, wire::Nullify>)>;
 type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Finalize>)>;
 
 struct Round<C: Scheme, H: Hasher, A: Supervisor> {
@@ -51,13 +50,10 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     proposal: Option<(Digest /* proposal */, wire::Proposal)>,
     verified_proposal: bool,
 
-    // Track broadcast
-    broadcast_vote: bool,
-    broadcast_finalize: bool,
-
     // Track votes for all proposals (ensuring any participant only has one recorded vote)
-    proposal_voters: HashMap<PublicKey, Digest>,
-    proposal_votes: HashMap<Digest, HashMap<PublicKey, wire::Vote>>,
+    notaries: HashMap<PublicKey, Digest>,
+    notarizes: HashMap<Digest, HashMap<PublicKey, wire::Notarize>>,
+    broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     timeout_fired: bool,
@@ -67,6 +63,7 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
     finalizers: HashMap<PublicKey, Digest>,
     finalizes: HashMap<Digest, HashMap<PublicKey, wire::Finalize>>,
+    broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
 
@@ -95,29 +92,25 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             proposal: None,
             verified_proposal: false,
 
-            broadcast_vote: false,
-            broadcast_finalize: false,
-
-            proposal_voters: HashMap::new(),
-            proposal_votes: HashMap::new(),
+            notaries: HashMap::new(),
+            notarizes: HashMap::new(),
+            broadcast_notarize: false,
             broadcast_notarization: false,
 
             timeout_fired: false,
-            nulls: HashMap::new(),
+            nullifies: HashMap::new(),
             broadcast_nullification: false,
 
             finalizers: HashMap::new(),
             finalizes: HashMap::new(),
+            broadcast_finalize: false,
             broadcast_finalization: false,
         }
     }
 
-    async fn add_verified_vote(&mut self, vote: wire::Vote) {
-        // Determine whether or not this is a null vote
-        let public_key = &vote.signature.as_ref().unwrap().public_key;
-
+    async fn add_verified_notarize(&mut self, notarize: wire::Notarize) {
         // Get proposal
-        let proposal = vote.proposal.as_ref().unwrap();
+        let proposal = notarize.proposal.as_ref().unwrap();
 
         // Compute proposal digest
         let message = proposal_message(
@@ -129,12 +122,13 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         let digest = self.hasher.finalize();
 
         // Check if already voted
-        if let Some(previous_vote) = self.proposal_voters.get(public_key) {
-            if previous_vote == &digest {
+        let public_key = &notarize.signature.as_ref().unwrap().public_key;
+        if let Some(previous_notarize) = self.notaries.get(public_key) {
+            if previous_notarize == &digest {
                 trace!(
                     view = self.view,
                     signer = hex(public_key),
-                    previous_vote = hex(previous_vote),
+                    previous_vote = hex(previous_notarize),
                     "already voted"
                 );
                 return;
@@ -142,13 +136,13 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
 
             // Create fault
             let previous_vote = self
-                .proposal_votes
-                .get(previous_vote)
+                .notarizes
+                .get(previous_notarize)
                 .unwrap()
                 .get(public_key)
                 .unwrap();
             let previous_proposal = previous_vote.proposal.as_ref().unwrap();
-            let proof = Prover::<C, H>::serialize_conflicting_vote(
+            let proof = Prover::<C, H>::serialize_conflicting_notarize(
                 &previous_proposal.index.unwrap(),
                 &previous_proposal.parent.as_ref().unwrap(),
                 &previous_proposal.payload,
@@ -156,29 +150,28 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 &proposal.index.unwrap(),
                 &proposal.parent.as_ref().unwrap(),
                 &proposal.payload,
-                &vote.signature.as_ref().unwrap(),
+                &notarize.signature.as_ref().unwrap(),
             );
-            self.application.report(CONFLICTING_VOTE, proof).await;
+            self.application.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
                 view = self.view,
                 signer = hex(public_key),
-                activity = CONFLICTING_VOTE,
+                activity = CONFLICTING_NOTARIZE,
                 "recorded fault"
             );
             return;
         }
 
         // Generate vote report
-        let proof = Prover::<C, H>::serialize_vote(&vote);
+        let proof = Prover::<C, H>::serialize_notarize(&notarize);
 
         // Store the vote
-        self.proposal_voters
-            .insert(public_key.clone(), digest.clone());
-        let entry = self.proposal_votes.entry(digest).or_default();
-        entry.insert(public_key.clone(), vote);
+        self.notaries.insert(public_key.clone(), digest.clone());
+        let entry = self.notarizes.entry(digest).or_default();
+        entry.insert(public_key.clone(), notarize);
 
         // Report vote
-        self.application.report(VOTE, proof).await;
+        self.application.report(NOTARIZE, proof).await;
     }
 
     async fn add_verified_nullify(&mut self, nullify: wire::Nullify) {
@@ -187,7 +180,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         let finalize = self.finalizers.get(public_key);
         if finalize.is_none() {
             // Store the null vote
-            self.nulls.insert(public_key.clone(), null);
+            self.nullifies.insert(public_key.clone(), nullify);
             return;
         }
         let finalize = finalize.unwrap();
@@ -200,18 +193,18 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             .get(public_key)
             .unwrap();
         let finalize_proposal = finalize.proposal.as_ref().unwrap();
-        let proof = Prover::<C, H>::serialize_null_finalize(
+        let proof = Prover::<C, H>::serialize_nullify_finalize(
             &finalize_proposal.index.as_ref().unwrap(),
             &finalize_proposal.parent.as_ref().unwrap(),
             &finalize_proposal.payload,
             &finalize.signature.as_ref().unwrap(),
-            &null.signature.as_ref().unwrap(),
+            &nullify.signature.as_ref().unwrap(),
         );
-        self.application.report(NULL_AND_FINALIZE, proof).await;
+        self.application.report(NULLIFY_AND_FINALIZE, proof).await;
         warn!(
             view = self.view,
             signer = hex(public_key),
-            activity = NULL_AND_FINALIZE,
+            activity = NULLIFY_AND_FINALIZE,
             "recorded fault"
         );
     }
@@ -226,8 +219,8 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             // this point.
             return None;
         }
-        for (proposal, votes) in self.proposal_votes.iter() {
-            if (votes.len() as u32) < threshold {
+        for (proposal, notarizes) in self.notarizes.iter() {
+            if (notarizes.len() as u32) < threshold {
                 continue;
             }
 
@@ -258,7 +251,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             // There should never exist enough votes for multiple proposals, so it doesn't
             // matter which one we choose.
             self.broadcast_notarization = true;
-            return Some((proposal.clone(), votes));
+            return Some((proposal.clone(), notarizes));
         }
         None
     }
@@ -267,32 +260,32 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
         }
-        if (self.nulls.len() as u32) < threshold {
+        if (self.nullifies.len() as u32) < threshold {
             return None;
         }
         self.broadcast_notarization = true;
-        Some((self.view, &self.nulls))
+        Some((self.view, &self.nullifies))
     }
 
     async fn add_verified_finalize(&mut self, finalize: wire::Finalize) {
         // Check if also issued null vote
         let proposal = finalize.proposal.as_ref().unwrap();
         let public_key = &finalize.signature.as_ref().unwrap().public_key;
-        let null = self.nulls.get(public_key);
+        let null = self.nullifies.get(public_key);
         if let Some(null) = null {
             // Create fault
-            let proof = Prover::<C, H>::serialize_null_finalize(
+            let proof = Prover::<C, H>::serialize_nullify_finalize(
                 &proposal.index.as_ref().unwrap(),
                 &proposal.parent.as_ref().unwrap(),
                 &proposal.payload,
                 &finalize.signature.as_ref().unwrap(),
                 &null.signature.as_ref().unwrap(),
             );
-            self.application.report(NULL_AND_FINALIZE, proof).await;
+            self.application.report(NULLIFY_AND_FINALIZE, proof).await;
             warn!(
                 view = self.view,
                 signer = hex(public_key),
-                activity = NULL_AND_FINALIZE,
+                activity = NULLIFY_AND_FINALIZE,
                 "recorded fault"
             );
             return;
@@ -408,14 +401,13 @@ pub struct Actor<
     hasher: H,
     application: A,
 
-    header_namespace: Vec<u8>,
-    vote_namespace: Vec<u8>,
-    null_namespace: Vec<u8>,
+    notarize_namespace: Vec<u8>,
+    nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 
     leader_timeout: Duration,
     notarization_timeout: Duration,
-    null_retry: Duration,
+    nullify_retry: Duration,
     proposal_retry: Duration,
     activity_timeout: View,
 
@@ -460,14 +452,13 @@ impl<
                 hasher: cfg.hasher,
                 application: cfg.application,
 
-                header_namespace: header_namespace(&cfg.namespace),
-                vote_namespace: vote_namespace(&cfg.namespace),
-                null_namespace: null_namespace(&cfg.namespace),
+                notarize_namespace: notarize_namespace(&cfg.namespace),
+                nullify_namespace: nullify_namespace(&cfg.namespace),
                 finalize_namespace: finalize_namespace(&cfg.namespace),
 
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
-                null_retry: cfg.null_retry,
+                nullify_retry: cfg.nullify_retry,
                 proposal_retry: cfg.proposal_retry,
 
                 activity_timeout: cfg.activity_timeout,
@@ -567,7 +558,7 @@ impl<
         }
 
         // Set null vote retry, if none already set
-        let null_retry = self.runtime.current() + self.null_retry;
+        let null_retry = self.runtime.current() + self.nullify_retry;
         view.null_retry = Some(null_retry);
         null_retry
     }
@@ -605,13 +596,13 @@ impl<
             }
         }
 
-        // Construct null vote
-        let message = null_message(self.view);
+        // Construct nullify
+        let message = nullify_message(self.view);
         let null = wire::Nullify {
             view: self.view,
             signature: Some(wire::Signature {
                 public_key: self.crypto.public_key(),
-                signature: self.crypto.sign(&self.null_namespace, &message),
+                signature: self.crypto.sign(&self.nullify_namespace, &message),
             }),
         };
         let msg = wire::Voter {
@@ -621,12 +612,12 @@ impl<
         .into();
         sender.send(Recipients::All, msg, true).await.unwrap();
 
-        // Handle the vote
+        // Handle the nullify
         debug!(view = self.view, "broadcasted nullify");
-        self.handle_null(null).await;
+        self.handle_nullify(null).await;
     }
 
-    async fn handle_null(&mut self, nullify: wire::Nullify) {
+    async fn handle_nullify(&mut self, nullify: wire::Nullify) {
         // Check to see if vote is for proposal in view
         let leader = match self.application.leader(nullify.view, ()) {
             Some(leader) => leader,
@@ -650,8 +641,8 @@ impl<
             )
         });
 
-        // Handle vote
-        round.add_verified_null(nullify).await;
+        // Handle nullify
+        round.add_verified_nullify(nullify).await;
     }
 
     async fn our_proposal(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {
@@ -749,6 +740,7 @@ impl<
         }
 
         // TODO: Ensure we have all null notarizations between the parent and this proposal
+        // TODO: when to determine when to fetch missing?
 
         // Verify the proposal
         let round = self.views.entry(index.view).or_insert_with(|| {
@@ -858,14 +850,18 @@ impl<
                     return;
                 }
             };
-            if round.proposal_voters.contains_key(&leader) || round.nulls.contains_key(&leader) {
+            if round.notaries.contains_key(&leader) || round.nullifies.contains_key(&leader) {
                 return;
             }
             next -= 1;
         }
 
         // Reduce leader deadline to now
-        debug!(view, leader = hex(&leader), "skipping leader timeout");
+        debug!(
+            view,
+            leader = hex(&leader),
+            "skipping leader timeout due to inactivity"
+        );
         self.views.get_mut(&view).unwrap().leader_deadline = Some(self.runtime.current());
     }
 

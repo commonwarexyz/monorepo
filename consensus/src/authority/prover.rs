@@ -331,7 +331,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_conflicting_proposal(proof, check_sig, &self.finalize_namespace)
     }
 
-    pub(crate) fn serialize_null_finalize(
+    pub(crate) fn serialize_nullify_finalize(
         index: &wire::Index,
         parent: &wire::Parent,
         payload: &Digest,
@@ -363,7 +363,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         proof.into()
     }
 
-    pub fn deserialize_null_finalize(
+    pub fn deserialize_nullify_finalize(
         &self,
         mut proof: Proof,
         check_sig: bool,

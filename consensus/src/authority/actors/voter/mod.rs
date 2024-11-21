@@ -19,7 +19,7 @@ pub struct Config<C: Scheme, H: Hasher, A: Automaton + Supervisor + Finalizer> {
     pub namespace: Bytes,
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
-    pub null_retry: Duration,
+    pub nullify_retry: Duration,
     pub proposal_retry: Duration,
     pub activity_timeout: View,
 }
