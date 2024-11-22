@@ -94,7 +94,6 @@ mod x25519;
 pub use handshake::IncomingHandshake;
 pub use instance::{Instance, Sender};
 
-
 /// Configuration for a connection.
 ///
 /// # Warning
