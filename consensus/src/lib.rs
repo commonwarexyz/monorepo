@@ -107,6 +107,8 @@ pub trait Automaton: Clone + Send + 'static {
 pub type Activity = u8;
 pub type Proof = Bytes;
 
+// TODO: should supervisor be managed by consensus? Other than PoA, the consensus usually keeps track of (and updates)
+// who is participating, not some external service. If we did this, we could also remove clone from Application?
 pub trait Supervisor: Clone + Send + 'static {
     type Index;
     type Seed;
