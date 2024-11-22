@@ -1,5 +1,5 @@
 use super::{actors::voter, config::Config, Context, View};
-use crate::{Automaton, Finalizer, Supervisor};
+use crate::{Automaton, Supervisor};
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -12,7 +12,7 @@ pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner,
     C: Scheme,
     H: Hasher,
-    A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
+    A: Automaton<Context = Context> + Supervisor<Seed = (), Index = View>,
 > {
     runtime: E,
 
@@ -26,7 +26,7 @@ impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context> + Supervisor<Seed = (), Index = View> + Finalizer,
+        A: Automaton<Context = Context> + Supervisor<Seed = (), Index = View>,
     > Engine<E, C, H, A>
 {
     pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> Self {

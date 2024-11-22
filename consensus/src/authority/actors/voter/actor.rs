@@ -9,7 +9,7 @@ use crate::{
         wire, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
         NOTARIZE, NULLIFY_AND_FINALIZE,
     },
-    Automaton, Finalizer, Supervisor,
+    Automaton, Supervisor,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
@@ -404,7 +404,7 @@ pub struct Actor<
     E: Clock + Rng,
     C: Scheme,
     H: Hasher,
-    A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
+    A: Automaton<Context = Context> + Supervisor<Index = View>,
 > {
     runtime: E,
     crypto: C,
@@ -436,7 +436,7 @@ impl<
         E: Clock + Rng,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context> + Supervisor<Seed = (), Index = View> + Finalizer,
+        A: Automaton<Context = Context> + Supervisor<Seed = (), Index = View>,
     > Actor<E, C, H, A>
 {
     pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {

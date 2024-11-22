@@ -1,5 +1,5 @@
 use super::{Context, View};
-use crate::{Automaton, Finalizer, Supervisor};
+use crate::{Automaton, Supervisor};
 use bytes::Bytes;
 use commonware_cryptography::{Hasher, PublicKey, Scheme};
 use governor::Quota;
@@ -10,11 +10,8 @@ use std::{
     time::Duration,
 };
 
-pub struct Config<
-    C: Scheme,
-    H: Hasher,
-    A: Automaton<Context = Context> + Supervisor<Index = View> + Finalizer,
-> {
+pub struct Config<C: Scheme, H: Hasher, A: Automaton<Context = Context> + Supervisor<Index = View>>
+{
     pub crypto: C,
     pub hasher: H,
     pub application: A,
@@ -26,7 +23,6 @@ pub struct Config<
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,
-    pub proposal_retry: Duration,
 
     /// Number of views behind finalized tip to track
     /// activity derived from validator messages.

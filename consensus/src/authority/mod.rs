@@ -112,7 +112,8 @@ mod actors;
 mod config;
 mod encoder;
 mod engine;
-mod prover;
+mod mocks;
+pub mod prover;
 
 use commonware_cryptography::Digest;
 
@@ -156,3 +157,382 @@ pub const FINALIZE: Activity = 1;
 pub const CONFLICTING_NOTARIZE: Activity = 2;
 pub const CONFLICTING_FINALIZE: Activity = 3;
 pub const NULLIFY_AND_FINALIZE: Activity = 4;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Proof, Supervisor};
+    use bytes::Bytes;
+    use commonware_cryptography::{Ed25519, Hasher, PublicKey, Scheme, Sha256};
+    use commonware_macros::test_traced;
+    use commonware_p2p::simulated::{Config, Link, Network};
+    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use engine::Engine;
+    use futures::{channel::mpsc, StreamExt};
+    use governor::Quota;
+    use mocks::{Application, Config as ApplicationConfig, Progress};
+    use prometheus_client::registry::Registry;
+    use prover::Prover;
+    use std::{
+        collections::{BTreeMap, HashMap, HashSet},
+        num::NonZeroU32,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    type HeightActivity = HashMap<Height, HashMap<Digest, HashSet<PublicKey>>>;
+    type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
+
+    #[derive(Clone)]
+    struct TestSupervisor<C: Scheme, H: Hasher> {
+        participants: BTreeMap<View, (HashSet<PublicKey>, Vec<PublicKey>)>,
+
+        prover: Prover<C, H>,
+
+        proposals: Arc<Mutex<HeightActivity>>,
+        votes: Arc<Mutex<HeightActivity>>,
+        finalizes: Arc<Mutex<HeightActivity>>,
+        faults: Arc<Mutex<Faults>>,
+    }
+
+    impl<C: Scheme, H: Hasher> TestSupervisor<C, H> {
+        fn new(prover: Prover<C, H>, participants: BTreeMap<View, Vec<PublicKey>>) -> Self {
+            let mut parsed_participants = BTreeMap::new();
+            for (view, mut validators) in participants.into_iter() {
+                let mut set = HashSet::new();
+                for validator in validators.iter() {
+                    set.insert(validator.clone());
+                }
+                validators.sort();
+                parsed_participants.insert(view, (set.clone(), validators));
+            }
+            Self {
+                participants: parsed_participants,
+                prover,
+                proposals: Arc::new(Mutex::new(HashMap::new())),
+                votes: Arc::new(Mutex::new(HashMap::new())),
+                finalizes: Arc::new(Mutex::new(HashMap::new())),
+                faults: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+    }
+
+    impl<C: Scheme, H: Hasher> Supervisor for TestSupervisor<C, H> {
+        type Index = View;
+        type Seed = ();
+
+        fn leader(&self, index: Self::Index, _seed: Self::Seed) -> Option<PublicKey> {
+            let closest = match self.participants.range(..=index).next_back() {
+                Some((_, p)) => p,
+                None => {
+                    panic!("no participants in required range");
+                }
+            };
+            Some(closest.1[index as usize % closest.1.len()].clone())
+        }
+
+        fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>> {
+            let closest = match self.participants.range(..=index).next_back() {
+                Some((_, p)) => p,
+                None => {
+                    panic!("no participants in required range");
+                }
+            };
+            Some(&closest.1)
+        }
+
+        fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<bool> {
+            let closest = match self.participants.range(..=index).next_back() {
+                Some((_, p)) => p,
+                None => {
+                    panic!("no participants in required range");
+                }
+            };
+            Some(closest.0.contains(candidate))
+        }
+
+        async fn report(&mut self, activity: Activity, proof: Proof) {
+            // We check signatures for all messages to ensure that the prover is working correctly
+            // but in production this isn't necessary (as signatures are already verified in
+            // consensus).
+            match activity {
+                NOTARIZE => {
+                    // TODO: use payload digest?
+                    let (index, _, payload, public_key) =
+                        self.prover.deserialize_notarize(proof, true).unwrap();
+                    self.votes
+                        .lock()
+                        .unwrap()
+                        .entry(index.height)
+                        .or_default()
+                        .entry(payload)
+                        .or_default()
+                        .insert(public_key);
+                }
+                FINALIZE => {
+                    let (index, _, payload, public_key) =
+                        self.prover.deserialize_finalize(proof, true).unwrap();
+                    self.finalizes
+                        .lock()
+                        .unwrap()
+                        .entry(index.height)
+                        .or_default()
+                        .entry(payload)
+                        .or_default()
+                        .insert(public_key);
+                }
+                CONFLICTING_NOTARIZE => {
+                    let (public_key, view) = self
+                        .prover
+                        .deserialize_conflicting_notarize(proof, true)
+                        .unwrap();
+                    self.faults
+                        .lock()
+                        .unwrap()
+                        .entry(public_key)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .insert(CONFLICTING_NOTARIZE);
+                }
+                CONFLICTING_FINALIZE => {
+                    let (public_key, view) = self
+                        .prover
+                        .deserialize_conflicting_finalize(proof, true)
+                        .unwrap();
+                    self.faults
+                        .lock()
+                        .unwrap()
+                        .entry(public_key)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .insert(CONFLICTING_FINALIZE);
+                }
+                NULLIFY_AND_FINALIZE => {
+                    let (public_key, view) = self
+                        .prover
+                        .deserialize_nullify_finalize(proof, true)
+                        .unwrap();
+                    self.faults
+                        .lock()
+                        .unwrap()
+                        .entry(public_key)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .insert(NULLIFY_AND_FINALIZE);
+                }
+                a => {
+                    panic!("unexpected activity: {}", a);
+                }
+            }
+        }
+    }
+
+    #[test_traced]
+    fn test_all_online() {
+        // Create runtime
+        let n = 5;
+        let required_containers = 100;
+        let activity_timeout = 10;
+        let namespace = Bytes::from("consensus");
+        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        executor.start(async move {
+            // Create simulated network
+            let (network, mut oracle) = Network::new(
+                runtime.clone(),
+                Config {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                },
+            );
+
+            // Start network
+            runtime.spawn("network", network.run());
+
+            // Register participants
+            let mut schemes = Vec::new();
+            let mut validators = Vec::new();
+            for i in 0..n {
+                let scheme = Ed25519::from_seed(i as u64);
+                let pk = scheme.public_key();
+                schemes.push(scheme);
+                validators.push(pk);
+            }
+            validators.sort();
+            schemes.sort_by_key(|s| s.public_key());
+            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+
+            // Create engines
+            let mut supervisors = Vec::new();
+            let (done_sender, mut done_receiver) = mpsc::unbounded();
+            for scheme in schemes.into_iter() {
+                // Register on network
+                let validator = scheme.public_key();
+                let (container_sender, container_receiver) = oracle
+                    .register(validator.clone(), 0, 1024 * 1024)
+                    .await
+                    .unwrap();
+                let (vote_sender, vote_receiver) = oracle
+                    .register(validator.clone(), 1, 1024 * 1024)
+                    .await
+                    .unwrap();
+
+                // Link to all other validators
+                for other in validators.iter() {
+                    if other == &validator {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 1.0,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                // Start engine
+                let hasher = Sha256::default();
+                let supervisor = TestSupervisor::<Ed25519, Sha256>::new(
+                    Prover::new(hasher.clone(), namespace.clone()),
+                    view_validators.clone(),
+                );
+                supervisors.push(supervisor.clone());
+                let application_cfg = ApplicationConfig {
+                    hasher: hasher.clone(),
+                    supervisor,
+                    participant: validator,
+                    sender: done_sender.clone(),
+                    propose_latency: (10.0, 5.0),
+                    parse_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    allow_invalid_payload: false,
+                };
+                let application = Application::new(runtime.clone(), application_cfg);
+                let cfg = config::Config {
+                    crypto: scheme,
+                    hasher,
+                    application,
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    namespace: namespace.clone(),
+                    leader_timeout: Duration::from_secs(1),
+                    notarization_timeout: Duration::from_secs(2),
+                    nullify_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    max_fetch_count: 1,
+                    max_fetch_size: 1024 * 512,
+                    fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    validators: view_validators.clone(),
+                };
+                let engine = Engine::new(runtime.clone(), cfg);
+                runtime.spawn("engine", async move {
+                    engine
+                        .run(
+                            (container_sender, container_receiver),
+                            (vote_sender, vote_receiver),
+                        )
+                        .await;
+                });
+            }
+
+            // Wait for all engines to finish
+            let mut completed = HashSet::new();
+            let mut finalized = HashMap::new();
+            loop {
+                let (validator, event) = done_receiver.next().await.unwrap();
+                if let Progress::Finalized(height, digest) = event {
+                    finalized.insert(height, digest);
+                    if height < required_containers {
+                        continue;
+                    }
+                    completed.insert(validator);
+                }
+                if completed.len() == n {
+                    break;
+                }
+            }
+
+            // Check supervisors for correct activity
+            let latest_complete = required_containers - activity_timeout;
+            for supervisor in supervisors.iter() {
+                // Ensure no faults
+                {
+                    let faults = supervisor.faults.lock().unwrap();
+                    assert!(faults.is_empty());
+                }
+
+                // Ensure no forks
+                {
+                    let proposals = supervisor.proposals.lock().unwrap();
+                    for (height, views) in proposals.iter() {
+                        // Ensure no skips (height == view)
+                        if views.len() > 1 {
+                            panic!("height: {}, views: {:?}", height, views);
+                        }
+
+                        // Only check at views below timeout
+                        if *height > latest_complete {
+                            continue;
+                        }
+
+                        // Ensure everyone participating
+                        let digest = finalized.get(height).expect("height should be finalized");
+                        let proposers = views.get(digest).expect("digest should exist");
+                        if proposers.len() != 1 {
+                            panic!("height: {}, proposers: {:?}", height, proposers);
+                        }
+                    }
+                }
+                {
+                    let votes = supervisor.votes.lock().unwrap();
+                    for (height, views) in votes.iter() {
+                        // Ensure no skips (height == view)
+                        if views.len() > 1 {
+                            panic!("height: {}, views: {:?}", height, views);
+                        }
+
+                        // Only check at views below timeout
+                        if *height > latest_complete {
+                            continue;
+                        }
+
+                        // Ensure everyone participating
+                        let digest = finalized.get(height).expect("height should be finalized");
+                        let voters = views.get(digest).expect("digest should exist");
+                        if voters.len() != n {
+                            panic!("height: {}, voters: {:?}", height, voters);
+                        }
+                    }
+                }
+                {
+                    let finalizes = supervisor.finalizes.lock().unwrap();
+                    for (height, views) in finalizes.iter() {
+                        // Ensure no skips (height == view)
+                        if views.len() > 1 {
+                            panic!("height: {}, views: {:?}", height, views);
+                        }
+
+                        // Only check at views below timeout
+                        if *height > latest_complete {
+                            continue;
+                        }
+
+                        // Ensure everyone participating
+                        let digest = finalized.get(height).expect("height should be finalized");
+                        let finalizers = views.get(digest).expect("digest should exist");
+                        if finalizers.len() != n {
+                            panic!("height: {}, finalizers: {:?}", height, finalizers);
+                        }
+                    }
+                }
+            }
+        });
+    }
+}

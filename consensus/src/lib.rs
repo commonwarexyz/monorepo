@@ -18,7 +18,7 @@ use std::future::Future;
 /// │   Header    │◄──────────────┤   Header    │
 /// │             │               │             │
 /// └──────┬──────┘               └──────┬──────┘
-///        ▼                             ▼       
+///        ▼                             ▼
 /// ┌─────────────┐               ┌─────────────┐
 /// │             │               │             │
 /// │             │               │             │
@@ -80,6 +80,22 @@ pub trait Automaton: Clone + Send + 'static {
         context: Self::Context,
         payload: Digest,
     ) -> impl Future<Output = ()> + Send;
+
+    /// Event that the container has been notarized (seen by `2f+1` participants).
+    ///
+    /// No guarantee will send notarized event for all heights.
+    fn notarized(
+        &mut self,
+        context: Self::Context,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// Event that the container has been finalized.
+    fn finalized(
+        &mut self,
+        context: Self::Context,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 /// Mailbox is implemented by the consensus engine to receive messages from the Automaton.
@@ -135,24 +151,4 @@ pub trait Supervisor: Clone + Send + 'static {
     ///
     /// The consensus instance may report a duplicate contribution.
     fn report(&mut self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
-}
-
-pub trait Finalizer: Clone + Send + 'static {
-    type Context;
-
-    /// Event that the container has been notarized (seen by `2f+1` participants).
-    ///
-    /// No guarantee will send notarized event for all heights.
-    fn notarized(
-        &mut self,
-        context: Self::Context,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
-
-    /// Event that the container has been finalized.
-    fn finalized(
-        &mut self,
-        context: Self::Context,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
 }
