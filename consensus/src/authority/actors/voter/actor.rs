@@ -388,6 +388,16 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
     }
 }
 
+fn proposal_view(proposal: &Option<wire::Proposal>) -> Option<View> {
+    proposal.as_ref().and_then(|proposal| {
+        proposal
+            .index
+            .as_ref()
+            .map(|index| index.view)
+            .or_else(|| None)
+    })
+}
+
 pub struct Actor<
     E: Clock + Rng,
     C: Scheme,
@@ -1938,9 +1948,9 @@ impl<
                             self.hasher.update(&message);
                             let proposal_digest = self.hasher.finalize();
                             let proposal = wire::Proposal {
-                                index: Some(context.index),
-                                parent: Some(context.parent),
-                                payload,
+                                index: Some(context.index.clone()),
+                                parent: Some(context.parent.clone()),
+                                payload: payload.clone(),
                             };
                             if !self.our_proposal(proposal_digest, proposal.clone()).await {
                                 continue;
@@ -1962,18 +1972,19 @@ impl<
                             // Notify application of proposal
                             self.application.broadcast(context, header, payload).await;
                         },
-                        Message::Verified { view: verified_view } => {
+                        Message::Verified { context } => {
                             // Handle verified proposal
-                            if !self.verified(verified_view).await {
+                            view = context.index.view;
+                            if !self.verified(view).await {
                                 continue;
                             }
-                            view = verified_view;
 
                             // TODO: Have resolver hold on to verified proposals in case they become notarized or if they are notarized
                             // but learned about later.
                         },
                         Message::Backfilled { notarizations } => {
                             // TODO: store notarizations we've backfilled (verified in backfiller to avoid using compute in this loop)
+                            unimplemented!()
                         },
                     }
                 },
@@ -2000,8 +2011,7 @@ impl<
                     // All messages are semantically verified before being passed to the `voter`.
                     match payload {
                         wire::voter::Payload::Notarize(notarize) => {
-                            let parsed_view = notarize.proposal.map(|proposal| proposal.index.map(|index| index.view)).flatten();
-                            view = match parsed_view {
+                            view = match proposal_view(&notarize.proposal) {
                                 Some(view) => view,
                                 None => {
                                     debug!(sender = hex(&s), "missing view in notarize");
@@ -2011,8 +2021,7 @@ impl<
                             self.notarize(notarize).await;
                         }
                         wire::voter::Payload::Notarization(notarization) => {
-                            let parsed_view = notarization.proposal.map(|proposal| proposal.index.map(|index| index.view)).flatten();
-                            view = match parsed_view {
+                            view = match proposal_view(&notarization.proposal) {
                                 Some(view) => view,
                                 None => {
                                     debug!(sender = hex(&s), "missing view in notarization");
@@ -2030,8 +2039,7 @@ impl<
                             self.nullification(nullification).await;
                         }
                         wire::voter::Payload::Finalize(finalize) => {
-                            let parsed_view = finalize.proposal.map(|proposal| proposal.index.map(|index| index.view)).flatten();
-                            view = match parsed_view {
+                            view = match proposal_view(&finalize.proposal) {
                                 Some(view) => view,
                                 None => {
                                     debug!(sender = hex(&s), "missing view in finalize");
@@ -2041,8 +2049,7 @@ impl<
                             self.finalize(finalize).await;
                         }
                         wire::voter::Payload::Finalization(finalization) => {
-                            let parsed_view = finalization.proposal.map(|proposal| proposal.index.map(|index| index.view)).flatten();
-                            view = match parsed_view {
+                            view = match proposal_view(&finalization.proposal) {
                                 Some(view) => view,
                                 None => {
                                     debug!(sender = hex(&s), "missing view in finalization");
