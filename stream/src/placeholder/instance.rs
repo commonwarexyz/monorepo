@@ -3,7 +3,6 @@ use super::{
     utils::nonce_bytes,
     x25519, Config, Error,
 };
-use crate::authenticated::wire;
 use bytes::Bytes;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -12,9 +11,9 @@ use chacha20poly1305::{
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use prost::Message;
 use rand::{CryptoRng, Rng};
 
+// TODO: Fix this constant which is probably wrong (https://github.com/commonwarexyz/monorepo/issues/185).
 const CHUNK_PADDING: usize = 64 /* protobuf overhead */ + 12 /* chunk info */ + 16 /* encryption tag */;
 
 pub struct Instance<C: Scheme, Si: Sink, St: Stream> {
@@ -187,9 +186,8 @@ impl<Si: Sink> Sender<Si> {
         Ok(nonce_bytes)
     }
 
-    pub async fn send(&mut self, msg: wire::Message) -> Result<(), Error> {
+    pub async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
         // Encrypt data
-        let msg = msg.encode_to_vec();
         let nonce = self.my_nonce()?;
         let msg = self
             .cipher
@@ -227,7 +225,7 @@ impl<St: Stream> Receiver<St> {
         Ok(nonce_bytes)
     }
 
-    pub async fn receive(&mut self) -> Result<wire::Message, Error> {
+    pub async fn receive(&mut self) -> Result<Bytes, Error> {
         // Read message
         let msg = self.stream.recv().await.map_err(|_| Error::StreamClosed)?;
 
@@ -238,8 +236,7 @@ impl<St: Stream> Receiver<St> {
             .decrypt(&nonce, msg.as_ref())
             .map_err(|_| Error::DecryptionFailed)?;
 
-        // Deserialize data
-        wire::Message::decode(msg.as_ref()).map_err(Error::UnableToDecode)
+        Ok(Bytes::from(msg))
     }
 }
 

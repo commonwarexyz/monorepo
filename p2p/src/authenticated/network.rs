@@ -4,12 +4,12 @@ use super::{
     actors::{dialer, listener, router, spawner, tracker},
     channels::{self, Channels},
     config::Config,
-    connection,
 };
 use crate::Channel;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
+use commonware_stream::placeholder;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
@@ -150,7 +150,7 @@ impl<
         );
 
         // Start listener
-        let connection = connection::Config {
+        let connection = placeholder::Config {
             crypto: self.cfg.crypto,
             namespace: self.cfg.namespace,
             max_message_size: self.cfg.max_message_size,

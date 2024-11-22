@@ -1,6 +1,7 @@
-use crate::authenticated::{actors::tracker, connection::Instance};
+use crate::authenticated::actors::tracker;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
+use commonware_stream::placeholder::Instance;
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {

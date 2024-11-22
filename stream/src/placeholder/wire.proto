@@ -1,0 +1,26 @@
+syntax = "proto3";
+package wire;
+
+// Allows recipient to verify that the sender has the private key
+// of public key before sending any data.
+//
+// By requiring the server to have their public key signed, they prevent
+// a malicious peer from forwarding a handshake message from a previous
+// connection with public key (which could be used to convince the server
+// to start a useless handshake). Alternatively, we could require the
+// dialer to sign some random bytes provided by the server but this would
+// require the server to send a message to a peer before authorizing that
+// it should connect to them.
+message Handshake {
+    bytes recipient_public_key = 1;
+    bytes ephemeral_public_key = 2;
+    uint64 timestamp = 3;
+    Signature signature = 4;
+}
+
+// Signature is an arbitrary public key and signature over
+// either a Handshake or Peer message.
+message Signature {
+    bytes public_key = 1;
+    bytes signature = 2;
+}

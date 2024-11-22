@@ -436,10 +436,10 @@ version = "0.0.23"
 dependencies = [
  "bitvec",
  "bytes",
- "chacha20poly1305",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
+ "commonware-stream",
  "commonware-utils",
  "futures",
  "governor",
@@ -448,11 +448,9 @@ dependencies = [
  "prost-build",
  "rand",
  "rand_distr",
- "sha2 0.10.8",
  "thiserror",
  "tracing",
  "tracing-subscriber",
- "x25519-dalek",
  "zstd",
 ]
 
@@ -494,6 +492,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zstd",
+]
+
+[[package]]
+name = "commonware-stream"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "chacha20poly1305",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "prost",
+ "prost-build",
+ "rand",
+ "thiserror",
+ "x25519-dalek",
 ]
 
 [[package]]

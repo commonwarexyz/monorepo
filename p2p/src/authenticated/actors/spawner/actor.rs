@@ -89,18 +89,6 @@ impl<
                     let tracker = tracker.clone();
                     let mut router = router.clone();
 
-                    // Record handshake messages
-                    //
-                    // We define these metrics in the spawner to ensure all recorded peers are in
-                    // the same family (if we define the same metric in the peer actor, a duplicate
-                    // family will be created for each peer).
-                    sent_messages
-                        .get_or_create(&metrics::Message::new_handshake(&peer))
-                        .inc();
-                    received_messages
-                        .get_or_create(&metrics::Message::new_handshake(&peer))
-                        .inc();
-
                     // Spawn peer
                     self.runtime.spawn("peer", {
                         let runtime = self.runtime.clone();

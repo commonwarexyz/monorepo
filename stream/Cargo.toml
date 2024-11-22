@@ -1,0 +1,27 @@
+[package]
+name = "commonware-stream"
+edition = "2021"
+publish = true
+version = "0.0.1"
+license = "MIT OR Apache-2.0"
+description = "[Placeholder description]"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/stream"
+documentation = "https://docs.rs/commonware-stream"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+chacha20poly1305 = "0.10"
+x25519-dalek = "2"
+
+[build-dependencies]
+prost-build = { workspace = true }
