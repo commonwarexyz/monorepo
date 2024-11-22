@@ -6,7 +6,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use commonware_stream::connection::{
+use commonware_stream::placeholder::{
     Config as ConnectionConfig,
     Instance,
 };

@@ -1,7 +1,7 @@
 //! Peer
 
 use crate::authenticated::metrics;
-use commonware_stream::connection;
+use commonware_stream::placeholder;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use prost::DecodeError;
@@ -30,11 +30,11 @@ pub enum Error {
     #[error("peer killed: {0}")]
     PeerKilled(String),
     #[error("send failed: {0}")]
-    SendFailed(connection::Error),
+    SendFailed(placeholder::Error),
     #[error("peer disconnected")]
     PeerDisconnected,
     #[error("receive failed: {0}")]
-    ReceiveFailed(connection::Error),
+    ReceiveFailed(placeholder::Error),
     #[error("decode failed: {0}")]
     DecodeFailed(DecodeError),
     #[error("unexpected failure: {0}")]

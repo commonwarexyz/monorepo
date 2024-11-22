@@ -1,5 +1,5 @@
 use super::{x25519, Error};
-use crate::connection::wire;
+use crate::placeholder::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
