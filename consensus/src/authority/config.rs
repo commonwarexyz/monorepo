@@ -10,11 +10,16 @@ use std::{
     time::Duration,
 };
 
-pub struct Config<C: Scheme, H: Hasher, A: Automaton<Context = Context> + Supervisor<Index = View>>
-{
+pub struct Config<
+    C: Scheme,
+    H: Hasher,
+    A: Automaton<Context = Context>,
+    S: Supervisor<Index = View>,
+> {
     pub crypto: C,
     pub hasher: H,
     pub application: A,
+    pub supervisor: S,
 
     pub registry: Arc<Mutex<Registry>>,
 

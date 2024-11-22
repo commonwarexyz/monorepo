@@ -10,10 +10,11 @@ use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub struct Config<C: Scheme, H: Hasher, A: Automaton + Supervisor> {
+pub struct Config<C: Scheme, H: Hasher, A: Automaton, S: Supervisor> {
     pub crypto: C,
     pub hasher: H,
     pub application: A,
+    pub supervisor: S,
 
     pub registry: Arc<Mutex<Registry>>,
     pub namespace: Bytes,

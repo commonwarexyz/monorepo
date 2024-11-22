@@ -12,11 +12,12 @@ pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner,
     C: Scheme,
     H: Hasher,
-    A: Automaton<Context = Context> + Supervisor<Seed = (), Index = View>,
+    A: Automaton<Context = Context>,
+    S: Supervisor<Seed = (), Index = View>,
 > {
     runtime: E,
 
-    voter: voter::Actor<E, C, H, A>,
+    voter: voter::Actor<E, C, H, A, S>,
     voter_mailbox: voter::Mailbox,
     // backfiller: backfiller::Actor<E, C, H, A>,
     // backfiller_mailbox: backfiller::Mailbox,
@@ -26,10 +27,11 @@ impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context> + Supervisor<Seed = (), Index = View>,
-    > Engine<E, C, H, A>
+        A: Automaton<Context = Context>,
+        S: Supervisor<Seed = (), Index = View>,
+    > Engine<E, C, H, A, S>
 {
-    pub fn new(runtime: E, mut cfg: Config<C, H, A>) -> Self {
+    pub fn new(runtime: E, mut cfg: Config<C, H, A, S>) -> Self {
         // Sort the validators at each view
         if cfg.validators.is_empty() {
             panic!("no validators specified");
@@ -47,7 +49,8 @@ impl<
             voter::Config {
                 crypto: cfg.crypto.clone(),
                 hasher: cfg.hasher.clone(),
-                application: cfg.application.clone(),
+                application: cfg.application,
+                supervisor: cfg.supervisor.clone(),
                 registry: cfg.registry,
                 namespace: cfg.namespace.clone(),
                 leader_timeout: cfg.leader_timeout,

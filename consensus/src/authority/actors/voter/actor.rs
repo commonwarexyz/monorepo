@@ -38,9 +38,9 @@ type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Fina
 const GENESIS_VIEW: View = 0;
 const GENESIS_HEIGHT: Height = 0;
 
-struct Round<C: Scheme, H: Hasher, A: Supervisor> {
+struct Round<C: Scheme, H: Hasher, S: Supervisor> {
     hasher: H,
-    application: A,
+    supervisor: S,
     _crypto: PhantomData<C>,
 
     view: View,
@@ -71,10 +71,10 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
+impl<C: Scheme, H: Hasher, S: Supervisor> Round<C, H, S> {
     pub fn new(
         hasher: H,
-        application: A,
+        supervisor: S,
         view: View,
         leader: PublicKey,
         leader_deadline: Option<SystemTime>,
@@ -82,7 +82,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
     ) -> Self {
         Self {
             hasher,
-            application,
+            supervisor,
             _crypto: PhantomData,
 
             view,
@@ -155,7 +155,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 &proposal.payload,
                 &notarize.signature.as_ref().unwrap(),
             );
-            self.application.report(CONFLICTING_NOTARIZE, proof).await;
+            self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
                 view = self.view,
                 signer = hex(public_key),
@@ -174,7 +174,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         entry.insert(public_key.clone(), notarize);
 
         // Report vote
-        self.application.report(NOTARIZE, proof).await;
+        self.supervisor.report(NOTARIZE, proof).await;
     }
 
     async fn add_verified_nullify(&mut self, nullify: wire::Nullify) {
@@ -203,7 +203,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             &finalize.signature.as_ref().unwrap(),
             &nullify.signature.as_ref().unwrap(),
         );
-        self.application.report(NULLIFY_AND_FINALIZE, proof).await;
+        self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
         warn!(
             view = self.view,
             signer = hex(public_key),
@@ -284,7 +284,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 &finalize.signature.as_ref().unwrap(),
                 &null.signature.as_ref().unwrap(),
             );
-            self.application.report(NULLIFY_AND_FINALIZE, proof).await;
+            self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
             warn!(
                 view = self.view,
                 signer = hex(public_key),
@@ -332,7 +332,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
                 &proposal.payload,
                 &finalize.signature.as_ref().unwrap(),
             );
-            self.application.report(CONFLICTING_FINALIZE, proof).await;
+            self.supervisor.report(CONFLICTING_FINALIZE, proof).await;
             warn!(
                 view = self.view,
                 signer = hex(public_key),
@@ -351,7 +351,7 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
         entry.insert(public_key.clone(), finalize);
 
         // Report the finalize
-        self.application.report(FINALIZE, proof).await;
+        self.supervisor.report(FINALIZE, proof).await;
     }
 
     fn finalizable_proposal(&mut self, threshold: u32, force: bool) -> Finalizable {
@@ -407,12 +407,14 @@ pub struct Actor<
     E: Clock + Rng,
     C: Scheme,
     H: Hasher,
-    A: Automaton<Context = Context> + Supervisor<Index = View>,
+    A: Automaton<Context = Context>,
+    S: Supervisor<Index = View>,
 > {
     runtime: E,
     crypto: C,
     hasher: H,
-    application: A,
+    application: Option<A>,
+    supervisor: S,
 
     genesis: Digest,
 
@@ -430,7 +432,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, H, A>>,
+    views: BTreeMap<View, Round<C, H, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -440,10 +442,11 @@ impl<
         E: Clock + Rng + Spawner,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context> + Supervisor<Seed = (), Index = View>,
-    > Actor<E, C, H, A>
+        A: Automaton<Context = Context>,
+        S: Supervisor<Seed = (), Index = View>,
+    > Actor<E, C, H, A, S>
 {
-    pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -469,7 +472,8 @@ impl<
                 runtime,
                 crypto: cfg.crypto,
                 hasher: cfg.hasher,
-                application: cfg.application,
+                application: Some(cfg.application),
+                supervisor: cfg.supervisor,
 
                 genesis,
 
@@ -697,7 +701,7 @@ impl<
 
         // Verify that signer is a validator
         let is_participant = match self
-            .application
+            .supervisor
             .is_participant(nullify.view, &signature.public_key)
         {
             Some(is) => is,
@@ -739,7 +743,7 @@ impl<
 
     async fn handle_nullify(&mut self, nullify: wire::Nullify) {
         // Check to see if vote is for proposal in view
-        let leader = match self.application.leader(nullify.view, ()) {
+        let leader = match self.supervisor.leader(nullify.view, ()) {
             Some(leader) => leader,
             None => {
                 debug!(
@@ -753,7 +757,7 @@ impl<
         let round = self.views.entry(nullify.view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
-                self.application.clone(),
+                self.supervisor.clone(),
                 nullify.view,
                 leader,
                 None,
@@ -802,7 +806,7 @@ impl<
     ) {
         // Determine if proposal from leader
         let index = proposal.index.as_ref().unwrap();
-        let expected_leader = match self.application.leader(index.view, ()) {
+        let expected_leader = match self.supervisor.leader(index.view, ()) {
             Some(leader) => leader,
             None => {
                 debug!(
@@ -974,7 +978,7 @@ impl<
         let round = self.views.entry(index.view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
-                self.application.clone(),
+                self.supervisor.clone(),
                 index.view,
                 expected_leader,
                 None,
@@ -1042,13 +1046,13 @@ impl<
 
         // Setup new view
         let leader = self
-            .application
+            .supervisor
             .leader(view, ())
             .expect("unable to get leader");
         let entry = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
-                self.application.clone(),
+                self.supervisor.clone(),
                 view,
                 leader.clone(),
                 None,
@@ -1067,7 +1071,7 @@ impl<
         }
         let mut next = view - 1;
         while next > view - self.activity_timeout {
-            if !self.application.is_participant(next, &leader).unwrap() {
+            if !self.supervisor.is_participant(next, &leader).unwrap() {
                 // Don't punish a participant if they weren't online at any point during
                 // the lookback window.
                 return;
@@ -1126,7 +1130,7 @@ impl<
     }
 
     fn threshold(&self, view: View) -> Option<(u32, u32)> {
-        let validators = match self.application.participants(view) {
+        let validators = match self.supervisor.participants(view) {
             Some(validators) => validators,
             None => return None,
         };
@@ -1184,7 +1188,7 @@ impl<
 
         // Verify that signer is a validator
         let is_participant = match self
-            .application
+            .supervisor
             .is_participant(proposal_index.view, &signature.public_key)
         {
             Some(is) => is,
@@ -1232,13 +1236,13 @@ impl<
         // Check to see if vote is for proposal in view
         let view = notarize.proposal.as_ref().unwrap().index.unwrap().view;
         let leader = self
-            .application
+            .supervisor
             .leader(view, ())
             .expect("unable to get leader");
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
-                self.application.clone(),
+                self.supervisor.clone(),
                 view,
                 leader,
                 None,
@@ -1380,13 +1384,13 @@ impl<
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = notarization.proposal.as_ref().unwrap().index.unwrap().view;
         let leader = self
-            .application
+            .supervisor
             .leader(view, ())
             .expect("unable to get leader");
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
-                self.application.clone(),
+                self.supervisor.clone(),
                 view,
                 leader,
                 None,
@@ -1511,13 +1515,13 @@ impl<
     async fn handle_nullification(&mut self, nullification: wire::Nullification) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let leader = self
-            .application
+            .supervisor
             .leader(nullification.view, ())
             .expect("unable to get leader");
         let round = self.views.entry(nullification.view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
-                self.application.clone(),
+                self.supervisor.clone(),
                 nullification.view,
                 leader,
                 None,
@@ -1592,7 +1596,7 @@ impl<
 
         // Verify that signer is a validator
         let is_participant = match self
-            .application
+            .supervisor
             .is_participant(proposal_index.view, &signature.public_key)
         {
             Some(is) => is,
@@ -1643,13 +1647,13 @@ impl<
         // Get view for finalize
         let view = finalize.proposal.as_ref().unwrap().index.unwrap().view;
         let leader = self
-            .application
+            .supervisor
             .leader(view, ())
             .expect("unable to get leader");
         let view = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
-                self.application.clone(),
+                self.supervisor.clone(),
                 view,
                 leader,
                 None,
@@ -1792,13 +1796,13 @@ impl<
         // Add signatures to view (needed to broadcast finalization if we get proposal)
         let view = finalization.proposal.as_ref().unwrap().index.unwrap().view;
         let leader = self
-            .application
+            .supervisor
             .leader(view, ())
             .expect("unable to get leader");
         let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
-                self.application.clone(),
+                self.supervisor.clone(),
                 view,
                 leader,
                 None,
@@ -1866,7 +1870,7 @@ impl<
         };
 
         // Attempt to construct notarization
-        let validators = match self.application.participants(view) {
+        let validators = match self.supervisor.participants(view) {
             Some(validators) => validators,
             None => {
                 return None;
@@ -1900,7 +1904,7 @@ impl<
         };
 
         // Attempt to construct notarization
-        let validators = match self.application.participants(view) {
+        let validators = match self.supervisor.participants(view) {
             Some(validators) => validators,
             None => {
                 return None;
@@ -1973,7 +1977,7 @@ impl<
         };
 
         // Attempt to construct finalization
-        let validators = match self.application.participants(view) {
+        let validators = match self.supervisor.participants(view) {
             Some(validators) => validators,
             None => {
                 return None;
@@ -2078,7 +2082,7 @@ impl<
         let (application_sender, mut application_receiver) = mpsc::channel(1024);
         let mut application_mailbox = Application::new(application_sender);
         self.runtime.spawn("application", {
-            let mut application = self.application.clone();
+            let mut application = self.application.take().unwrap();
             let mut mailbox = self.mailbox_sender.clone();
             async move {
                 while let Some(msg) = application_receiver.next().await {
@@ -2096,6 +2100,13 @@ impl<
                                 None => continue, // means that can't be verified (not sure if valid or not)
                             };
                             mailbox.verified(context, result).await;
+                        }
+                        ApplicationMessage::Broadcast {
+                            context,
+                            header,
+                            payload,
+                        } => {
+                            application.broadcast(context, header, payload).await;
                         }
                     }
                 }
@@ -2171,7 +2182,7 @@ impl<
                             let header = Prover::<C, H>::serialize_notarize(&notarize);
 
                             // Notify application of proposal
-                            self.application.broadcast(context, header, payload).await;
+                            application_mailbox.broadcast(context, header, payload).await;
                         },
                         Message::Verified { context, result } => {
                             // TODO: prevent future verification/penalize?

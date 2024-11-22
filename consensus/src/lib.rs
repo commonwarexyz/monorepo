@@ -43,7 +43,7 @@ type Header = Bytes;
 /// While an automaton may be logically instantiated as a single entity, it may be
 /// cloned by multiple sub-components of a consensus engine to, among other things,
 /// parse payloads concurrently.
-pub trait Automaton: Clone + Send + 'static {
+pub trait Automaton: Send + 'static {
     type Context;
 
     /// Initialize the application with the genesis container.
@@ -116,7 +116,7 @@ pub trait Supervisor: Clone + Send + 'static {
     type Index;
     type Seed;
 
-    /// Get the leader at a given index for the provided seed.
+    /// Get the leader at a given index for the provided seed (sourced from consensus).
     fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
 
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
