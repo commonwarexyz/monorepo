@@ -63,7 +63,12 @@ pub trait Automaton: Clone + Send + 'static {
     ///
     /// TODO: must be specific about how payloads are linked...if we only use payloads then we can't
     /// verify broader object from consensus, so parent should instead be over headers.
-    fn broadcast(&mut self, header: Header, payload: Digest) -> impl Future<Output = ()> + Send;
+    fn broadcast(
+        &mut self,
+        context: Self::Context,
+        header: Header,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
 
     /// Verify the payload is valid.
     ///

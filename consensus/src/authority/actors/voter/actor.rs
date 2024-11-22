@@ -1062,7 +1062,7 @@ impl<
             .application
             .leader(view, ())
             .expect("unable to get leader");
-        let view = self.views.entry(view).or_insert_with(|| {
+        let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
                 self.application.clone(),
@@ -1074,7 +1074,7 @@ impl<
         });
 
         // Handle vote
-        view.add_verified_notarize(notarize).await;
+        round.add_verified_notarize(notarize).await;
     }
 
     async fn notarization(&mut self, notarization: wire::Notarization) {
@@ -1822,8 +1822,6 @@ impl<
     async fn broadcast(&mut self, sender: &mut impl Sender, view: u64) {
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
-            // TODO: if build proposal, should let application know we are broadcasting
-
             // Broadcast the vote
             let msg = wire::Voter {
                 payload: Some(wire::voter::Payload::Notarize(notarize.clone())),
@@ -1948,6 +1946,21 @@ impl<
                                 continue;
                             }
                             view = self.view;
+
+                            // Construct header
+                            //
+                            // TODO: refactor to only sign once
+                            let notarize = wire::Notarize {
+                                proposal: Some(proposal),
+                                signature: Some(wire::Signature {
+                                    public_key: self.crypto.public_key(),
+                                    signature: self.crypto.sign(&self.notarize_namespace, &message),
+                                }),
+                            };
+                            let header = Prover::<C, H>::serialize_notarize(&notarize);
+
+                            // Notify application of proposal
+                            self.application.broadcast(context, header, payload).await;
                         },
                         Message::Verified { view: verified_view } => {
                             // Handle verified proposal
