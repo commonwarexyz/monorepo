@@ -582,11 +582,8 @@ impl<
         // Request proposal from application
         self.application
             .propose(Context {
-                index: wire::Index {
-                    view: self.view,
-                    height: parent_height + 1,
-                },
-                parent,
+                index: (self.view, parent_height + 1),
+                parent: (parent.view, parent.digest),
             })
             .await;
         debug!(view = self.view, "requested proposal");
@@ -977,8 +974,8 @@ impl<
         self.application
             .verify(
                 Context {
-                    index: index.clone(),
-                    parent: proposal.parent.as_ref().unwrap().clone(),
+                    index: (index.view, index.height),
+                    parent: (parent.view, parent.digest.clone()),
                 },
                 proposal.payload.clone(),
             )
@@ -2089,18 +2086,26 @@ impl<
                         Message::Proposed{ context, payload } => {
                             // If we have already moved to another view, drop the response as we will
                             // not broadcast it
-                            if self.view != context.index.view {
-                                debug!(view = context.index.view, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
+                            if self.view != context.index.0 {
+                                debug!(view = context.index.0, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
                                 continue;
                             }
 
                             // Construct proposal
-                            let message = proposal_message(&context.index, &context.parent, &payload);
+                            let index = wire::Index {
+                                view: context.index.0,
+                                height: context.index.1,
+                            };
+                            let parent = wire::Parent {
+                                view: context.parent.0,
+                                digest: context.parent.1.clone(),
+                            };
+                            let message = proposal_message(&index, &parent, &payload);
                             self.hasher.update(&message);
                             let proposal_digest = self.hasher.finalize();
                             let proposal = wire::Proposal {
-                                index: Some(context.index.clone()),
-                                parent: Some(context.parent.clone()),
+                                index: Some(index),
+                                parent: Some(parent),
                                 payload: payload.clone(),
                             };
                             if !self.our_proposal(proposal_digest, proposal.clone()).await {
@@ -2125,7 +2130,7 @@ impl<
                         },
                         Message::Verified { context } => {
                             // Handle verified proposal
-                            view = context.index.view;
+                            view = context.index.0;
                             if !self.verified(view).await {
                                 continue;
                             }

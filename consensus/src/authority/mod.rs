@@ -114,7 +114,7 @@ mod encoder;
 mod engine;
 mod prover;
 
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::Digest;
 
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
@@ -126,8 +126,8 @@ pub type Height = u64;
 /// Context is a collection of information about the context in which a container is built.
 #[derive(Clone)]
 pub struct Context {
-    pub index: wire::Index,
-    pub parent: wire::Parent,
+    pub index: (View, Height),
+    pub parent: (View, Digest),
 }
 
 use crate::Activity;
