@@ -1,5 +1,5 @@
 use super::{Context, Height, View};
-use crate::{Activity, Automaton, Finalizer, Header, Proof, Supervisor};
+use crate::{Activity, Automaton, Header, Proof, Supervisor};
 use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_runtime::Clock;

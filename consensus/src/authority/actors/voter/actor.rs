@@ -1,4 +1,7 @@
-use super::{Config, Mailbox, Message};
+use super::{
+    ingress::{Application, ApplicationMessage},
+    Config, Mailbox, Message,
+};
 use crate::{
     authority::{
         encoder::{
@@ -14,7 +17,7 @@ use crate::{
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Clock;
+use commonware_runtime::{Clock, Spawner};
 use commonware_utils::{hex, quorum};
 use core::panic;
 use futures::{channel::mpsc, StreamExt};
@@ -422,6 +425,7 @@ pub struct Actor<
     nullify_retry: Duration,
     activity_timeout: View,
 
+    mailbox_sender: Mailbox,
     mailbox_receiver: mpsc::Receiver<Message>,
 
     last_finalized: View,
@@ -433,7 +437,7 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + Rng,
+        E: Clock + Rng + Spawner,
         C: Scheme,
         H: Hasher,
         A: Automaton<Context = Context> + Supervisor<Seed = (), Index = View>,
@@ -459,6 +463,7 @@ impl<
 
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
+        let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
                 runtime,
@@ -478,6 +483,7 @@ impl<
 
                 activity_timeout: cfg.activity_timeout,
 
+                mailbox_sender: mailbox.clone(),
                 mailbox_receiver,
 
                 last_finalized: 0,
@@ -487,7 +493,7 @@ impl<
                 current_view,
                 tracked_views,
             },
-            Mailbox::new(mailbox_sender),
+            mailbox,
         )
     }
 
@@ -550,7 +556,7 @@ impl<
         }
     }
 
-    async fn propose(&mut self) {
+    async fn propose(&mut self, mailbox: &mut Application) {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -580,7 +586,7 @@ impl<
         };
 
         // Request proposal from application
-        self.application
+        mailbox
             .propose(Context {
                 index: (self.view, parent_height + 1),
                 parent: (parent.view, parent.digest),
@@ -788,7 +794,12 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
-    async fn peer_proposal(&mut self, proposal: &wire::Proposal, sender: &PublicKey) {
+    async fn peer_proposal(
+        &mut self,
+        proposal: &wire::Proposal,
+        sender: &PublicKey,
+        mailbox: &mut Application,
+    ) {
         // Determine if proposal from leader
         let index = proposal.index.as_ref().unwrap();
         let expected_leader = match self.application.leader(index.view, ()) {
@@ -971,7 +982,7 @@ impl<
             )
         });
         round.proposal = Some((proposal_digest.clone(), proposal.clone()));
-        self.application
+        mailbox
             .verify(
                 Context {
                     index: (index.view, index.height),
@@ -1124,7 +1135,7 @@ impl<
         Some((threshold, len))
     }
 
-    async fn notarize(&mut self, notarize: wire::Notarize) {
+    async fn notarize(&mut self, notarize: wire::Notarize, mailbox: &mut Application) {
         // Extract proposal
         let proposal = match &notarize.proposal {
             Some(proposal) => proposal,
@@ -1210,7 +1221,8 @@ impl<
         }
 
         // Handle peer proposal
-        self.peer_proposal(proposal, &signature.public_key).await;
+        self.peer_proposal(proposal, &signature.public_key, mailbox)
+            .await;
 
         // Handle notarize
         self.handle_notarize(notarize).await;
@@ -1238,7 +1250,7 @@ impl<
         round.add_verified_notarize(notarize).await;
     }
 
-    async fn notarization(&mut self, notarization: wire::Notarization) {
+    async fn notarization(&mut self, notarization: wire::Notarization, mailbox: &mut Application) {
         // Extract proposal
         let proposal = match &notarization.proposal {
             Some(proposal) => proposal,
@@ -1355,7 +1367,8 @@ impl<
             }
 
             // Handle peer proposal
-            self.peer_proposal(proposal, &signature.public_key).await;
+            self.peer_proposal(proposal, &signature.public_key, mailbox)
+                .await;
         }
         debug!(view = proposal_index.view, "notarization verified");
 
@@ -1529,7 +1542,7 @@ impl<
         self.enter_view(nullification.view + 1);
     }
 
-    async fn finalize(&mut self, finalize: wire::Finalize) {
+    async fn finalize(&mut self, finalize: wire::Finalize, mailbox: &mut Application) {
         // Extract proposal
         let proposal = match &finalize.proposal {
             Some(proposal) => proposal,
@@ -1619,7 +1632,8 @@ impl<
         }
 
         // Handle peer proposal
-        self.peer_proposal(proposal, &signature.public_key).await;
+        self.peer_proposal(proposal, &signature.public_key, mailbox)
+            .await;
 
         // Handle finalize
         self.handle_finalize(finalize).await;
@@ -1647,7 +1661,7 @@ impl<
         view.add_verified_finalize(finalize).await;
     }
 
-    async fn finalization(&mut self, finalization: wire::Finalization) {
+    async fn finalization(&mut self, finalization: wire::Finalization, mailbox: &mut Application) {
         // Extract proposal
         let proposal = match &finalization.proposal {
             Some(proposal) => proposal,
@@ -1765,7 +1779,8 @@ impl<
             }
 
             // Handle peer proposal
-            self.peer_proposal(proposal, &signature.public_key).await;
+            self.peer_proposal(proposal, &signature.public_key, mailbox)
+                .await;
         }
         debug!(view = proposal_index.view, "finalization verified");
 
@@ -2057,6 +2072,36 @@ impl<
     }
 
     pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+        // Spawn async application processor
+        //
+        // TODO: clean up these abstractions
+        let (application_sender, mut application_receiver) = mpsc::channel(1024);
+        let mut application_mailbox = Application::new(application_sender);
+        self.runtime.spawn("application", {
+            let mut application = self.application.clone();
+            let mut mailbox = self.mailbox_sender.clone();
+            async move {
+                while let Some(msg) = application_receiver.next().await {
+                    match msg {
+                        ApplicationMessage::Propose { context } => {
+                            let payload = match application.propose(context.clone()).await {
+                                Some(payload) => payload,
+                                None => continue,
+                            };
+                            mailbox.proposed(context, payload).await;
+                        }
+                        ApplicationMessage::Verify { context, payload } => {
+                            let result = match application.verify(context.clone(), payload).await {
+                                Some(verified) => verified,
+                                None => continue, // means that can't be verified (not sure if valid or not)
+                            };
+                            mailbox.verified(context, result).await;
+                        }
+                    }
+                }
+            }
+        });
+
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
@@ -2069,7 +2114,7 @@ impl<
         // Process messages
         loop {
             // Attempt to propose a container
-            self.propose().await;
+            self.propose(&mut application_mailbox).await;
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.timeout_deadline();
@@ -2128,7 +2173,13 @@ impl<
                             // Notify application of proposal
                             self.application.broadcast(context, header, payload).await;
                         },
-                        Message::Verified { context } => {
+                        Message::Verified { context, result } => {
+                            // TODO: prevent future verification/penalize?
+                            if !result {
+                                debug!(view = context.index.0, "proposal failed verification");
+                                continue;
+                            }
+
                             // Handle verified proposal
                             view = context.index.0;
                             if !self.verified(view).await {
@@ -2174,7 +2225,7 @@ impl<
                                     continue;
                                 }
                             };
-                            self.notarize(notarize).await;
+                            self.notarize(notarize, &mut application_mailbox).await;
                         }
                         wire::voter::Payload::Notarization(notarization) => {
                             view = match proposal_view(&notarization.proposal) {
@@ -2184,7 +2235,7 @@ impl<
                                     continue;
                                 }
                             };
-                            self.notarization(notarization).await;
+                            self.notarization(notarization, &mut application_mailbox).await;
                         }
                         wire::voter::Payload::Nullify(nullify) => {
                             view = nullify.view;
@@ -2202,7 +2253,7 @@ impl<
                                     continue;
                                 }
                             };
-                            self.finalize(finalize).await;
+                            self.finalize(finalize, &mut application_mailbox).await;
                         }
                         wire::voter::Payload::Finalization(finalization) => {
                             view = match proposal_view(&finalization.proposal) {
@@ -2212,7 +2263,7 @@ impl<
                                     continue;
                                 }
                             };
-                            self.finalization(finalization).await;
+                            self.finalization(finalization, &mut application_mailbox).await;
                         }
                     };
                 },

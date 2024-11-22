@@ -52,7 +52,7 @@ pub trait Automaton: Clone + Send + 'static {
     /// Generate a new payload for the given context.
     ///
     /// If it is possible to generate a payload, the `Automaton` should call `Mailbox::proposed`.
-    fn propose(&mut self, context: Self::Context) -> impl Future<Output = ()> + Send;
+    fn propose(&mut self, context: Self::Context) -> impl Future<Output = Option<Digest>> + Send;
 
     /// Called once consensus locks on a proposal. At this point the application can
     /// broadcast the raw contents to the network with the given consensus header (which
@@ -79,7 +79,7 @@ pub trait Automaton: Clone + Send + 'static {
         &mut self,
         context: Self::Context,
         payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = Option<bool>> + Send;
 
     /// Event that the container has been notarized (seen by `2f+1` participants).
     ///
@@ -96,23 +96,6 @@ pub trait Automaton: Clone + Send + 'static {
         context: Self::Context,
         payload: Digest,
     ) -> impl Future<Output = ()> + Send;
-}
-
-/// Mailbox is implemented by the consensus engine to receive messages from the Automaton.
-pub trait Mailbox: Clone + Send + 'static {
-    type Context;
-
-    /// Proposed is called after a payload is constructed.
-    ///
-    /// If the `Context` is no longer active/relevant, this will be dropped.
-    fn proposed(
-        &mut self,
-        context: Self::Context,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
-
-    /// Verified is called after a payload is verified.
-    fn verified(&mut self, context: Self::Context) -> impl Future<Output = ()> + Send;
 }
 
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not
