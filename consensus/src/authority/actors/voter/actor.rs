@@ -45,7 +45,6 @@ struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view
-    next_proposal_request: Option<SystemTime>,
     requested_proposal: bool,
     proposal: Option<(Digest /* proposal */, wire::Proposal)>,
     verified_proposal: bool,
@@ -87,7 +86,6 @@ impl<C: Scheme, H: Hasher, A: Supervisor> Round<C, H, A> {
             advance_deadline,
             nullify_retry: None,
 
-            next_proposal_request: None,
             requested_proposal: false,
             proposal: None,
             verified_proposal: false,
@@ -408,7 +406,6 @@ pub struct Actor<
     leader_timeout: Duration,
     notarization_timeout: Duration,
     nullify_retry: Duration,
-    proposal_retry: Duration,
     activity_timeout: View,
 
     mailbox_receiver: mpsc::Receiver<Message>,
@@ -459,7 +456,6 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
-                proposal_retry: cfg.proposal_retry,
 
                 activity_timeout: cfg.activity_timeout,
 
@@ -494,29 +490,22 @@ impl<
         None
     }
 
-    async fn propose(&mut self) -> Option<SystemTime> {
+    async fn propose(&mut self) {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
             if round.leader != self.crypto.public_key() {
-                return None;
-            }
-
-            // Check if we need to wait to propose
-            if let Some(next_proposal_request) = round.next_proposal_request {
-                if next_proposal_request > self.runtime.current() {
-                    return Some(next_proposal_request);
-                }
+                return;
             }
 
             // Check if we have already requested a proposal
             if round.requested_proposal {
-                return None;
+                return;
             }
 
             // Check if we have already proposed
             if round.proposal.is_some() {
-                return None;
+                return;
             }
 
             // Consider proposal requested, even if parent doesn't exist to prevent
@@ -525,7 +514,10 @@ impl<
         }
 
         // Find best parent
-        let (parent, parent_height) = self.find_parent()?;
+        let (parent, parent_height) = match self.find_parent() {
+            Some(parent) => parent,
+            None => return,
+        };
 
         // Request proposal from application
         self.application
@@ -538,7 +530,6 @@ impl<
             })
             .await;
         debug!(view = self.view, "requested proposal");
-        None
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -731,7 +722,6 @@ impl<
             view = index.view,
             height = index.height,
             digest = hex(&digest),
-            retried = round.next_proposal_request.is_some(),
             "generated proposal"
         );
         round.proposal = Some((digest, proposal));
@@ -1670,12 +1660,7 @@ impl<
         if !round.verified_proposal {
             return None;
         }
-        let proposal = match &round.proposal {
-            Some((_, proposal)) => proposal,
-            None => {
-                return None;
-            }
-        };
+        let proposal = &round.proposal.as_ref().unwrap().1;
         round.broadcast_notarize = true;
         Some(wire::Notarize {
             proposal: Some(proposal.clone()),
@@ -1837,6 +1822,8 @@ impl<
     async fn broadcast(&mut self, sender: &mut impl Sender, view: u64) {
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
+            // TODO: if build proposal, should let application know we are broadcasting
+
             // Broadcast the vote
             let msg = wire::Voter {
                 payload: Some(wire::voter::Payload::Notarize(notarize.clone())),
@@ -1926,60 +1913,41 @@ impl<
         // Process messages
         loop {
             // Attempt to propose a container
-            let propose_retry = match self.propose().await {
-                Some(retry) => Either::Left(self.runtime.sleep_until(retry)),
-                None => Either::Right(futures::future::pending()),
-            };
+            self.propose().await;
 
             // Wait for a timeout to fire or for a message to arrive
-            let null_timeout = self.timeout_deadline();
+            let timeout = self.timeout_deadline();
             let view;
             select! {
-                _ = self.runtime.sleep_until(null_timeout) => {
+                _ = self.runtime.sleep_until(timeout) => {
                     // Trigger the timeout
                     self.timeout(&mut sender).await;
                     view = self.view;
                 },
-                _ = propose_retry => {
-                    debug!(view = self.view, "proposal retry timeout fired");
-                    continue;
-                },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Proposed{ view: proposal_view, payload } => {
+                        Message::Proposed{ context, payload } => {
                             // If we have already moved to another view, drop the response as we will
                             // not broadcast it
-                            if self.view != proposal_view {
-                                debug!(view = proposal_view, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
+                            if self.view != context.index.view {
+                                debug!(view = context.index.view, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
                                 continue;
                             }
 
                             // Construct proposal
-                            let proposal_digest = proposal_message(self.view, height, &parent, &payload_digest);
-                            let proposal = wire::Proposal {
-                                view: self.view,
-                                height,
-                                parent,
-                                payload,
-                                signature: Some(wire::Signature {
-                                    public_key: self.crypto.public_key(),
-                                    signature: self.crypto.sign(&self.header_namespace, &proposal_digest),
-                                }),
-                            };
-
-                            // Handle our proposal
-                            self.hasher.update(&proposal_digest);
+                            let message = proposal_message(&context.index, &context.parent, &payload);
+                            self.hasher.update(&message);
                             let proposal_digest = self.hasher.finalize();
+                            let proposal = wire::Proposal {
+                                index: Some(context.index),
+                                parent: Some(context.parent),
+                                payload,
+                            };
                             if !self.our_proposal(proposal_digest, proposal.clone()).await {
                                 continue;
                             }
-                            view = proposal_view;
-
-                            // TODO: produce header and send back to application
-                            self.application.broadcast().await;
-
-                            // TODO: broadcast vote containing new proposal
+                            view = self.view;
                         },
                         Message::Verified { view: verified_view } => {
                             // Handle verified proposal

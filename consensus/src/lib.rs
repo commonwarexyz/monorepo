@@ -91,11 +91,7 @@ pub trait Mailbox: Clone + Send + 'static {
     ) -> impl Future<Output = ()> + Send;
 
     /// Verified is called after a payload is verified.
-    fn verified(
-        &mut self,
-        context: Self::Context,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
+    fn verified(&mut self, context: Self::Context) -> impl Future<Output = ()> + Send;
 }
 
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not

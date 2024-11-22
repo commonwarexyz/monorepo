@@ -1,15 +1,15 @@
-use crate::authority::{wire, View};
+use crate::authority::{wire, Context, View};
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message {
     Proposed {
-        view: View,
+        context: Context,
         payload: Digest,
     },
     Verified {
-        view: View,
+        context: Context,
     },
     Backfilled {
         notarizations: Vec<wire::Notarization>,
@@ -26,15 +26,18 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn proposed(&mut self, view: View, payload: Digest) {
+    pub async fn proposed(&mut self, context: Context, payload: Digest) {
         self.sender
-            .send(Message::Proposed { view, payload })
+            .send(Message::Proposed { context, payload })
             .await
             .unwrap();
     }
 
-    pub async fn verified(&mut self, view: View) {
-        self.sender.send(Message::Verified { view }).await.unwrap();
+    pub async fn verified(&mut self, context: Context) {
+        self.sender
+            .send(Message::Verified { context })
+            .await
+            .unwrap();
     }
 
     pub(crate) async fn backfilled(&mut self, notarizations: Vec<wire::Notarization>) {
