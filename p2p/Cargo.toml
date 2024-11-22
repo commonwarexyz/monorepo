@@ -16,20 +16,20 @@ commonware-macros = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-stream = { workspace = true }
 commonware-utils = { workspace = true }
-bytes = { workspace = true } 
+bytes = { workspace = true }
 rand = { workspace = true }
-rand_distr = { workspace = true } 
+rand_distr = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
-tracing = { workspace = true } 
+tracing = { workspace = true }
 prost = { workspace = true }
 governor = { workspace = true }
-prometheus-client = { workspace = true } 
+prometheus-client = { workspace = true }
 zstd = { workspace = true }
 bitvec = "1"
 
 [build-dependencies]
-prost-build = { workspace = true } 
+prost-build = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

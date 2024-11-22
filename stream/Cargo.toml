@@ -2,7 +2,7 @@
 name = "commonware-stream"
 edition = "2021"
 publish = true
-version = "0.0.2"
+version = "0.0.1"
 license = "MIT OR Apache-2.0"
 description = "[Placeholder description]"
 readme = "README.md"

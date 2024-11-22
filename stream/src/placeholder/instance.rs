@@ -13,6 +13,7 @@ use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use rand::{CryptoRng, Rng};
 
+// TODO: Fix this constant which is probably wrong (https://github.com/commonwarexyz/monorepo/issues/185).
 const CHUNK_PADDING: usize = 64 /* protobuf overhead */ + 12 /* chunk info */ + 16 /* encryption tag */;
 
 pub struct Instance<C: Scheme, Si: Sink, St: Stream> {
