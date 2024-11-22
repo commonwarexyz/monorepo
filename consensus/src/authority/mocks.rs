@@ -1,14 +1,17 @@
-use super::{Context, Height, View};
-use crate::{Activity, Automaton, Header, Proof, Supervisor};
+use super::{
+    prover::Prover, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
+    NOTARIZE, NULLIFY_AND_FINALIZE,
+};
+use crate::{Activity, Automaton as Au, Header, Proof, Supervisor as Su};
 use bytes::Bytes;
-use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt};
 use rand::RngCore;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -17,9 +20,8 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
-pub struct Config<H: Hasher, S: Supervisor> {
+pub struct AutomatonConfig<H: Hasher> {
     pub hasher: H,
-    pub supervisor: S,
 
     /// The public key of the participant.
     ///
@@ -51,11 +53,9 @@ struct State {
     finalized_views: HashSet<Digest>,
 }
 
-#[derive(Clone)]
-pub struct Application<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> {
+pub struct Automaton<E: Clock + RngCore, H: Hasher> {
     runtime: E,
     hasher: H,
-    supervisor: S,
 
     participant: PublicKey,
 
@@ -66,12 +66,12 @@ pub struct Application<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View
 
     progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
-    state: Arc<Mutex<State>>,
+    state: State,
 }
 
-impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Application<E, H, S> {
+impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
     // TODO: need to input broadcast artifacts into application
-    pub fn new(runtime: E, cfg: Config<H, S>) -> Self {
+    pub fn new(runtime: E, cfg: AutomatonConfig<H>) -> Self {
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
         let parse_latency = Normal::new(cfg.parse_latency.0, cfg.parse_latency.1).unwrap();
@@ -81,7 +81,6 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Application<E, 
         Self {
             runtime,
             hasher: cfg.hasher,
-            supervisor: cfg.supervisor,
 
             participant: cfg.participant,
 
@@ -92,7 +91,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Application<E, 
 
             progress: cfg.sender,
 
-            state: Arc::new(Mutex::new(State::default())),
+            state: State::default(),
         }
     }
 
@@ -101,9 +100,7 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Index = View>> Application<E, 
     }
 }
 
-impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Seed = (), Index = View>> Automaton
-    for Application<E, H, S>
-{
+impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
     type Context = Context;
 
     fn genesis(&self) -> Digest {
@@ -270,25 +267,157 @@ impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Seed = (), Index = View>> Auto
     }
 }
 
-impl<E: Clock + RngCore, H: Hasher, S: Supervisor<Seed = (), Index = View>> Supervisor
-    for Application<E, H, S>
-{
-    type Index = S::Index;
-    type Seed = S::Seed;
+pub struct SupervisorConfig<C: Scheme, H: Hasher> {
+    pub prover: Prover<C, H>,
+    pub participants: BTreeMap<View, Vec<PublicKey>>,
+}
 
-    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey> {
-        self.supervisor.leader(index, seed)
+type HeightActivity = HashMap<Height, HashMap<Digest, HashSet<PublicKey>>>;
+type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
+
+#[derive(Clone)]
+pub struct Supervisor<C: Scheme, H: Hasher> {
+    participants: BTreeMap<View, (HashSet<PublicKey>, Vec<PublicKey>)>,
+
+    prover: Prover<C, H>,
+
+    proposals: Arc<Mutex<HeightActivity>>,
+    votes: Arc<Mutex<HeightActivity>>,
+    finalizes: Arc<Mutex<HeightActivity>>,
+    faults: Arc<Mutex<Faults>>,
+}
+
+impl<C: Scheme, H: Hasher> Supervisor<C, H> {
+    fn new(cfg: SupervisorConfig<C, H>) -> Self {
+        let mut parsed_participants = BTreeMap::new();
+        for (view, mut validators) in cfg.participants.into_iter() {
+            let mut set = HashSet::new();
+            for validator in validators.iter() {
+                set.insert(validator.clone());
+            }
+            validators.sort();
+            parsed_participants.insert(view, (set.clone(), validators));
+        }
+        Self {
+            participants: parsed_participants,
+            prover: cfg.prover,
+            proposals: Arc::new(Mutex::new(HashMap::new())),
+            votes: Arc::new(Mutex::new(HashMap::new())),
+            finalizes: Arc::new(Mutex::new(HashMap::new())),
+            faults: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
+    type Index = View;
+    type Seed = ();
+
+    fn leader(&self, index: Self::Index, _seed: Self::Seed) -> Option<PublicKey> {
+        let closest = match self.participants.range(..=index).next_back() {
+            Some((_, p)) => p,
+            None => {
+                panic!("no participants in required range");
+            }
+        };
+        Some(closest.1[index as usize % closest.1.len()].clone())
     }
 
     fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>> {
-        self.supervisor.participants(index)
+        let closest = match self.participants.range(..=index).next_back() {
+            Some((_, p)) => p,
+            None => {
+                panic!("no participants in required range");
+            }
+        };
+        Some(&closest.1)
     }
 
     fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<bool> {
-        self.supervisor.is_participant(index, candidate)
+        let closest = match self.participants.range(..=index).next_back() {
+            Some((_, p)) => p,
+            None => {
+                panic!("no participants in required range");
+            }
+        };
+        Some(closest.0.contains(candidate))
     }
 
     async fn report(&mut self, activity: Activity, proof: Proof) {
-        self.supervisor.report(activity, proof).await
+        // We check signatures for all messages to ensure that the prover is working correctly
+        // but in production this isn't necessary (as signatures are already verified in
+        // consensus).
+        match activity {
+            NOTARIZE => {
+                // TODO: use payload digest?
+                let (index, _, payload, public_key) =
+                    self.prover.deserialize_notarize(proof, true).unwrap();
+                self.votes
+                    .lock()
+                    .unwrap()
+                    .entry(index.height)
+                    .or_default()
+                    .entry(payload)
+                    .or_default()
+                    .insert(public_key);
+            }
+            FINALIZE => {
+                let (index, _, payload, public_key) =
+                    self.prover.deserialize_finalize(proof, true).unwrap();
+                self.finalizes
+                    .lock()
+                    .unwrap()
+                    .entry(index.height)
+                    .or_default()
+                    .entry(payload)
+                    .or_default()
+                    .insert(public_key);
+            }
+            CONFLICTING_NOTARIZE => {
+                let (public_key, view) = self
+                    .prover
+                    .deserialize_conflicting_notarize(proof, true)
+                    .unwrap();
+                self.faults
+                    .lock()
+                    .unwrap()
+                    .entry(public_key)
+                    .or_default()
+                    .entry(view)
+                    .or_default()
+                    .insert(CONFLICTING_NOTARIZE);
+            }
+            CONFLICTING_FINALIZE => {
+                let (public_key, view) = self
+                    .prover
+                    .deserialize_conflicting_finalize(proof, true)
+                    .unwrap();
+                self.faults
+                    .lock()
+                    .unwrap()
+                    .entry(public_key)
+                    .or_default()
+                    .entry(view)
+                    .or_default()
+                    .insert(CONFLICTING_FINALIZE);
+            }
+            NULLIFY_AND_FINALIZE => {
+                let (public_key, view) = self
+                    .prover
+                    .deserialize_nullify_finalize(proof, true)
+                    .unwrap();
+                self.faults
+                    .lock()
+                    .unwrap()
+                    .entry(public_key)
+                    .or_default()
+                    .entry(view)
+                    .or_default()
+                    .insert(NULLIFY_AND_FINALIZE);
+            }
+            unexpected => {
+                panic!("unexpected activity: {}", unexpected);
+            }
+        }
     }
 }

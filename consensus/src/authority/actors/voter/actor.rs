@@ -2079,6 +2079,7 @@ impl<
         // Spawn async application processor
         //
         // TODO: clean up these abstractions
+        // TODO: use automaton rather than application
         let (application_sender, mut application_receiver) = mpsc::channel(1024);
         let mut application_mailbox = Application::new(application_sender);
         self.runtime.spawn("application", {
