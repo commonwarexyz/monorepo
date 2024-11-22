@@ -1,8 +1,4 @@
-use super::{
-    actors::{backfiller, voter},
-    config::Config,
-    Context, View,
-};
+use super::{actors::voter, config::Config, Context, View};
 use crate::{Automaton, Finalizer, Supervisor};
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_macros::select;
@@ -22,9 +18,8 @@ pub struct Engine<
 
     voter: voter::Actor<E, C, H, A>,
     voter_mailbox: voter::Mailbox,
-
-    backfiller: backfiller::Actor<E, C, H, A>,
-    backfiller_mailbox: backfiller::Mailbox,
+    // backfiller: backfiller::Actor<E, C, H, A>,
+    // backfiller_mailbox: backfiller::Mailbox,
 }
 
 impl<
@@ -57,26 +52,25 @@ impl<
                 namespace: cfg.namespace.clone(),
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
-                null_vote_retry: cfg.null_vote_retry,
-                proposal_retry: cfg.proposal_retry,
+                nullify_retry: cfg.nullify_retry,
                 activity_timeout: cfg.activity_timeout,
             },
         );
 
-        // Create backfiller
-        let (backfiller, backfiller_mailbox) = backfiller::Actor::new(
-            runtime.clone(),
-            backfiller::Config {
-                crypto: cfg.crypto,
-                hasher: cfg.hasher,
-                application: cfg.application,
-                namespace: cfg.namespace,
-                fetch_timeout: cfg.fetch_timeout,
-                max_fetch_count: cfg.max_fetch_count,
-                max_fetch_size: cfg.max_fetch_size,
-                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
-            },
-        );
+        // // Create backfiller
+        // let (backfiller, backfiller_mailbox) = backfiller::Actor::new(
+        //     runtime.clone(),
+        //     backfiller::Config {
+        //         crypto: cfg.crypto,
+        //         hasher: cfg.hasher,
+        //         application: cfg.application,
+        //         namespace: cfg.namespace,
+        //         fetch_timeout: cfg.fetch_timeout,
+        //         max_fetch_count: cfg.max_fetch_count,
+        //         max_fetch_size: cfg.max_fetch_size,
+        //         fetch_rate_per_peer: cfg.fetch_rate_per_peer,
+        //     },
+        // );
 
         // Return the engine
         Self {
@@ -84,43 +78,40 @@ impl<
 
             voter,
             voter_mailbox,
-
-            backfiller,
-            backfiller_mailbox,
+            // backfiller,
+            // backfiller_mailbox,
         }
     }
 
     pub async fn run(
         self,
         voter_network: (impl Sender, impl Receiver),
-        backfiller_network: (impl Sender, impl Receiver),
+        _backfiller_network: (impl Sender, impl Receiver),
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
         let mut voter = self.runtime.spawn("voter", async move {
-            self.voter
-                .run(self.backfiller_mailbox, voter_sender, voter_receiver)
-                .await;
+            self.voter.run(voter_sender, voter_receiver).await;
         });
 
-        // Start the backfiller
-        let (backfiller_sender, backfiller_receiver) = backfiller_network;
-        let mut backfiller = self.runtime.spawn("backfiller", async move {
-            self.backfiller
-                .run(self.voter_mailbox, backfiller_sender, backfiller_receiver)
-                .await;
-        });
+        // // Start the backfiller
+        // let (backfiller_sender, backfiller_receiver) = backfiller_network;
+        // let mut backfiller = self.runtime.spawn("backfiller", async move {
+        //     self.backfiller
+        //         .run(self.voter_mailbox, backfiller_sender, backfiller_receiver)
+        //         .await;
+        // });
 
         // Wait for the resolver or voter to finish
         select! {
             _ = &mut voter => {
                 debug!("voter finished");
-                backfiller.abort();
+                // backfiller.abort();
             },
-            _ = &mut backfiller => {
-                debug!("backfiller finished");
-                voter.abort();
-            },
+            // _ = &mut backfiller => {
+            //     debug!("backfiller finished");
+            //     voter.abort();
+            // },
         }
     }
 }

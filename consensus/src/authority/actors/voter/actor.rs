@@ -1,7 +1,6 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
-        actors::backfiller,
         encoder::{
             finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
             proposal_message,
@@ -18,7 +17,7 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::{hex, quorum};
 use core::panic;
-use futures::{channel::mpsc, future::Either, join, StreamExt};
+use futures::{channel::mpsc, StreamExt};
 use prometheus_client::metrics::gauge::Gauge;
 use prost::Message as _;
 use rand::Rng;
@@ -1527,6 +1526,8 @@ impl<
         round.leader_deadline = None;
         round.advance_deadline = None;
 
+        // TODO: If `> f` notarized a given proposal, then we should backfill...
+
         // Enter next view
         self.enter_view(nullification.view + 1);
     }
@@ -2058,12 +2059,7 @@ impl<
         };
     }
 
-    pub async fn run(
-        mut self,
-        mut backfiller: backfiller::Mailbox,
-        mut sender: impl Sender,
-        mut receiver: impl Receiver,
-    ) {
+    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
@@ -2137,7 +2133,7 @@ impl<
                             // TODO: Have resolver hold on to verified proposals in case they become notarized or if they are notarized
                             // but learned about later.
                         },
-                        Message::Backfilled { notarizations } => {
+                        Message::Backfilled { notarizations: _ } => {
                             // TODO: store notarizations we've backfilled (verified in backfiller to avoid using compute in this loop)
                             unimplemented!()
                         },
