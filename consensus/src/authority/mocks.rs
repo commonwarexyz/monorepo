@@ -7,6 +7,7 @@ use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
+use core::hash;
 use futures::{channel::mpsc, SinkExt};
 use rand::RngCore;
 use rand_distr::{Distribution, Normal};
@@ -20,8 +21,31 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
+#[derive(Clone)]
+pub struct Broadcast {
+    containers: Arc<Mutex<HashMap<Digest, Bytes>>>,
+}
+
+impl Broadcast {
+    pub fn new() -> Self {
+        Self {
+            containers: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn put(&self, container: Digest, payload: Bytes) {
+        self.containers.lock().unwrap().insert(container, payload);
+    }
+
+    pub async fn get(&self, container: Digest) -> Option<Bytes> {
+        self.containers.lock().unwrap().remove(&container)
+    }
+}
+
 pub struct AutomatonConfig<H: Hasher> {
     pub hasher: H,
+
+    pub broadcast: Broadcast,
 
     /// The public key of the participant.
     ///
@@ -53,9 +77,12 @@ struct State {
     finalized_views: HashSet<Digest>,
 }
 
+#[derive(Clone)]
 pub struct Automaton<E: Clock + RngCore, H: Hasher> {
     runtime: E,
-    hasher: H,
+
+    hasher: Arc<Mutex<H>>,
+    broadcast: Broadcast,
 
     participant: PublicKey,
 
@@ -66,11 +93,11 @@ pub struct Automaton<E: Clock + RngCore, H: Hasher> {
 
     progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
-    state: State,
+    state: Arc<Mutex<State>>,
 }
 
 impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
-    // TODO: need to input broadcast artifacts into application
+    // TODO: need to input broadcast artifacts into automaton concurrently?
     pub fn new(runtime: E, cfg: AutomatonConfig<H>) -> Self {
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
@@ -80,7 +107,9 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
         // Return constructed application
         Self {
             runtime,
-            hasher: cfg.hasher,
+
+            hasher: Arc::new(Mutex::new(cfg.hasher)),
+            broadcast: cfg.broadcast,
 
             participant: cfg.participant,
 
@@ -91,7 +120,7 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
 
             progress: cfg.sender,
 
-            state: State::default(),
+            state: Arc::new(Mutex::new(State::default())),
         }
     }
 
@@ -105,10 +134,11 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
 
     fn genesis(&self) -> Digest {
         let payload = Bytes::from(GENESIS_BYTES);
-        // TODO: clean this up
-        let mut hasher = self.hasher.clone();
-        hasher.update(&payload);
-        let digest = hasher.finalize();
+        let digest = {
+            let mut hasher = self.hasher.lock().unwrap();
+            hasher.update(&payload);
+            hasher.finalize()
+        };
         let mut state = self.state.lock().unwrap();
         state.parsed.insert(digest.clone());
         state.verified.insert(digest.clone(), 0);
@@ -116,19 +146,18 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
         digest
     }
 
-    async fn propose(&mut self, context: Self::Context) -> Option<Digest> {
+    async fn propose(&self, context: Self::Context) -> Option<Digest> {
         // Verify parent exists and we are at the correct height
         if !H::validate(&context.parent.1) {
             self.panic("invalid parent digest length");
         }
+        if self.broadcast.get(context.parent.1).await.is_none() {
+            return None;
+        }
         {
             let state = self.state.lock().unwrap();
-            if state.verified.contains_key(&context.parent) {
-                if state.verified.get(&context.parent).unwrap() + 1 != context.height {
-                    self.panic("invalid height");
-                }
-            } else {
-                self.panic("parent not verified");
+            if !state.verified.contains_key(&context.parent.1) {
+                return None;
             }
         }
 
@@ -141,15 +170,21 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
         // Generate the payload
         let mut payload = Vec::new();
         payload.extend_from_slice(&self.participant);
-        payload.extend_from_slice(&context.height.to_be_bytes());
-        Some(Bytes::from(payload))
+        payload.extend_from_slice(&context.index.0.to_be_bytes());
+        payload.extend_from_slice(&context.index.1.to_be_bytes());
+        let mut hasher = self.hasher.lock().unwrap();
+        hasher.update(&payload);
+        Some(hasher.finalize())
     }
 
-    async fn broadcast(&mut self, context: Self::Context, header: Header, payload: Digest) {
+    async fn broadcast(&self, context: Self::Context, header: Header, payload: Digest) {
+        // TODO: need to send to other application instances using a simple overlay
+        // TODO: if get block after all votes, no one will do anything?
         unimplemented!();
+        self.broadcast.put(payload, pending);
     }
 
-    async fn verify(&mut self, context: Self::Context, payload: Digest) -> Option<bool> {
+    async fn verify(&self, context: Self::Context, payload: Digest) -> Option<bool> {
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
         self.runtime
@@ -203,7 +238,7 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
         None
     }
 
-    async fn notarized(&mut self, context: Self::Context, container: Digest) {
+    async fn notarized(&self, context: Self::Context, container: Digest) {
         if !H::validate(&container) {
             self.panic("invalid digest length");
         }
@@ -230,7 +265,7 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
             .await;
     }
 
-    async fn finalized(&mut self, context: Self::Context, container: Digest) {
+    async fn finalized(&self, context: Self::Context, container: Digest) {
         if !H::validate(&container) {
             self.panic("invalid digest length");
         }

@@ -446,7 +446,7 @@ impl<
         S: Supervisor<Seed = (), Index = View>,
     > Actor<E, C, H, A, S>
 {
-    pub fn new(runtime: E, cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, mut cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -2086,6 +2086,7 @@ impl<
             let mut application = self.application.take().unwrap();
             let mut mailbox = self.mailbox_sender.clone();
             async move {
+                // TODO: should we handle these messages concurrently?
                 while let Some(msg) = application_receiver.next().await {
                     match msg {
                         ApplicationMessage::Propose { context } => {

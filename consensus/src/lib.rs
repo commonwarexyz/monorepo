@@ -43,7 +43,7 @@ type Header = Bytes;
 /// While an automaton may be logically instantiated as a single entity, it may be
 /// cloned by multiple sub-components of a consensus engine to, among other things,
 /// parse payloads concurrently.
-pub trait Automaton: Send + 'static {
+pub trait Automaton: Clone + Send + 'static {
     type Context;
 
     /// Initialize the application with the genesis container.
@@ -52,7 +52,7 @@ pub trait Automaton: Send + 'static {
     /// Generate a new payload for the given context.
     ///
     /// If it is possible to generate a payload, the `Automaton` should call `Mailbox::proposed`.
-    fn propose(&mut self, context: Self::Context) -> impl Future<Output = Option<Digest>> + Send;
+    fn propose(&self, context: Self::Context) -> impl Future<Output = Option<Digest>> + Send;
 
     /// Called once consensus locks on a proposal. At this point the application can
     /// broadcast the raw contents to the network with the given consensus header (which
@@ -64,7 +64,7 @@ pub trait Automaton: Send + 'static {
     /// TODO: must be specific about how payloads are linked...if we only use payloads then we can't
     /// verify broader object from consensus, so parent should instead be over headers.
     fn broadcast(
-        &mut self,
+        &self,
         context: Self::Context,
         header: Header,
         payload: Digest,
@@ -76,7 +76,7 @@ pub trait Automaton: Send + 'static {
     /// the payload. If the payload has not been received or describes an invalid payload, the consensus
     /// instance should not be notified using `Mailbox::verified`.
     fn verify(
-        &mut self,
+        &self,
         context: Self::Context,
         payload: Digest,
     ) -> impl Future<Output = Option<bool>> + Send;
@@ -84,18 +84,12 @@ pub trait Automaton: Send + 'static {
     /// Event that the container has been notarized (seen by `2f+1` participants).
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(
-        &mut self,
-        context: Self::Context,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
+    fn notarized(&self, context: Self::Context, payload: Digest)
+        -> impl Future<Output = ()> + Send;
 
     /// Event that the container has been finalized.
-    fn finalized(
-        &mut self,
-        context: Self::Context,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
+    fn finalized(&self, context: Self::Context, payload: Digest)
+        -> impl Future<Output = ()> + Send;
 }
 
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not
@@ -138,5 +132,5 @@ pub trait Supervisor: Clone + Send + 'static {
     /// To get more information about the contribution, the proof can be decoded.
     ///
     /// The consensus instance may report a duplicate contribution.
-    fn report(&mut self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
+    fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
 }
