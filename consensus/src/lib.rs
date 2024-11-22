@@ -47,7 +47,7 @@ pub trait Automaton: Clone + Send + 'static {
     type Context;
 
     /// Initialize the application with the genesis container.
-    fn genesis(&mut self) -> Digest;
+    fn genesis(&self) -> Digest;
 
     /// Generate a new payload for the given context.
     ///

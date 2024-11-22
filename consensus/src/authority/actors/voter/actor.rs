@@ -33,6 +33,9 @@ type Notarizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Nota
 type Nullifiable<'a> = Option<(View, &'a HashMap<PublicKey, wire::Nullify>)>;
 type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Finalize>)>;
 
+const GENESIS_VIEW: View = 0;
+const GENESIS_HEIGHT: Height = 0;
+
 struct Round<C: Scheme, H: Hasher, A: Supervisor> {
     hasher: H,
     application: A,
@@ -409,6 +412,8 @@ pub struct Actor<
     hasher: H,
     application: A,
 
+    genesis: Digest,
+
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
@@ -450,6 +455,9 @@ impl<
             registry.register("tracked_views", "tracked views", tracked_views.clone());
         }
 
+        // Get genesis
+        let genesis = cfg.application.genesis();
+
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         (
@@ -458,6 +466,8 @@ impl<
                 crypto: cfg.crypto,
                 hasher: cfg.hasher,
                 application: cfg.application,
+
+                genesis,
 
                 notarize_namespace: notarize_namespace(&cfg.namespace),
                 nullify_namespace: nullify_namespace(&cfg.namespace),
@@ -482,22 +492,63 @@ impl<
         )
     }
 
+    fn is_notarized(&self, view: View) -> Option<&(Digest, wire::Proposal)> {
+        let round = self.views.get(&view)?;
+        let proposal = round.proposal.as_ref()?;
+        let notarizes = round.notarizes.get(&proposal.0)?;
+        let (threshold, _) = self.threshold(view)?;
+        if notarizes.len() < threshold as usize {
+            return None;
+        }
+        Some(proposal)
+    }
+
+    fn is_nullified(&self, view: View) -> bool {
+        let round = match self.views.get(&view) {
+            Some(round) => round,
+            None => return false,
+        };
+        let (threshold, _) = match self.threshold(view) {
+            Some(threshold) => threshold,
+            None => return false,
+        };
+        round.nullifies.len() >= threshold as usize
+    }
+
     fn find_parent(&self) -> Option<(wire::Parent, Height)> {
-        for view in (0..self.view).rev() {
-            let round = self.views.get(&view)?;
-            // TODO: check if should be doing something different (may not have broadcast notarization)
-            if round.broadcast_notarization {
-                let (digest, proposal) = round.proposal.as_ref()?;
+        let mut cursor = self.view - 1; // self.view always at least 1
+        loop {
+            if cursor == 0 {
                 return Some((
                     wire::Parent {
-                        view,
-                        digest: digest.clone(),
+                        view: GENESIS_VIEW,
+                        digest: self.genesis.clone(),
                     },
-                    proposal.index.unwrap().height,
+                    GENESIS_HEIGHT,
                 ));
             }
+
+            // If have notarization, return
+            let parent = self.is_notarized(cursor);
+            if let Some(parent) = parent {
+                return Some((
+                    wire::Parent {
+                        view: cursor,
+                        digest: parent.0.clone(),
+                    },
+                    parent.1.index.unwrap().height,
+                ));
+            }
+
+            // If have nullification, continue
+            if self.is_nullified(cursor) {
+                cursor -= 1;
+                continue;
+            }
+
+            // We can't find a valid parent, return
+            return None;
         }
-        None
     }
 
     async fn propose(&mut self) {
@@ -800,13 +851,117 @@ impl<
                         round_digest = hex(round_digest),
                         proposal_digest = hex(&proposal_digest),
                         "conflicting proposal"
-                    )
+                    );
+                    return;
                 }
             }
         }
 
-        // TODO: Ensure we have all null notarizations between the parent and this proposal
-        // TODO: when to determine when to fetch missing?
+        // Check parent validity
+        let parent = proposal.parent.as_ref().unwrap();
+        if index.view <= parent.view {
+            debug!(
+                view = index.view,
+                parent = parent.view,
+                reason = "invalid parent",
+                "dropping proposal"
+            );
+            return;
+        }
+        if parent.view < self.last_finalized {
+            debug!(
+                view = index.view,
+                parent = parent.view,
+                last_finalized = self.last_finalized,
+                reason = "parent behind finalized tip",
+                "dropping proposal"
+            );
+            return;
+        }
+
+        // Ensure we have required notarizations
+        let mut cursor = match index.view {
+            0 => {
+                debug!(
+                    view = index.view,
+                    reason = "invalid view",
+                    "dropping proposal"
+                );
+                return;
+            }
+            _ => index.view - 1,
+        };
+        loop {
+            if cursor == parent.view {
+                // Check if first block
+                if parent.view == GENESIS_VIEW {
+                    if parent.digest != self.genesis {
+                        debug!(
+                            view = cursor,
+                            proposal = hex(&parent.digest),
+                            genesis = hex(&self.genesis),
+                            reason = "invalid genesis",
+                            "dropping proposal"
+                        );
+                        return;
+                    }
+                    if index.height != GENESIS_HEIGHT + 1 {
+                        debug!(
+                            view = cursor,
+                            height = index.height,
+                            reason = "invalid height",
+                            "dropping proposal"
+                        );
+                        return;
+                    }
+                    break;
+                }
+
+                // Check notarization exists
+                let (parent_digest, parent_proposal) = match self.is_notarized(cursor) {
+                    Some(parent) => parent,
+                    None => {
+                        debug!(
+                            view = cursor,
+                            reason = "missing notarization",
+                            "dropping proposal"
+                        );
+                        return;
+                    }
+                };
+                if parent_digest != &parent.digest {
+                    debug!(
+                        view = cursor,
+                        parent = hex(&parent.digest),
+                        proposal = hex(&parent_digest),
+                        reason = "invalid parent",
+                        "dropping proposal"
+                    );
+                    return;
+                }
+                if parent_proposal.index.unwrap().height + 1 != index.height {
+                    debug!(
+                        view = cursor,
+                        parent = hex(&parent.digest),
+                        proposal = hex(&parent_digest),
+                        height = index.height,
+                        reason = "invalid height",
+                        "dropping proposal"
+                    );
+                    return;
+                }
+
+                // Peer proposal references a valid parent
+                break;
+            }
+
+            // Check nullification exists in gap
+            if !self.is_nullified(cursor) {
+                debug!(view = cursor, "missing nullification");
+                return;
+            }
+            cursor -= 1;
+        }
 
         // Verify the proposal
         let round = self.views.entry(index.view).or_insert_with(|| {
