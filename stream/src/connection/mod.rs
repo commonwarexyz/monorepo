@@ -94,13 +94,31 @@ mod x25519;
 pub use handshake::IncomingHandshake;
 pub use instance::{Instance, Sender};
 
+
+/// Configuration for a connection.
+///
+/// # Warning
+/// It is recommended to synchronize this configuration with any relevant peer.
+/// If this is not synchronized, connections could be unnecessarily dropped,
+/// or messages could be parsed incorrectly.
 #[derive(Clone)]
 pub struct Config<C: Scheme> {
+    /// Cryptographic primitives.
     pub crypto: C,
+
+    /// Prefix for all signed messages to avoid replay attacks.
     pub namespace: Vec<u8>,
+
+    /// Maximum size allowed for messages over any connection.
     pub max_message_size: usize,
+
+    /// Time into the future that a timestamp can be and still be considered valid.
     pub synchrony_bound: Duration,
+
+    /// Duration after which a handshake message is considered stale.
     pub max_handshake_age: Duration,
+
+    /// Timeout for the handshake process.
     pub handshake_timeout: Duration,
 }
 

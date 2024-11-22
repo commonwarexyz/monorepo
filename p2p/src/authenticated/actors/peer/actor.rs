@@ -4,7 +4,7 @@ use crate::authenticated::{
     channels::Channels,
     metrics, wire,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
@@ -103,14 +103,14 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                         content,
                     }
                 })),
-            }.encode_to_vec();
+            }.encode_to_vec().into();
             trace!(
                 part = part,
                 total_parts = total_parts - 1,
                 peer = hex(peer),
                 "sending chunk",
             );
-            sender.send(Bytes::from(msg)).await.map_err(Error::SendFailed)?;
+            sender.send(msg).await.map_err(Error::SendFailed)?;
             sent_messages
                 .get_or_create(&metrics::Message::new_chunk(peer, channel))
                 .inc();
