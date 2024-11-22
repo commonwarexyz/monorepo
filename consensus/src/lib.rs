@@ -109,6 +109,9 @@ pub type Proof = Bytes;
 
 // TODO: should supervisor be managed by consensus? Other than PoA, the consensus usually keeps track of (and updates)
 // who is participating, not some external service. If we did this, we could also remove clone from Application?
+//
+// Rationale not to: application needs to interpret the "reporting" of activity in some way to determine uptime/penalties
+// and it isn't clear how this could be sent back to the consensus application?
 pub trait Supervisor: Clone + Send + 'static {
     type Index;
     type Seed;
