@@ -213,6 +213,7 @@ mod tests {
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
+            let relay = Arc::new(Mutex::new(mocks::Relay::new()));
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for scheme in schemes.into_iter() {
@@ -248,26 +249,27 @@ mod tests {
 
                 // Start engine
                 let hasher = Sha256::default();
-                let supervisor = TestSupervisor::<Ed25519, Sha256>::new(
-                    Prover::new(hasher.clone(), namespace.clone()),
-                    view_validators.clone(),
-                );
+                let supervisor_config = mocks::SupervisorConfig {
+                    prover: Prover::new(hasher.clone(), namespace.clone()),
+                    participants: view_validators.clone(),
+                };
+                let supervisor = mocks::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = ApplicationConfig {
+                let automaton_cfg = mocks::AutomatonConfig {
                     hasher: hasher.clone(),
-                    supervisor,
+                    relay: relay.clone(),
                     participant: validator,
                     sender: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
-                    parse_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
                     allow_invalid_payload: false,
                 };
-                let application = Application::new(runtime.clone(), application_cfg);
+                let application = mocks::Automaton::new(runtime.clone(), automaton_cfg);
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher,
                     application,
+                    supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
@@ -296,7 +298,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let Progress::Finalized(height, digest) = event {
+                if let mocks::Progress::Finalized(height, digest) = event {
                     finalized.insert(height, digest);
                     if height < required_containers {
                         continue;
@@ -318,27 +320,6 @@ mod tests {
                 }
 
                 // Ensure no forks
-                {
-                    let proposals = supervisor.proposals.lock().unwrap();
-                    for (height, views) in proposals.iter() {
-                        // Ensure no skips (height == view)
-                        if views.len() > 1 {
-                            panic!("height: {}, views: {:?}", height, views);
-                        }
-
-                        // Only check at views below timeout
-                        if *height > latest_complete {
-                            continue;
-                        }
-
-                        // Ensure everyone participating
-                        let digest = finalized.get(height).expect("height should be finalized");
-                        let proposers = views.get(digest).expect("digest should exist");
-                        if proposers.len() != 1 {
-                            panic!("height: {}, proposers: {:?}", height, proposers);
-                        }
-                    }
-                }
                 {
                     let votes = supervisor.votes.lock().unwrap();
                     for (height, views) in votes.iter() {

@@ -63,7 +63,6 @@ pub struct AutomatonConfig<H: Hasher> {
     pub participant: PublicKey,
 
     pub propose_latency: Latency,
-    pub parse_latency: Latency,
     pub verify_latency: Latency,
     pub allow_invalid_payload: bool,
 
@@ -95,7 +94,6 @@ pub struct Automaton<E: Clock + RngCore, H: Hasher> {
     participant: PublicKey,
 
     propose_latency: Normal<f64>,
-    parse_latency: Normal<f64>,
     verify_latency: Normal<f64>,
     allow_invalid_payload: bool,
 
@@ -109,7 +107,6 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
     pub fn new(runtime: E, cfg: AutomatonConfig<H>) -> Self {
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
-        let parse_latency = Normal::new(cfg.parse_latency.0, cfg.parse_latency.1).unwrap();
         let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
 
         // Return constructed application
@@ -122,7 +119,6 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
             participant: cfg.participant,
 
             propose_latency,
-            parse_latency,
             verify_latency,
             allow_invalid_payload: cfg.allow_invalid_payload,
 
@@ -306,14 +302,13 @@ pub struct Supervisor<C: Scheme, H: Hasher> {
 
     prover: Prover<C, H>,
 
-    proposals: Arc<Mutex<HeightActivity>>,
-    votes: Arc<Mutex<HeightActivity>>,
-    finalizes: Arc<Mutex<HeightActivity>>,
-    faults: Arc<Mutex<Faults>>,
+    pub votes: Arc<Mutex<HeightActivity>>,
+    pub finalizes: Arc<Mutex<HeightActivity>>,
+    pub faults: Arc<Mutex<Faults>>,
 }
 
 impl<C: Scheme, H: Hasher> Supervisor<C, H> {
-    fn new(cfg: SupervisorConfig<C, H>) -> Self {
+    pub fn new(cfg: SupervisorConfig<C, H>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, mut validators) in cfg.participants.into_iter() {
             let mut set = HashSet::new();
@@ -326,7 +321,6 @@ impl<C: Scheme, H: Hasher> Supervisor<C, H> {
         Self {
             participants: parsed_participants,
             prover: cfg.prover,
-            proposals: Arc::new(Mutex::new(HashMap::new())),
             votes: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
