@@ -1,7 +1,4 @@
-use crate::{
-    authority::{wire, Context, View},
-    Header,
-};
+use crate::authority::{wire, Context};
 use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt};
 
@@ -53,18 +50,9 @@ impl Mailbox {
 }
 
 pub enum ApplicationMessage {
-    Propose {
-        context: Context,
-    },
-    Verify {
-        context: Context,
-        payload: Digest,
-    },
-    Broadcast {
-        context: Context,
-        header: Header,
-        payload: Digest,
-    },
+    Propose { context: Context },
+    Verify { context: Context, payload: Digest },
+    Broadcast { context: Context, payload: Digest },
 }
 
 pub struct Application {
@@ -90,13 +78,9 @@ impl Application {
             .unwrap();
     }
 
-    pub async fn broadcast(&mut self, context: Context, header: Header, payload: Digest) {
+    pub async fn broadcast(&mut self, context: Context, payload: Digest) {
         self.sender
-            .send(ApplicationMessage::Broadcast {
-                context,
-                header,
-                payload,
-            })
+            .send(ApplicationMessage::Broadcast { context, payload })
             .await
             .unwrap();
     }

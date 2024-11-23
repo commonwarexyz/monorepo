@@ -2103,12 +2103,8 @@ impl<
                             };
                             mailbox.verified(context, result).await;
                         }
-                        ApplicationMessage::Broadcast {
-                            context,
-                            header,
-                            payload,
-                        } => {
-                            application.broadcast(context, header, payload).await;
+                        ApplicationMessage::Broadcast { context, payload } => {
+                            application.broadcast(context, payload).await;
                         }
                     }
                 }
@@ -2171,20 +2167,8 @@ impl<
                             }
                             view = self.view;
 
-                            // Construct header
-                            //
-                            // TODO: refactor to only sign once
-                            let notarize = wire::Notarize {
-                                proposal: Some(proposal),
-                                signature: Some(wire::Signature {
-                                    public_key: self.crypto.public_key(),
-                                    signature: self.crypto.sign(&self.notarize_namespace, &message),
-                                }),
-                            };
-                            let header = Prover::<C, H>::serialize_notarize(&notarize);
-
                             // Notify application of proposal
-                            application_mailbox.broadcast(context, header, payload).await;
+                            application_mailbox.broadcast(context,  payload).await;
                         },
                         Message::Verified { context, result } => {
                             // TODO: prevent future verification/penalize?

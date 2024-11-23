@@ -2,12 +2,11 @@ use super::{
     prover::Prover, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
     NOTARIZE, NULLIFY_AND_FINALIZE,
 };
-use crate::{Activity, Automaton as Au, Header, Proof, Supervisor as Su};
+use crate::{Activity, Automaton as Au, Proof, Supervisor as Su};
 use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
-use core::hash;
 use futures::{channel::mpsc, SinkExt};
 use rand::RngCore;
 use rand_distr::{Distribution, Normal};
@@ -22,30 +21,40 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 type Latency = (f64, f64);
 
 #[derive(Clone)]
-pub struct Broadcast {
-    containers: Arc<Mutex<HashMap<Digest, Bytes>>>,
+pub struct Relay {
+    pending: HashMap<Digest, Bytes>,
+    broadcast: HashMap<Digest, Bytes>,
 }
 
-impl Broadcast {
+impl Relay {
     pub fn new() -> Self {
         Self {
-            containers: Arc::new(Mutex::new(HashMap::new())),
+            pending: HashMap::new(),
+            broadcast: HashMap::new(),
         }
     }
 
-    pub async fn put(&self, container: Digest, payload: Bytes) {
-        self.containers.lock().unwrap().insert(container, payload);
+    pub fn pending(&mut self, container: Digest, payload: Bytes) {
+        self.pending.insert(container, payload);
     }
 
-    pub async fn get(&self, container: Digest) -> Option<Bytes> {
-        self.containers.lock().unwrap().remove(&container)
+    pub fn broadcast(&mut self, container: Digest) {
+        let payload = self
+            .pending
+            .remove(&container)
+            .expect("container not pending");
+        self.broadcast.insert(container, payload);
+    }
+
+    pub fn get(&self, container: &Digest) -> Option<Bytes> {
+        self.broadcast.get(container).cloned()
     }
 }
 
 pub struct AutomatonConfig<H: Hasher> {
     pub hasher: H,
 
-    pub broadcast: Broadcast,
+    pub relay: Arc<Mutex<Relay>>,
 
     /// The public key of the participant.
     ///
@@ -68,7 +77,6 @@ pub enum Progress {
 
 #[derive(Default)]
 struct State {
-    parsed: HashSet<Digest>,
     verified: HashMap<Digest, Height>,
     last_finalized: u64,
     finalized: HashMap<Digest, Height>,
@@ -77,12 +85,12 @@ struct State {
     finalized_views: HashSet<Digest>,
 }
 
-#[derive(Clone)]
 pub struct Automaton<E: Clock + RngCore, H: Hasher> {
     runtime: E,
+    hasher: H,
 
-    hasher: Arc<Mutex<H>>,
-    broadcast: Broadcast,
+    /// Relay is a mock for distributing artifacts between applications.
+    relay: Arc<Mutex<Relay>>,
 
     participant: PublicKey,
 
@@ -93,7 +101,7 @@ pub struct Automaton<E: Clock + RngCore, H: Hasher> {
 
     progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
-    state: Arc<Mutex<State>>,
+    state: State,
 }
 
 impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
@@ -108,8 +116,8 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
         Self {
             runtime,
 
-            hasher: Arc::new(Mutex::new(cfg.hasher)),
-            broadcast: cfg.broadcast,
+            hasher: cfg.hasher,
+            relay: cfg.relay,
 
             participant: cfg.participant,
 
@@ -120,7 +128,7 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
 
             progress: cfg.sender,
 
-            state: Arc::new(Mutex::new(State::default())),
+            state: State::default(),
         }
     }
 
@@ -132,59 +140,58 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
 impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
     type Context = Context;
 
-    fn genesis(&self) -> Digest {
+    fn genesis(&mut self) -> Digest {
         let payload = Bytes::from(GENESIS_BYTES);
-        let digest = {
-            let mut hasher = self.hasher.lock().unwrap();
-            hasher.update(&payload);
-            hasher.finalize()
-        };
-        let mut state = self.state.lock().unwrap();
-        state.parsed.insert(digest.clone());
-        state.verified.insert(digest.clone(), 0);
-        state.finalized.insert(digest.clone(), 0);
+        self.hasher.update(&payload);
+        let digest = self.hasher.finalize();
+        self.state.verified.insert(digest.clone(), 0);
+        self.state.finalized.insert(digest.clone(), 0);
         digest
     }
 
-    async fn propose(&self, context: Self::Context) -> Option<Digest> {
-        // Verify parent exists and we are at the correct height
-        if !H::validate(&context.parent.1) {
-            self.panic("invalid parent digest length");
-        }
-        if self.broadcast.get(context.parent.1).await.is_none() {
-            return None;
-        }
-        {
-            let state = self.state.lock().unwrap();
-            if !state.verified.contains_key(&context.parent.1) {
-                return None;
-            }
-        }
-
+    async fn propose(&mut self, context: Self::Context) -> Option<Digest> {
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.runtime);
         self.runtime
             .sleep(Duration::from_millis(duration as u64))
             .await;
 
+        // Verify parent exists and we are at the correct height
+        if !H::validate(&context.parent.1) {
+            self.panic("invalid parent digest length");
+        }
+        let parent_height = match self.state.verified.get(&context.parent.1) {
+            Some(height) => *height,
+            None => return None,
+        };
+        if context.index.1 != parent_height + 1 {
+            self.panic(&format!(
+                "invalid height: {} != {} + 1",
+                context.index.1, parent_height
+            ));
+        }
+
         // Generate the payload
         let mut payload = Vec::new();
         payload.extend_from_slice(&self.participant);
         payload.extend_from_slice(&context.index.0.to_be_bytes());
         payload.extend_from_slice(&context.index.1.to_be_bytes());
-        let mut hasher = self.hasher.lock().unwrap();
-        hasher.update(&payload);
-        Some(hasher.finalize())
+        self.hasher.update(&payload);
+        let digest = self.hasher.finalize();
+
+        // Store pending payload
+        self.relay
+            .lock()
+            .unwrap()
+            .pending(digest.clone(), Bytes::from(payload));
+        Some(digest)
     }
 
-    async fn broadcast(&self, context: Self::Context, header: Header, payload: Digest) {
-        // TODO: need to send to other application instances using a simple overlay
-        // TODO: if get block after all votes, no one will do anything?
-        unimplemented!();
-        self.broadcast.put(payload, pending);
+    async fn broadcast(&mut self, _context: Self::Context, payload: Digest) {
+        self.relay.lock().unwrap().broadcast(payload);
     }
 
-    async fn verify(&self, context: Self::Context, payload: Digest) -> Option<bool> {
+    async fn verify(&mut self, context: Self::Context, payload: Digest) -> Option<bool> {
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
         self.runtime
@@ -192,106 +199,89 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
             .await;
 
         // Verify parent exists and we are at the correct height
-        if !H::validate(&context.parent) {
+        if !H::validate(&context.parent.1) {
             self.panic("invalid parent digest length");
         }
-        if !H::validate(&container) {
+        if !H::validate(&payload) {
             self.panic("invalid digest length");
-        }
-
-        // Verify the payload
-        if !self.allow_invalid_payload {
-            if payload.len() != 40 {
-                self.panic("invalid payload length");
-            }
-            let parsed_height = Height::from_be_bytes(payload[32..].try_into().unwrap());
-            if parsed_height != context.height {
-                self.panic(&format!(
-                    "invalid height (in payload): {} != {}",
-                    parsed_height, context.height
-                ));
-            }
         }
 
         // Ensure not duplicate check
-        let mut state = self.state.lock().unwrap();
-        if state.verified.contains_key(&container) {
+        if self.state.verified.contains_key(&payload) {
             self.panic("container already verified");
         }
-        if let Some(parent) = state.verified.get(&context.parent) {
-            if parent + 1 != context.height {
+        if let Some(parent) = self.state.verified.get(&context.parent.1) {
+            if parent + 1 != context.index.1 {
                 self.panic(&format!(
                     "invalid height (from last verified): {} != {}",
                     parent + 1,
-                    context.height
+                    context.index.1
                 ));
             }
         } else {
-            self.panic("parent not verified");
+            return None;
         };
-        self.hasher.update(&payload);
-        let digest = self.hasher.finalize();
-        if !state.parsed.contains(&digest) {
-            self.panic("payload not parsed");
+
+        // Verify the payload
+        let contents = match self.relay.lock().unwrap().get(&payload) {
+            Some(contents) => contents,
+            None => return None,
+        };
+        if !self.allow_invalid_payload {
+            if contents.len() != 48 {
+                self.panic("invalid payload length");
+            }
+            let parsed_view = Height::from_be_bytes(contents[32..].try_into().unwrap());
+            if parsed_view != context.index.0 {
+                self.panic(&format!(
+                    "invalid view (in payload): {} != {}",
+                    parsed_view, context.index.0
+                ));
+            }
+            let parsed_height = Height::from_be_bytes(contents[40..].try_into().unwrap());
+            if parsed_height != context.index.1 {
+                self.panic(&format!(
+                    "invalid height (in payload): {} != {}",
+                    parsed_height, context.index.1
+                ));
+            }
         }
-        state.verified.insert(container, context.height);
-        None
+        self.state.verified.insert(payload, context.index.1);
+        Some(true)
     }
 
-    async fn notarized(&self, context: Self::Context, container: Digest) {
+    async fn notarized(&mut self, context: Self::Context, container: Digest) {
         if !H::validate(&container) {
             self.panic("invalid digest length");
         }
-        let height = {
-            let mut state = self.state.lock().unwrap();
-            if state.finalized.contains_key(&container) {
-                self.panic("container already finalized");
-            }
-            if !state.notarized_views.insert(container.clone()) {
-                self.panic("view already notarized");
-            }
-            if let Some(height) = state.verified.get(&container) {
-                *height
-            } else {
-                self.panic("container not verified");
-            }
-        };
+        if self.state.finalized.contains_key(&container) {
+            self.panic("container already finalized");
+        }
+        if !self.state.notarized_views.insert(container.clone()) {
+            self.panic("view already notarized");
+        }
         let _ = self
             .progress
             .send((
                 self.participant.clone(),
-                Progress::Notarized(height, container),
+                Progress::Notarized(context.index.1, container),
             ))
             .await;
     }
 
-    async fn finalized(&self, context: Self::Context, container: Digest) {
+    async fn finalized(&mut self, context: Self::Context, container: Digest) {
         if !H::validate(&container) {
             self.panic("invalid digest length");
         }
-        let height = {
-            let mut state = self.state.lock().unwrap();
-            if state.finalized.contains_key(&container) {
-                self.panic("container already finalized");
-            }
-            if !state.finalized_views.insert(container.clone()) {
-                self.panic("view already finalized");
-            }
-            let height = match state.verified.get(&container) {
-                Some(height) => *height,
-                None => self.panic("container not verified"),
-            };
-            let expected = state.last_finalized + 1;
-            if expected != height {
-                self.panic(&format!(
-                    "invalid finalization height: {} != {}",
-                    expected, height
-                ));
-            }
-            state.last_finalized = height;
-            state.finalized.insert(container.clone(), height);
-            height
-        };
+        if self.state.finalized.contains_key(&container) {
+            self.panic("container already finalized");
+        }
+        if !self.state.finalized_views.insert(container.clone()) {
+            self.panic("view already finalized");
+        }
+        let height = context.index.1;
+        self.state.last_finalized = height;
+        self.state.finalized.insert(container.clone(), height);
         let _ = self
             .progress
             .send((
@@ -378,7 +368,7 @@ impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
         Some(closest.0.contains(candidate))
     }
 
-    async fn report(&mut self, activity: Activity, proof: Proof) {
+    async fn report(&self, activity: Activity, proof: Proof) {
         // We check signatures for all messages to ensure that the prover is working correctly
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).

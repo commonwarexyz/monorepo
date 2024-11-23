@@ -8,65 +8,30 @@ use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use std::future::Future;
 
-/// Header contains information specific to consensus that can be used, among other things,
-/// to verify that a given container was signed by some participant at some height.
-///
-/// Headers link payloads together in a chain like so:
-/// ```txt
-/// ┌─────────────┐               ┌─────────────┐
-/// │             │               │             │
-/// │   Header    │◄──────────────┤   Header    │
-/// │             │               │             │
-/// └──────┬──────┘               └──────┬──────┘
-///        ▼                             ▼
-/// ┌─────────────┐               ┌─────────────┐
-/// │             │               │             │
-/// │             │               │             │
-/// │             │               │             │
-/// │   Payload   │               │   Payload   │
-/// │             │               │             │
-/// │             │               │             │
-/// │             │               │             │
-/// └─────────────┘               └─────────────┘
-/// ```
-///
-/// It is possible for payloads to also link to each other and bypass header info, however,
-/// there may be some information in the header useful for interpreting the payload (which
-/// will be wrapped by the header in exported consensus decisions).
-///
-/// Header is a serialized version of Context that includes a payload digest and typically
-/// a signature.
-type Header = Bytes;
-
 /// Automaton is the interface for the consensus engine to inform of progress.
 ///
 /// While an automaton may be logically instantiated as a single entity, it may be
 /// cloned by multiple sub-components of a consensus engine to, among other things,
 /// parse payloads concurrently.
-pub trait Automaton: Clone + Send + 'static {
+pub trait Automaton: Send + 'static {
     type Context;
 
     /// Initialize the application with the genesis container.
-    fn genesis(&self) -> Digest;
+    fn genesis(&mut self) -> Digest;
 
     /// Generate a new payload for the given context.
     ///
     /// If it is possible to generate a payload, the `Automaton` should call `Mailbox::proposed`.
-    fn propose(&self, context: Self::Context) -> impl Future<Output = Option<Digest>> + Send;
+    fn propose(&mut self, context: Self::Context) -> impl Future<Output = Option<Digest>> + Send;
 
     /// Called once consensus locks on a proposal. At this point the application can
     /// broadcast the raw contents to the network with the given consensus header (which
     /// references the payload).
     ///
     /// It is up to the developer to efficiently handle broadcast/backfill to/from the rest of the network.
-    ///
-    ///
-    /// TODO: must be specific about how payloads are linked...if we only use payloads then we can't
-    /// verify broader object from consensus, so parent should instead be over headers.
     fn broadcast(
-        &self,
+        &mut self,
         context: Self::Context,
-        header: Header,
         payload: Digest,
     ) -> impl Future<Output = ()> + Send;
 
@@ -76,7 +41,7 @@ pub trait Automaton: Clone + Send + 'static {
     /// the payload. If the payload has not been received or describes an invalid payload, the consensus
     /// instance should not be notified using `Mailbox::verified`.
     fn verify(
-        &self,
+        &mut self,
         context: Self::Context,
         payload: Digest,
     ) -> impl Future<Output = Option<bool>> + Send;
@@ -84,12 +49,18 @@ pub trait Automaton: Clone + Send + 'static {
     /// Event that the container has been notarized (seen by `2f+1` participants).
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&self, context: Self::Context, payload: Digest)
-        -> impl Future<Output = ()> + Send;
+    fn notarized(
+        &mut self,
+        context: Self::Context,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
 
     /// Event that the container has been finalized.
-    fn finalized(&self, context: Self::Context, payload: Digest)
-        -> impl Future<Output = ()> + Send;
+    fn finalized(
+        &mut self,
+        context: Self::Context,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not
