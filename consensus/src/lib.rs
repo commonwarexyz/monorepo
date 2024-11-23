@@ -49,6 +49,8 @@ pub trait Automaton: Clone + Send + 'static {
     ///
     /// This approach would allow you to just "push what you know" into a log and then handle any issues
     /// with it after the fact.
+    ///
+    /// Can concurrently sync from multiple heights by using multiple notarizations (historical)
     fn verify(
         &mut self,
         context: Self::Context,
@@ -79,7 +81,9 @@ pub trait Relay: Clone + Send + 'static {
     /// It is up to the developer to efficiently handle broadcast/backfill to/from the rest of the network.
     ///
     /// TODO: how to know what digests might be useful? If it is just opaque bytes, its difficult
-    /// to optimistically cache when listening to messages from peers.
+    /// to optimistically cache when listening to messages from peers. Could just keep latest proposal digest
+    /// per peer sent to us (and answer any verification requests with that digest...how would we do more complex
+    /// broadcast).
     fn propagate(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
 }
 

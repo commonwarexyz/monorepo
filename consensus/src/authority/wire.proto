@@ -7,7 +7,7 @@ message Voter {
         Notarization notarization = 2;
         Nullify nullify = 3;
         Nullification nullification = 4;
-        Finalize finalize = 5;  
+        Finalize finalize = 5;
         Finalization finalization = 6;
     }
 }
@@ -32,8 +32,8 @@ message Parent {
 // To ensure all participants stay informed, Container is included in all vote messages.
 message Proposal {
     Index index = 1;
-    Parent parent = 2; 
-    bytes payload = 3; // Hash 
+    Parent parent = 2;
+    bytes payload = 3; // Digest
 }
 
 message Signature {
@@ -62,7 +62,7 @@ message Nullify {
 message Nullification {
     uint64 view = 1;
     repeated Signature signatures = 2;
-} 
+}
 
 message Finalize {
     Proposal proposal = 1;

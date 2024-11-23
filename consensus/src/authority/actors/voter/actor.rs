@@ -9,7 +9,7 @@ use crate::{
             proposal_message,
         },
         prover::Prover,
-        wire, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
+        wire, Context, Height, Index, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
         NOTARIZE, NULLIFY_AND_FINALIZE,
     },
     Automaton, Supervisor,
@@ -989,7 +989,10 @@ impl<
         mailbox
             .verify(
                 Context {
-                    index: (index.view, index.height),
+                    index: Index {
+                        view: index.view,
+                        height: index.height,
+                    },
                     parent: (parent.view, parent.digest.clone()),
                 },
                 proposal.payload.clone(),
