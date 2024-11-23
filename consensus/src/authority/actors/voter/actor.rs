@@ -2092,14 +2092,20 @@ impl<
                         ApplicationMessage::Propose { context } => {
                             let payload = match application.propose(context.clone()).await {
                                 Some(payload) => payload,
-                                None => continue,
+                                None => {
+                                    debug!(view = context.index.0, "failed to propose container");
+                                    continue;
+                                }
                             };
                             mailbox.proposed(context, payload).await;
                         }
                         ApplicationMessage::Verify { context, payload } => {
                             let result = match application.verify(context.clone(), payload).await {
                                 Some(verified) => verified,
-                                None => continue, // means that can't be verified (not sure if valid or not)
+                                None => {
+                                    debug!(view = context.index.0, "failed to verify container");
+                                    continue;
+                                } // means that can't be verified (not sure if valid or not)
                             };
                             mailbox.verified(context, result).await;
                         }
@@ -2163,6 +2169,7 @@ impl<
                                 payload: payload.clone(),
                             };
                             if !self.our_proposal(proposal_digest, proposal.clone()).await {
+                                debug!(view = context.index.0, "failed to propose container");
                                 continue;
                             }
                             view = self.view;

@@ -15,6 +15,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tracing::debug;
 
 const GENESIS_BYTES: &[u8] = b"genesis";
 
@@ -146,6 +147,8 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
     }
 
     async fn propose(&mut self, context: Self::Context) -> Option<Digest> {
+        unimplemented!("we don't know which digest is contained in which parent");
+
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.runtime);
         self.runtime
@@ -158,7 +161,10 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
         }
         let parent_height = match self.state.verified.get(&context.parent.1) {
             Some(height) => *height,
-            None => return None,
+            None => {
+                debug!(parent = hex(&context.parent.1), "parent not verified");
+                return None;
+            }
         };
         if context.index.1 != parent_height + 1 {
             self.panic(&format!(
@@ -174,6 +180,9 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
         payload.extend_from_slice(&context.index.1.to_be_bytes());
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
+
+        // Mark verified
+        self.state.verified.insert(digest.clone(), context.index.1);
 
         // Store pending payload
         self.relay
@@ -206,6 +215,8 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
         if self.state.verified.contains_key(&payload) {
             self.panic("container already verified");
         }
+
+        // TODO: verified should include concatenation fo parent/payload?
         if let Some(parent) = self.state.verified.get(&context.parent.1) {
             if parent + 1 != context.index.1 {
                 self.panic(&format!(
@@ -215,6 +226,7 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
                 ));
             }
         } else {
+            debug!(parent = hex(&context.parent.1), "parent not verified");
             return None;
         };
 
@@ -242,6 +254,7 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
                 ));
             }
         }
+        debug!(payload = hex(&payload), "verified");
         self.state.verified.insert(payload, context.index.1);
         Some(true)
     }
