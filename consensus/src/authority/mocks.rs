@@ -227,7 +227,7 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
             if contents.len() != 48 {
                 self.panic("invalid payload length");
             }
-            let parsed_view = Height::from_be_bytes(contents[32..].try_into().unwrap());
+            let parsed_view = Height::from_be_bytes(contents[32..40].try_into().unwrap());
             if parsed_view != context.index.0 {
                 self.panic(&format!(
                     "invalid view (in payload): {} != {}",
