@@ -24,6 +24,12 @@ pub trait Automaton: Clone + Send + 'static {
     /// If it is possible to generate a payload, the `Automaton` should call `Mailbox::proposed`.
     ///
     /// Payload should stand alone and not require any additional context to be verified from the wire.
+    ///
+    /// TODO: if parent payload digest is provided in propose, we no longer need to actually have
+    /// the parent to build on it (useful if already notarized). This is really nice for chains
+    /// that store the "tip" of some subprocess in the block rather than the chain content itself. It is
+    /// ultimately still up to the "Automaton" to decide how to handle this (the linking to parent digests
+    /// could be some sort of tree that requires much more prior knowledge).
     fn propose(&mut self, context: Self::Context) -> impl Future<Output = ()> + Send;
 
     /// Verify the payload is valid.
@@ -33,6 +39,16 @@ pub trait Automaton: Clone + Send + 'static {
     ///
     /// If the payload has not been received or describes an invalid payload, the consensus
     /// instance should not be notified using `Mailbox::verified`.
+    ///
+    /// TODO: if we really want to go crazy, we should not verify and just try to agree here and just
+    /// ask for hashes that can be reconciled later? Output of threshold signature for a given agreement
+    /// is then useless? TL;DR my job is to agree on a single digest at a given view, nothing else.
+    /// -> Can do lagging threshold signatures over verified state at a given height?
+    ///
+    /// "Stop doing so much, don't be a hero."
+    ///
+    /// This approach would allow you to just "push what you know" into a log and then handle any issues
+    /// with it after the fact.
     fn verify(
         &mut self,
         context: Self::Context,
@@ -61,7 +77,10 @@ pub trait Relay: Clone + Send + 'static {
     /// references the payload).
     ///
     /// It is up to the developer to efficiently handle broadcast/backfill to/from the rest of the network.
-    fn broadcast(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
+    ///
+    /// TODO: how to know what digests might be useful? If it is just opaque bytes, its difficult
+    /// to optimistically cache when listening to messages from peers.
+    fn propagate(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
 }
 
 pub trait Finalizer: Clone + Send + 'static {

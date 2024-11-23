@@ -128,7 +128,10 @@ pub type Height = u64;
 #[derive(Clone)]
 pub struct Context {
     pub index: (View, Height),
-    pub parent: (View, Digest),
+    pub parent: (
+        View,
+        Digest, /* TODO: payload, not parent consensus block? */
+    ),
 }
 
 use crate::Activity;
