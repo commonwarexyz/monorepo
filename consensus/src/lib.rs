@@ -12,8 +12,8 @@ use std::future::Future;
 ///
 /// While an automaton may be logically instantiated as a single entity, it may be
 /// cloned by multiple sub-components of a consensus engine to, among other things,
-/// parse payloads concurrently.
-pub trait Automaton: Send + 'static {
+/// broadcast and verify payloads.
+pub trait Automaton: Clone + Send + 'static {
     type Context;
 
     /// Initialize the application with the genesis container.
@@ -22,45 +22,56 @@ pub trait Automaton: Send + 'static {
     /// Generate a new payload for the given context.
     ///
     /// If it is possible to generate a payload, the `Automaton` should call `Mailbox::proposed`.
-    fn propose(&mut self, context: Self::Context) -> impl Future<Output = Option<Digest>> + Send;
-
-    /// Called once consensus locks on a proposal. At this point the application can
-    /// broadcast the raw contents to the network with the given consensus header (which
-    /// references the payload).
     ///
-    /// It is up to the developer to efficiently handle broadcast/backfill to/from the rest of the network.
-    fn broadcast(
-        &mut self,
-        context: Self::Context,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
+    /// Payload should stand alone and not require any additional context to be verified from the wire.
+    fn propose(&mut self, context: Self::Context) -> impl Future<Output = ()> + Send;
 
     /// Verify the payload is valid.
     ///
     /// If `Mailbox::verified` is called with this payload, the consensus will vote to support
-    /// the payload. If the payload has not been received or describes an invalid payload, the consensus
+    /// the payload.
+    ///
+    /// If the payload has not been received or describes an invalid payload, the consensus
     /// instance should not be notified using `Mailbox::verified`.
     fn verify(
         &mut self,
         context: Self::Context,
         payload: Digest,
-    ) -> impl Future<Output = Option<bool>> + Send;
+    ) -> impl Future<Output = ()> + Send;
+}
 
+/// Implemented by the consensus engine to handle messages from the Automaton.
+pub trait Engine: Clone + Send + 'static {
+    type Context;
+
+    fn proposed(&self, context: Self::Context, payload: Digest) -> impl Future<Output = ()> + Send;
+
+    fn verified(
+        &self,
+        context: Self::Context,
+        payload: Digest,
+        result: bool,
+    ) -> impl Future<Output = ()> + Send;
+}
+
+/// Indication that a digest should be disseminated to other participants.
+pub trait Relay: Clone + Send + 'static {
+    /// Called once consensus locks on a proposal. At this point the application can
+    /// broadcast the raw contents to the network with the given consensus header (which
+    /// references the payload).
+    ///
+    /// It is up to the developer to efficiently handle broadcast/backfill to/from the rest of the network.
+    fn broadcast(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
+}
+
+pub trait Finalizer: Clone + Send + 'static {
     /// Event that the container has been notarized (seen by `2f+1` participants).
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(
-        &mut self,
-        context: Self::Context,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
+    fn notarized(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
 
     /// Event that the container has been finalized.
-    fn finalized(
-        &mut self,
-        context: Self::Context,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
+    fn finalized(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
 }
 
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not
