@@ -77,6 +77,9 @@ pub trait Relay: Send + 'static {
     fn broadcast(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
 }
 
+/// Proof is a blob that attests to some data.
+pub type Proof = Bytes;
+
 pub trait Finalizer: Send + 'static {
     /// Event that the container has been notarized (seen by `2f+1` participants).
     ///
@@ -94,7 +97,6 @@ pub trait Finalizer: Send + 'static {
 /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
 /// both equally may better align incentives with desired behavior.
 pub type Activity = u8;
-pub type Proof = Bytes;
 
 // TODO: should supervisor be managed by consensus? Other than PoA, the consensus usually keeps track of (and updates)
 // who is participating, not some external service. If we did this, we could also remove clone from Application?

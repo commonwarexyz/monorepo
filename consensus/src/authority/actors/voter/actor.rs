@@ -2230,6 +2230,8 @@ impl<
             // Attempt to send any new view messages
             self.broadcast(&mut sender, view).await;
 
+            // TODO: send any notarization/finalization proof to finalizer
+
             // After sending all required messages, prune any views
             // we no longer need
             self.prune_views();
