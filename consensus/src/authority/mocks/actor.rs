@@ -235,8 +235,11 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     }
 
     pub async fn run(mut self) {
+        // Setup digest tracking
         let mut waiters: HashMap<Digest, Vec<(Context, oneshot::Sender<bool>)>> = HashMap::new();
         let mut seen: HashMap<Digest, Bytes> = HashMap::new();
+
+        // Handle actions
         loop {
             select! {
                 message = self.mailbox.next() => {

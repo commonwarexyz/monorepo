@@ -212,7 +212,9 @@ mod tests {
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
-            let relay = Arc::new(Mutex::new(mocks::Relay::new()));
+            let hasher = Sha256::default();
+            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let relay = Arc::new(Mutex::new(mocks::relay::Relay::new()));
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for scheme in schemes.into_iter() {
@@ -247,26 +249,29 @@ mod tests {
                 }
 
                 // Start engine
-                let hasher = Sha256::default();
-                let supervisor_config = mocks::SupervisorConfig {
-                    prover: Prover::new(hasher.clone(), namespace.clone()),
+                let supervisor_config = mocks::actor::SupervisorConfig {
+                    prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor =
+                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let automaton_cfg = mocks::AutomatonConfig {
+                let application_cfg = mocks::actor::ApplicationConfig {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
-                    sender: done_sender.clone(),
+                    tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
-                    allow_invalid_payload: false,
                 };
-                let application = mocks::Automaton::new(runtime.clone(), automaton_cfg);
+                let (actor, application) =
+                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                runtime.spawn("application", async move {
+                    actor.run().await;
+                });
                 let cfg = config::Config {
                     crypto: scheme,
-                    hasher,
+                    hasher: hasher.clone(),
                     application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
@@ -297,9 +302,17 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::Progress::Finalized(height, digest) = event {
-                    finalized.insert(height, digest);
-                    if height < required_containers {
+                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                    let (view, parent, payload, signers) =
+                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    if digest != payload {
+                        panic!(
+                            "finalization mismatch digest: {:?}, payload: {:?}",
+                            digest, payload
+                        );
+                    }
+                    finalized.insert(view, digest);
+                    if (finalized.len() as u64) < required_containers {
                         continue;
                     }
                     completed.insert(validator);
