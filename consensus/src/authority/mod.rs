@@ -214,7 +214,7 @@ mod tests {
             // Create engines
             let hasher = Sha256::default();
             let prover = Prover::new(hasher.clone(), namespace.clone());
-            let relay = Arc::new(Mutex::new(mocks::relay::Relay::new()));
+            let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for scheme in schemes.into_iter() {

@@ -39,7 +39,7 @@ pub enum Progress {
 pub struct ApplicationConfig<H: Hasher> {
     pub hasher: H,
 
-    pub relay: Arc<Mutex<Relay>>,
+    pub relay: Arc<Relay>,
 
     /// The public key of the participant.
     ///
@@ -58,7 +58,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     hasher: H,
     participant: PublicKey,
 
-    relay: Arc<Mutex<Relay>>,
+    relay: Arc<Relay>,
     broadcast: mpsc::UnboundedReceiver<(Digest, Bytes)>,
     tracker: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
@@ -79,7 +79,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     // TODO: need to input broadcast artifacts into automaton concurrently?
     pub fn new(runtime: E, cfg: ApplicationConfig<H>) -> (Self, Mailbox) {
         // Register self on relay
-        let broadcast = cfg.relay.lock().unwrap().register(cfg.participant.clone());
+        let broadcast = cfg.relay.register(cfg.participant.clone());
 
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
@@ -175,10 +175,10 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
             self.panic("invalid payload length");
         }
         let parsed_view = contents.get_u64();
-        if parsed_view != context.parent.0 {
+        if parsed_view != context.view {
             self.panic(&format!(
                 "invalid view (in payload): {} != {}",
-                parsed_view, context.parent.0
+                parsed_view, context.view
             ));
         }
         let parsed_parent: Digest = contents.copy_to_bytes(H::len());
@@ -194,12 +194,11 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         true
     }
 
-    fn broadcast(&mut self, payload: Digest) {
+    async fn broadcast(&mut self, payload: Digest) {
         let contents = self.pending.remove(&payload).expect("missing payload");
         self.relay
-            .lock()
-            .unwrap()
-            .broadcast(&self.participant, (payload, contents));
+            .broadcast(&self.participant, (payload, contents))
+            .await;
     }
 
     async fn notarized(&mut self, proof: Proof, payload: Digest) {
@@ -255,9 +254,11 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                         }
                         Message::Verify { context, payload, response } => {
                             if let Some(contents) = seen.get(&payload) {
+                                debug!(payload = hex(&payload), "have broadcast");
                                 let verified = self.verify(context, payload, contents.clone()).await;
                                 let _ = response.send(verified);
                             } else {
+                                debug!(payload = hex(&payload), "waiting for broadcast");
                                 waiters
                                     .entry(payload.clone())
                                     .or_default()
@@ -266,7 +267,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                             }
                         }
                         Message::Broadcast { payload } => {
-                            self.broadcast(payload);
+                            self.broadcast(payload).await;
                         }
                         Message::Notarized { proof, payload } => {
                             self.notarized(proof, payload).await;
@@ -279,6 +280,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 broadcast = self.broadcast.next() => {
                     // Record digest for future use
                     let (digest, contents) = broadcast.expect("broadcast closed");
+                    debug!(payload = hex(&digest), "received broadcast");
                     seen.insert(digest.clone(), contents.clone());
 
                     // Check if we have a waiter
