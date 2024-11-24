@@ -5,6 +5,7 @@ use futures::{channel::mpsc, SinkExt};
 pub enum Message {
     Backfilled {
         notarizations: Vec<wire::Notarization>,
+        nullifications: Vec<wire::Nullification>,
     },
 }
 
@@ -18,9 +19,16 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub(crate) async fn backfilled(&mut self, notarizations: Vec<wire::Notarization>) {
+    pub(crate) async fn backfilled(
+        &mut self,
+        notarizations: Vec<wire::Notarization>,
+        nullifications: Vec<wire::Nullification>,
+    ) {
         self.sender
-            .send(Message::Backfilled { notarizations })
+            .send(Message::Backfilled {
+                notarizations,
+                nullifications,
+            })
             .await
             .unwrap();
     }

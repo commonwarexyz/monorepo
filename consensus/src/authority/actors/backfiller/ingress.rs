@@ -3,15 +3,18 @@ use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {
     Fetch {
-        proposals: Vec<View>,
-        null: Vec<View>,
+        notarizations: Vec<View>,
+        nullifications: Vec<View>,
     },
     Notarized {
         notarization: wire::Notarization,
-
-        // Used to indicate when to drop old notarizations
-        // we are caching in memory.
-        last_finalized: View,
+    },
+    Nullified {
+        nullification: wire::Nullification,
+    },
+    Finalized {
+        // Used to indicate when to prune old notarizations/nullifications.
+        view: View,
     },
 }
 
@@ -25,9 +28,12 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn fetch(&mut self, proposals: Vec<View>, null: Vec<View>) {
+    pub async fn fetch(&mut self, notarizations: Vec<View>, nullifications: Vec<View>) {
         self.sender
-            .send(Message::Fetch { proposals, null })
+            .send(Message::Fetch {
+                notarizations,
+                nullifications,
+            })
             .await
             .expect("Failed to send notarizations");
     }

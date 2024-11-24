@@ -1999,13 +1999,8 @@ impl<
                     }
                 },
                 mailbox = self.mailbox_receiver.next() => {
-                    let msg = mailbox.unwrap();
-                    match msg {
-                        Message::Backfilled { notarizations: _ } => {
-                            // TODO: store notarizations we've backfilled (verified in backfiller to avoid using compute in this loop)
-                            unimplemented!()
-                        },
-                    }
+                    // TODO: store notarizations we've backfilled (verified in backfiller to avoid using compute in this loop)
+                    unimplemented!()
                 },
                 msg = receiver.recv() => {
                     // Parse message
