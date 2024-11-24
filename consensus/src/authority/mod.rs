@@ -122,26 +122,12 @@ mod wire {
 }
 
 pub type View = u64;
-pub type Height = u64;
-
-#[derive(Clone)]
-pub struct Index {
-    pub view: View,
-    pub height: Height,
-}
-
-#[derive(Clone)]
-pub struct Parent {
-    pub view: View,
-    pub payload: Digest,
-    proposal: Digest,
-}
 
 /// Context is a collection of information about the context in which a container is built.
 #[derive(Clone)]
 pub struct Context {
-    pub index: Index,
-    pub parent: Parent,
+    pub view: View,
+    pub parent: (View, Digest),
 }
 
 use crate::Activity;
