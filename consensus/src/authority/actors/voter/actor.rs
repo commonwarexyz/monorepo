@@ -27,7 +27,6 @@ use prost::Message as _;
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    future::Future,
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
@@ -806,8 +805,9 @@ impl<
     // Attempt to set proposal from each message received over the wire
     async fn peer_proposal(&mut self) -> Option<(Context, oneshot::Receiver<bool>)> {
         // Get round
-        let (parent, height, proposal_digest, payload) = {
-            let round = self.views.get_mut(&self.view)?;
+        let (parent, height, proposal_digest, proposal) = {
+            // Get view or exit
+            let round = self.views.get(&self.view)?;
 
             // If we are the leader, drop peer proposals
             if round.leader == self.crypto.public_key() {
@@ -853,12 +853,7 @@ impl<
                 );
                 return None;
             }
-            (
-                parent.clone(),
-                height,
-                proposal_digest.clone(),
-                proposal.payload.clone(),
-            )
+            (parent, height, proposal_digest, proposal)
         };
 
         // Ensure we have required notarizations
@@ -942,7 +937,7 @@ impl<
         };
 
         // Verify the proposal
-        unimplemented!("set round proposal");
+        let payload = proposal.payload.clone();
         debug!(
             view = self.view,
             height,
@@ -950,6 +945,8 @@ impl<
             payload = hex(&payload),
             "requested proposal verification",
         );
+
+        // Store proposal
         let context = Context {
             index: Index {
                 view: self.view,
@@ -961,6 +958,11 @@ impl<
                 proposal: parent.digest.clone(),
             },
         };
+        let proposal = Some((proposal_digest.clone(), proposal.clone()));
+        let round = self.views.get_mut(&self.view).unwrap();
+        round.proposal = proposal;
+
+        // Return future
         Some((
             context.clone(),
             self.application.verify(context, payload.clone()).await,
