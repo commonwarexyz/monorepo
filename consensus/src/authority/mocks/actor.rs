@@ -1,4 +1,7 @@
-use super::ingress::{Mailbox, Message};
+use super::{
+    ingress::{Mailbox, Message},
+    relay::Relay,
+};
 use crate::{
     authority::{
         prover::Prover, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
@@ -8,9 +11,13 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
+use commonware_macros::select;
 use commonware_runtime::Clock;
 use commonware_utils::hex;
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt, StreamExt,
+};
 use rand::RngCore;
 use rand_distr::{Distribution, Normal};
 use std::{
@@ -23,35 +30,6 @@ use tracing::debug;
 const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
-
-/// Relay is a mock for distributing artifacts between applications.
-#[derive(Clone)]
-pub struct Relay {
-    pending: HashMap<Digest, Bytes>,
-    broadcast: HashMap<Digest, Bytes>,
-}
-
-impl Relay {
-    pub fn new() -> Self {
-        Self {
-            pending: HashMap::new(),
-            broadcast: HashMap::new(),
-        }
-    }
-
-    pub fn pending(&mut self, digest: Digest, payload: Bytes) {
-        self.pending.insert(digest, payload);
-    }
-
-    pub fn broadcast(&mut self, digest: Digest) {
-        let payload = self.pending.remove(&digest).expect("container not pending");
-        self.broadcast.insert(digest, payload);
-    }
-
-    pub fn get(&self, digest: &Digest) -> Option<Bytes> {
-        self.broadcast.get(digest).cloned()
-    }
-}
 
 pub enum Progress {
     Notarized(Proof, Digest),
@@ -81,6 +59,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     participant: PublicKey,
 
     relay: Arc<Mutex<Relay>>,
+    broadcast: mpsc::UnboundedReceiver<(Digest, Bytes)>,
     tracker: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
     mailbox: mpsc::Receiver<Message>,
@@ -94,9 +73,17 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     last_finalized: u64,
 }
 
+enum Waiter {
+    Propose(Context, oneshot::Sender<Option<Digest>>),
+    Verify(Context, oneshot::Sender<Option<bool>>),
+}
+
 impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     // TODO: need to input broadcast artifacts into automaton concurrently?
     pub fn new(runtime: E, cfg: ApplicationConfig<H>) -> (Self, Mailbox) {
+        // Register self on relay
+        let broadcast = cfg.relay.lock().unwrap().register(cfg.participant.clone());
+
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
         let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
@@ -110,6 +97,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 participant: cfg.participant,
 
                 relay: cfg.relay,
+                broadcast,
                 tracker: cfg.tracker,
 
                 mailbox: receiver,
@@ -258,34 +246,55 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     }
 
     pub async fn run(mut self) {
-        while let Some(work) = self.mailbox.next().await {
-            match work {
-                Message::Genesis { response } => {
-                    let digest = self.genesis();
-                    let _ = response.send(digest);
-                }
-                Message::Propose { context, response } => {
-                    // TODO: handle case where parent broadcast later
-                    let digest = self.propose(context).await;
-                    let _ = response.send(digest);
-                }
-                Message::Verify {
-                    context,
-                    payload,
-                    response,
-                } => {
-                    // TODO: handle case where parent broadcast later
-                    let verified = self.verify(context, payload).await;
-                    let _ = response.send(verified);
-                }
-                Message::Broadcast { payload } => {
-                    self.broadcast(payload);
-                }
-                Message::Notarized { proof, payload } => {
-                    self.notarized(proof, payload).await;
-                }
-                Message::Finalized { proof, payload } => {
-                    self.finalized(proof, payload).await;
+        let mut waiters: HashMap<Digest, Vec<Waiter>> = HashMap::new();
+        let mut seen = HashMap::new();
+        loop {
+            select! {
+                message = self.mailbox.next() => {
+                    let message = message.expect("mailbox closed");
+                    match message {
+                        Message::Genesis { response } => {
+                            let digest = self.genesis();
+                            let _ = response.send(digest);
+                        }
+                        Message::Propose { context, response } => {
+                            let digest = self.propose(context).await;
+                            let _ = response.send(digest);
+                        }
+                        Message::Verify { context, payload, response } => {
+                            let verified = self.verify(context, payload).await;
+                            let _ = response.send(verified);
+                        }
+                        Message::Broadcast { payload } => {
+                            self.broadcast(payload);
+                        }
+                        Message::Notarized { proof, payload } => {
+                            self.notarized(proof, payload).await;
+                        }
+                        Message::Finalized { proof, payload } => {
+                            self.finalized(proof, payload).await;
+                        }
+                    }
+                },
+                broadcast = self.broadcast.next() => {
+                    // Record digest for future use
+                    let (digest, contents) = broadcast.expect("broadcast closed");
+                    seen.insert(digest.clone(), contents);
+
+                    // Check if we have a waiter
+                    if let Some(waiters) = waiters.remove(&digest) {
+                        for waiter in waiters {
+                            match waiter {
+                                Waiter::Propose(context, response) => {
+                                    let digest = self.propose(context).await;
+                                    let _ = response.send(Some(digest.clone()));
+                                }
+                                Waiter::Verify(context, response) => {
+                                    let _ = response.send(Some(true));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
