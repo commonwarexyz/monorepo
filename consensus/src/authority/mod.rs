@@ -166,6 +166,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use commonware_utils::{hex, quorum};
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
@@ -177,12 +178,12 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tracing::debug;
 
     #[test_traced]
     fn test_all_online() {
         // Create runtime
         let n = 5;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
@@ -313,13 +314,12 @@ mod tests {
                         );
                     }
                     finalized.insert(view, digest);
-                    debug!(completed = completed.len(), finalized = finalized.len());
                     if (finalized.len() as u64) < required_containers {
                         continue;
                     }
                     completed.insert(validator);
                 }
-                if completed.len() == n {
+                if completed.len() == n as usize {
                     break;
                 }
             }
@@ -336,22 +336,22 @@ mod tests {
                 // Ensure no forks
                 {
                     let votes = supervisor.votes.lock().unwrap();
-                    for (height, views) in votes.iter() {
+                    for (view, payloads) in votes.iter() {
                         // Ensure no skips (height == view)
-                        if views.len() > 1 {
-                            panic!("height: {}, views: {:?}", height, views);
-                        }
-
-                        // Only check at views below timeout
-                        if *height > latest_complete {
-                            continue;
+                        if payloads.len() > 1 {
+                            let hex_payloads =
+                                payloads.iter().map(|p| hex(p.0)).collect::<Vec<String>>();
+                            panic!("view: {}, payloads: {:?}", view, hex_payloads);
                         }
 
                         // Ensure everyone participating
-                        let digest = finalized.get(height).expect("height should be finalized");
-                        let voters = views.get(digest).expect("digest should exist");
-                        if voters.len() != n {
-                            panic!("height: {}, voters: {:?}", height, voters);
+                        let digest = finalized.get(view).expect("view should be finalized");
+                        let voters = payloads.get(digest).expect("digest should exist");
+                        if voters.len() < threshold as usize {
+                            // We can't verify that everyone participated at every height because some nodes may have started later.
+                            //
+                            // TODO: verify everyone participated most of the time
+                            panic!("view: {}, voters: {:?}", view, voters);
                         }
                     }
                 }
@@ -371,7 +371,10 @@ mod tests {
                         // Ensure everyone participating
                         let digest = finalized.get(height).expect("height should be finalized");
                         let finalizers = views.get(digest).expect("digest should exist");
-                        if finalizers.len() != n {
+                        if finalizers.len() < threshold as usize {
+                            // We can't verify that everyone participated at every height because some nodes may have started later.
+                            //
+                            // TODO: verify everyone participated most of the time
                             panic!("height: {}, finalizers: {:?}", height, finalizers);
                         }
                     }
