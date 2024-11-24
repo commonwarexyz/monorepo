@@ -1,13 +1,23 @@
 use super::{
-    prover::Prover, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
-    NOTARIZE, NULLIFY_AND_FINALIZE,
+    ingress::{Mailbox, Message},
+    relay::Relay,
 };
-use crate::{Activity, Automaton as Au, Proof, Supervisor as Su};
-use bytes::Bytes;
+use crate::{
+    authority::{
+        prover::Prover, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
+        NOTARIZE, NULLIFY_AND_FINALIZE,
+    },
+    Activity, Proof, Supervisor as Su,
+};
+use bytes::{Buf, Bytes};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
+use commonware_macros::select;
 use commonware_runtime::Clock;
 use commonware_utils::hex;
-use futures::{channel::mpsc, SinkExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt, StreamExt,
+};
 use rand::RngCore;
 use rand_distr::{Distribution, Normal};
 use std::{
@@ -21,41 +31,15 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
-#[derive(Clone)]
-pub struct Relay {
-    pending: HashMap<Digest, Bytes>,
-    broadcast: HashMap<Digest, Bytes>,
+pub enum Progress {
+    Notarized(Proof, Digest),
+    Finalized(Proof, Digest),
 }
 
-impl Relay {
-    pub fn new() -> Self {
-        Self {
-            pending: HashMap::new(),
-            broadcast: HashMap::new(),
-        }
-    }
-
-    pub fn pending(&mut self, container: Digest, payload: Bytes) {
-        self.pending.insert(container, payload);
-    }
-
-    pub fn broadcast(&mut self, container: Digest) {
-        let payload = self
-            .pending
-            .remove(&container)
-            .expect("container not pending");
-        self.broadcast.insert(container, payload);
-    }
-
-    pub fn get(&self, container: &Digest) -> Option<Bytes> {
-        self.broadcast.get(container).cloned()
-    }
-}
-
-pub struct AutomatonConfig<H: Hasher> {
+pub struct ApplicationConfig<H: Hasher> {
     pub hasher: H,
 
-    pub relay: Arc<Mutex<Relay>>,
+    pub relay: Arc<Relay>,
 
     /// The public key of the participant.
     ///
@@ -65,90 +49,86 @@ pub struct AutomatonConfig<H: Hasher> {
 
     pub propose_latency: Latency,
     pub verify_latency: Latency,
-    pub allow_invalid_payload: bool,
 
-    pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
+    pub tracker: mpsc::UnboundedSender<(PublicKey, Progress)>,
 }
 
-pub enum Progress {
-    Notarized(Height, Digest),
-    Finalized(Height, Digest),
-}
-
-#[derive(Default)]
-struct State {
-    verified: HashMap<Digest, Height>,
-    last_finalized: u64,
-    finalized: HashMap<Digest, Height>,
-
-    notarized_views: HashSet<Digest>,
-    finalized_views: HashSet<Digest>,
-}
-
-pub struct Automaton<E: Clock + RngCore, H: Hasher> {
+pub struct Application<E: Clock + RngCore, H: Hasher> {
     runtime: E,
     hasher: H,
-
-    /// Relay is a mock for distributing artifacts between applications.
-    relay: Arc<Mutex<Relay>>,
-
     participant: PublicKey,
+
+    relay: Arc<Relay>,
+    broadcast: mpsc::UnboundedReceiver<(Digest, Bytes)>,
+    tracker: mpsc::UnboundedSender<(PublicKey, Progress)>,
+
+    mailbox: mpsc::Receiver<Message>,
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
-    allow_invalid_payload: bool,
 
-    progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
+    pending: HashMap<Digest, Bytes>,
 
-    state: State,
+    verified: HashSet<Digest>,
+    notarized_views: HashSet<Digest>,
+    finalized_views: HashSet<Digest>,
+    last_finalized: u64,
 }
 
-impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
+impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     // TODO: need to input broadcast artifacts into automaton concurrently?
-    pub fn new(runtime: E, cfg: AutomatonConfig<H>) -> Self {
+    pub fn new(runtime: E, cfg: ApplicationConfig<H>) -> (Self, Mailbox) {
+        // Register self on relay
+        let broadcast = cfg.relay.register(cfg.participant.clone());
+
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
         let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
 
         // Return constructed application
-        Self {
-            runtime,
+        let (sender, receiver) = mpsc::channel(1024);
+        (
+            Self {
+                runtime,
+                hasher: cfg.hasher,
+                participant: cfg.participant,
 
-            hasher: cfg.hasher,
-            relay: cfg.relay,
+                relay: cfg.relay,
+                broadcast,
+                tracker: cfg.tracker,
 
-            participant: cfg.participant,
+                mailbox: receiver,
 
-            propose_latency,
-            verify_latency,
-            allow_invalid_payload: cfg.allow_invalid_payload,
+                propose_latency,
+                verify_latency,
 
-            progress: cfg.sender,
+                pending: HashMap::new(),
 
-            state: State::default(),
-        }
+                verified: HashSet::new(),
+                last_finalized: 0,
+                notarized_views: HashSet::new(),
+                finalized_views: HashSet::new(),
+            },
+            Mailbox::new(sender),
+        )
     }
 
     fn panic(&self, msg: &str) -> ! {
         panic!("[{}] {}", hex(&self.participant), msg);
     }
-}
-
-impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
-    type Context = Context;
 
     fn genesis(&mut self) -> Digest {
         let payload = Bytes::from(GENESIS_BYTES);
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
-        self.state.verified.insert(digest.clone(), 0);
-        self.state.finalized.insert(digest.clone(), 0);
+        self.verified.insert(digest.clone());
+        self.finalized_views.insert(digest.clone());
         digest
     }
 
-    async fn propose(&mut self, context: Self::Context) -> Option<Digest> {
-        unimplemented!("we don't know which digest is contained in which parent");
-
+    /// When proposing a block, we do not care if the parent is verified (or even in our possession).
+    /// Backfilling verification dependencies is considered out-of-scope for consensus.
+    async fn propose(&mut self, context: Context) -> Digest {
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.runtime);
         self.runtime
@@ -159,44 +139,23 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
         if !H::validate(&context.parent.1) {
             self.panic("invalid parent digest length");
         }
-        let parent_height = match self.state.verified.get(&context.parent.1) {
-            Some(height) => *height,
-            None => {
-                debug!(parent = hex(&context.parent.1), "parent not verified");
-                return None;
-            }
-        };
-        if context.index.1 != parent_height + 1 {
-            self.panic(&format!(
-                "invalid height: {} != {} + 1",
-                context.index.1, parent_height
-            ));
-        }
 
         // Generate the payload
         let mut payload = Vec::new();
-        payload.extend_from_slice(&self.participant);
-        payload.extend_from_slice(&context.index.0.to_be_bytes());
-        payload.extend_from_slice(&context.index.1.to_be_bytes());
+        payload.extend_from_slice(&context.view.to_be_bytes());
+        payload.extend_from_slice(&context.parent.1);
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
 
         // Mark verified
-        self.state.verified.insert(digest.clone(), context.index.1);
+        self.verified.insert(digest.clone());
 
         // Store pending payload
-        self.relay
-            .lock()
-            .unwrap()
-            .pending(digest.clone(), Bytes::from(payload));
-        Some(digest)
+        self.pending.insert(digest.clone(), payload.into());
+        digest
     }
 
-    async fn broadcast(&mut self, _context: Self::Context, payload: Digest) {
-        self.relay.lock().unwrap().broadcast(payload);
-    }
-
-    async fn verify(&mut self, context: Self::Context, payload: Digest) -> Option<bool> {
+    async fn verify(&mut self, context: Context, payload: Digest, mut contents: Bytes) -> bool {
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
         self.runtime
@@ -211,93 +170,125 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
             self.panic("invalid digest length");
         }
 
-        // Ensure not duplicate check
-        if self.state.verified.contains_key(&payload) {
-            self.panic("container already verified");
+        // Verify contents
+        if contents.len() != 40 {
+            self.panic("invalid payload length");
         }
-
-        // TODO: verified should include concatenation fo parent/payload?
-        if let Some(parent) = self.state.verified.get(&context.parent.1) {
-            if parent + 1 != context.index.1 {
-                self.panic(&format!(
-                    "invalid height (from last verified): {} != {}",
-                    parent + 1,
-                    context.index.1
-                ));
-            }
-        } else {
-            debug!(parent = hex(&context.parent.1), "parent not verified");
-            return None;
-        };
-
-        // Verify the payload
-        let contents = match self.relay.lock().unwrap().get(&payload) {
-            Some(contents) => contents,
-            None => return None,
-        };
-        if !self.allow_invalid_payload {
-            if contents.len() != 48 {
-                self.panic("invalid payload length");
-            }
-            let parsed_view = Height::from_be_bytes(contents[32..40].try_into().unwrap());
-            if parsed_view != context.index.0 {
-                self.panic(&format!(
-                    "invalid view (in payload): {} != {}",
-                    parsed_view, context.index.0
-                ));
-            }
-            let parsed_height = Height::from_be_bytes(contents[40..].try_into().unwrap());
-            if parsed_height != context.index.1 {
-                self.panic(&format!(
-                    "invalid height (in payload): {} != {}",
-                    parsed_height, context.index.1
-                ));
-            }
+        let parsed_view = contents.get_u64();
+        if parsed_view != context.view {
+            self.panic(&format!(
+                "invalid view (in payload): {} != {}",
+                parsed_view, context.view
+            ));
         }
-        debug!(payload = hex(&payload), "verified");
-        self.state.verified.insert(payload, context.index.1);
-        Some(true)
+        let parsed_parent: Digest = contents.copy_to_bytes(H::len());
+        if parsed_parent != context.parent.1 {
+            self.panic(&format!(
+                "invalid parent (in payload): {} != {}",
+                hex(&parsed_parent),
+                hex(&context.parent.1)
+            ));
+        }
+        self.verified.insert(payload);
+        true
     }
 
-    async fn notarized(&mut self, context: Self::Context, container: Digest) {
-        if !H::validate(&container) {
+    async fn broadcast(&mut self, payload: Digest) {
+        let contents = self.pending.remove(&payload).expect("missing payload");
+        self.relay
+            .broadcast(&self.participant, (payload, contents))
+            .await;
+    }
+
+    async fn notarized(&mut self, proof: Proof, payload: Digest) {
+        if !H::validate(&payload) {
             self.panic("invalid digest length");
         }
-        if self.state.finalized.contains_key(&container) {
-            self.panic("container already finalized");
-        }
-        if !self.state.notarized_views.insert(container.clone()) {
+        if !self.notarized_views.insert(payload.clone()) {
             self.panic("view already notarized");
         }
         let _ = self
-            .progress
+            .tracker
             .send((
                 self.participant.clone(),
-                Progress::Notarized(context.index.1, container),
+                Progress::Notarized(proof, payload),
             ))
             .await;
     }
 
-    async fn finalized(&mut self, context: Self::Context, container: Digest) {
-        if !H::validate(&container) {
+    async fn finalized(&mut self, proof: Proof, payload: Digest) {
+        if !H::validate(&payload) {
             self.panic("invalid digest length");
         }
-        if self.state.finalized.contains_key(&container) {
-            self.panic("container already finalized");
-        }
-        if !self.state.finalized_views.insert(container.clone()) {
+        if !self.finalized_views.insert(payload.clone()) {
             self.panic("view already finalized");
         }
-        let height = context.index.1;
-        self.state.last_finalized = height;
-        self.state.finalized.insert(container.clone(), height);
         let _ = self
-            .progress
+            .tracker
             .send((
                 self.participant.clone(),
-                Progress::Finalized(height, container),
+                Progress::Finalized(proof, payload),
             ))
             .await;
+    }
+
+    pub async fn run(mut self) {
+        // Setup digest tracking
+        let mut waiters: HashMap<Digest, Vec<(Context, oneshot::Sender<bool>)>> = HashMap::new();
+        let mut seen: HashMap<Digest, Bytes> = HashMap::new();
+
+        // Handle actions
+        loop {
+            select! {
+                message = self.mailbox.next() => {
+                    let message = message.expect("mailbox closed");
+                    match message {
+                        Message::Genesis { response } => {
+                            let digest = self.genesis();
+                            let _ = response.send(digest);
+                        }
+                        Message::Propose { context, response } => {
+                            let digest = self.propose(context).await;
+                            response.send(digest).expect("Failed to send proposal");
+                        }
+                        Message::Verify { context, payload, response } => {
+                            if let Some(contents) = seen.get(&payload) {
+                                let verified = self.verify(context, payload, contents.clone()).await;
+                                response.send(verified).expect("Failed to send verification");
+                            } else {
+                                waiters
+                                    .entry(payload.clone())
+                                    .or_default()
+                                    .push((context, response));
+                                continue;
+                            }
+                        }
+                        Message::Broadcast { payload } => {
+                            self.broadcast(payload).await;
+                        }
+                        Message::Notarized { proof, payload } => {
+                            self.notarized(proof, payload).await;
+                        }
+                        Message::Finalized { proof, payload } => {
+                            self.finalized(proof, payload).await;
+                        }
+                    }
+                },
+                broadcast = self.broadcast.next() => {
+                    // Record digest for future use
+                    let (digest, contents) = broadcast.expect("broadcast closed");
+                    seen.insert(digest.clone(), contents.clone());
+
+                    // Check if we have a waiter
+                    if let Some(waiters) = waiters.remove(&digest) {
+                        for (context, sender) in waiters {
+                            let verified = self.verify(context, digest.clone(), contents.clone()).await;
+                            sender.send(verified).expect("Failed to send verification");
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -306,7 +297,7 @@ pub struct SupervisorConfig<C: Scheme, H: Hasher> {
     pub participants: BTreeMap<View, Vec<PublicKey>>,
 }
 
-type HeightActivity = HashMap<Height, HashMap<Digest, HashSet<PublicKey>>>;
+type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
@@ -315,8 +306,8 @@ pub struct Supervisor<C: Scheme, H: Hasher> {
 
     prover: Prover<C, H>,
 
-    pub votes: Arc<Mutex<HeightActivity>>,
-    pub finalizes: Arc<Mutex<HeightActivity>>,
+    pub votes: Arc<Mutex<Participation>>,
+    pub finalizes: Arc<Mutex<Participation>>,
     pub faults: Arc<Mutex<Faults>>,
 }
 
@@ -381,25 +372,24 @@ impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
         // consensus).
         match activity {
             NOTARIZE => {
-                // TODO: use payload digest?
-                let (index, _, payload, public_key) =
+                let (view, _, payload, public_key) =
                     self.prover.deserialize_notarize(proof, true).unwrap();
                 self.votes
                     .lock()
                     .unwrap()
-                    .entry(index.height)
+                    .entry(view)
                     .or_default()
                     .entry(payload)
                     .or_default()
                     .insert(public_key);
             }
             FINALIZE => {
-                let (index, _, payload, public_key) =
+                let (view, _, payload, public_key) =
                     self.prover.deserialize_finalize(proof, true).unwrap();
                 self.finalizes
                     .lock()
                     .unwrap()
-                    .entry(index.height)
+                    .entry(view)
                     .or_default()
                     .entry(payload)
                     .or_default()

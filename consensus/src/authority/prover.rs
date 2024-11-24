@@ -14,7 +14,7 @@ use crate::Proof;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use core::panic;
-use std::marker::PhantomData;
+use std::{collections::HashSet, marker::PhantomData};
 
 #[derive(Clone)]
 pub struct Prover<C: Scheme, H: Hasher> {
@@ -39,26 +39,18 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     }
 
     fn serialize_proposal(
-        index: &wire::Index,
-        parent: &wire::Parent,
+        view: View,
+        parent: View,
         payload: &Digest,
         signature: &wire::Signature,
     ) -> Proof {
         // Setup proof
-        let len = 8
-            + 8
-            + 8
-            + parent.digest.len()
-            + payload.len()
-            + signature.public_key.len()
-            + signature.signature.len();
+        let len = 8 + 8 + payload.len() + signature.public_key.len() + signature.signature.len();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
-        proof.put_u64(index.view);
-        proof.put_u64(index.height);
-        proof.put_u64(parent.view);
-        proof.extend_from_slice(&parent.digest);
+        proof.put_u64(view);
+        proof.put_u64(parent);
         proof.extend_from_slice(payload);
         proof.extend_from_slice(&signature.public_key);
         proof.extend_from_slice(&signature.signature);
@@ -69,30 +61,23 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         mut proof: Proof,
         check_sig: bool,
         namespace: &[u8],
-    ) -> Option<(wire::Index, wire::Parent, Digest, PublicKey)> {
+    ) -> Option<(View, View, Digest, PublicKey)> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        if proof.len() != 8 + 8 + 8 + digest_len + digest_len + public_key_len + signature_len {
+        if proof.len() != 8 + 8 + digest_len + public_key_len + signature_len {
             return None;
         }
 
         // Decode proof
         let view = proof.get_u64();
-        let height = proof.get_u64();
-        let index = wire::Index { view, height };
-        let parent_view = proof.get_u64();
-        let parent_digest = proof.copy_to_bytes(digest_len);
-        let parent = wire::Parent {
-            view: parent_view,
-            digest: parent_digest,
-        };
+        let parent = proof.get_u64();
         let payload = proof.copy_to_bytes(digest_len);
         let public_key = proof.copy_to_bytes(public_key_len);
         let signature = proof.copy_to_bytes(signature_len);
 
         // Verify signature
-        let proposal_message = proposal_message(&index, &parent, &payload);
+        let proposal_message = proposal_message(view, parent, &payload);
         if check_sig {
             if !C::validate(&public_key) {
                 return None;
@@ -102,7 +87,82 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             }
         }
 
-        Some((index, parent, payload, public_key))
+        Some((view, parent, payload, public_key))
+    }
+
+    fn serialize_aggregation(
+        view: View,
+        parent: View,
+        payload: &Digest,
+        signatures: &[wire::Signature],
+    ) -> Proof {
+        // Setup proof
+        let (public_key_len, signature_len) = C::len();
+        let len = 8 + 8 + payload.len() + 4 + signatures.len() * (public_key_len + signature_len);
+
+        // Encode proof
+        let mut proof = Vec::with_capacity(len);
+        proof.put_u64(view);
+        proof.put_u64(parent);
+        proof.extend_from_slice(&payload);
+        proof.put_u32(signatures.len() as u32);
+        for signature in signatures {
+            proof.extend_from_slice(&signature.public_key);
+            proof.extend_from_slice(&signature.signature);
+        }
+        proof.into()
+    }
+
+    fn deserialize_aggregation(
+        mut proof: Proof,
+        max: u32,
+        check_sigs: bool,
+        namespace: &[u8],
+    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
+        // Ensure proof prefix is big enough
+        let digest_len = H::len();
+        let len = 8 + 8 + digest_len + 4;
+        if proof.len() < len {
+            return None;
+        }
+
+        // Decode proof prefix
+        let view = proof.get_u64();
+        let parent = proof.get_u64();
+        let payload = proof.copy_to_bytes(digest_len);
+        let count = proof.get_u32();
+        if count > max {
+            return None;
+        }
+        let count = count as usize;
+        let message = proposal_message(view, parent, &payload);
+
+        // Decode signatures
+        let (public_key_len, signature_len) = C::len();
+        if proof.remaining() != count * (public_key_len + signature_len) {
+            return None;
+        }
+        let mut seen = HashSet::with_capacity(count);
+        for _ in 0..count {
+            // Check if already saw public key
+            let public_key = proof.copy_to_bytes(public_key_len);
+            if seen.contains(&public_key) {
+                return None;
+            }
+            seen.insert(public_key.clone());
+
+            // Verify signature
+            let signature = proof.copy_to_bytes(signature_len);
+            if check_sigs {
+                if !C::validate(&public_key) {
+                    return None;
+                }
+                if !C::verify(namespace, &message, &public_key, &signature) {
+                    return None;
+                }
+            }
+        }
+        Some((view, parent, payload, seen.into_iter().collect()))
     }
 
     pub(crate) fn serialize_notarize(notarize: &wire::Notarize) -> Proof {
@@ -111,8 +171,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
         // Setup proof
         Self::serialize_proposal(
-            proposal.index.as_ref().expect("missing index"),
-            proposal.parent.as_ref().expect("missing parent"),
+            proposal.view,
+            proposal.parent,
             &proposal.payload,
             notarize.signature.as_ref().expect("missing signature"),
         )
@@ -122,8 +182,30 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         &self,
         proof: Proof,
         check_sig: bool,
-    ) -> Option<(wire::Index, wire::Parent, Digest, PublicKey)> {
+    ) -> Option<(View, View, Digest, PublicKey)> {
         Self::deserialize_proposal(proof, check_sig, &self.notarize_namespace)
+    }
+
+    pub(crate) fn serialize_notarization(notarization: &wire::Notarization) -> Proof {
+        // Extract proposal
+        let proposal = notarization.proposal.as_ref().expect("missing proposal");
+
+        // Setup proof
+        Self::serialize_aggregation(
+            proposal.view,
+            proposal.parent,
+            &proposal.payload,
+            &notarization.signatures,
+        )
+    }
+
+    pub fn deserialize_notarization(
+        &self,
+        proof: Proof,
+        max: u32,
+        check_sigs: bool,
+    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
+        Self::deserialize_aggregation(proof, max, check_sigs, &self.notarize_namespace)
     }
 
     pub(crate) fn serialize_finalize(finalize: &wire::Finalize) -> Proof {
@@ -132,8 +214,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
         // Setup proof
         Self::serialize_proposal(
-            proposal.index.as_ref().expect("missing index"),
-            proposal.parent.as_ref().expect("missing parent"),
+            proposal.view,
+            proposal.parent,
             &proposal.payload,
             finalize.signature.as_ref().expect("missing signature"),
         )
@@ -143,42 +225,53 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         &self,
         proof: Proof,
         check_sig: bool,
-    ) -> Option<(wire::Index, wire::Parent, Digest, PublicKey)> {
+    ) -> Option<(View, View, Digest, PublicKey)> {
         Self::deserialize_proposal(proof, check_sig, &self.finalize_namespace)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn serialize_finalization(finalization: &wire::Finalization) -> Proof {
+        // Extract proposal
+        let proposal = finalization.proposal.as_ref().expect("missing proposal");
+
+        // Setup proof
+        Self::serialize_aggregation(
+            proposal.view,
+            proposal.parent,
+            &proposal.payload,
+            &finalization.signatures,
+        )
+    }
+
+    pub fn deserialize_finalization(
+        &self,
+        proof: Proof,
+        max: u32,
+        check_sigs: bool,
+    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
+        Self::deserialize_aggregation(proof, max, check_sigs, &self.finalize_namespace)
+    }
+
     pub(crate) fn serialize_conflicting_proposal(
-        index_1: &wire::Index,
-        parent_1: &wire::Parent,
+        view_1: View,
+        parent_1: View,
         payload_1: &Digest,
         signature_1: &wire::Signature,
-        index_2: &wire::Index,
-        parent_2: &wire::Parent,
+        view_2: View,
+        parent_2: View,
         payload_2: &Digest,
         signature_2: &wire::Signature,
     ) -> Proof {
         // Setup proof
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        let len = 8
-            + public_key_len
-            + 8
-            + 8
-            + digest_len
-            + digest_len
-            + signature_len
-            + 8
-            + 8
-            + digest_len
-            + digest_len
-            + signature_len;
+        let len =
+            8 + public_key_len + 8 + digest_len + signature_len + 8 + digest_len + signature_len;
 
         // Ensure proof can be generated correctly
-        if index_1.view != index_2.view {
+        if view_1 != view_2 {
             panic!("views do not match");
         }
-        let view = index_1.view;
+        let view = view_1;
         if signature_1.public_key != signature_2.public_key {
             panic!("public keys do not match");
         }
@@ -188,14 +281,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let mut proof = Vec::with_capacity(len);
         proof.put_u64(view);
         proof.put(public_key);
-        proof.put_u64(index_1.height);
-        proof.put_u64(parent_1.view);
-        proof.extend_from_slice(&parent_1.digest);
+        proof.put_u64(parent_1);
         proof.extend_from_slice(&payload_1);
         proof.extend_from_slice(&signature_1.signature);
-        proof.put_u64(index_2.height);
-        proof.put_u64(parent_2.view);
-        proof.extend_from_slice(&parent_2.digest);
+        proof.put_u64(parent_2);
         proof.extend_from_slice(&payload_2);
         proof.extend_from_slice(&signature_2.signature);
         proof.into()
@@ -209,18 +298,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        let len = 8
-            + public_key_len
-            + 8
-            + 8
-            + digest_len
-            + digest_len
-            + signature_len
-            + 8
-            + 8
-            + digest_len
-            + digest_len
-            + signature_len;
+        let len =
+            8 + public_key_len + 8 + digest_len + signature_len + 8 + digest_len + signature_len;
         if proof.len() != len {
             return None;
         }
@@ -228,30 +307,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Decode proof
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_len);
-        let height_1 = proof.get_u64();
-        let index_1 = wire::Index {
-            view,
-            height: height_1,
-        };
-        let parent_view_1 = proof.get_u64();
-        let parent_digest_1 = proof.copy_to_bytes(digest_len);
-        let parent_1 = wire::Parent {
-            view: parent_view_1,
-            digest: parent_digest_1,
-        };
+        let parent_1 = proof.get_u64();
         let payload_1 = proof.copy_to_bytes(digest_len);
         let signature_1 = proof.copy_to_bytes(signature_len);
-        let height_2 = proof.get_u64();
-        let index_2 = wire::Index {
-            view,
-            height: height_2,
-        };
-        let parent_view_2 = proof.get_u64();
-        let parent_digest_2 = proof.copy_to_bytes(digest_len);
-        let parent_2 = wire::Parent {
-            view: parent_view_2,
-            digest: parent_digest_2,
-        };
+        let parent_2 = proof.get_u64();
         let payload_2 = proof.copy_to_bytes(digest_len);
         let signature_2 = proof.copy_to_bytes(signature_len);
 
@@ -260,8 +319,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let proposal_message_1 = proposal_message(&index_1, &parent_1, &payload_1);
-            let proposal_message_2 = proposal_message(&index_2, &parent_2, &payload_2);
+            let proposal_message_1 = proposal_message(view, parent_1, &payload_1);
+            let proposal_message_2 = proposal_message(view, parent_2, &payload_2);
             if !C::verify(namespace, &proposal_message_1, &public_key, &signature_1)
                 || !C::verify(namespace, &proposal_message_2, &public_key, &signature_2)
             {
@@ -272,21 +331,21 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     }
 
     pub(crate) fn serialize_conflicting_notarize(
-        index_1: &wire::Index,
-        parent_1: &wire::Parent,
+        view_1: View,
+        parent_1: View,
         payload_1: &Digest,
         signature_1: &wire::Signature,
-        index_2: &wire::Index,
-        parent_2: &wire::Parent,
+        view_2: View,
+        parent_2: View,
         payload_2: &Digest,
         signature_2: &wire::Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
-            index_1,
+            view_1,
             parent_1,
             payload_1,
             signature_1,
-            index_2,
+            view_2,
             parent_2,
             payload_2,
             signature_2,
@@ -302,21 +361,21 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     }
 
     pub(crate) fn serialize_conflicting_finalize(
-        index_1: &wire::Index,
-        parent_1: &wire::Parent,
+        view_1: View,
+        parent_1: View,
         payload_1: &Digest,
         signature_1: &wire::Signature,
-        index_2: &wire::Index,
-        parent_2: &wire::Parent,
+        view_2: View,
+        parent_2: View,
         payload_2: &Digest,
         signature_2: &wire::Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
-            index_1,
+            view_1,
             parent_1,
             payload_1,
             signature_1,
-            index_2,
+            view_2,
             parent_2,
             payload_2,
             signature_2,
@@ -332,8 +391,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     }
 
     pub(crate) fn serialize_nullify_finalize(
-        index: &wire::Index,
-        parent: &wire::Parent,
+        view: View,
+        parent: View,
         payload: &Digest,
         signature_finalize: &wire::Signature,
         signature_null: &wire::Signature,
@@ -341,8 +400,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Setup proof
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        let len =
-            8 + public_key_len + 8 + 8 + digest_len + digest_len + signature_len + signature_len;
+        let len = 8 + public_key_len + 8 + digest_len + signature_len + signature_len;
 
         // Ensure proof can be generated correctly
         if signature_finalize.public_key != signature_null.public_key {
@@ -352,11 +410,9 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
-        proof.put_u64(index.view);
+        proof.put_u64(view);
         proof.put(public_key);
-        proof.put_u64(index.height);
-        proof.put_u64(parent.view);
-        proof.extend_from_slice(&parent.digest);
+        proof.put_u64(parent);
         proof.extend_from_slice(payload);
         proof.extend_from_slice(&signature_finalize.signature);
         proof.extend_from_slice(&signature_null.signature);
@@ -371,8 +427,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        let len =
-            8 + public_key_len + 8 + 8 + digest_len + digest_len + signature_len + signature_len;
+        let len = 8 + public_key_len + 8 + digest_len + signature_len + signature_len;
         if proof.len() != len {
             return None;
         }
@@ -380,14 +435,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Decode proof
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_len);
-        let height = proof.get_u64();
-        let index = wire::Index { view, height };
-        let parent_view = proof.get_u64();
-        let parent_digest = proof.copy_to_bytes(digest_len);
-        let parent = wire::Parent {
-            view: parent_view,
-            digest: parent_digest,
-        };
+        let parent = proof.get_u64();
         let payload = proof.copy_to_bytes(digest_len);
         let signature_finalize = proof.copy_to_bytes(signature_len);
         let signature_null = proof.copy_to_bytes(signature_len);
@@ -397,7 +445,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             if !C::validate(&public_key) {
                 return None;
             }
-            let finalize_message = proposal_message(&index, &parent, &payload);
+            let finalize_message = proposal_message(view, parent, &payload);
             let null_message = nullify_message(view);
             if !C::verify(
                 &self.finalize_namespace,

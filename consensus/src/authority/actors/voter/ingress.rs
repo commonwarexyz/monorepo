@@ -1,19 +1,11 @@
-use crate::authority::{wire, Context};
-use commonware_cryptography::Digest;
+use crate::authority::wire;
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message {
-    Proposed {
-        context: Context,
-        payload: Digest,
-    },
-    Verified {
-        context: Context,
-        result: bool,
-    },
     Backfilled {
         notarizations: Vec<wire::Notarization>,
+        nullifications: Vec<wire::Nullification>,
     },
 }
 
@@ -27,60 +19,16 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub async fn proposed(&mut self, context: Context, payload: Digest) {
+    pub(crate) async fn backfilled(
+        &mut self,
+        notarizations: Vec<wire::Notarization>,
+        nullifications: Vec<wire::Nullification>,
+    ) {
         self.sender
-            .send(Message::Proposed { context, payload })
-            .await
-            .unwrap();
-    }
-
-    pub async fn verified(&mut self, context: Context, result: bool) {
-        self.sender
-            .send(Message::Verified { context, result })
-            .await
-            .unwrap();
-    }
-
-    pub(crate) async fn backfilled(&mut self, notarizations: Vec<wire::Notarization>) {
-        self.sender
-            .send(Message::Backfilled { notarizations })
-            .await
-            .unwrap();
-    }
-}
-
-pub enum ApplicationMessage {
-    Propose { context: Context },
-    Verify { context: Context, payload: Digest },
-    Broadcast { context: Context, payload: Digest },
-}
-
-pub struct Application {
-    sender: mpsc::Sender<ApplicationMessage>,
-}
-
-impl Application {
-    pub(super) fn new(sender: mpsc::Sender<ApplicationMessage>) -> Self {
-        Self { sender }
-    }
-
-    pub async fn propose(&mut self, context: Context) {
-        self.sender
-            .send(ApplicationMessage::Propose { context })
-            .await
-            .unwrap();
-    }
-
-    pub async fn verify(&mut self, context: Context, payload: Digest) {
-        self.sender
-            .send(ApplicationMessage::Verify { context, payload })
-            .await
-            .unwrap();
-    }
-
-    pub async fn broadcast(&mut self, context: Context, payload: Digest) {
-        self.sender
-            .send(ApplicationMessage::Broadcast { context, payload })
+            .send(Message::Backfilled {
+                notarizations,
+                nullifications,
+            })
             .await
             .unwrap();
     }

@@ -7,36 +7,20 @@ message Voter {
         Notarization notarization = 2;
         Nullify nullify = 3;
         Nullification nullification = 4;
-        Finalize finalize = 5;  
+        Finalize finalize = 5;
         Finalization finalization = 6;
     }
 }
 
-message Index {
-    // View of current proposal.
-    uint64 view = 1;
-
-    // Height of current proposal (must be 1 greater than parent).
-    uint64 height = 2;
-}
-
-message Parent {
-    // View is used to quickly determine which null notarizations are missing for
-    // some verification.
-    uint64 view = 1;
-
-    // Digest is used to link proposals using a cryptographic hash.
-    bytes digest = 2;
-}
-
 // To ensure all participants stay informed, Container is included in all vote messages.
 message Proposal {
-    Index index = 1;
-    Parent parent = 2; 
-    bytes payload = 3; // Hash 
+    uint64 view = 1;
+    uint64 parent = 2;
+    bytes payload = 3; // Digest
 }
 
 message Signature {
+    // TODO: replace with index
     bytes public_key = 1;
     bytes signature = 2;
 }
@@ -62,7 +46,7 @@ message Nullify {
 message Nullification {
     uint64 view = 1;
     repeated Signature signatures = 2;
-} 
+}
 
 message Finalize {
     Proposal proposal = 1;

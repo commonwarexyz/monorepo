@@ -122,12 +122,11 @@ mod wire {
 }
 
 pub type View = u64;
-pub type Height = u64;
 
 /// Context is a collection of information about the context in which a container is built.
 #[derive(Clone)]
 pub struct Context {
-    pub index: (View, Height),
+    pub view: View,
     pub parent: (View, Digest),
 }
 
@@ -167,6 +166,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use commonware_utils::{hex, quorum};
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
@@ -183,6 +183,7 @@ mod tests {
     fn test_all_online() {
         // Create runtime
         let n = 5;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
@@ -213,7 +214,9 @@ mod tests {
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
 
             // Create engines
-            let relay = Arc::new(Mutex::new(mocks::Relay::new()));
+            let hasher = Sha256::default();
+            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for scheme in schemes.into_iter() {
@@ -248,26 +251,29 @@ mod tests {
                 }
 
                 // Start engine
-                let hasher = Sha256::default();
-                let supervisor_config = mocks::SupervisorConfig {
-                    prover: Prover::new(hasher.clone(), namespace.clone()),
+                let supervisor_config = mocks::actor::SupervisorConfig {
+                    prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor =
+                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let automaton_cfg = mocks::AutomatonConfig {
+                let application_cfg = mocks::actor::ApplicationConfig {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
-                    sender: done_sender.clone(),
+                    tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
-                    allow_invalid_payload: false,
                 };
-                let application = mocks::Automaton::new(runtime.clone(), automaton_cfg);
+                let (actor, application) =
+                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                runtime.spawn("application", async move {
+                    actor.run().await;
+                });
                 let cfg = config::Config {
                     crypto: scheme,
-                    hasher,
+                    hasher: hasher.clone(),
                     application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
@@ -298,14 +304,22 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::Progress::Finalized(height, digest) = event {
-                    finalized.insert(height, digest);
-                    if height < required_containers {
+                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                    let (view, _, payload, _) =
+                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    if digest != payload {
+                        panic!(
+                            "finalization mismatch digest: {:?}, payload: {:?}",
+                            digest, payload
+                        );
+                    }
+                    finalized.insert(view, digest);
+                    if (finalized.len() as u64) < required_containers {
                         continue;
                     }
                     completed.insert(validator);
                 }
-                if completed.len() == n {
+                if completed.len() == n as usize {
                     break;
                 }
             }
@@ -322,22 +336,22 @@ mod tests {
                 // Ensure no forks
                 {
                     let votes = supervisor.votes.lock().unwrap();
-                    for (height, views) in votes.iter() {
+                    for (view, payloads) in votes.iter() {
                         // Ensure no skips (height == view)
-                        if views.len() > 1 {
-                            panic!("height: {}, views: {:?}", height, views);
-                        }
-
-                        // Only check at views below timeout
-                        if *height > latest_complete {
-                            continue;
+                        if payloads.len() > 1 {
+                            let hex_payloads =
+                                payloads.iter().map(|p| hex(p.0)).collect::<Vec<String>>();
+                            panic!("view: {}, payloads: {:?}", view, hex_payloads);
                         }
 
                         // Ensure everyone participating
-                        let digest = finalized.get(height).expect("height should be finalized");
-                        let voters = views.get(digest).expect("digest should exist");
-                        if voters.len() != n {
-                            panic!("height: {}, voters: {:?}", height, voters);
+                        let digest = finalized.get(view).expect("view should be finalized");
+                        let voters = payloads.get(digest).expect("digest should exist");
+                        if voters.len() < threshold as usize {
+                            // We can't verify that everyone participated at every height because some nodes may have started later.
+                            //
+                            // TODO: verify everyone participated most of the time
+                            panic!("view: {}, voters: {:?}", view, voters);
                         }
                     }
                 }
@@ -357,7 +371,10 @@ mod tests {
                         // Ensure everyone participating
                         let digest = finalized.get(height).expect("height should be finalized");
                         let finalizers = views.get(digest).expect("digest should exist");
-                        if finalizers.len() != n {
+                        if finalizers.len() < threshold as usize {
+                            // We can't verify that everyone participated at every height because some nodes may have started later.
+                            //
+                            // TODO: verify everyone participated most of the time
                             panic!("height: {}, finalizers: {:?}", height, finalizers);
                         }
                     }
