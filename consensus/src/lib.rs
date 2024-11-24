@@ -13,7 +13,7 @@ use std::future::Future;
 /// While an automaton may be logically instantiated as a single entity, it may be
 /// cloned by multiple sub-components of a consensus engine to, among other things,
 /// broadcast and verify payloads.
-pub trait Automaton: Clone + Send + 'static {
+pub trait Automaton: Send + 'static {
     type Context;
 
     /// Initialize the application with the genesis container.
@@ -30,7 +30,7 @@ pub trait Automaton: Clone + Send + 'static {
     /// that store the "tip" of some subprocess in the block rather than the chain content itself. It is
     /// ultimately still up to the "Automaton" to decide how to handle this (the linking to parent digests
     /// could be some sort of tree that requires much more prior knowledge).
-    fn propose(&mut self, context: Self::Context) -> impl Future<Output = ()> + Send;
+    fn propose(&mut self, context: Self::Context) -> impl Future<Output = Digest> + Send;
 
     /// Verify the payload is valid.
     ///
@@ -55,25 +55,11 @@ pub trait Automaton: Clone + Send + 'static {
         &mut self,
         context: Self::Context,
         payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
-}
-
-/// Implemented by the consensus engine to handle messages from the Automaton.
-pub trait Engine: Clone + Send + 'static {
-    type Context;
-
-    fn proposed(&self, context: Self::Context, payload: Digest) -> impl Future<Output = ()> + Send;
-
-    fn verified(
-        &self,
-        context: Self::Context,
-        payload: Digest,
-        result: bool,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = bool> + Send;
 }
 
 /// Indication that a digest should be disseminated to other participants.
-pub trait Relay: Clone + Send + 'static {
+pub trait Relay: Send + 'static {
     /// Called once consensus locks on a proposal. At this point the application can
     /// broadcast the raw contents to the network with the given consensus header (which
     /// references the payload).
@@ -84,10 +70,10 @@ pub trait Relay: Clone + Send + 'static {
     /// to optimistically cache when listening to messages from peers. Could just keep latest proposal digest
     /// per peer sent to us (and answer any verification requests with that digest...how would we do more complex
     /// broadcast).
-    fn propagate(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
+    fn broadcast(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
 }
 
-pub trait Finalizer: Clone + Send + 'static {
+pub trait Finalizer: Send + 'static {
     /// Event that the container has been notarized (seen by `2f+1` participants).
     ///
     /// No guarantee will send notarized event for all heights.

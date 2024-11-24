@@ -9,10 +9,10 @@ use crate::{
             proposal_message,
         },
         prover::Prover,
-        wire, Context, Height, Index, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
-        NOTARIZE, NULLIFY_AND_FINALIZE,
+        wire, Context, Height, Index, Parent, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE,
+        FINALIZE, NOTARIZE, NULLIFY_AND_FINALIZE,
     },
-    Automaton, Supervisor,
+    Automaton, Finalizer, Relay, Supervisor,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
@@ -20,12 +20,13 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::{hex, quorum};
 use core::panic;
-use futures::{channel::mpsc, StreamExt};
+use futures::{channel::mpsc, future::Either, StreamExt};
 use prometheus_client::metrics::gauge::Gauge;
 use prost::Message as _;
 use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    future::Future,
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
@@ -50,8 +51,8 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor> {
     nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view
-    requested_proposal: bool,
     proposal: Option<(Digest /* proposal */, wire::Proposal)>,
+    requested_proposal: bool,
     verified_proposal: bool,
 
     // Track votes for all proposals (ensuring any participant only has one recorded vote)
@@ -407,13 +408,13 @@ pub struct Actor<
     E: Clock + Rng,
     C: Scheme,
     H: Hasher,
-    A: Automaton<Context = Context>,
+    A: Automaton<Context = Context> + Relay + Finalizer,
     S: Supervisor<Index = View>,
 > {
     runtime: E,
     crypto: C,
     hasher: H,
-    application: Option<A>,
+    application: A,
     supervisor: S,
 
     genesis: Digest,
@@ -442,7 +443,7 @@ impl<
         E: Clock + Rng + Spawner,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context>,
+        A: Automaton<Context = Context> + Relay + Finalizer,
         S: Supervisor<Seed = (), Index = View>,
     > Actor<E, C, H, A, S>
 {
@@ -472,7 +473,7 @@ impl<
                 runtime,
                 crypto: cfg.crypto,
                 hasher: cfg.hasher,
-                application: Some(cfg.application),
+                application: cfg.application,
                 supervisor: cfg.supervisor,
 
                 genesis,
@@ -524,15 +525,14 @@ impl<
         round.nullifies.len() >= threshold as usize
     }
 
-    fn find_parent(&self) -> Option<(wire::Parent, Height)> {
+    fn find_parent(&self) -> Option<(View, Digest, Digest, Height)> {
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
                 return Some((
-                    wire::Parent {
-                        view: GENESIS_VIEW,
-                        digest: self.genesis.clone(),
-                    },
+                    GENESIS_VIEW,
+                    self.genesis.clone(),
+                    self.genesis.clone(),
                     GENESIS_HEIGHT,
                 ));
             }
@@ -541,10 +541,9 @@ impl<
             let parent = self.is_notarized(cursor);
             if let Some(parent) = parent {
                 return Some((
-                    wire::Parent {
-                        view: cursor,
-                        digest: parent.0.clone(),
-                    },
+                    cursor,
+                    parent.0.clone(),
+                    parent.1.payload.clone(),
                     parent.1.index.unwrap().height,
                 ));
             }
@@ -560,22 +559,22 @@ impl<
         }
     }
 
-    async fn propose(&mut self, mailbox: &mut Application) {
+    fn propose(&mut self) -> Option<(Context, impl Future<Output = Digest> + Send + '_)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
             if round.leader != self.crypto.public_key() {
-                return;
+                return None;
             }
 
             // Check if we have already requested a proposal
             if round.requested_proposal {
-                return;
+                return None;
             }
 
             // Check if we have already proposed
             if round.proposal.is_some() {
-                return;
+                return None;
             }
 
             // Consider proposal requested, even if parent doesn't exist to prevent
@@ -584,19 +583,25 @@ impl<
         }
 
         // Find best parent
-        let (parent, parent_height) = match self.find_parent() {
+        let (parent_view, parent_digest, parent_payload, parent_height) = match self.find_parent() {
             Some(parent) => parent,
-            None => return,
+            None => return None,
         };
 
         // Request proposal from application
-        mailbox
-            .propose(Context {
-                index: (self.view, parent_height + 1),
-                parent: (parent.view, parent.digest),
-            })
-            .await;
         debug!(view = self.view, "requested proposal");
+        let context = Context {
+            index: Index {
+                view: self.view,
+                height: parent_height + 1,
+            },
+            parent: Parent {
+                view: parent_view,
+                payload: parent_payload,
+                proposal: parent_digest,
+            },
+        };
+        Some((context.clone(), self.application.propose(context)))
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -798,111 +803,72 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
-    async fn peer_proposal(
-        &mut self,
-        proposal: &wire::Proposal,
-        sender: &PublicKey,
-        mailbox: &mut Application,
-    ) {
-        // Determine if proposal from leader
-        let index = proposal.index.as_ref().unwrap();
-        let expected_leader = match self.supervisor.leader(index.view, ()) {
-            Some(leader) => leader,
-            None => {
-                debug!(
-                    sender = hex(&sender),
-                    reason = "unable to compute leader",
-                    "dropping proposal"
-                );
-                return;
+    fn peer_proposal(&mut self) -> Option<(Context, impl Future<Output = bool> + Send + '_)> {
+        // Get round
+        let (parent, height, proposal_digest, payload) = {
+            let round = self.views.get_mut(&self.view)?;
+
+            // If we are the leader, drop peer proposals
+            if round.leader == self.crypto.public_key() {
+                return None;
             }
-        };
-        if expected_leader != sender {
-            trace!(
-                sender = hex(&sender),
-                view_leader = hex(&expected_leader),
-                reason = "not leader",
-                "dropping proposal"
-            );
-            return;
-        }
 
-        // Compute digest
-        let proposal_message =
-            proposal_message(index, proposal.parent.as_ref().unwrap(), &proposal.payload);
-        self.hasher.update(&proposal_message);
-        let proposal_digest = self.hasher.finalize();
-
-        // Check if duplicate or conflicting
-        if let Some(round) = self.views.get_mut(&index.view) {
+            // If we already broadcast nullify or set proposal, do nothing
             if round.broadcast_nullify {
-                warn!(
-                    leader = hex(&expected_leader),
-                    view = round.view,
-                    reason = "view already timed out",
-                    "dropping proposal"
-                );
-                return;
+                return None;
             }
             if round.proposal.is_some() {
-                let round_digest = &round.proposal.as_ref().unwrap().0;
-                if *round_digest == proposal_digest {
-                    debug!(
-                        leader = hex(&expected_leader),
-                        view = round.view,
-                        reason = "already received proposal",
-                        "dropping proposal"
-                    );
-                    return;
-                } else {
-                    // This will be handled as a conflicting vote.
-                    warn!(
-                        leader = hex(&expected_leader),
-                        view = round.view,
-                        round_digest = hex(round_digest),
-                        proposal_digest = hex(&proposal_digest),
-                        "conflicting proposal"
-                    );
-                    return;
-                }
+                return None;
             }
-        }
 
-        // Check parent validity
-        let parent = proposal.parent.as_ref().unwrap();
-        if index.view <= parent.view {
-            debug!(
-                view = index.view,
-                parent = parent.view,
-                reason = "invalid parent",
-                "dropping proposal"
-            );
-            return;
-        }
-        if parent.view < self.last_finalized {
-            debug!(
-                view = index.view,
-                parent = parent.view,
-                last_finalized = self.last_finalized,
-                reason = "parent behind finalized tip",
-                "dropping proposal"
-            );
-            return;
-        }
+            // Check if leader has signed a digest
+            let proposal_digest = round.notaries.get(&round.leader)?;
+            let proposal = round
+                .notarizes
+                .get(proposal_digest)?
+                .get(&round.leader)?
+                .proposal
+                .as_ref()?;
+            let height = proposal.index.as_ref()?.height;
 
-        // Ensure we have required notarizations
-        let mut cursor = match index.view {
-            0 => {
+            // Check parent validity
+            let parent = proposal.parent.as_ref().unwrap();
+            if self.view <= parent.view {
                 debug!(
-                    view = index.view,
-                    reason = "invalid view",
+                    view = self.view,
+                    parent = parent.view,
+                    reason = "invalid parent",
                     "dropping proposal"
                 );
-                return;
+                return None;
             }
-            _ => index.view - 1,
+            if parent.view < self.last_finalized {
+                debug!(
+                    view = self.view,
+                    parent = parent.view,
+                    last_finalized = self.last_finalized,
+                    reason = "parent behind finalized tip",
+                    "dropping proposal"
+                );
+                return None;
+            }
+            (
+                parent.clone(),
+                height,
+                proposal_digest.clone(),
+                proposal.payload.clone(),
+            )
         };
-        loop {
+
+        // Ensure we have required notarizations
+        let mut cursor = match self.view {
+            0 => {
+                debug!(self.view, reason = "invalid view", "dropping proposal");
+                return None;
+            }
+            _ => self.view - 1,
+        };
+        let parent_payload = loop {
             if cursor == parent.view {
                 // Check if first block
                 if parent.view == GENESIS_VIEW {
@@ -914,18 +880,18 @@ impl<
                             reason = "invalid genesis",
                             "dropping proposal"
                         );
-                        return;
+                        return None;
                     }
-                    if index.height != GENESIS_HEIGHT + 1 {
+                    if height != GENESIS_HEIGHT + 1 {
                         debug!(
                             view = cursor,
-                            height = index.height,
+                            height,
                             reason = "invalid height",
                             "dropping proposal"
                         );
-                        return;
+                        return None;
                     }
-                    break;
+                    break self.genesis.clone();
                 }
 
                 // Check notarization exists
@@ -937,7 +903,7 @@ impl<
                             reason = "missing notarization",
                             "dropping proposal"
                         );
-                        return;
+                        return None;
                     }
                 };
                 if parent_digest != &parent.digest {
@@ -948,63 +914,56 @@ impl<
                         reason = "invalid parent",
                         "dropping proposal"
                     );
-                    return;
+                    return None;
                 }
-                if parent_proposal.index.unwrap().height + 1 != index.height {
+                if parent_proposal.index.unwrap().height + 1 != height {
                     debug!(
                         view = cursor,
                         parent = hex(&parent.digest),
                         proposal = hex(&parent_digest),
-                        height = index.height,
+                        height,
                         reason = "invalid height",
                         "dropping proposal"
                     );
-                    return;
+                    return None;
                 }
 
                 // Peer proposal references a valid parent
-                break;
+                break parent_proposal.payload.clone();
             }
 
             // Check nullification exists in gap
             if !self.is_nullified(cursor) {
                 debug!(view = cursor, "missing nullification");
-                return;
+                return None;
             }
             cursor -= 1;
-        }
+        };
 
         // Verify the proposal
-        let round = self.views.entry(index.view).or_insert_with(|| {
-            Round::new(
-                self.hasher.clone(),
-                self.supervisor.clone(),
-                index.view,
-                expected_leader,
-                None,
-                None,
-            )
-        });
-        round.proposal = Some((proposal_digest.clone(), proposal.clone()));
-        mailbox
-            .verify(
-                Context {
-                    index: Index {
-                        view: index.view,
-                        height: index.height,
-                    },
-                    parent: (parent.view, parent.digest.clone()),
-                },
-                proposal.payload.clone(),
-            )
-            .await;
+        unimplemented!("set round proposal");
         debug!(
-            view = index.view,
-            height = index.height,
+            view = self.view,
+            height,
             digest = hex(&proposal_digest),
-            payload = hex(&proposal.payload),
+            payload = hex(&payload),
             "requested proposal verification",
         );
+        let context = Context {
+            index: Index {
+                view: self.view,
+                height,
+            },
+            parent: Parent {
+                view: parent.view,
+                payload: parent_payload.clone(),
+                proposal: parent.digest.clone(),
+            },
+        };
+        Some((
+            context.clone(),
+            self.application.verify(context, payload.clone()),
+        ))
     }
 
     async fn verified(&mut self, view: View) -> bool {
@@ -1142,7 +1101,7 @@ impl<
         Some((threshold, len))
     }
 
-    async fn notarize(&mut self, notarize: wire::Notarize, mailbox: &mut Application) {
+    async fn notarize(&mut self, notarize: wire::Notarize) {
         // Extract proposal
         let proposal = match &notarize.proposal {
             Some(proposal) => proposal,
@@ -1227,10 +1186,6 @@ impl<
             return;
         }
 
-        // Handle peer proposal
-        self.peer_proposal(proposal, &signature.public_key, mailbox)
-            .await;
-
         // Handle notarize
         self.handle_notarize(notarize).await;
     }
@@ -1257,7 +1212,7 @@ impl<
         round.add_verified_notarize(notarize).await;
     }
 
-    async fn notarization(&mut self, notarization: wire::Notarization, mailbox: &mut Application) {
+    async fn notarization(&mut self, notarization: wire::Notarization) {
         // Extract proposal
         let proposal = match &notarization.proposal {
             Some(proposal) => proposal,
@@ -1372,15 +1327,13 @@ impl<
                 debug!(reason = "invalid signature", "dropping notarization");
                 return;
             }
-
-            // Handle peer proposal
-            self.peer_proposal(proposal, &signature.public_key, mailbox)
-                .await;
         }
         debug!(view = proposal_index.view, "notarization verified");
 
         // Handle notarization
         self.handle_notarization(notarization).await;
+
+        // TODO: add to verify?
     }
 
     async fn handle_notarization(&mut self, notarization: wire::Notarization) {
@@ -1549,7 +1502,7 @@ impl<
         self.enter_view(nullification.view + 1);
     }
 
-    async fn finalize(&mut self, finalize: wire::Finalize, mailbox: &mut Application) {
+    async fn finalize(&mut self, finalize: wire::Finalize) {
         // Extract proposal
         let proposal = match &finalize.proposal {
             Some(proposal) => proposal,
@@ -1638,10 +1591,6 @@ impl<
             return;
         }
 
-        // Handle peer proposal
-        self.peer_proposal(proposal, &signature.public_key, mailbox)
-            .await;
-
         // Handle finalize
         self.handle_finalize(finalize).await;
     }
@@ -1668,7 +1617,7 @@ impl<
         view.add_verified_finalize(finalize).await;
     }
 
-    async fn finalization(&mut self, finalization: wire::Finalization, mailbox: &mut Application) {
+    async fn finalization(&mut self, finalization: wire::Finalization) {
         // Extract proposal
         let proposal = match &finalization.proposal {
             Some(proposal) => proposal,
@@ -1784,10 +1733,6 @@ impl<
                 debug!(reason = "invalid signature", "dropping finalization");
                 return;
             }
-
-            // Handle peer proposal
-            self.peer_proposal(proposal, &signature.public_key, mailbox)
-                .await;
         }
         debug!(view = proposal_index.view, "finalization verified");
 
@@ -2079,47 +2024,6 @@ impl<
     }
 
     pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
-        // Spawn async application processor
-        //
-        // TODO: clean up these abstractions
-        // TODO: use automaton rather than application
-        let (application_sender, mut application_receiver) = mpsc::channel(1024);
-        let mut application_mailbox = Application::new(application_sender);
-        self.runtime.spawn("application", {
-            let mut application = self.application.take().unwrap();
-            let mut mailbox = self.mailbox_sender.clone();
-            async move {
-                // TODO: should we handle these messages concurrently?
-                while let Some(msg) = application_receiver.next().await {
-                    match msg {
-                        ApplicationMessage::Propose { context } => {
-                            let payload = match application.propose(context.clone()).await {
-                                Some(payload) => payload,
-                                None => {
-                                    debug!(view = context.index.0, "failed to propose container");
-                                    continue;
-                                }
-                            };
-                            mailbox.proposed(context, payload).await;
-                        }
-                        ApplicationMessage::Verify { context, payload } => {
-                            let result = match application.verify(context.clone(), payload).await {
-                                Some(verified) => verified,
-                                None => {
-                                    debug!(view = context.index.0, "failed to verify container");
-                                    continue;
-                                } // means that can't be verified (not sure if valid or not)
-                            };
-                            mailbox.verified(context, result).await;
-                        }
-                        ApplicationMessage::Broadcast { context, payload } => {
-                            application.broadcast(context, payload).await;
-                        }
-                    }
-                }
-            }
-        });
-
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
@@ -2130,9 +2034,26 @@ impl<
         // TODO: rebuild from journal
 
         // Process messages
+        let mut pending_propose = None;
+        let mut pending_verify = None;
         loop {
             // Attempt to propose a container
-            self.propose(&mut application_mailbox).await;
+            if let Some(new_propose) = self.propose() {
+                pending_propose = Some(new_propose);
+            }
+            let propose_wait = match pending_propose {
+                Some(propose) => Either::Left(propose.1),
+                None => Either::Right(futures::future::pending()),
+            };
+
+            // Attempt to verify current view
+            if let Some(new_verify) = self.peer_proposal() {
+                pending_verify = Some(new_verify);
+            }
+            let verify_wait = match pending_verify {
+                Some(verify) => Either::Left(verify.1),
+                None => Either::Right(futures::future::pending()),
+            };
 
             // Wait for a timeout to fire or for a message to arrive
             let timeout = self.timeout_deadline();
@@ -2143,59 +2064,64 @@ impl<
                     self.timeout(&mut sender).await;
                     view = self.view;
                 },
+                proposed = propose_wait => {
+                    // Clear propose waiter
+                    let context = pending_propose.unwrap().0;
+                    pending_propose = None;
+
+                    // If we have already moved to another view, drop the response as we will
+                    // not broadcast it
+                    if self.view != context.index.view {
+                        debug!(view = context.index.view, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
+                        continue;
+                    }
+
+                    // Construct proposal
+                    let index = wire::Index {
+                        view: context.index.view,
+                        height: context.index.height,
+                    };
+                    let parent = wire::Parent {
+                        view: context.parent.view,
+                        digest: context.parent.proposal,
+                    };
+                    let message = proposal_message(&index, &parent, &proposed);
+                    self.hasher.update(&message);
+                    let proposal_digest = self.hasher.finalize();
+                    let proposal = wire::Proposal {
+                        index: Some(index),
+                        parent: Some(parent),
+                        payload: proposed.clone(),
+                    };
+                    if !self.our_proposal(proposal_digest, proposal.clone()).await {
+                        debug!(view = context.index.view, "failed to propose container");
+                        continue;
+                    }
+                    view = self.view;
+
+                    // Notify application of proposal
+                    self.application.broadcast(proposed).await;
+                },
+                verified = verify_wait => {
+                    // Clear verify waiter
+                    let context = pending_verify.unwrap().0;
+                    pending_verify = None;
+
+                    // Digest should never be verified again
+                    if !verified {
+                        debug!(view = context.index.view, "proposal failed verification");
+                        continue;
+                    }
+
+                    // Handle verified proposal
+                    view = context.index.view;
+                    if !self.verified(view).await {
+                        continue;
+                    }
+                },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Proposed{ context, payload } => {
-                            // If we have already moved to another view, drop the response as we will
-                            // not broadcast it
-                            if self.view != context.index.0 {
-                                debug!(view = context.index.0, our_view = self.view, reason = "no longer in required view", "dropping requested proposal");
-                                continue;
-                            }
-
-                            // Construct proposal
-                            let index = wire::Index {
-                                view: context.index.0,
-                                height: context.index.1,
-                            };
-                            let parent = wire::Parent {
-                                view: context.parent.0,
-                                digest: context.parent.1.clone(),
-                            };
-                            let message = proposal_message(&index, &parent, &payload);
-                            self.hasher.update(&message);
-                            let proposal_digest = self.hasher.finalize();
-                            let proposal = wire::Proposal {
-                                index: Some(index),
-                                parent: Some(parent),
-                                payload: payload.clone(),
-                            };
-                            if !self.our_proposal(proposal_digest, proposal.clone()).await {
-                                debug!(view = context.index.0, "failed to propose container");
-                                continue;
-                            }
-                            view = self.view;
-
-                            // Notify application of proposal
-                            application_mailbox.broadcast(context,  payload).await;
-                        },
-                        Message::Verified { context, result } => {
-                            // TODO: prevent future verification/penalize?
-                            if !result {
-                                debug!(view = context.index.0, "proposal failed verification");
-                                continue;
-                            }
-
-                            // Handle verified proposal
-                            view = context.index.0;
-                            if !self.verified(view).await {
-                                continue;
-                            }
-
-                            // TODO: Have resolver hold on to verified proposals in case they become notarized or if they are notarized
-                            // but learned about later.
-                        },
                         Message::Backfilled { notarizations: _ } => {
                             // TODO: store notarizations we've backfilled (verified in backfiller to avoid using compute in this loop)
                             unimplemented!()
@@ -2232,7 +2158,7 @@ impl<
                                     continue;
                                 }
                             };
-                            self.notarize(notarize, &mut application_mailbox).await;
+                            self.notarize(notarize).await;
                         }
                         wire::voter::Payload::Notarization(notarization) => {
                             view = match proposal_view(&notarization.proposal) {
@@ -2242,7 +2168,7 @@ impl<
                                     continue;
                                 }
                             };
-                            self.notarization(notarization, &mut application_mailbox).await;
+                            self.notarization(notarization).await;
                         }
                         wire::voter::Payload::Nullify(nullify) => {
                             view = nullify.view;
@@ -2260,7 +2186,7 @@ impl<
                                     continue;
                                 }
                             };
-                            self.finalize(finalize, &mut application_mailbox).await;
+                            self.finalize(finalize).await;
                         }
                         wire::voter::Payload::Finalization(finalization) => {
                             view = match proposal_view(&finalization.proposal) {
@@ -2270,7 +2196,7 @@ impl<
                                     continue;
                                 }
                             };
-                            self.finalization(finalization, &mut application_mailbox).await;
+                            self.finalization(finalization).await;
                         }
                     };
                 },

@@ -134,6 +134,7 @@ pub struct Index {
 pub struct Parent {
     pub view: View,
     pub payload: Digest,
+    proposal: Digest,
 }
 
 /// Context is a collection of information about the context in which a container is built.
