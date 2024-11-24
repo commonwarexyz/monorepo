@@ -306,6 +306,7 @@ pub struct SupervisorConfig<C: Scheme, H: Hasher> {
     pub participants: BTreeMap<View, Vec<PublicKey>>,
 }
 
+type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
@@ -314,8 +315,8 @@ pub struct Supervisor<C: Scheme, H: Hasher> {
 
     prover: Prover<C, H>,
 
-    pub votes: Arc<Mutex<HeightActivity>>,
-    pub finalizes: Arc<Mutex<HeightActivity>>,
+    pub votes: Arc<Mutex<Participation>>,
+    pub finalizes: Arc<Mutex<Participation>>,
     pub faults: Arc<Mutex<Faults>>,
 }
 
@@ -392,12 +393,12 @@ impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
                     .insert(public_key);
             }
             FINALIZE => {
-                let (index, _, payload, public_key) =
+                let (view, _, payload, public_key) =
                     self.prover.deserialize_finalize(proof, true).unwrap();
                 self.finalizes
                     .lock()
                     .unwrap()
-                    .entry(index.height)
+                    .entry(view)
                     .or_default()
                     .entry(payload)
                     .or_default()
