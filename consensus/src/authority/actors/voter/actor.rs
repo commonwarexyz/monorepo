@@ -545,15 +545,22 @@ impl<
                 return None;
             }
 
-            // Consider proposal requested, even if parent doesn't exist to prevent
-            // frequent parent searches
+            // Set that we requested a proposal even if we don't end up finding a parent
+            // to prevent frequent scans.
             round.requested_proposal = true;
         }
 
         // Find best parent
         let (parent_view, parent_payload) = match self.find_parent() {
             Some(parent) => parent,
-            None => return None,
+            None => {
+                debug!(
+                    view = self.view,
+                    reason = "no parent",
+                    "skipping proposal opportunity"
+                );
+                return None;
+            }
         };
 
         // Request proposal from application
@@ -752,6 +759,7 @@ impl<
         // Store the proposal
         debug!(
             view = proposal.view,
+            parent = proposal.parent,
             digest = hex(&digest),
             "generated proposal"
         );
@@ -832,10 +840,10 @@ impl<
                 let parent_proposal = match self.is_notarized(cursor) {
                     Some(parent) => parent,
                     None => {
-                        debug!(
+                        trace!(
                             view = cursor,
                             reason = "missing notarization",
-                            "dropping proposal"
+                            "skipping verify"
                         );
                         return None;
                     }
@@ -1245,6 +1253,20 @@ impl<
         round.leader_deadline = None;
         round.advance_deadline = None;
 
+        // If proposal is missing, set it
+        if round.proposal.is_none() {
+            let proposal = notarization.proposal.unwrap();
+            let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+            self.hasher.update(&message);
+            let digest = self.hasher.finalize();
+            debug!(
+                view = proposal.view,
+                digest = hex(&digest),
+                "setting unverified proposal in notarization"
+            );
+            round.proposal = Some((digest, proposal));
+        }
+
         // Enter next view
         self.enter_view(view + 1);
     }
@@ -1615,6 +1637,20 @@ impl<
                 signature: Some(signature.clone()),
             };
             round.add_verified_finalize(finalize).await;
+        }
+
+        // If proposal is missing, set it
+        if round.proposal.is_none() {
+            let proposal = finalization.proposal.unwrap();
+            let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+            self.hasher.update(&message);
+            let digest = self.hasher.finalize();
+            debug!(
+                view = proposal.view,
+                digest = hex(&digest),
+                "setting unverified proposal in finalization"
+            );
+            round.proposal = Some((digest, proposal));
         }
 
         // Track view finalized

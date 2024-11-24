@@ -177,6 +177,7 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
+    use tracing::debug;
 
     #[test_traced]
     fn test_all_online() {
@@ -303,7 +304,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::actor::Progress::Finalized(proof, digest) = event {
-                    let (view, parent, payload, signers) =
+                    let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
                         panic!(
@@ -312,6 +313,7 @@ mod tests {
                         );
                     }
                     finalized.insert(view, digest);
+                    debug!(completed = completed.len(), finalized = finalized.len());
                     if (finalized.len() as u64) < required_containers {
                         continue;
                     }

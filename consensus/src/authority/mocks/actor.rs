@@ -189,7 +189,6 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 hex(&context.parent.1)
             ));
         }
-        debug!(payload = hex(&payload), "verified");
         self.verified.insert(payload);
         true
     }
@@ -250,15 +249,13 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                         }
                         Message::Propose { context, response } => {
                             let digest = self.propose(context).await;
-                            let _ = response.send(digest);
+                            response.send(digest).expect("Failed to send proposal");
                         }
                         Message::Verify { context, payload, response } => {
                             if let Some(contents) = seen.get(&payload) {
-                                debug!(payload = hex(&payload), "have broadcast");
                                 let verified = self.verify(context, payload, contents.clone()).await;
-                                let _ = response.send(verified);
+                                response.send(verified).expect("Failed to send verification");
                             } else {
-                                debug!(payload = hex(&payload), "waiting for broadcast");
                                 waiters
                                     .entry(payload.clone())
                                     .or_default()
@@ -280,14 +277,13 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 broadcast = self.broadcast.next() => {
                     // Record digest for future use
                     let (digest, contents) = broadcast.expect("broadcast closed");
-                    debug!(payload = hex(&digest), "received broadcast");
                     seen.insert(digest.clone(), contents.clone());
 
                     // Check if we have a waiter
                     if let Some(waiters) = waiters.remove(&digest) {
                         for (context, sender) in waiters {
                             let verified = self.verify(context, digest.clone(), contents.clone()).await;
-                            let _ = sender.send(verified);
+                            sender.send(verified).expect("Failed to send verification");
                         }
                     }
                 }
