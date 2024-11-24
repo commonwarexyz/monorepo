@@ -77,10 +77,10 @@ pub trait Finalizer: Send + 'static {
     /// Event that the container has been notarized (seen by `2f+1` participants).
     ///
     /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
+    fn notarized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
 
     /// Event that the container has been finalized.
-    fn finalized(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
+    fn finalized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
 }
 
 /// Faults are specified by the underlying primitive and can be interpreted if desired (not
