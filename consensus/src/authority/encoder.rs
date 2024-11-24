@@ -1,4 +1,4 @@
-use super::wire;
+use super::View;
 use bytes::{BufMut, Bytes};
 use commonware_cryptography::Digest;
 use commonware_utils::union;
@@ -7,17 +7,15 @@ pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
-pub fn proposal_message(index: &wire::Index, parent: &wire::Parent, payload: &Digest) -> Bytes {
-    let mut msg = Vec::with_capacity(8 + 8 + 8 + parent.digest.len() + payload.len());
-    msg.put_u64(index.view);
-    msg.put_u64(index.height);
-    msg.put_u64(parent.view);
-    msg.extend_from_slice(&parent.digest);
+pub fn proposal_message(view: View, parent: View, payload: &Digest) -> Bytes {
+    let mut msg = Vec::with_capacity(8 + 8 + payload.len());
+    msg.put_u64(view);
+    msg.put_u64(parent);
     msg.extend_from_slice(payload);
     msg.into()
 }
 
-pub fn nullify_message(nullify: u64) -> Bytes {
+pub fn nullify_message(nullify: View) -> Bytes {
     nullify.to_be_bytes().to_vec().into()
 }
 
