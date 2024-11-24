@@ -7,9 +7,6 @@ pub enum Message {
         null: Vec<View>,
     },
     Notarized {
-        // TODO: cancel any outstanding fetches if we get a non-null notarized view
-        // higher than what we are requesting.
-        view: View,
         notarization: wire::Notarization,
 
         // Used to indicate when to drop old notarizations
@@ -35,12 +32,7 @@ impl Mailbox {
             .expect("Failed to send notarizations");
     }
 
-    pub async fn notarized(
-        &mut self,
-        view: View,
-        notarization: wire::Notarization,
-        last_finalized: View,
-    ) {
+    pub async fn notarized(&mut self, notarization: wire::Notarization, last_finalized: View) {
         self.sender
             .send(Message::Notarized {
                 view,

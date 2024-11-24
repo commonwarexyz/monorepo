@@ -1,6 +1,6 @@
 use super::{
-    prover::Prover, Context, Height, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
-    NOTARIZE, NULLIFY_AND_FINALIZE,
+    prover::Prover, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
+    NULLIFY_AND_FINALIZE,
 };
 use crate::{Activity, Automaton as Au, Proof, Supervisor as Su};
 use bytes::Bytes;
@@ -71,8 +71,8 @@ pub struct AutomatonConfig<H: Hasher> {
 }
 
 pub enum Progress {
-    Notarized(Height, Digest),
-    Finalized(Height, Digest),
+    Notarized(Digest),
+    Finalized(Digest),
 }
 
 #[derive(Default)]

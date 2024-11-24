@@ -1,5 +1,4 @@
-use crate::authority::{wire, Context};
-use commonware_cryptography::Digest;
+use crate::authority::wire;
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
