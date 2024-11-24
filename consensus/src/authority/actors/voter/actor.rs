@@ -398,7 +398,7 @@ pub struct Actor<
     application: A,
     supervisor: S,
 
-    genesis: Digest,
+    genesis: Option<Digest>,
 
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
@@ -428,7 +428,7 @@ impl<
         S: Supervisor<Seed = (), Index = View>,
     > Actor<E, C, H, A, S>
 {
-    pub async fn new(runtime: E, mut cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, mut cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -443,9 +443,6 @@ impl<
             registry.register("tracked_views", "tracked views", tracked_views.clone());
         }
 
-        // Get genesis
-        let genesis = cfg.application.genesis().await;
-
         // Initialize store
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
         let mailbox = Mailbox::new(mailbox_sender);
@@ -457,7 +454,7 @@ impl<
                 application: cfg.application,
                 supervisor: cfg.supervisor,
 
-                genesis,
+                genesis: None,
 
                 notarize_namespace: notarize_namespace(&cfg.namespace),
                 nullify_namespace: nullify_namespace(&cfg.namespace),
@@ -510,7 +507,7 @@ impl<
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
-                return Some((GENESIS_VIEW, self.genesis.clone()));
+                return Some((GENESIS_VIEW, self.genesis.as_ref().unwrap().clone()));
             }
 
             // If have notarization, return
@@ -828,7 +825,7 @@ impl<
             if cursor == proposal.parent {
                 // Check if first block
                 if proposal.parent == GENESIS_VIEW {
-                    break self.genesis.clone();
+                    break self.genesis.as_ref().unwrap().clone();
                 }
 
                 // Check notarization exists
@@ -1889,6 +1886,10 @@ impl<
     }
 
     pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+        // Compute genesis
+        let genesis = self.application.genesis().await;
+        self.genesis = Some(genesis);
+
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
