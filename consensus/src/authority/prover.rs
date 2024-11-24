@@ -14,7 +14,7 @@ use crate::Proof;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use core::panic;
-use std::marker::PhantomData;
+use std::{collections::HashSet, marker::PhantomData};
 
 #[derive(Clone)]
 pub struct Prover<C: Scheme, H: Hasher> {
@@ -90,6 +90,81 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((view, parent, payload, public_key))
     }
 
+    fn serialize_aggregation(
+        view: View,
+        parent: View,
+        payload: &Digest,
+        signatures: &[wire::Signature],
+    ) -> Proof {
+        // Setup proof
+        let (public_key_len, signature_len) = C::len();
+        let len = 8 + 8 + payload.len() + 4 + signatures.len() * (public_key_len + signature_len);
+
+        // Encode proof
+        let mut proof = Vec::with_capacity(len);
+        proof.put_u64(view);
+        proof.put_u64(parent);
+        proof.extend_from_slice(&payload);
+        proof.put_u32(signatures.len() as u32);
+        for signature in signatures {
+            proof.extend_from_slice(&signature.public_key);
+            proof.extend_from_slice(&signature.signature);
+        }
+        proof.into()
+    }
+
+    fn deserialize_aggregation(
+        mut proof: Proof,
+        max: u32,
+        check_sigs: bool,
+        namespace: &[u8],
+    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
+        // Ensure proof prefix is big enough
+        let digest_len = H::len();
+        let len = 8 + 8 + digest_len + 4;
+        if proof.len() < len {
+            return None;
+        }
+
+        // Decode proof prefix
+        let view = proof.get_u64();
+        let parent = proof.get_u64();
+        let payload = proof.copy_to_bytes(digest_len);
+        let count = proof.get_u32();
+        if count > max {
+            return None;
+        }
+        let count = count as usize;
+        let message = proposal_message(view, parent, &payload);
+
+        // Decode signatures
+        let (public_key_len, signature_len) = C::len();
+        if proof.remaining() != count * (public_key_len + signature_len) {
+            return None;
+        }
+        let mut seen = HashSet::with_capacity(count);
+        for _ in 0..count {
+            // Check if already saw public key
+            let public_key = proof.copy_to_bytes(public_key_len);
+            if seen.contains(&public_key) {
+                return None;
+            }
+            seen.insert(public_key.clone());
+
+            // Verify signature
+            let signature = proof.copy_to_bytes(signature_len);
+            if check_sigs {
+                if !C::validate(&public_key) {
+                    return None;
+                }
+                if !C::verify(namespace, &message, &public_key, &signature) {
+                    return None;
+                }
+            }
+        }
+        Some((view, parent, payload, seen.into_iter().collect()))
+    }
+
     pub(crate) fn serialize_notarize(notarize: &wire::Notarize) -> Proof {
         // Extract proposal
         let proposal = notarize.proposal.as_ref().expect("missing proposal");
@@ -111,6 +186,28 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
+    pub(crate) fn serialize_notarization(notarization: &wire::Notarization) -> Proof {
+        // Extract proposal
+        let proposal = notarization.proposal.as_ref().expect("missing proposal");
+
+        // Setup proof
+        Self::serialize_aggregation(
+            proposal.view,
+            proposal.parent,
+            &proposal.payload,
+            &notarization.signatures,
+        )
+    }
+
+    pub fn deserialize_notarization(
+        &self,
+        proof: Proof,
+        max: u32,
+        check_sigs: bool,
+    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
+        Self::deserialize_aggregation(proof, max, check_sigs, &self.notarize_namespace)
+    }
+
     pub(crate) fn serialize_finalize(finalize: &wire::Finalize) -> Proof {
         // Extract proposal
         let proposal = finalize.proposal.as_ref().expect("missing proposal");
@@ -130,6 +227,28 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         check_sig: bool,
     ) -> Option<(View, View, Digest, PublicKey)> {
         Self::deserialize_proposal(proof, check_sig, &self.finalize_namespace)
+    }
+
+    pub(crate) fn serialize_finalization(finalization: &wire::Finalization) -> Proof {
+        // Extract proposal
+        let proposal = finalization.proposal.as_ref().expect("missing proposal");
+
+        // Setup proof
+        Self::serialize_aggregation(
+            proposal.view,
+            proposal.parent,
+            &proposal.payload,
+            &finalization.signatures,
+        )
+    }
+
+    pub fn deserialize_finalization(
+        &self,
+        proof: Proof,
+        max: u32,
+        check_sigs: bool,
+    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
+        Self::deserialize_aggregation(proof, max, check_sigs, &self.finalize_namespace)
     }
 
     pub(crate) fn serialize_conflicting_proposal(
