@@ -14,11 +14,11 @@ use std::future::Future;
 /// While an automaton may be logically instantiated as a single entity, it may be
 /// cloned by multiple sub-components of a consensus engine to, among other things,
 /// broadcast and verify payloads.
-pub trait Automaton: Send + 'static {
+pub trait Automaton: Clone + Send + 'static {
     type Context;
 
     /// Initialize the application with the genesis container.
-    fn genesis(&mut self) -> Digest;
+    fn genesis(&mut self) -> impl Future<Output = Digest> + Send;
 
     /// Generate a new payload for the given context.
     ///
@@ -63,7 +63,7 @@ pub trait Automaton: Send + 'static {
 }
 
 /// Indication that a digest should be disseminated to other participants.
-pub trait Relay: Send + 'static {
+pub trait Relay: Clone + Send + 'static {
     /// Called once consensus locks on a proposal. At this point the application can
     /// broadcast the raw contents to the network with the given consensus header (which
     /// references the payload).
@@ -80,7 +80,7 @@ pub trait Relay: Send + 'static {
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
-pub trait Finalizer: Send + 'static {
+pub trait Finalizer: Clone + Send + 'static {
     /// Event that the container has been notarized (seen by `2f+1` participants).
     ///
     /// No guarantee will send notarized event for all heights.

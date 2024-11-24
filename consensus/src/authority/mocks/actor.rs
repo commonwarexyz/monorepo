@@ -1,16 +1,16 @@
-use super::{
-    prover::Prover, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-    NULLIFY_AND_FINALIZE,
+use super::ingress::{Mailbox, Message};
+use crate::{
+    authority::{
+        prover::Prover, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
+        NOTARIZE, NULLIFY_AND_FINALIZE,
+    },
+    Activity, Proof, Supervisor as Su,
 };
-use crate::{Activity, Automaton as Au, Finalizer, Proof, Relay as Re, Supervisor as Su};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
-};
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use rand::RngCore;
 use rand_distr::{Distribution, Normal};
 use std::{
@@ -24,6 +24,7 @@ const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
 
+/// Relay is a mock for distributing artifacts between applications.
 #[derive(Clone)]
 pub struct Relay {
     pending: HashMap<Digest, Bytes>,
@@ -38,24 +39,26 @@ impl Relay {
         }
     }
 
-    pub fn pending(&mut self, container: Digest, payload: Bytes) {
-        self.pending.insert(container, payload);
+    pub fn pending(&mut self, digest: Digest, payload: Bytes) {
+        self.pending.insert(digest, payload);
     }
 
-    pub fn broadcast(&mut self, container: Digest) {
-        let payload = self
-            .pending
-            .remove(&container)
-            .expect("container not pending");
-        self.broadcast.insert(container, payload);
+    pub fn broadcast(&mut self, digest: Digest) {
+        let payload = self.pending.remove(&digest).expect("container not pending");
+        self.broadcast.insert(digest, payload);
     }
 
-    pub fn get(&self, container: &Digest) -> Option<Bytes> {
-        self.broadcast.get(container).cloned()
+    pub fn get(&self, digest: &Digest) -> Option<Bytes> {
+        self.broadcast.get(digest).cloned()
     }
 }
 
-pub struct AutomatonConfig<H: Hasher> {
+pub enum Progress {
+    Notarized(Proof, Digest),
+    Finalized(Proof, Digest),
+}
+
+pub struct ApplicationConfig<H: Hasher> {
     pub hasher: H,
 
     pub relay: Arc<Mutex<Relay>>,
@@ -69,84 +72,74 @@ pub struct AutomatonConfig<H: Hasher> {
     pub propose_latency: Latency,
     pub verify_latency: Latency,
 
-    pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
+    pub tracker: mpsc::UnboundedSender<(PublicKey, Progress)>,
 }
 
-pub enum Progress {
-    Notarized(Proof, Digest),
-    Finalized(Proof, Digest),
-}
-
-enum Work {
-    Propose(Context, oneshot::Sender<Digest>),
-    Verify(Context, Digest, oneshot::Sender<bool>),
-}
-
-pub struct Automaton<E: Clock + RngCore, H: Hasher> {
+pub struct Application<E: Clock + RngCore, H: Hasher> {
     runtime: E,
     hasher: H,
     participant: PublicKey,
 
-    /// Relay is a mock for distributing artifacts between applications.
     relay: Arc<Mutex<Relay>>,
+    tracker: mpsc::UnboundedSender<(PublicKey, Progress)>,
+
+    mailbox: mpsc::Receiver<Message>,
 
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
 
-    progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
-
-    work_sender: mpsc::UnboundedSender<Work>,
-    work_receiver: mpsc::UnboundedReceiver<Work>,
-
     verified: HashSet<Digest>,
-
     notarized_views: HashSet<Digest>,
     finalized_views: HashSet<Digest>,
     last_finalized: u64,
 }
 
-impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
+impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     // TODO: need to input broadcast artifacts into automaton concurrently?
-    pub fn new(runtime: E, cfg: AutomatonConfig<H>) -> Self {
+    pub fn new(runtime: E, cfg: ApplicationConfig<H>) -> (Self, Mailbox) {
         // Generate samplers
         let propose_latency = Normal::new(cfg.propose_latency.0, cfg.propose_latency.1).unwrap();
         let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
 
         // Return constructed application
-        let (work_sender, work_receiver) = mpsc::unbounded();
-        Self {
-            runtime,
+        let (sender, receiver) = mpsc::channel(1024);
+        (
+            Self {
+                runtime,
+                hasher: cfg.hasher,
+                participant: cfg.participant,
 
-            hasher: cfg.hasher,
-            relay: cfg.relay,
+                relay: cfg.relay,
+                tracker: cfg.tracker,
 
-            participant: cfg.participant,
+                mailbox: receiver,
 
-            propose_latency,
-            verify_latency,
+                propose_latency,
+                verify_latency,
 
-            progress: cfg.sender,
-
-            work_sender,
-            work_receiver,
-
-            verified: HashSet::new(),
-
-            last_finalized: 0,
-            notarized_views: HashSet::new(),
-            finalized_views: HashSet::new(),
-        }
+                verified: HashSet::new(),
+                last_finalized: 0,
+                notarized_views: HashSet::new(),
+                finalized_views: HashSet::new(),
+            },
+            Mailbox::new(sender),
+        )
     }
 
     fn panic(&self, msg: &str) -> ! {
         panic!("[{}] {}", hex(&self.participant), msg);
     }
 
-    pub async fn run(mut self) {
-        while let Some(work) = self.work_receiver.next().await {
-            match work {
-                Work::Propose(context, sender) => {
+    fn genesis(&mut self) -> Digest {
+        let payload = Bytes::from(GENESIS_BYTES);
+        self.hasher.update(&payload);
+        let digest = self.hasher.finalize();
+        self.verified.insert(digest.clone());
+        self.finalized_views.insert(digest.clone());
+        digest
+    }
 
+    async fn propose(&mut self, context: Context) -> Option<Digest> {
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.runtime);
         self.runtime
@@ -157,30 +150,20 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
         if !H::validate(&context.parent.1) {
             self.panic("invalid parent digest length");
         }
-        let parent_height = match self.state.verified.get(&context.parent.1) {
-            Some(height) => *height,
-            None => {
-                debug!(parent = hex(&context.parent.1), "parent not verified");
-                return None;
-            }
+        if !self.verified.contains(&context.parent.1) {
+            debug!(parent = hex(&context.parent.1), "parent not verified");
+            return None;
         };
-        if context.index.1 != parent_height + 1 {
-            self.panic(&format!(
-                "invalid height: {} != {} + 1",
-                context.index.1, parent_height
-            ));
-        }
 
         // Generate the payload
         let mut payload = Vec::new();
-        payload.extend_from_slice(&self.participant);
-        payload.extend_from_slice(&context.index.0.to_be_bytes());
-        payload.extend_from_slice(&context.index.1.to_be_bytes());
+        payload.extend_from_slice(&context.view.to_be_bytes());
+        payload.extend_from_slice(&context.parent.1);
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
 
         // Mark verified
-        self.state.verified.insert(digest.clone(), context.index.1);
+        self.verified.insert(digest.clone());
 
         // Store pending payload
         self.relay
@@ -188,11 +171,9 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
             .unwrap()
             .pending(digest.clone(), Bytes::from(payload));
         Some(digest)
-                    let _ = self.propose(context).await;
-                }
-                Work::Verify(context, payload, sender) => {
-                    let _ = self.verify(context, payload).await;
+    }
 
+    async fn verify(&mut self, context: Context, payload: Digest) -> Option<bool> {
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
         self.runtime
@@ -208,95 +189,42 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
         }
 
         // Ensure not duplicate check
-        if self.state.verified.contains_key(&payload) {
+        if self.verified.contains(&payload) {
             self.panic("container already verified");
         }
 
-        // TODO: verified should include concatenation fo parent/payload?
-        if let Some(parent) = self.state.verified.get(&context.parent.1) {
-            if parent + 1 != context.index.1 {
-                self.panic(&format!(
-                    "invalid height (from last verified): {} != {}",
-                    parent + 1,
-                    context.index.1
-                ));
-            }
-        } else {
-            debug!(parent = hex(&context.parent.1), "parent not verified");
-            return None;
-        };
-
         // Verify the payload
-        let contents = match self.relay.lock().unwrap().get(&payload) {
-            Some(contents) => contents,
+        let mut contents = match self.relay.lock().unwrap().get(&payload) {
+            Some(contents) => contents.clone(),
             None => return None,
         };
-        if !self.allow_invalid_payload {
-            if contents.len() != 48 {
-                self.panic("invalid payload length");
-            }
-            let parsed_view = Height::from_be_bytes(contents[32..40].try_into().unwrap());
-            if parsed_view != context.index.0 {
-                self.panic(&format!(
-                    "invalid view (in payload): {} != {}",
-                    parsed_view, context.index.0
-                ));
-            }
-            let parsed_height = Height::from_be_bytes(contents[40..].try_into().unwrap());
-            if parsed_height != context.index.1 {
-                self.panic(&format!(
-                    "invalid height (in payload): {} != {}",
-                    parsed_height, context.index.1
-                ));
-            }
+        if contents.len() != 40 {
+            self.panic("invalid payload length");
+        }
+        let parsed_view = contents.get_u64();
+        if parsed_view != context.parent.0 {
+            self.panic(&format!(
+                "invalid view (in payload): {} != {}",
+                parsed_view, context.parent.0
+            ));
+        }
+        let parsed_parent: Digest = contents.copy_to_bytes(H::len());
+        if parsed_parent != context.parent.1 {
+            self.panic(&format!(
+                "invalid parent (in payload): {} != {}",
+                hex(&parsed_parent),
+                hex(&context.parent.1)
+            ));
         }
         debug!(payload = hex(&payload), "verified");
-        self.state.verified.insert(payload, context.index.1);
+        self.verified.insert(payload);
         Some(true)
-                }
-            }
-        }
-    }
-}
-
-impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
-    type Context = Context;
-
-    fn genesis(&mut self) -> Digest {
-        let payload = Bytes::from(GENESIS_BYTES);
-        self.hasher.update(&payload);
-        let digest = self.hasher.finalize();
-        self.verified.insert(digest.clone());
-        self.finalized_views.insert(digest.clone());
-        digest
     }
 
-    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Digest> {
-        let (sender, receiver) = oneshot::channel();
-        let _ = self
-            .work_sender
-            .send(Work::Propose(context, sender))
-            .await;
-        receiver
-    }
-
-    async fn verify(&mut self, context: Self::Context, payload: Digest) -> oneshot::Receiver<bool> {
-        let (sender, receiver) = oneshot::channel();
-        let _ = self
-            .work_sender
-            .send(Work::Verify(context, payload, sender))
-            .await;
-        receiver
-    }
-}
-
-impl <E: Clock + RngCore, H: Hasher> Re for Automaton<E, H> {
-    async fn broadcast(&mut self, payload: Digest) {
+    fn broadcast(&mut self, payload: Digest) {
         self.relay.lock().unwrap().broadcast(payload);
     }
-}
 
-impl <E:Clock + RngCore, H: Hasher> Finalizer for Automaton<E, H> {
     async fn notarized(&mut self, proof: Proof, payload: Digest) {
         if !H::validate(&payload) {
             self.panic("invalid digest length");
@@ -305,7 +233,7 @@ impl <E:Clock + RngCore, H: Hasher> Finalizer for Automaton<E, H> {
             self.panic("view already notarized");
         }
         let _ = self
-            .progress
+            .tracker
             .send((
                 self.participant.clone(),
                 Progress::Notarized(proof, payload),
@@ -313,7 +241,7 @@ impl <E:Clock + RngCore, H: Hasher> Finalizer for Automaton<E, H> {
             .await;
     }
 
-    async fn finalized(&mut self, proof:Proof, payload: Digest) {
+    async fn finalized(&mut self, proof: Proof, payload: Digest) {
         if !H::validate(&payload) {
             self.panic("invalid digest length");
         }
@@ -321,12 +249,46 @@ impl <E:Clock + RngCore, H: Hasher> Finalizer for Automaton<E, H> {
             self.panic("view already finalized");
         }
         let _ = self
-            .progress
+            .tracker
             .send((
                 self.participant.clone(),
                 Progress::Finalized(proof, payload),
             ))
             .await;
+    }
+
+    pub async fn run(mut self) {
+        while let Some(work) = self.mailbox.next().await {
+            match work {
+                Message::Genesis { response } => {
+                    let digest = self.genesis();
+                    let _ = response.send(digest);
+                }
+                Message::Propose { context, response } => {
+                    // TODO: handle case where parent broadcast later
+                    let digest = self.propose(context).await;
+                    let _ = response.send(digest);
+                }
+                Message::Verify {
+                    context,
+                    payload,
+                    response,
+                } => {
+                    // TODO: handle case where parent broadcast later
+                    let verified = self.verify(context, payload).await;
+                    let _ = response.send(verified);
+                }
+                Message::Broadcast { payload } => {
+                    self.broadcast(payload);
+                }
+                Message::Notarized { proof, payload } => {
+                    self.notarized(proof, payload).await;
+                }
+                Message::Finalized { proof, payload } => {
+                    self.finalized(proof, payload).await;
+                }
+            }
+        }
     }
 }
 
@@ -409,13 +371,12 @@ impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
         // consensus).
         match activity {
             NOTARIZE => {
-                // TODO: use payload digest?
-                let (index, _, payload, public_key) =
+                let (view, _, payload, public_key) =
                     self.prover.deserialize_notarize(proof, true).unwrap();
                 self.votes
                     .lock()
                     .unwrap()
-                    .entry(index.height)
+                    .entry(view)
                     .or_default()
                     .entry(payload)
                     .or_default()
