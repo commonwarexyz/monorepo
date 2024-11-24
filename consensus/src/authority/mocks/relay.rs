@@ -23,9 +23,9 @@ impl Relay {
         receiver
     }
 
-    pub fn broadcast(&mut self, sender: PublicKey, payload: (Digest, Bytes)) {
+    pub fn broadcast(&mut self, sender: &PublicKey, payload: (Digest, Bytes)) {
         for (public_key, channel) in self.recipients.iter_mut() {
-            if public_key == &sender {
+            if public_key == sender {
                 continue;
             }
             channel.send((payload.0.clone(), payload.1.clone()));

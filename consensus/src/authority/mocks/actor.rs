@@ -67,15 +67,12 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
 
+    pending: HashMap<Digest, Bytes>,
+
     verified: HashSet<Digest>,
     notarized_views: HashSet<Digest>,
     finalized_views: HashSet<Digest>,
     last_finalized: u64,
-}
-
-enum Waiter {
-    Propose(Context, oneshot::Sender<Option<Digest>>),
-    Verify(Context, oneshot::Sender<Option<bool>>),
 }
 
 impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
@@ -105,6 +102,8 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 propose_latency,
                 verify_latency,
 
+                pending: HashMap::new(),
+
                 verified: HashSet::new(),
                 last_finalized: 0,
                 notarized_views: HashSet::new(),
@@ -127,7 +126,9 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         digest
     }
 
-    async fn propose(&mut self, context: Context) -> Option<Digest> {
+    /// When proposing a block, we do not care if the parent is verified (or even in our possession).
+    /// Backfilling verification dependencies is considered out-of-scope for consensus.
+    async fn propose(&mut self, context: Context) -> Digest {
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.runtime);
         self.runtime
@@ -138,10 +139,6 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         if !H::validate(&context.parent.1) {
             self.panic("invalid parent digest length");
         }
-        if !self.verified.contains(&context.parent.1) {
-            debug!(parent = hex(&context.parent.1), "parent not verified");
-            return None;
-        };
 
         // Generate the payload
         let mut payload = Vec::new();
@@ -154,14 +151,11 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         self.verified.insert(digest.clone());
 
         // Store pending payload
-        self.relay
-            .lock()
-            .unwrap()
-            .pending(digest.clone(), Bytes::from(payload));
-        Some(digest)
+        self.pending.insert(digest.clone(), payload.into());
+        digest
     }
 
-    async fn verify(&mut self, context: Context, payload: Digest) -> Option<bool> {
+    async fn verify(&mut self, context: Context, payload: Digest, mut contents: Bytes) -> bool {
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
         self.runtime
@@ -176,16 +170,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
             self.panic("invalid digest length");
         }
 
-        // Ensure not duplicate check
-        if self.verified.contains(&payload) {
-            self.panic("container already verified");
-        }
-
-        // Verify the payload
-        let mut contents = match self.relay.lock().unwrap().get(&payload) {
-            Some(contents) => contents.clone(),
-            None => return None,
-        };
+        // Verify contents
         if contents.len() != 40 {
             self.panic("invalid payload length");
         }
@@ -206,11 +191,15 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         }
         debug!(payload = hex(&payload), "verified");
         self.verified.insert(payload);
-        Some(true)
+        true
     }
 
     fn broadcast(&mut self, payload: Digest) {
-        self.relay.lock().unwrap().broadcast(payload);
+        let contents = self.pending.remove(&payload).expect("missing payload");
+        self.relay
+            .lock()
+            .unwrap()
+            .broadcast(&self.participant, (payload, contents));
     }
 
     async fn notarized(&mut self, proof: Proof, payload: Digest) {
@@ -246,8 +235,8 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     }
 
     pub async fn run(mut self) {
-        let mut waiters: HashMap<Digest, Vec<Waiter>> = HashMap::new();
-        let mut seen = HashMap::new();
+        let mut waiters: HashMap<Digest, Vec<(Context, oneshot::Sender<bool>)>> = HashMap::new();
+        let mut seen: HashMap<Digest, Bytes> = HashMap::new();
         loop {
             select! {
                 message = self.mailbox.next() => {
@@ -262,8 +251,16 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                             let _ = response.send(digest);
                         }
                         Message::Verify { context, payload, response } => {
-                            let verified = self.verify(context, payload).await;
-                            let _ = response.send(verified);
+                            if let Some(contents) = seen.get(&payload) {
+                                let verified = self.verify(context, payload, contents.clone()).await;
+                                let _ = response.send(verified);
+                            } else {
+                                waiters
+                                    .entry(payload.clone())
+                                    .or_default()
+                                    .push((context, response));
+                                continue;
+                            }
                         }
                         Message::Broadcast { payload } => {
                             self.broadcast(payload);
@@ -279,20 +276,13 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 broadcast = self.broadcast.next() => {
                     // Record digest for future use
                     let (digest, contents) = broadcast.expect("broadcast closed");
-                    seen.insert(digest.clone(), contents);
+                    seen.insert(digest.clone(), contents.clone());
 
                     // Check if we have a waiter
                     if let Some(waiters) = waiters.remove(&digest) {
-                        for waiter in waiters {
-                            match waiter {
-                                Waiter::Propose(context, response) => {
-                                    let digest = self.propose(context).await;
-                                    let _ = response.send(Some(digest.clone()));
-                                }
-                                Waiter::Verify(context, response) => {
-                                    let _ = response.send(Some(true));
-                                }
-                            }
+                        for (context, sender) in waiters {
+                            let verified = self.verify(context, digest.clone(), contents.clone()).await;
+                            let _ = sender.send(verified);
                         }
                     }
                 }
