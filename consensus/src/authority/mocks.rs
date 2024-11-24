@@ -2,12 +2,15 @@ use super::{
     prover::Prover, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
     NULLIFY_AND_FINALIZE,
 };
-use crate::{Activity, Automaton as Au, Proof, Supervisor as Su};
+use crate::{Activity, Automaton as Au, Finalizer, Proof, Relay as Re, Supervisor as Su};
 use bytes::Bytes;
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
-use futures::{channel::mpsc, SinkExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt, StreamExt,
+};
 use rand::RngCore;
 use rand_distr::{Distribution, Normal};
 use std::{
@@ -65,42 +68,41 @@ pub struct AutomatonConfig<H: Hasher> {
 
     pub propose_latency: Latency,
     pub verify_latency: Latency,
-    pub allow_invalid_payload: bool,
 
     pub sender: mpsc::UnboundedSender<(PublicKey, Progress)>,
 }
 
 pub enum Progress {
-    Notarized(Digest),
-    Finalized(Digest),
+    Notarized(Proof, Digest),
+    Finalized(Proof, Digest),
 }
 
-#[derive(Default)]
-struct State {
-    verified: HashMap<Digest, Height>,
-    last_finalized: u64,
-    finalized: HashMap<Digest, Height>,
-
-    notarized_views: HashSet<Digest>,
-    finalized_views: HashSet<Digest>,
+enum Work {
+    Propose(Context, oneshot::Sender<Digest>),
+    Verify(Context, Digest, oneshot::Sender<bool>),
 }
 
 pub struct Automaton<E: Clock + RngCore, H: Hasher> {
     runtime: E,
     hasher: H,
+    participant: PublicKey,
 
     /// Relay is a mock for distributing artifacts between applications.
     relay: Arc<Mutex<Relay>>,
 
-    participant: PublicKey,
-
     propose_latency: Normal<f64>,
     verify_latency: Normal<f64>,
-    allow_invalid_payload: bool,
 
     progress: mpsc::UnboundedSender<(PublicKey, Progress)>,
 
-    state: State,
+    work_sender: mpsc::UnboundedSender<Work>,
+    work_receiver: mpsc::UnboundedReceiver<Work>,
+
+    verified: HashSet<Digest>,
+
+    notarized_views: HashSet<Digest>,
+    finalized_views: HashSet<Digest>,
+    last_finalized: u64,
 }
 
 impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
@@ -111,6 +113,7 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
         let verify_latency = Normal::new(cfg.verify_latency.0, cfg.verify_latency.1).unwrap();
 
         // Return constructed application
+        let (work_sender, work_receiver) = mpsc::unbounded();
         Self {
             runtime,
 
@@ -121,33 +124,28 @@ impl<E: Clock + RngCore, H: Hasher> Automaton<E, H> {
 
             propose_latency,
             verify_latency,
-            allow_invalid_payload: cfg.allow_invalid_payload,
 
             progress: cfg.sender,
 
-            state: State::default(),
+            work_sender,
+            work_receiver,
+
+            verified: HashSet::new(),
+
+            last_finalized: 0,
+            notarized_views: HashSet::new(),
+            finalized_views: HashSet::new(),
         }
     }
 
     fn panic(&self, msg: &str) -> ! {
         panic!("[{}] {}", hex(&self.participant), msg);
     }
-}
 
-impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
-    type Context = Context;
-
-    fn genesis(&mut self) -> Digest {
-        let payload = Bytes::from(GENESIS_BYTES);
-        self.hasher.update(&payload);
-        let digest = self.hasher.finalize();
-        self.state.verified.insert(digest.clone(), 0);
-        self.state.finalized.insert(digest.clone(), 0);
-        digest
-    }
-
-    async fn propose(&mut self, context: Self::Context) -> Option<Digest> {
-        unimplemented!("we don't know which digest is contained in which parent");
+    pub async fn run(mut self) {
+        while let Some(work) = self.work_receiver.next().await {
+            match work {
+                Work::Propose(context, sender) => {
 
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.runtime);
@@ -190,13 +188,11 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
             .unwrap()
             .pending(digest.clone(), Bytes::from(payload));
         Some(digest)
-    }
+                    let _ = self.propose(context).await;
+                }
+                Work::Verify(context, payload, sender) => {
+                    let _ = self.verify(context, payload).await;
 
-    async fn broadcast(&mut self, _context: Self::Context, payload: Digest) {
-        self.relay.lock().unwrap().broadcast(payload);
-    }
-
-    async fn verify(&mut self, context: Self::Context, payload: Digest) -> Option<bool> {
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.runtime);
         self.runtime
@@ -257,45 +253,78 @@ impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
         debug!(payload = hex(&payload), "verified");
         self.state.verified.insert(payload, context.index.1);
         Some(true)
+                }
+            }
+        }
+    }
+}
+
+impl<E: Clock + RngCore, H: Hasher> Au for Automaton<E, H> {
+    type Context = Context;
+
+    fn genesis(&mut self) -> Digest {
+        let payload = Bytes::from(GENESIS_BYTES);
+        self.hasher.update(&payload);
+        let digest = self.hasher.finalize();
+        self.verified.insert(digest.clone());
+        self.finalized_views.insert(digest.clone());
+        digest
     }
 
-    async fn notarized(&mut self, context: Self::Context, container: Digest) {
-        if !H::validate(&container) {
+    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Digest> {
+        let (sender, receiver) = oneshot::channel();
+        let _ = self
+            .work_sender
+            .send(Work::Propose(context, sender))
+            .await;
+        receiver
+    }
+
+    async fn verify(&mut self, context: Self::Context, payload: Digest) -> oneshot::Receiver<bool> {
+        let (sender, receiver) = oneshot::channel();
+        let _ = self
+            .work_sender
+            .send(Work::Verify(context, payload, sender))
+            .await;
+        receiver
+    }
+}
+
+impl <E: Clock + RngCore, H: Hasher> Re for Automaton<E, H> {
+    async fn broadcast(&mut self, payload: Digest) {
+        self.relay.lock().unwrap().broadcast(payload);
+    }
+}
+
+impl <E:Clock + RngCore, H: Hasher> Finalizer for Automaton<E, H> {
+    async fn notarized(&mut self, proof: Proof, payload: Digest) {
+        if !H::validate(&payload) {
             self.panic("invalid digest length");
         }
-        if self.state.finalized.contains_key(&container) {
-            self.panic("container already finalized");
-        }
-        if !self.state.notarized_views.insert(container.clone()) {
+        if !self.notarized_views.insert(payload.clone()) {
             self.panic("view already notarized");
         }
         let _ = self
             .progress
             .send((
                 self.participant.clone(),
-                Progress::Notarized(context.index.1, container),
+                Progress::Notarized(proof, payload),
             ))
             .await;
     }
 
-    async fn finalized(&mut self, context: Self::Context, container: Digest) {
-        if !H::validate(&container) {
+    async fn finalized(&mut self, proof:Proof, payload: Digest) {
+        if !H::validate(&payload) {
             self.panic("invalid digest length");
         }
-        if self.state.finalized.contains_key(&container) {
-            self.panic("container already finalized");
-        }
-        if !self.state.finalized_views.insert(container.clone()) {
+        if !self.finalized_views.insert(payload.clone()) {
             self.panic("view already finalized");
         }
-        let height = context.index.1;
-        self.state.last_finalized = height;
-        self.state.finalized.insert(container.clone(), height);
         let _ = self
             .progress
             .send((
                 self.participant.clone(),
-                Progress::Finalized(height, container),
+                Progress::Finalized(proof, payload),
             ))
             .await;
     }
@@ -306,7 +335,6 @@ pub struct SupervisorConfig<C: Scheme, H: Hasher> {
     pub participants: BTreeMap<View, Vec<PublicKey>>,
 }
 
-type HeightActivity = HashMap<Height, HashMap<Digest, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
