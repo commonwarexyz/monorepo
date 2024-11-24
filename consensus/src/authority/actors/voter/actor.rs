@@ -1,7 +1,4 @@
-use super::{
-    ingress::{Application, ApplicationMessage},
-    Config, Mailbox, Message,
-};
+use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
         encoder::{
@@ -20,7 +17,11 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
 use commonware_utils::{hex, quorum};
 use core::panic;
-use futures::{channel::mpsc, future::Either, StreamExt};
+use futures::{
+    channel::{mpsc, oneshot},
+    future::Either,
+    StreamExt,
+};
 use prometheus_client::metrics::gauge::Gauge;
 use prost::Message as _;
 use rand::Rng;
@@ -559,7 +560,7 @@ impl<
         }
     }
 
-    fn propose(&mut self) -> Option<(Context, impl Future<Output = Digest> + Send + '_)> {
+    async fn propose(&mut self) -> Option<(Context, oneshot::Receiver<Digest>)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -601,7 +602,7 @@ impl<
                 proposal: parent_digest,
             },
         };
-        Some((context.clone(), self.application.propose(context)))
+        Some((context.clone(), self.application.propose(context).await))
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -803,7 +804,7 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
-    fn peer_proposal(&mut self) -> Option<(Context, impl Future<Output = bool> + Send + '_)> {
+    async fn peer_proposal(&mut self) -> Option<(Context, oneshot::Receiver<bool>)> {
         // Get round
         let (parent, height, proposal_digest, payload) = {
             let round = self.views.get_mut(&self.view)?;
@@ -962,7 +963,7 @@ impl<
         };
         Some((
             context.clone(),
-            self.application.verify(context, payload.clone()),
+            self.application.verify(context, payload.clone()).await,
         ))
     }
 
@@ -2034,24 +2035,28 @@ impl<
         // TODO: rebuild from journal
 
         // Process messages
+        let mut pending_propose_context = None;
         let mut pending_propose = None;
+        let mut pending_verify_context = None;
         let mut pending_verify = None;
         loop {
             // Attempt to propose a container
-            if let Some(new_propose) = self.propose() {
+            if let Some((context, new_propose)) = self.propose().await {
+                pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
             }
-            let propose_wait = match pending_propose {
-                Some(propose) => Either::Left(propose.1),
+            let propose_wait = match &mut pending_propose {
+                Some(propose) => Either::Left(propose),
                 None => Either::Right(futures::future::pending()),
             };
 
             // Attempt to verify current view
-            if let Some(new_verify) = self.peer_proposal() {
+            if let Some((context, new_verify)) = self.peer_proposal().await {
+                pending_verify_context = Some(context);
                 pending_verify = Some(new_verify);
             }
-            let verify_wait = match pending_verify {
-                Some(verify) => Either::Left(verify.1),
+            let verify_wait = match &mut pending_verify {
+                Some(verify) => Either::Left(verify),
                 None => Either::Right(futures::future::pending()),
             };
 
@@ -2066,8 +2071,17 @@ impl<
                 },
                 proposed = propose_wait => {
                     // Clear propose waiter
-                    let context = pending_propose.unwrap().0;
+                    let context = pending_propose_context.take().unwrap();
                     pending_propose = None;
+
+                    // Try to use result
+                    let proposed = match proposed {
+                        Ok(proposed) => proposed,
+                        Err(err) => {
+                            debug!(?err, view = context.index.view, "failed to propose container");
+                            continue;
+                        }
+                    };
 
                     // If we have already moved to another view, drop the response as we will
                     // not broadcast it
@@ -2104,8 +2118,17 @@ impl<
                 },
                 verified = verify_wait => {
                     // Clear verify waiter
-                    let context = pending_verify.unwrap().0;
+                    let context = pending_verify_context.take().unwrap();
                     pending_verify = None;
+
+                    // Try to use result
+                    let verified = match verified {
+                        Ok(verified) => verified,
+                        Err(err) => {
+                            debug!(?err, view = context.index.view, "failed to verify proposal");
+                            continue;
+                        }
+                    };
 
                     // Digest should never be verified again
                     if !verified {

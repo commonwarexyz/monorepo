@@ -6,6 +6,7 @@ pub mod authority;
 
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
+use futures::channel::oneshot;
 use std::future::Future;
 
 /// Automaton is the interface for the consensus engine to inform of progress.
@@ -30,7 +31,10 @@ pub trait Automaton: Send + 'static {
     /// that store the "tip" of some subprocess in the block rather than the chain content itself. It is
     /// ultimately still up to the "Automaton" to decide how to handle this (the linking to parent digests
     /// could be some sort of tree that requires much more prior knowledge).
-    fn propose(&mut self, context: Self::Context) -> impl Future<Output = Digest> + Send;
+    fn propose(
+        &mut self,
+        context: Self::Context,
+    ) -> impl Future<Output = oneshot::Receiver<Digest>> + Send;
 
     /// Verify the payload is valid.
     ///
@@ -55,7 +59,7 @@ pub trait Automaton: Send + 'static {
         &mut self,
         context: Self::Context,
         payload: Digest,
-    ) -> impl Future<Output = bool> + Send;
+    ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 }
 
 /// Indication that a digest should be disseminated to other participants.
