@@ -166,6 +166,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use commonware_storage::journal::{self, Journal};
     use commonware_utils::{hex, quorum};
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
@@ -223,6 +224,7 @@ mod tests {
             for scheme in schemes.into_iter() {
                 // Register on network
                 let validator = scheme.public_key();
+                let partition = hex(&validator);
                 let (container_sender, container_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
@@ -272,6 +274,13 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
+                let cfg = journal::Config {
+                    registry: Arc::new(Mutex::new(Registry::default())),
+                    partition,
+                };
+                let journal = Journal::init(runtime.clone(), cfg)
+                    .await
+                    .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher: hasher.clone(),
@@ -287,8 +296,9 @@ mod tests {
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    replay_concurrency: 1,
                 };
-                let engine = Engine::new(runtime.clone(), cfg);
+                let engine = Engine::new(runtime.clone(), journal, cfg);
                 runtime.spawn("engine", async move {
                     engine
                         .run(

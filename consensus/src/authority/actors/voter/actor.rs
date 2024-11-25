@@ -14,19 +14,22 @@ use crate::{
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Blob, Clock, Spawner, Storage};
+use commonware_storage::journal::Journal;
 use commonware_utils::{hex, quorum};
 use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
-    StreamExt,
+    pin_mut, StreamExt,
 };
 use prometheus_client::metrics::gauge::Gauge;
 use prost::Message as _;
 use rand::Rng;
 use std::{
+    cmp::max,
     collections::{BTreeMap, HashMap, HashSet},
+    pin,
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
@@ -386,7 +389,8 @@ impl<C: Scheme, H: Hasher, S: Supervisor> Round<C, H, S> {
 }
 
 pub struct Actor<
-    E: Clock + Rng,
+    B: Blob,
+    E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
     H: Hasher,
     A: Automaton<Context = Context> + Relay + Finalizer,
@@ -397,6 +401,9 @@ pub struct Actor<
     hasher: H,
     application: A,
     supervisor: S,
+
+    replay_concurrency: usize,
+    journal: Option<Journal<B, E>>,
 
     genesis: Option<Digest>,
 
@@ -421,14 +428,15 @@ pub struct Actor<
 }
 
 impl<
-        E: Clock + Rng + Spawner,
+        B: Blob,
+        E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
         H: Hasher,
         A: Automaton<Context = Context> + Relay + Finalizer,
         S: Supervisor<Seed = (), Index = View>,
-    > Actor<E, C, H, A, S>
+    > Actor<B, E, C, H, A, S>
 {
-    pub fn new(runtime: E, mut cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, journal: Journal<B, E>, mut cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -453,6 +461,9 @@ impl<
                 hasher: cfg.hasher,
                 application: cfg.application,
                 supervisor: cfg.supervisor,
+
+                replay_concurrency: cfg.replay_concurrency,
+                journal: Some(journal),
 
                 genesis: None,
 
@@ -988,7 +999,8 @@ impl<
     }
 
     fn prune_views(&mut self) {
-        loop {
+        // Get last min
+        let min = loop {
             // Get next key
             let next = match self.views.keys().next() {
                 Some(next) => *next,
@@ -1004,9 +1016,12 @@ impl<
                     "pruned view"
                 );
             } else {
-                return;
+                break next;
             }
-        }
+        };
+
+        // Prune journal up to min
+        self.journal.as_mut().unwrap().prune(min);
     }
 
     fn threshold(&self, view: View) -> Option<(u32, u32)> {
@@ -1930,10 +1945,90 @@ impl<
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
         self.enter_view(1);
-        self.current_view.set(1);
-        self.tracked_views.set(1);
 
-        // TODO: rebuild from journal
+        // Rebuild from journal
+        let mut observed_view = 1;
+        let mut journal = self.journal.take().expect("missing journal");
+        {
+            let stream = journal
+                .replay(self.replay_concurrency, None)
+                .await
+                .expect("unable to replay journal");
+            pin_mut!(stream);
+            while let Some(msg) = stream.next().await {
+                let (_, _, _, msg) = msg.expect("unable to decode journal message");
+                let msg = wire::Voter::decode(msg).expect("unable to decode wire message");
+                let msg = msg.payload.expect("missing payload");
+                match msg {
+                    wire::voter::Payload::Notarize(notarize) => {
+                        // Handle notarize
+                        let proposal = notarize.proposal.as_ref().unwrap().clone();
+                        let me = notarize.signature.as_ref().unwrap().public_key
+                            == self.crypto.public_key();
+                        self.handle_notarize(notarize).await;
+
+                        // Update round info
+                        if me {
+                            observed_view = max(observed_view, proposal.view);
+                            let round = self.views.get_mut(&proposal.view).expect("missing round");
+                            let proposal_message =
+                                proposal_message(proposal.view, proposal.parent, &proposal.payload);
+                            self.hasher.update(&proposal_message);
+                            let proposal_digest = self.hasher.finalize();
+                            round.proposal = Some((proposal_digest, proposal));
+                            round.verified_proposal = true;
+                            round.broadcast_notarize = true;
+                        }
+                    }
+                    wire::voter::Payload::Nullify(nullify) => {
+                        // Handle nullify
+                        let view = nullify.view;
+                        let me = nullify.signature.as_ref().unwrap().public_key
+                            == self.crypto.public_key();
+                        self.handle_nullify(nullify).await;
+
+                        // Update round info
+                        if me {
+                            observed_view = max(observed_view, view);
+                            let round = self.views.get_mut(&view).expect("missing round");
+                            round.broadcast_nullify = true;
+                        }
+                    }
+                    wire::voter::Payload::Finalize(finalize) => {
+                        // Handle finalize
+                        let view = finalize.proposal.as_ref().unwrap().view;
+                        let me = finalize.signature.as_ref().unwrap().public_key
+                            == self.crypto.public_key();
+                        self.handle_finalize(finalize).await;
+
+                        // Update round info
+                        //
+                        // If we are sending a finalize message, we must be in the next view
+                        if me {
+                            observed_view = max(observed_view, view + 1);
+                            let round = self.views.get_mut(&view).expect("missing round");
+                            round.broadcast_notarization = true;
+                            round.broadcast_finalize = true;
+                        }
+                    }
+                    _ => {
+                        panic!("unexpected message in journal");
+                    }
+                }
+            }
+        }
+        self.journal = Some(journal);
+
+        // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
+        debug!(current_view = observed_view, "replayed journal");
+        self.enter_view(observed_view);
+        {
+            let round = self.views.get_mut(&observed_view).expect("missing round");
+            round.leader_deadline = Some(self.runtime.current());
+            round.advance_deadline = Some(self.runtime.current());
+        }
+        self.current_view.set(observed_view as i64);
+        self.tracked_views.set(self.views.len() as i64);
 
         // Process messages
         let mut pending_propose_context = None;

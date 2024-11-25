@@ -22,4 +22,5 @@ pub struct Config<C: Scheme, H: Hasher, A: Automaton, S: Supervisor> {
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,
     pub activity_timeout: View,
+    pub replay_concurrency: usize,
 }
