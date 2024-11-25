@@ -2069,7 +2069,7 @@ impl<
 
                     // Enqueue missing
                     warn!(
-                        view,
+                        proposal_view = view,
                         parent,
                         ?missing_notarizations,
                         ?missing_nullifications,
