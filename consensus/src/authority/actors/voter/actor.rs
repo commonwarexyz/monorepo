@@ -2073,7 +2073,7 @@ impl<
                         parent,
                         ?missing_notarizations,
                         ?missing_nullifications,
-                        "at least one honest voter for parent"
+                        ">= 1 honest voter for nullified parent"
                     );
                 } else {
                     // Broadcast last finalized
