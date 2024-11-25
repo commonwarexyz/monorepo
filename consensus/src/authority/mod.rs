@@ -184,6 +184,7 @@ mod tests {
         // Create runtime
         let n = 5;
         let threshold = quorum(n).expect("unable to calculate threshold");
+        let max_exceptions = 4;
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
@@ -334,6 +335,7 @@ mod tests {
                 }
 
                 // Ensure no forks
+                let mut exceptions = 0;
                 {
                     let votes = supervisor.votes.lock().unwrap();
                     for (view, payloads) in votes.iter() {
@@ -349,9 +351,10 @@ mod tests {
                         let voters = payloads.get(digest).expect("digest should exist");
                         if voters.len() < threshold as usize {
                             // We can't verify that everyone participated at every height because some nodes may have started later.
-                            //
-                            // TODO: verify everyone participated most of the time
                             panic!("view: {}, voters: {:?}", view, voters);
+                        }
+                        if voters.len() != n as usize {
+                            exceptions += 1;
                         }
                     }
                 }
@@ -373,12 +376,16 @@ mod tests {
                         let finalizers = views.get(digest).expect("digest should exist");
                         if finalizers.len() < threshold as usize {
                             // We can't verify that everyone participated at every height because some nodes may have started later.
-                            //
-                            // TODO: verify everyone participated most of the time
                             panic!("height: {}, finalizers: {:?}", height, finalizers);
+                        }
+                        if finalizers.len() != n as usize {
+                            exceptions += 1;
                         }
                     }
                 }
+
+                // Ensure exceptions within allowed
+                assert!(exceptions <= max_exceptions);
             }
         });
     }
