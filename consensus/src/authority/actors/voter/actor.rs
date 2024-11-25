@@ -1023,8 +1023,9 @@ impl<
         true
     }
 
-    fn prune_views(&mut self) {
+    async fn prune_views(&mut self) {
         // Get last min
+        let mut pruned = false;
         let min = loop {
             // Get next key
             let next = match self.views.keys().next() {
@@ -1040,13 +1041,21 @@ impl<
                     last_finalized = self.last_finalized,
                     "pruned view"
                 );
+                pruned = true;
             } else {
                 break next;
             }
         };
 
         // Prune journal up to min
-        self.journal.as_mut().unwrap().prune(min);
+        if pruned {
+            self.journal
+                .as_mut()
+                .unwrap()
+                .prune(min)
+                .await
+                .expect("unable to prune journal");
+        }
     }
 
     fn threshold(&self, view: View) -> Option<(u32, u32)> {
@@ -2331,7 +2340,7 @@ impl<
 
             // After sending all required messages, prune any views
             // we no longer need
-            self.prune_views();
+            self.prune_views().await;
 
             // Update metrics
             self.current_view.set(view as i64);
