@@ -768,7 +768,7 @@ impl<
 
         // Handle nullify
         let nullify_bytes = nullify.encode_to_vec().into();
-        if round.add_verified_nullify(nullify).await {
+        if round.add_verified_nullify(nullify).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1163,7 +1163,7 @@ impl<
 
         // Handle vote
         let notarize_bytes = notarize.encode_to_vec().into();
-        if round.add_verified_notarize(notarize).await {
+        if round.add_verified_notarize(notarize).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1304,7 +1304,7 @@ impl<
                 signature: Some(signature.clone()),
             };
             let notarize_bytes = notarize.encode_to_vec().into();
-            if round.add_verified_notarize(notarize).await {
+            if round.add_verified_notarize(notarize).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
                     .unwrap()
@@ -1457,7 +1457,7 @@ impl<
                 signature: Some(signature.clone()),
             };
             let nullify_bytes = nullify.encode_to_vec().into();
-            if round.add_verified_nullify(nullify).await {
+            if round.add_verified_nullify(nullify).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
                     .unwrap()
@@ -1577,7 +1577,7 @@ impl<
 
         // Handle finalize
         let finalize_bytes = finalize.encode_to_vec().into();
-        if round.add_verified_finalize(finalize).await {
+        if round.add_verified_finalize(finalize).await && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1718,7 +1718,7 @@ impl<
                 signature: Some(signature.clone()),
             };
             let finalize_bytes = finalize.encode_to_vec().into();
-            if round.add_verified_finalize(finalize).await {
+            if round.add_verified_finalize(finalize).await && self.journal.is_some() {
                 self.journal
                     .as_mut()
                     .unwrap()
@@ -2071,63 +2071,57 @@ impl<
             pin_mut!(stream);
             while let Some(msg) = stream.next().await {
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
-                let msg = wire::Voter::decode(msg).expect("unable to decode wire message");
-                let msg = msg.payload.expect("missing payload");
-                match msg {
-                    wire::voter::Payload::Notarize(notarize) => {
-                        // Handle notarize
-                        let proposal = notarize.proposal.as_ref().unwrap().clone();
-                        let me = notarize.signature.as_ref().unwrap().public_key
-                            == self.crypto.public_key();
-                        self.handle_notarize(notarize).await;
+                // TODO: consider wrapping in full message to avoid multiple decode attempts
+                if let Ok(notarize) = wire::Notarize::decode(msg.clone()) {
+                    // Handle notarize
+                    let proposal = notarize.proposal.as_ref().unwrap().clone();
+                    let me =
+                        notarize.signature.as_ref().unwrap().public_key == self.crypto.public_key();
+                    self.handle_notarize(notarize).await;
 
-                        // Update round info
-                        if me {
-                            observed_view = max(observed_view, proposal.view);
-                            let round = self.views.get_mut(&proposal.view).expect("missing round");
-                            let proposal_message =
-                                proposal_message(proposal.view, proposal.parent, &proposal.payload);
-                            self.hasher.update(&proposal_message);
-                            let proposal_digest = self.hasher.finalize();
-                            round.proposal = Some((proposal_digest, proposal));
-                            round.verified_proposal = true;
-                            round.broadcast_notarize = true;
-                        }
+                    // Update round info
+                    if me {
+                        observed_view = max(observed_view, proposal.view);
+                        let round = self.views.get_mut(&proposal.view).expect("missing round");
+                        let proposal_message =
+                            proposal_message(proposal.view, proposal.parent, &proposal.payload);
+                        self.hasher.update(&proposal_message);
+                        let proposal_digest = self.hasher.finalize();
+                        round.proposal = Some((proposal_digest, proposal));
+                        round.verified_proposal = true;
+                        round.broadcast_notarize = true;
                     }
-                    wire::voter::Payload::Nullify(nullify) => {
-                        // Handle nullify
-                        let view = nullify.view;
-                        let me = nullify.signature.as_ref().unwrap().public_key
-                            == self.crypto.public_key();
-                        self.handle_nullify(nullify).await;
+                } else if let Ok(nullify) = wire::Nullify::decode(msg.clone()) {
+                    // Handle nullify
+                    let view = nullify.view;
+                    let me =
+                        nullify.signature.as_ref().unwrap().public_key == self.crypto.public_key();
+                    self.handle_nullify(nullify).await;
 
-                        // Update round info
-                        if me {
-                            observed_view = max(observed_view, view);
-                            let round = self.views.get_mut(&view).expect("missing round");
-                            round.broadcast_nullify = true;
-                        }
+                    // Update round info
+                    if me {
+                        observed_view = max(observed_view, view);
+                        let round = self.views.get_mut(&view).expect("missing round");
+                        round.broadcast_nullify = true;
                     }
-                    wire::voter::Payload::Finalize(finalize) => {
-                        // Handle finalize
-                        let view = finalize.proposal.as_ref().unwrap().view;
-                        let me = finalize.signature.as_ref().unwrap().public_key
-                            == self.crypto.public_key();
-                        self.handle_finalize(finalize).await;
+                } else if let Ok(finalize) = wire::Finalize::decode(msg) {
+                    // Handle finalize
+                    let view = finalize.proposal.as_ref().unwrap().view;
+                    let me =
+                        finalize.signature.as_ref().unwrap().public_key == self.crypto.public_key();
+                    self.handle_finalize(finalize).await;
 
-                        // Update round info
-                        //
-                        // If we are sending a finalize message, we must be in the next view
-                        if me {
-                            observed_view = max(observed_view, view + 1);
-                            let round = self.views.get_mut(&view).expect("missing round");
-                            round.broadcast_notarization = true;
-                            round.broadcast_finalize = true;
-                        }
+                    // Update round info
+                    //
+                    // If we are sending a finalize message, we must be in the next view
+                    if me {
+                        observed_view = max(observed_view, view + 1);
+                        let round = self.views.get_mut(&view).expect("missing round");
+                        round.broadcast_notarization = true;
+                        round.broadcast_finalize = true;
                     }
-                    _ => {
-                        panic!("unexpected message in journal");
-                    }
+                } else {
+                    panic!("unexpected message in journal");
                 }
             }
         }
