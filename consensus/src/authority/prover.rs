@@ -251,6 +251,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_aggregation(proof, max, check_sigs, &self.finalize_namespace)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn serialize_conflicting_proposal(
         view_1: View,
         parent_1: View,
@@ -330,6 +331,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((public_key, view))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn serialize_conflicting_notarize(
         view_1: View,
         parent_1: View,
@@ -360,6 +362,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_conflicting_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn serialize_conflicting_finalize(
         view_1: View,
         parent_1: View,
