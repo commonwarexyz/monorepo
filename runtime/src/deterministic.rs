@@ -409,11 +409,15 @@ impl Tasks {
     }
 }
 
+/// Seed for random number generation.
 #[derive(Clone)]
 pub enum Seed {
     Number(u64),
     Sampler(Arc<Mutex<StdRng>>),
 }
+
+/// Map of names to blobs.
+pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
 
 /// Configuration for the `deterministic` runtime.
 #[derive(Clone)]
@@ -1074,19 +1078,6 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
-#[derive(Clone)]
-pub struct Partition {
-    blobs: HashMap<Vec<u8>, Vec<u8>>,
-}
-
-impl Partition {
-    fn new() -> Self {
-        Self {
-            blobs: HashMap::new(),
-        }
-    }
-}
-
 /// Implementation of [`crate::Blob`] for the `deterministic` runtime.
 pub struct Blob {
     executor: Arc<Executor>,
@@ -1129,10 +1120,8 @@ impl crate::Storage<Blob> for Context {
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         self.executor.auditor.open(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
-        let partition_entry = partitions
-            .entry(partition.into())
-            .or_insert_with(Partition::new);
-        let content = partition_entry.blobs.entry(name.into()).or_default();
+        let partition_entry = partitions.entry(partition.into()).or_default();
+        let content = partition_entry.entry(name.into()).or_default();
         Ok(Blob::new(
             self.executor.clone(),
             partition.into(),
@@ -1149,7 +1138,6 @@ impl crate::Storage<Blob> for Context {
                 partitions
                     .get_mut(partition)
                     .ok_or(Error::PartitionMissing(partition.into()))?
-                    .blobs
                     .remove(name)
                     .ok_or(Error::BlobMissing(partition.into(), hex(name)))?;
             }
@@ -1168,8 +1156,8 @@ impl crate::Storage<Blob> for Context {
         let partition = partitions
             .get(partition)
             .ok_or(Error::PartitionMissing(partition.into()))?;
-        let mut results = Vec::with_capacity(partition.blobs.len());
-        for name in partition.blobs.keys() {
+        let mut results = Vec::with_capacity(partition.len());
+        for name in partition.keys() {
             results.push(name.clone());
         }
         results.sort(); // deterministic output
@@ -1247,7 +1235,6 @@ impl crate::Blob for Blob {
             .get_mut(&self.partition)
             .ok_or(Error::PartitionMissing(self.partition.clone()))?;
         let content = partition
-            .blobs
             .get_mut(&self.name)
             .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
         *content = new_content;
