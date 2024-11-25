@@ -250,12 +250,12 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                         }
                         Message::Propose { context, response } => {
                             let digest = self.propose(context).await;
-                            response.send(digest).expect("Failed to send proposal");
+                            let _ = response.send(digest);
                         }
                         Message::Verify { context, payload, response } => {
                             if let Some(contents) = seen.get(&payload) {
                                 let verified = self.verify(context, payload, contents.clone()).await;
-                                response.send(verified).expect("Failed to send verification");
+                                let _ = response.send(verified);
                             } else {
                                 waiters
                                     .entry(payload.clone())
