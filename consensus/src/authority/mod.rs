@@ -650,13 +650,11 @@ mod tests {
     #[test_traced]
     fn test_backfill() {
         // Create runtime
-        let n = 5;
-        let threshold = quorum(n).expect("unable to calculate threshold");
-        let max_exceptions = 4;
+        let n = 4;
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, runtime, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -689,7 +687,12 @@ mod tests {
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.into_iter() {
+            for (idx_scheme, scheme) in schemes.iter().enumerate() {
+                // Skip first peer
+                if idx_scheme == 0 {
+                    continue;
+                }
+
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
@@ -703,7 +706,10 @@ mod tests {
                     .unwrap();
 
                 // Link to all other validators
-                for other in validators.iter() {
+                for (idx_other, other) in validators.iter().enumerate() {
+                    if idx_other == 0 {
+                        continue;
+                    }
                     if other == &validator {
                         continue;
                     }
@@ -750,7 +756,7 @@ mod tests {
                     .await
                     .expect("unable to create journal");
                 let cfg = config::Config {
-                    crypto: scheme,
+                    crypto: scheme.clone(),
                     hasher: hasher.clone(),
                     application,
                     supervisor,
@@ -777,7 +783,7 @@ mod tests {
                 }));
             }
 
-            // Wait for all engines to finish
+            // Wait for all online engines to finish
             let mut completed = HashSet::new();
             let mut finalized = HashMap::new();
             loop {
@@ -797,78 +803,169 @@ mod tests {
                     }
                     completed.insert(validator);
                 }
-                if completed.len() == n as usize {
+                if completed.len() == (n - 1) as usize {
                     break;
                 }
             }
 
-            // Check supervisors for correct activity
-            let latest_complete = required_containers - activity_timeout;
-            for supervisor in supervisors.iter() {
-                // Ensure no faults
-                {
-                    let faults = supervisor.faults.lock().unwrap();
-                    assert!(faults.is_empty());
+            // Degrade network connections for online peers
+            for (idx, scheme) in schemes.iter().enumerate() {
+                // Skip first peer
+                if idx == 0 {
+                    continue;
                 }
 
-                // Ensure no forks
-                let mut exceptions = 0;
-                {
-                    let notarizes = supervisor.notarizes.lock().unwrap();
-                    for (view, payloads) in notarizes.iter() {
-                        // Ensure no skips (height == view)
-                        if payloads.len() > 1 {
-                            let hex_payloads =
-                                payloads.iter().map(|p| hex(p.0)).collect::<Vec<String>>();
-                            panic!("view: {}, payloads: {:?}", view, hex_payloads);
-                        }
-
-                        // Ensure everyone participating
-                        let digest = finalized.get(view).expect("view should be finalized");
-                        let voters = payloads.get(digest).expect("digest should exist");
-                        if voters.len() < threshold as usize {
-                            // We can't verify that everyone participated at every height because some nodes may have started later.
-                            panic!("view: {}, voters: {:?}", view, voters);
-                        }
-                        if voters.len() != n as usize {
-                            exceptions += 1;
-                        }
+                // Degrade connection
+                let validator = scheme.public_key();
+                for (other_idx, other) in validators.iter().enumerate() {
+                    if other_idx == 0 {
+                        continue;
                     }
-                }
-                {
-                    let finalizes = supervisor.finalizes.lock().unwrap();
-                    for (height, views) in finalizes.iter() {
-                        // Ensure no skips (height == view)
-                        if views.len() > 1 {
-                            panic!("height: {}, views: {:?}", height, views);
-                        }
-
-                        // Only check at views below timeout
-                        if *height > latest_complete {
-                            continue;
-                        }
-
-                        // Ensure everyone participating
-                        let digest = finalized.get(height).expect("height should be finalized");
-                        let finalizers = views.get(digest).expect("digest should exist");
-                        if finalizers.len() < threshold as usize {
-                            // We can't verify that everyone participated at every height because some nodes may have started later.
-                            panic!("height: {}, finalizers: {:?}", height, finalizers);
-                        }
-                        if finalizers.len() != n as usize {
-                            exceptions += 1;
-                        }
+                    if other == &validator {
+                        continue;
                     }
+                    oracle
+                        .add_link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency: 3_000.0,
+                                jitter: 0.0,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
                 }
-
-                // Ensure exceptions within allowed
-                assert!(exceptions <= max_exceptions);
             }
 
-            // Stop execution and wait for all engines to stop
-            runtime.stop(-1);
-            for handler in engine_handlers.into_iter() {
-                let _ = handler.await;
+            // Wait for null notarizations to accrue
+            runtime.sleep(Duration::from_secs(120)).await;
+
+            // Remove all connections from second peer
+            let failed_validator = validators[1].clone();
+            for (other_idx, other) in validators.iter().enumerate() {
+                if other_idx == 0 {
+                    continue;
+                }
+                if other == &failed_validator {
+                    continue;
+                }
+                oracle
+                    .remove_link(failed_validator.clone(), other.clone())
+                    .await
+                    .unwrap();
+                oracle
+                    .remove_link(other.clone(), failed_validator.clone())
+                    .await
+                    .unwrap();
+            }
+
+            // Start engine for first peer
+            let scheme = schemes[0].clone();
+            let validator = scheme.public_key();
+            let partition = hex(&validator);
+            let (container_sender, container_receiver) = oracle
+                .register(validator.clone(), 0, 1024 * 1024)
+                .await
+                .unwrap();
+            let (vote_sender, vote_receiver) = oracle
+                .register(validator.clone(), 1, 1024 * 1024)
+                .await
+                .unwrap();
+
+            // Restore network connections for online peers
+            for (idx, scheme) in schemes.iter().enumerate() {
+                // Skip newly offline peer
+                if idx == 1 {
+                    continue;
+                }
+
+                // Restore connection
+                let validator = scheme.public_key();
+                for (idx_other, other) in validators.iter().enumerate() {
+                    if idx_other == 1 {
+                        continue;
+                    }
+                    if other == &validator {
+                        continue;
+                    }
+                    oracle
+                        .add_link(
+                            validator.clone(),
+                            other.clone(),
+                            Link {
+                                latency: 10.0,
+                                jitter: 2.5,
+                                success_rate: 1.0,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            // Start engine
+            let supervisor_config = mocks::actor::SupervisorConfig {
+                prover: prover.clone(),
+                participants: view_validators.clone(),
+            };
+            let supervisor = mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+            supervisors.push(supervisor.clone());
+            let application_cfg = mocks::actor::ApplicationConfig {
+                hasher: hasher.clone(),
+                relay: relay.clone(),
+                participant: validator.clone(),
+                tracker: done_sender.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+            };
+            let (actor, application) =
+                mocks::actor::Application::new(runtime.clone(), application_cfg);
+            runtime.spawn("application", async move {
+                actor.run().await;
+            });
+            let cfg = journal::Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition,
+            };
+            let journal = Journal::init(runtime.clone(), cfg)
+                .await
+                .expect("unable to create journal");
+            let cfg = config::Config {
+                crypto: scheme,
+                hasher: hasher.clone(),
+                application,
+                supervisor,
+                registry: Arc::new(Mutex::new(Registry::default())),
+                namespace: namespace.clone(),
+                leader_timeout: Duration::from_secs(1),
+                notarization_timeout: Duration::from_secs(2),
+                nullify_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout,
+                max_fetch_count: 1,
+                max_fetch_size: 1024 * 512,
+                fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                replay_concurrency: 1,
+            };
+            let engine = Engine::new(runtime.clone(), journal, cfg);
+            engine_handlers.push(runtime.spawn("engine", async move {
+                engine
+                    .run(
+                        (container_sender, container_receiver),
+                        (vote_sender, vote_receiver),
+                    )
+                    .await;
+            }));
+
+            // Wait for new engine to finish
+            loop {
+                let (candidate, _event) = done_receiver.next().await.unwrap();
+                if validator != candidate {
+                    continue;
+                }
+                panic!("should not be able to notarize or finalize")
             }
         });
 
