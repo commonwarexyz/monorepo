@@ -9,7 +9,7 @@ use crate::{
     },
     Activity, Proof, Supervisor as Su,
 };
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::Clock;
@@ -18,12 +18,12 @@ use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 use tracing::debug;
 
@@ -142,6 +142,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&context.view.to_be_bytes());
         payload.extend_from_slice(&context.parent.1);
+        payload.put_u64(self.runtime.gen::<u64>()); // Ensures we always have a unique payload
         self.hasher.update(&payload);
         let digest = self.hasher.finalize();
 
@@ -169,7 +170,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         }
 
         // Verify contents
-        if contents.len() != 40 {
+        if contents.len() != 48 {
             self.panic("invalid payload length");
         }
         let parsed_view = contents.get_u64();
@@ -187,6 +188,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 hex(&context.parent.1)
             ));
         }
+        // We don't care about the random number
         self.verified.insert(payload);
         true
     }
