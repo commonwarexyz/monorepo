@@ -352,8 +352,8 @@ mod tests {
                 // Ensure no forks
                 let mut exceptions = 0;
                 {
-                    let votes = supervisor.votes.lock().unwrap();
-                    for (view, payloads) in votes.iter() {
+                    let notarizes = supervisor.notarizes.lock().unwrap();
+                    for (view, payloads) in notarizes.iter() {
                         // Ensure no skips (height == view)
                         if payloads.len() > 1 {
                             let hex_payloads =

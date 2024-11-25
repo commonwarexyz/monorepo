@@ -307,7 +307,7 @@ pub struct Supervisor<C: Scheme, H: Hasher> {
 
     prover: Prover<C, H>,
 
-    pub votes: Arc<Mutex<Participation>>,
+    pub notarizes: Arc<Mutex<Participation>>,
     pub finalizes: Arc<Mutex<Participation>>,
     pub faults: Arc<Mutex<Faults>>,
 }
@@ -326,7 +326,7 @@ impl<C: Scheme, H: Hasher> Supervisor<C, H> {
         Self {
             participants: parsed_participants,
             prover: cfg.prover,
-            votes: Arc::new(Mutex::new(HashMap::new())),
+            notarizes: Arc::new(Mutex::new(HashMap::new())),
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -375,7 +375,7 @@ impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
             NOTARIZE => {
                 let (view, _, payload, public_key) =
                     self.prover.deserialize_notarize(proof, true).unwrap();
-                self.votes
+                self.notarizes
                     .lock()
                     .unwrap()
                     .entry(view)
