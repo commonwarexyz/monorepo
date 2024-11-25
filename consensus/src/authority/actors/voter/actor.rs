@@ -41,7 +41,7 @@ type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Fina
 
 const GENESIS_VIEW: View = 0;
 
-struct Round<C: Scheme, H: Hasher, S: Supervisor> {
+struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     hasher: H,
     supervisor: S,
     _crypto: PhantomData<C>,
@@ -74,7 +74,7 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, H: Hasher, S: Supervisor> Round<C, H, S> {
+impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
     pub fn new(
         hasher: H,
         supervisor: S,
@@ -389,6 +389,27 @@ impl<C: Scheme, H: Hasher, S: Supervisor> Round<C, H, S> {
             // matter which one we choose.
             self.broadcast_finalization = true;
             return Some((proposal.clone(), finalizes));
+        }
+        None
+    }
+
+    pub fn at_least_one_honest(&self) -> Option<View> {
+        let participants = self.supervisor.participants(self.view)?;
+        let threshold = quorum(participants.len() as u32)?;
+        let at_least_one_honest = (threshold - 1) / 2 + 1;
+        for (_, notarizes) in self.notarizes.iter() {
+            if notarizes.len() < at_least_one_honest as usize {
+                continue;
+            }
+            let parent = notarizes
+                .values()
+                .next()
+                .unwrap()
+                .proposal
+                .as_ref()
+                .unwrap()
+                .parent;
+            return Some(parent);
         }
         None
     }
@@ -1495,9 +1516,6 @@ impl<
         round.leader_deadline = None;
         round.advance_deadline = None;
 
-        // TODO: If `> f` notarized a given proposal, then we should backfill missing
-        // notarizations
-
         // Enter next view
         self.enter_view(nullification.view + 1);
     }
@@ -2026,6 +2044,46 @@ impl<
             .encode_to_vec()
             .into();
             sender.send(Recipients::All, msg, true).await.unwrap();
+
+            // If `> f` notarized a given proposal, then we should backfill missing
+            // notarizations
+            let round = self.views.get(&view).expect("missing round");
+            if let Some(parent) = round.at_least_one_honest() {
+                if parent >= self.last_finalized {
+                    // Compute missing nullifications
+
+                    // Enqueue missing
+                    warn!(
+                        view,
+                        parent = parent,
+                        "at least one honest voter for parent"
+                    );
+                } else {
+                    // Broadcast last finalized
+                    debug!(
+                    parent,
+                    last_finalized = self.last_finalized,
+                    "not backfilling because parent is behind finalized tip, broadcasting finalized"
+                );
+                    let finalization = self.construct_finalization(self.last_finalized, true);
+                    if let Some(finalization) = finalization {
+                        let msg = wire::Voter {
+                            payload: Some(wire::voter::Payload::Finalization(finalization)),
+                        }
+                        .encode_to_vec()
+                        .into();
+                        sender
+                            .send(Recipients::All, msg, true)
+                            .await
+                            .expect("unable to broadcast finalization");
+                    } else {
+                        warn!(
+                            last_finalized = self.last_finalized,
+                            "unable to construct last finalization"
+                        );
+                    }
+                }
+            }
         }
 
         // Attempt to finalize

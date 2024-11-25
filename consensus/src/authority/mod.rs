@@ -51,7 +51,7 @@
 //! * Broadcast null notarization for `v`
 //! * Enter `v+1`
 //! * If observe `>= f+1` votes for some proposal `c` in a view, fetch the non-null notarization for `c_parent` and any missing null notarizations
-//!   between `c_parent` and `c`
+//!   between `c_parent` and `c`, if `c_parent` is less than last finalized, broadcast finalization instead
 //!
 //! Upon receiving `2f+1` finalizes for `c`:
 //! * Broadcast finalization for `c`
