@@ -3,10 +3,8 @@ use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message {
-    Backfilled {
-        notarizations: Vec<wire::Notarization>,
-        nullifications: Vec<wire::Nullification>,
-    },
+    Notarization { notarization: wire::Notarization },
+    Nullification { nullification: wire::Nullification },
 }
 
 #[derive(Clone)]
@@ -19,17 +17,17 @@ impl Mailbox {
         Self { sender }
     }
 
-    pub(crate) async fn backfilled(
-        &mut self,
-        notarizations: Vec<wire::Notarization>,
-        nullifications: Vec<wire::Nullification>,
-    ) {
+    pub async fn notarization(&mut self, notarization: wire::Notarization) {
         self.sender
-            .send(Message::Backfilled {
-                notarizations,
-                nullifications,
-            })
+            .send(Message::Notarization { notarization })
             .await
-            .unwrap();
+            .expect("Failed to send notarization");
+    }
+
+    pub async fn nullification(&mut self, nullification: wire::Nullification) {
+        self.sender
+            .send(Message::Nullification { nullification })
+            .await
+            .expect("Failed to send nullification");
     }
 }

@@ -7,6 +7,7 @@ use crate::{
     authority::{
         actors::voter,
         encoder::{notarize_namespace, nullify_namespace},
+        verifier::{threshold, verify_notarization, verify_nullification},
         wire, Context, View,
     },
     Automaton, Supervisor,
@@ -304,6 +305,111 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                         wire::backfiller::Payload::Request(request) => {
                         },
                         wire::backfiller::Payload::Response(response) => {
+                            // If we weren't waiting for anything, ignore
+                            let received = self.runtime.current();
+                            let (notarizations, nullifications, status) = match &mut outstanding {
+                                Some((notarizations, nullifications, _, status)) => {
+                                    if s != status.0 {
+                                        debug!(sender = hex(&s), "received unexpected response");
+                                        continue;
+                                    }
+                                    if response.notarizations.is_empty() && response.nullifications.is_empty() {
+                                        debug!(sender = hex(&s), "received empty response");
+
+                                        // Pick new recipient
+                                        let (notarizations, nullifications, mut sent, _) = outstanding.take().unwrap();
+                                        let status = self.send_request(&notarizations, &nullifications, &mut sent, &mut sender).await;
+                                        outstanding = Some((notarizations, nullifications, sent, status));
+                                        continue;
+                                    }
+                                    (notarizations, nullifications, status)
+                                },
+                                None => {
+                                    warn!(sender = hex(&s), "received unexpected response");
+                                    continue;
+                                },
+                            };
+
+                            // Ensure response isn't too big
+                            if response.notarizations.len() + response.nullifications.len() > self.max_fetch_count as usize {
+                                warn!(sender = hex(&s), "response too large");
+
+                                // Pick new recipient
+                                let (notarizations, nullifications, mut sent, _) = outstanding.take().unwrap();
+                                let status = self.send_request(&notarizations, &nullifications, &mut sent, &mut sender).await;
+                                outstanding = Some((notarizations, nullifications, sent, status));
+                                continue;
+                            }
+
+                            // Parse notarizations
+                            let mut useful = false;
+                            for notarization in response.notarizations {
+                                let view = match notarization.proposal.as_ref() {
+                                    Some(proposal) => proposal.view,
+                                    None => {
+                                        warn!(sender = hex(&s), "missing proposal");
+                                        continue;
+                                    },
+                                };
+                                if !notarizations.contains(&view) {
+                                    debug!(view, sender = hex(&s), "unnecessry notarization");
+                                    continue;
+                                }
+                                let (threshold, count) = match threshold::<S>(&self.supervisor, view) {
+                                    Some(threshold) => threshold,
+                                    None => {
+                                        warn!(view, sender = hex(&s), "missing view");
+                                        continue;
+                                    },
+                                };
+                                if !verify_notarization::<C>(threshold, count, &self.notarize_namespace, &notarization) {
+                                    warn!(view, sender = hex(&s), "invalid notarization");
+                                    continue;
+                                }
+                                notarizations.remove(&view);
+                                self.notarizations.insert(view, notarization.clone());
+                                voter.notarization(notarization).await;
+                                useful = true;
+                            }
+
+                            // Parse nullifications
+                            for nullification in response.nullifications {
+                                let view = nullification.view;
+                                if !nullifications.contains(&view) {
+                                    debug!(view, sender = hex(&s), "unnecessry nullification");
+                                    continue;
+                                }
+                                let (threshold, count) = match threshold::<S>(&self.supervisor, view) {
+                                    Some(threshold) => threshold,
+                                    None => {
+                                        warn!(view, sender = hex(&s), "missing view");
+                                        continue;
+                                    },
+                                };
+                                if !verify_nullification::<C>(threshold, count, &self.nullify_namespace, &nullification) {
+                                    warn!(view, sender = hex(&s), "invalid nullification");
+                                    continue;
+                                }
+                                nullifications.remove(&view);
+                                self.nullifications.insert(view, nullification.clone());
+                                voter.nullification(nullification).await;
+                                useful = true;
+                            }
+
+                            // Update performance
+                            if useful {
+                                let duration = received.duration_since(status.1).unwrap();
+                                self.fetch_performance.put(s, duration);
+                            }
+
+                            // If still work to do, send another request
+                            if !notarizations.is_empty() || !nullifications.is_empty() {
+                                let (notarizations, nullifications, mut sent, _) = outstanding.take().unwrap();
+                                let status = self.send_request(&notarizations, &nullifications, &mut sent, &mut sender).await;
+                                outstanding = Some((notarizations, nullifications, sent, status));
+                            } else {
+                                outstanding = None;
+                            }
                         },
                     }
                 },
