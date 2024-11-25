@@ -2135,6 +2135,9 @@ impl<
         self.current_view.set(observed_view as i64);
         self.tracked_views.set(self.views.len() as i64);
 
+        // Create shutdown tracker
+        let mut shutdown = self.runtime.stopped();
+
         // Process messages
         let mut pending_propose_context = None;
         let mut pending_propose = None;
@@ -2165,6 +2168,16 @@ impl<
             let timeout = self.timeout_deadline();
             let view;
             select! {
+                _ = &mut shutdown => {
+                    // Close journal
+                    self.journal
+                        .take()
+                        .unwrap()
+                        .close()
+                        .await
+                        .expect("unable to close journal");
+                    return;
+                },
                 _ = self.runtime.sleep_until(timeout) => {
                     // Trigger the timeout
                     self.timeout(&mut sender).await;

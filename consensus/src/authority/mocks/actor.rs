@@ -239,7 +239,10 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         loop {
             select! {
                 message = self.mailbox.next() => {
-                    let message = message.expect("mailbox closed");
+                    let message =match message {
+                        Some(message) => message,
+                        None => break,
+                    };
                     match message {
                         Message::Genesis { response } => {
                             let digest = self.genesis();

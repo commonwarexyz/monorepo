@@ -221,6 +221,7 @@ mod tests {
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
+            let mut engine_handlers = Vec::new();
             for scheme in schemes.into_iter() {
                 // Register on network
                 let validator = scheme.public_key();
@@ -299,14 +300,14 @@ mod tests {
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
-                runtime.spawn("engine", async move {
+                engine_handlers.push(runtime.spawn("engine", async move {
                     engine
                         .run(
                             (container_sender, container_receiver),
                             (vote_sender, vote_receiver),
                         )
                         .await;
-                });
+                }));
             }
 
             // Wait for all engines to finish
@@ -396,6 +397,15 @@ mod tests {
                 // Ensure exceptions within allowed
                 assert!(exceptions <= max_exceptions);
             }
+
+            // Stop execution and wait for all engines to stop
+            runtime.stop(-1);
+            for handler in engine_handlers.into_iter() {
+                let _ = handler.await;
+            }
+
+            // Restart network
+            unimplemented!("restart network");
         });
     }
 }
