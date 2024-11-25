@@ -13,8 +13,10 @@ use super::{
 use crate::Proof;
 use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
+use commonware_utils::hex;
 use core::panic;
 use std::{collections::HashSet, marker::PhantomData};
+use tracing::debug;
 
 #[derive(Clone)]
 pub struct Prover<C: Scheme, H: Hasher> {
@@ -80,9 +82,16 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let proposal_message = proposal_message(view, parent, &payload);
         if check_sig {
             if !C::validate(&public_key) {
+                debug!(public_key = hex(&public_key), "invalid public key");
                 return None;
             }
             if !C::verify(namespace, &proposal_message, &public_key, &signature) {
+                debug!(
+                    namespace = hex(namespace),
+                    public_key = hex(&public_key),
+                    signature = hex(&signature),
+                    "signature verification failed"
+                );
                 return None;
             }
         }
@@ -251,6 +260,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_aggregation(proof, max, check_sigs, &self.finalize_namespace)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn serialize_conflicting_proposal(
         view_1: View,
         parent_1: View,
@@ -330,6 +340,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((public_key, view))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn serialize_conflicting_notarize(
         view_1: View,
         parent_1: View,
@@ -360,6 +371,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_conflicting_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn serialize_conflicting_finalize(
         view_1: View,
         parent_1: View,

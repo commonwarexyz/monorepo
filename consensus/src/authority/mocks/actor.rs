@@ -72,7 +72,6 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     verified: HashSet<Digest>,
     notarized_views: HashSet<Digest>,
     finalized_views: HashSet<Digest>,
-    last_finalized: u64,
 }
 
 impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
@@ -105,7 +104,6 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 pending: HashMap::new(),
 
                 verified: HashSet::new(),
-                last_finalized: 0,
                 notarized_views: HashSet::new(),
                 finalized_views: HashSet::new(),
             },
@@ -241,7 +239,10 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         loop {
             select! {
                 message = self.mailbox.next() => {
-                    let message = message.expect("mailbox closed");
+                    let message =match message {
+                        Some(message) => message,
+                        None => break,
+                    };
                     match message {
                         Message::Genesis { response } => {
                             let digest = self.genesis();
@@ -249,12 +250,12 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                         }
                         Message::Propose { context, response } => {
                             let digest = self.propose(context).await;
-                            response.send(digest).expect("Failed to send proposal");
+                            let _ = response.send(digest);
                         }
                         Message::Verify { context, payload, response } => {
                             if let Some(contents) = seen.get(&payload) {
                                 let verified = self.verify(context, payload, contents.clone()).await;
-                                response.send(verified).expect("Failed to send verification");
+                                let _ = response.send(verified);
                             } else {
                                 waiters
                                     .entry(payload.clone())

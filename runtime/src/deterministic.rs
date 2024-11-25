@@ -409,6 +409,16 @@ impl Tasks {
     }
 }
 
+/// Seed for random number generation.
+#[derive(Clone)]
+pub enum Seed {
+    Number(u64),
+    Sampler(Arc<Mutex<StdRng>>),
+}
+
+/// Map of names to blobs.
+pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
+
 /// Configuration for the `deterministic` runtime.
 #[derive(Clone)]
 pub struct Config {
@@ -416,7 +426,7 @@ pub struct Config {
     pub registry: Arc<Mutex<Registry>>,
 
     /// Seed for the random number generator.
-    pub seed: u64,
+    pub seed: Seed,
 
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
@@ -424,15 +434,18 @@ pub struct Config {
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     pub timeout: Option<Duration>,
+
+    pub storage: Option<Arc<Mutex<HashMap<String, Partition>>>>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             registry: Arc::new(Mutex::new(Registry::default())),
-            seed: 42,
+            seed: Seed::Number(42),
             cycle: Duration::from_millis(1),
             timeout: None,
+            storage: None,
         }
     }
 }
@@ -443,12 +456,12 @@ pub struct Executor {
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Arc<Mutex<StdRng>>,
     prefix: Mutex<String>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
-    partitions: Mutex<HashMap<String, Partition>>,
+    partitions: Arc<Mutex<HashMap<String, Partition>>>,
     signaler: Mutex<Signaler>,
     signal: Signal,
 }
@@ -460,6 +473,18 @@ impl Executor {
         if cfg.timeout.is_some() && cfg.cycle == Duration::default() {
             panic!("cycle duration must be non-zero when timeout is set");
         }
+
+        // Ensure storage exists
+        let partitions = match cfg.storage {
+            Some(storage) => storage,
+            None => Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        // Ensure rng exists
+        let rng = match cfg.seed {
+            Seed::Number(seed) => Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
+            Seed::Sampler(rng) => rng,
+        };
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(cfg.registry));
@@ -474,7 +499,7 @@ impl Executor {
             deadline,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
-            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            rng,
             prefix: Mutex::new(String::new()),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks {
@@ -482,7 +507,7 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
-            partitions: Mutex::new(HashMap::new()),
+            partitions,
             signaler: Mutex::new(signaler),
             signal,
         });
@@ -502,7 +527,7 @@ impl Executor {
     /// and the provided seed.
     pub fn seeded(seed: u64) -> (Runner, Context, Arc<Auditor>) {
         let cfg = Config {
-            seed,
+            seed: Seed::Number(seed),
             ..Config::default()
         };
         Self::init(cfg)
@@ -1053,18 +1078,6 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
-struct Partition {
-    blobs: HashMap<Vec<u8>, Vec<u8>>,
-}
-
-impl Partition {
-    fn new() -> Self {
-        Self {
-            blobs: HashMap::new(),
-        }
-    }
-}
-
 /// Implementation of [`crate::Blob`] for the `deterministic` runtime.
 pub struct Blob {
     executor: Arc<Executor>,
@@ -1107,10 +1120,8 @@ impl crate::Storage<Blob> for Context {
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         self.executor.auditor.open(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
-        let partition_entry = partitions
-            .entry(partition.into())
-            .or_insert_with(Partition::new);
-        let content = partition_entry.blobs.entry(name.into()).or_default();
+        let partition_entry = partitions.entry(partition.into()).or_default();
+        let content = partition_entry.entry(name.into()).or_default();
         Ok(Blob::new(
             self.executor.clone(),
             partition.into(),
@@ -1127,7 +1138,6 @@ impl crate::Storage<Blob> for Context {
                 partitions
                     .get_mut(partition)
                     .ok_or(Error::PartitionMissing(partition.into()))?
-                    .blobs
                     .remove(name)
                     .ok_or(Error::BlobMissing(partition.into(), hex(name)))?;
             }
@@ -1146,8 +1156,8 @@ impl crate::Storage<Blob> for Context {
         let partition = partitions
             .get(partition)
             .ok_or(Error::PartitionMissing(partition.into()))?;
-        let mut results = Vec::with_capacity(partition.blobs.len());
-        for name in partition.blobs.keys() {
+        let mut results = Vec::with_capacity(partition.len());
+        for name in partition.keys() {
             results.push(name.clone());
         }
         results.sort(); // deterministic output
@@ -1225,7 +1235,6 @@ impl crate::Blob for Blob {
             .get_mut(&self.partition)
             .ok_or(Error::PartitionMissing(self.partition.clone()))?;
         let content = partition
-            .blobs
             .get_mut(&self.name)
             .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
         *content = new_content;

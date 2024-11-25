@@ -3,13 +3,15 @@ use crate::{Automaton, Finalizer, Relay, Supervisor};
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{Blob, Clock, Spawner, Storage};
+use commonware_storage::journal::Journal;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
 
 pub struct Engine<
-    E: Clock + GClock + Rng + CryptoRng + Spawner,
+    B: Blob,
+    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
     H: Hasher,
     A: Automaton<Context = Context> + Relay + Finalizer,
@@ -17,35 +19,26 @@ pub struct Engine<
 > {
     runtime: E,
 
-    voter: voter::Actor<E, C, H, A, S>,
+    voter: voter::Actor<B, E, C, H, A, S>,
     voter_mailbox: voter::Mailbox,
     // backfiller: backfiller::Actor<E, C, H, A>,
     // backfiller_mailbox: backfiller::Mailbox,
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner,
+        B: Blob,
+        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
         H: Hasher,
         A: Automaton<Context = Context> + Relay + Finalizer,
         S: Supervisor<Seed = (), Index = View>,
-    > Engine<E, C, H, A, S>
+    > Engine<B, E, C, H, A, S>
 {
-    pub fn new(runtime: E, mut cfg: Config<C, H, A, S>) -> Self {
-        // Sort the validators at each view
-        if cfg.validators.is_empty() {
-            panic!("no validators specified");
-        }
-        for (_, validators) in cfg.validators.iter_mut() {
-            if validators.is_empty() {
-                panic!("no validators specified");
-            }
-            validators.sort();
-        }
-
+    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, S>) -> Self {
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
             runtime.clone(),
+            journal,
             voter::Config {
                 crypto: cfg.crypto.clone(),
                 hasher: cfg.hasher.clone(),
@@ -57,6 +50,7 @@ impl<
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
                 activity_timeout: cfg.activity_timeout,
+                replay_concurrency: cfg.replay_concurrency,
             },
         );
 

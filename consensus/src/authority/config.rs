@@ -45,11 +45,5 @@ pub struct Config<
     /// Maximum rate of fetch requests per peer (to prevent rate limiting).
     pub fetch_rate_per_peer: Quota,
 
-    /// Validators to use for each range of views. Any view without
-    /// an explicit view will use the next smallest view.
-    ///
-    /// # Warning
-    ///
-    /// Any disagreement on this list could result in a halt or a fork.
-    pub validators: BTreeMap<View, Vec<PublicKey>>,
+    pub replay_concurrency: usize,
 }
