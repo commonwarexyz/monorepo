@@ -409,6 +409,12 @@ impl Tasks {
     }
 }
 
+#[derive(Clone)]
+pub enum Seed {
+    Number(u64),
+    Sampler(Arc<Mutex<StdRng>>),
+}
+
 /// Configuration for the `deterministic` runtime.
 #[derive(Clone)]
 pub struct Config {
@@ -416,7 +422,7 @@ pub struct Config {
     pub registry: Arc<Mutex<Registry>>,
 
     /// Seed for the random number generator.
-    pub seed: u64,
+    pub seed: Seed,
 
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
@@ -426,20 +432,16 @@ pub struct Config {
     pub timeout: Option<Duration>,
 
     pub storage: Option<Arc<Mutex<HashMap<String, Partition>>>>,
-
-    // TODO: change seed to an enum that accepts either u64 or a previously initialized sampler
-    pub rng: Option<Arc<Mutex<StdRng>>>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             registry: Arc::new(Mutex::new(Registry::default())),
-            seed: 42,
+            seed: Seed::Number(42),
             cycle: Duration::from_millis(1),
             timeout: None,
             storage: None,
-            rng: None,
         }
     }
 }
@@ -475,9 +477,9 @@ impl Executor {
         };
 
         // Ensure rng exists
-        let rng = match cfg.rng {
-            Some(rng) => rng,
-            None => Arc::new(Mutex::new(StdRng::seed_from_u64(cfg.seed))),
+        let rng = match cfg.seed {
+            Seed::Number(seed) => Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
+            Seed::Sampler(rng) => rng,
         };
 
         // Initialize runtime
@@ -521,7 +523,7 @@ impl Executor {
     /// and the provided seed.
     pub fn seeded(seed: u64) -> (Runner, Context, Arc<Auditor>) {
         let cfg = Config {
-            seed,
+            seed: Seed::Number(seed),
             ..Config::default()
         };
         Self::init(cfg)

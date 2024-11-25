@@ -166,7 +166,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{
-        deterministic::{self, Executor},
+        deterministic::{self, Executor, Seed},
         Clock, Runner, Spawner,
     };
     use commonware_storage::journal::{self, Journal};
@@ -434,10 +434,9 @@ mod tests {
             let finalized = finalized.clone();
             let completed = completed.clone();
             let cfg = deterministic::Config {
-                seed,
+                seed: Seed::Sampler(rng.clone()), // allows us to reuse same sampler (from original seed) across restarts
                 timeout: Some(Duration::from_secs(30)),
                 storage: Some(storage.clone()),
-                rng: Some(rng.clone()),
                 ..Default::default()
             };
             let (executor, mut runtime, _) = Executor::init(cfg);
