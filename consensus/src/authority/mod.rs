@@ -646,4 +646,17 @@ mod tests {
             });
         }
     }
+
+    #[test_traced]
+    fn test_backfill() {
+        // Create a bunch of nullifications with 3/4 validators
+
+        // Disconnect 1/3 live validators
+
+        // Start new node that hasn't been live (back to 3/4)
+
+        // Recover network links so that can notarize
+
+        // New node must backfill all nullifications to verify proposal
+    }
 }
