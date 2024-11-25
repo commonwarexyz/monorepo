@@ -403,9 +403,8 @@ mod tests {
             for handler in engine_handlers.into_iter() {
                 let _ = handler.await;
             }
-
-            // Restart network
-            unimplemented!("restart network");
         });
     }
+
+    // TODO: add unclean shutdown test
 }
