@@ -38,14 +38,24 @@ impl Mailbox {
             .expect("Failed to send notarizations");
     }
 
-    pub async fn notarized(&mut self, notarization: wire::Notarization, last_finalized: View) {
+    pub async fn notarized(&mut self, notarization: wire::Notarization) {
         self.sender
-            .send(Message::Notarized {
-                view,
-                notarization,
-                last_finalized,
-            })
+            .send(Message::Notarized { notarization })
             .await
             .expect("Failed to send notarization");
+    }
+
+    pub async fn nullified(&mut self, nullification: wire::Nullification) {
+        self.sender
+            .send(Message::Nullified { nullification })
+            .await
+            .expect("Failed to send nullification");
+    }
+
+    pub async fn finalized(&mut self, view: View) {
+        self.sender
+            .send(Message::Finalized { view })
+            .await
+            .expect("Failed to send finalized view");
     }
 }

@@ -114,6 +114,7 @@ mod encoder;
 mod engine;
 mod mocks;
 pub mod prover;
+mod verifier;
 
 use commonware_cryptography::Digest;
 

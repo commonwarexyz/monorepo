@@ -5,8 +5,8 @@ use super::{
 };
 use crate::{
     authority::{
-        encoder::{vote_message, vote_namespace},
-        wire, Context, Height, View,
+        encoder::{notarize_namespace, nullify_namespace},
+        wire, Context, View,
     },
     Automaton, Supervisor,
 };
@@ -15,7 +15,7 @@ use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
-use commonware_utils::{hex, quorum};
+use commonware_utils::hex;
 use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
@@ -29,29 +29,26 @@ use std::{
 };
 use tracing::{debug, warn};
 
-#[derive(Default)]
-struct Notarizations {
-    digest: Option<wire::Notarization>,
-    null: Option<wire::Notarization>,
-}
-
 type Status = (PublicKey, SystemTime, SystemTime);
 
 pub struct Actor<
     E: Clock + GClock + Rng,
     C: Scheme,
     H: Hasher,
-    A: Automaton<Context = Context> + Supervisor<Index = View>,
+    A: Automaton<Context = Context>,
+    S: Supervisor<Index = View>,
 > {
     runtime: E,
     crypto: C,
     hasher: H,
     application: A,
+    supervisor: S,
 
-    proposal_namespace: Vec<u8>,
-    vote_namespace: Vec<u8>,
+    notarize_namespace: Vec<u8>,
+    nullify_namespace: Vec<u8>,
 
-    notarizations: BTreeMap<View, Notarizations>,
+    notarizations: BTreeMap<View, wire::Notarization>,
+    nullifications: BTreeMap<View, wire::Nullification>,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -69,10 +66,11 @@ impl<
         E: Clock + GClock + Rng,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context> + Supervisor<Index = View>,
-    > Actor<E, C, H, A>
+        A: Automaton<Context = Context>,
+        S: Supervisor<Index = View>,
+    > Actor<E, C, H, A, S>
 {
-    pub fn new(runtime: E, cfg: Config<C, H, A>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
         // Initialize rate limiter
         //
         // This ensures we don't exceed the inbound rate limit on any peer we are communicating with (which
@@ -87,11 +85,13 @@ impl<
                 crypto: cfg.crypto,
                 hasher: cfg.hasher,
                 application: cfg.application,
+                supervisor: cfg.supervisor,
 
-                proposal_namespace: proposal_namespace(&cfg.namespace),
-                vote_namespace: vote_namespace(&cfg.namespace),
+                notarize_namespace: notarize_namespace(&cfg.namespace),
+                nullify_namespace: nullify_namespace(&cfg.namespace),
 
                 notarizations: BTreeMap::new(),
+                nullifications: BTreeMap::new(),
 
                 mailbox_receiver: receiver,
 
@@ -105,26 +105,6 @@ impl<
             },
             Mailbox::new(sender),
         )
-    }
-
-    // TODO: remove duplicated code
-    fn leader(&self, view: View) -> Option<PublicKey> {
-        let validators = match self.application.participants(view) {
-            Some(validators) => validators,
-            None => return None,
-        };
-        Some(validators[view as usize % validators.len()].clone())
-    }
-
-    // TODO: remove duplicated code
-    fn threshold(&self, view: View) -> Option<(u32, u32)> {
-        let validators = match self.application.participants(view) {
-            Some(validators) => validators,
-            None => return None,
-        };
-        let len = validators.len() as u32;
-        let threshold = quorum(len).expect("not enough validators for a quorum");
-        Some((threshold, len))
     }
 
     async fn send(
