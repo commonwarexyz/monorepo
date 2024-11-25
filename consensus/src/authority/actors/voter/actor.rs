@@ -647,6 +647,8 @@ impl<
                 signature: self.crypto.sign(&self.nullify_namespace, &message),
             }),
         };
+
+        // Broadcast nullify
         let msg = wire::Voter {
             payload: Some(wire::voter::Payload::Nullify(null.clone())),
         }
