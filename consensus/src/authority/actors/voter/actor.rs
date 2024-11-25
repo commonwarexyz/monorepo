@@ -743,7 +743,8 @@ impl<
 
     async fn handle_nullify(&mut self, nullify: wire::Nullify) {
         // Check to see if vote is for proposal in view
-        let leader = match self.supervisor.leader(nullify.view, ()) {
+        let view = nullify.view;
+        let leader = match self.supervisor.leader(view, ()) {
             Some(leader) => leader,
             None => {
                 debug!(
@@ -754,11 +755,11 @@ impl<
                 return;
             }
         };
-        let round = self.views.entry(nullify.view).or_insert_with(|| {
+        let round = self.views.entry(view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
                 self.supervisor.clone(),
-                nullify.view,
+                view,
                 leader,
                 None,
                 None,
@@ -766,11 +767,12 @@ impl<
         });
 
         // Handle nullify
-        if round.add_verified_nullify(nullify.clone()).await {
+        let nullify_bytes = nullify.encode_to_vec().into();
+        if round.add_verified_nullify(nullify).await {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(nullify.view, nullify.encode_to_vec().into())
+                .append(view, nullify_bytes)
                 .await
                 .expect("unable to append nullify");
         }
@@ -1151,11 +1153,12 @@ impl<
         });
 
         // Handle vote
-        if round.add_verified_notarize(notarize.clone()).await {
+        let notarize_bytes = notarize.encode_to_vec().into();
+        if round.add_verified_notarize(notarize).await {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, notarize.encode_to_vec().into())
+                .append(view, notarize_bytes)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1291,11 +1294,12 @@ impl<
                 proposal: Some(notarization.proposal.as_ref().unwrap().clone()),
                 signature: Some(signature.clone()),
             };
-            if round.add_verified_notarize(notarize.clone()).await {
+            let notarize_bytes = notarize.encode_to_vec().into();
+            if round.add_verified_notarize(notarize).await {
                 self.journal
                     .as_mut()
                     .unwrap()
-                    .append(view, notarize.encode_to_vec().into())
+                    .append(view, notarize_bytes)
                     .await
                     .expect("unable to append to journal");
             }
@@ -1443,11 +1447,12 @@ impl<
                 view: nullification.view,
                 signature: Some(signature.clone()),
             };
-            if round.add_verified_nullify(nullify.clone()).await {
+            let nullify_bytes = nullify.encode_to_vec().into();
+            if round.add_verified_nullify(nullify).await {
                 self.journal
                     .as_mut()
                     .unwrap()
-                    .append(nullification.view, nullify.encode_to_vec().into())
+                    .append(nullification.view, nullify_bytes)
                     .await
                     .expect("unable to append to journal");
             }
@@ -1562,11 +1567,12 @@ impl<
         });
 
         // Handle finalize
-        if round.add_verified_finalize(finalize.clone()).await {
+        let finalize_bytes = finalize.encode_to_vec().into();
+        if round.add_verified_finalize(finalize).await {
             self.journal
                 .as_mut()
                 .unwrap()
-                .append(view, finalize.encode_to_vec().into())
+                .append(view, finalize_bytes)
                 .await
                 .expect("unable to append to journal");
         }
@@ -1702,11 +1708,12 @@ impl<
                 proposal: Some(finalization.proposal.as_ref().unwrap().clone()),
                 signature: Some(signature.clone()),
             };
-            if round.add_verified_finalize(finalize.clone()).await {
+            let finalize_bytes = finalize.encode_to_vec().into();
+            if round.add_verified_finalize(finalize).await {
                 self.journal
                     .as_mut()
                     .unwrap()
-                    .append(view, finalize.encode_to_vec().into())
+                    .append(view, finalize_bytes)
                     .await
                     .expect("unable to append to journal");
             }
