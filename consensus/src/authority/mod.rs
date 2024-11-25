@@ -406,5 +406,5 @@ mod tests {
         });
     }
 
-    // TODO: add unclean shutdown test
+    // TODO: add unclean shutdown test (wait for runtime to finish, then extract storage to new runtime)
 }
