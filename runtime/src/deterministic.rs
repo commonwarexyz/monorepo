@@ -1001,14 +1001,13 @@ pub struct Sink {
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
-        let len = msg.len();
-        self.auditor.send(self.me, self.peer, msg.clone());
-        self.sender
-            .send(msg)
+    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
+        let bytes = Bytes::copy_from_slice(msg);
+        self.auditor.send(self.me, self.peer, bytes.clone());
+        self.sender.send(bytes)
             .await
             .map_err(|_| Error::WriteFailed)?;
-        self.metrics.network_bandwidth.inc_by(len as u64);
+        self.metrics.network_bandwidth.inc_by(msg.len() as u64);
         Ok(())
     }
 }
@@ -1022,10 +1021,13 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self) -> Result<Bytes, Error> {
-        let msg = self.receiver.next().await.ok_or(Error::ReadFailed)?;
+    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+        let msg = self.receiver.next()
+            .await
+            .ok_or(Error::ReadFailed)?;
         self.auditor.recv(self.me, self.peer, msg.clone());
-        Ok(msg)
+        buf.copy_from_slice(&msg);
+        Ok(())
     }
 }
 

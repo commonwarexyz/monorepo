@@ -1,4 +1,8 @@
-use super::{x25519, Error};
+use super::{
+    utils::codec::recv_frame,
+    Error,
+    x25519,
+};
 use crate::placeholder::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
@@ -147,6 +151,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
         runtime: E,
         crypto: &C,
         namespace: &[u8],
+        max_message_size: usize,
         synchrony_bound: Duration,
         max_handshake_age: Duration,
         handshake_timeout: Duration,
@@ -161,7 +166,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
             _ = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout);
             },
-            result = stream.recv() => {
+            result = recv_frame(&mut stream, max_message_size) => {
                 result.map_err(|_| Error::ReadFailed)?
             },
         };
@@ -198,6 +203,7 @@ mod tests {
     use x25519_dalek::PublicKey;
 
     const TEST_NAMESPACE: &[u8] = b"test_namespace";
+    const ONE_MEGABYTE: usize = 1024 * 1024;
 
     #[test]
     fn test_handshake_create_verify() {
@@ -299,6 +305,7 @@ mod tests {
                 runtime,
                 &recipient,
                 TEST_NAMESPACE,
+                ONE_MEGABYTE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -347,6 +354,7 @@ mod tests {
                 runtime,
                 &Ed25519::from_seed(2),
                 TEST_NAMESPACE,
+                ONE_MEGABYTE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -379,6 +387,7 @@ mod tests {
                 runtime,
                 &Ed25519::from_seed(0),
                 TEST_NAMESPACE,
+                ONE_MEGABYTE,
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
@@ -429,6 +438,7 @@ mod tests {
                 runtime,
                 &recipient,
                 TEST_NAMESPACE,
+                ONE_MEGABYTE,
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),

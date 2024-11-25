@@ -106,6 +106,7 @@ impl<
             runtime.clone(),
             &connection.crypto,
             &connection.namespace,
+            connection.max_message_size,
             connection.synchrony_bound,
             connection.max_handshake_age,
             connection.handshake_timeout,

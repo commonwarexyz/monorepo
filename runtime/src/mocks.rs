@@ -18,8 +18,11 @@ impl MockSink {
 }
 
 impl Sink for MockSink {
-    async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
-        self.sender.send(msg).await.map_err(|_| Error::WriteFailed)
+    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
+        let bytes = Bytes::copy_from_slice(msg);
+        self.sender.send(bytes)
+            .await
+            .map_err(|_| Error::WriteFailed)
     }
 }
 
@@ -37,7 +40,11 @@ impl MockStream {
 }
 
 impl Stream for MockStream {
-    async fn recv(&mut self) -> Result<Bytes, Error> {
-        self.receiver.next().await.ok_or(Error::ReadFailed)
+    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+        let msg = self.receiver.next()
+            .await
+            .ok_or(Error::ReadFailed)?;
+        buf.copy_from_slice(&msg);
+        Ok(())
     }
 }

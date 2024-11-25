@@ -140,7 +140,6 @@
 //!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,
-//!     runtime_cfg.max_message_size,
 //! );
 //!
 //! // Start runtime
@@ -444,7 +443,7 @@ mod tests {
         let cfg = tokio::Config::default();
         let (executor, runtime) = tokio::Executor::init(cfg.clone());
         executor.start(async move {
-            run_network(runtime, cfg.max_message_size, 3000, 10, Mode::One).await;
+            run_network(runtime, cfg.maximum_buffer_size, 3000, 10, Mode::One).await;
         });
     }
 

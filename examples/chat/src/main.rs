@@ -163,7 +163,6 @@ fn main() {
         p2p_registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        runtime_cfg.max_message_size,
     );
 
     // Start runtime
