@@ -303,6 +303,48 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     };
                     match payload {
                         wire::backfiller::Payload::Request(request) => {
+                            let mut populated_bytes = 0;
+                            let mut notarizations_found = Vec::new();
+                            let mut nullifications_found = Vec::new();
+
+                            // Populate notarizations first
+                            for view in request.notarizations {
+                                if let Some(notarization) = self.notarizations.get(&view) {
+                                    let size = notarization.encoded_len();
+                                    if populated_bytes + size > self.max_fetch_size {
+                                        break;
+                                    }
+                                    populated_bytes += size;
+                                    notarizations_found.push(notarization.clone());
+                                }
+                            }
+
+                            // Populate nullifications next
+                            for view in request.nullifications {
+                                if let Some(nullification) = self.nullifications.get(&view) {
+                                    let size = nullification.encoded_len();
+                                    if populated_bytes + size > self.max_fetch_size {
+                                        break;
+                                    }
+                                    populated_bytes += size;
+                                    nullifications_found.push(nullification.clone());
+                                }
+                            }
+
+                            // Send response
+                            debug!(notarizations = notarizations_found.len(), nullifications = nullifications_found.len(), sender = hex(&s), "sending response");
+                            let response = wire::Backfiller {
+                                payload: Some(wire::backfiller::Payload::Response(wire::Response {
+                                    notarizations: notarizations_found,
+                                    nullifications: nullifications_found,
+                                })),
+                            }
+                            .encode_to_vec()
+                            .into();
+                            sender
+                                .send(Recipients::One(s.clone()), response, false)
+                                .await
+                                .unwrap();
                         },
                         wire::backfiller::Payload::Response(response) => {
                             // If we weren't waiting for anything, ignore
