@@ -427,6 +427,7 @@ pub struct Config {
 
     pub storage: Option<Arc<Mutex<HashMap<String, Partition>>>>,
 
+    // TODO: change seed to an enum that accepts either u64 or a previously initialized sampler
     pub rng: Option<Arc<Mutex<StdRng>>>,
 }
 

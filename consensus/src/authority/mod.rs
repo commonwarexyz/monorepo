@@ -496,8 +496,8 @@ mod tests {
                                 validator.clone(),
                                 other.clone(),
                                 Link {
-                                    latency: 10.0,
-                                    jitter: 1.0,
+                                    latency: 50.0,
+                                    jitter: 10.0,
                                     success_rate: 1.0,
                                 },
                             )
