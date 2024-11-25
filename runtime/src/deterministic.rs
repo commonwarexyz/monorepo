@@ -426,6 +426,8 @@ pub struct Config {
     pub timeout: Option<Duration>,
 
     pub storage: Option<Arc<Mutex<HashMap<String, Partition>>>>,
+
+    pub rng: Option<Arc<Mutex<StdRng>>>,
 }
 
 impl Default for Config {
@@ -436,6 +438,7 @@ impl Default for Config {
             cycle: Duration::from_millis(1),
             timeout: None,
             storage: None,
+            rng: None,
         }
     }
 }
@@ -446,7 +449,7 @@ pub struct Executor {
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Arc<Mutex<StdRng>>,
     prefix: Mutex<String>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
@@ -470,6 +473,12 @@ impl Executor {
             None => Arc::new(Mutex::new(HashMap::new())),
         };
 
+        // Ensure rng exists
+        let rng = match cfg.rng {
+            Some(rng) => rng,
+            None => Arc::new(Mutex::new(StdRng::seed_from_u64(cfg.seed))),
+        };
+
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(cfg.registry));
         let auditor = Arc::new(Auditor::new());
@@ -483,7 +492,7 @@ impl Executor {
             deadline,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
-            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            rng,
             prefix: Mutex::new(String::new()),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks {
