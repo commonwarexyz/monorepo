@@ -5,6 +5,7 @@ use super::{
 };
 use crate::{
     authority::{
+        actors::voter,
         encoder::{notarize_namespace, nullify_namespace},
         wire, Context, View,
     },
@@ -24,24 +25,17 @@ use governor::{
 use prost::Message as _;
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
 
 type Status = (PublicKey, SystemTime, SystemTime);
 
-pub struct Actor<
-    E: Clock + GClock + Rng,
-    C: Scheme,
-    H: Hasher,
-    A: Automaton<Context = Context>,
-    S: Supervisor<Index = View>,
-> {
+pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     runtime: E,
     crypto: C,
     hasher: H,
-    application: A,
     supervisor: S,
 
     notarize_namespace: Vec<u8>,
@@ -62,15 +56,8 @@ pub struct Actor<
     incorrect: HashSet<PublicKey>,
 }
 
-impl<
-        E: Clock + GClock + Rng,
-        C: Scheme,
-        H: Hasher,
-        A: Automaton<Context = Context>,
-        S: Supervisor<Index = View>,
-    > Actor<E, C, H, A, S>
-{
-    pub fn new(runtime: E, cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
+impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> Actor<E, C, H, S> {
+    pub fn new(runtime: E, cfg: Config<C, H, S>) -> (Self, Mailbox) {
         // Initialize rate limiter
         //
         // This ensures we don't exceed the inbound rate limit on any peer we are communicating with (which
@@ -84,7 +71,6 @@ impl<
                 runtime,
                 crypto: cfg.crypto,
                 hasher: cfg.hasher,
-                application: cfg.application,
                 supervisor: cfg.supervisor,
 
                 notarize_namespace: notarize_namespace(&cfg.namespace),
@@ -180,60 +166,19 @@ impl<
         }
     }
 
-    async fn send_block_request(
+    async fn send_request(
         &mut self,
-        digest: Digest,
-        parents: Height,
+        notarizations: &BTreeSet<View>,
+        nullifications: &BTreeSet<View>,
         sent: &mut HashSet<PublicKey>,
         sender: &mut impl Sender,
     ) -> Status {
-        // Compute deadline
-        let deadline = self.runtime.current() + self.fetch_timeout;
-        let deadline = deadline
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
         // Create new message
         let msg = wire::Backfiller {
-            payload: Some(wire::backfiller::Payload::ProposalRequest(
-                wire::ProposalRequest {
-                    deadline,
-                    digest,
-                    parents,
-                },
-            )),
-        }
-        .encode_to_vec()
-        .into();
-
-        // Send message
-        self.send(msg, sent, sender).await
-    }
-
-    async fn send_notarization_request(
-        &mut self,
-        view: View,
-        children: View,
-        sent: &mut HashSet<PublicKey>,
-        sender: &mut impl Sender,
-    ) -> Status {
-        // Compute deadline
-        let deadline = self.runtime.current() + self.fetch_timeout;
-        let deadline = deadline
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        // Create new message
-        let msg = wire::Backfiller {
-            payload: Some(wire::backfiller::Payload::NotarizationRequest(
-                wire::NotarizationRequest {
-                    deadline,
-                    view,
-                    children,
-                },
-            )),
+            payload: Some(wire::backfiller::Payload::Request(wire::Request {
+                notarizations: notarizations.iter().cloned().collect(),
+                nullifications: nullifications.iter().cloned().collect(),
+            })),
         }
         .encode_to_vec()
         .into();
@@ -244,29 +189,16 @@ impl<
 
     pub async fn run(
         mut self,
-        last_notarized: View,
-        mut resolver: resolver::Mailbox,
+        voter: &mut voter::Mailbox,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
-        // Instantiate priority queue
-        let validators = self.application.participants(last_notarized).unwrap();
-        self.fetch_performance
-            .retain(self.fetch_timeout, validators);
-
         // Wait for an event
-        let mut outstanding_proposal: Option<(Digest, Height, HashSet<PublicKey>, Status)> = None;
-        let mut outstanding_notarization: Option<(View, View, HashSet<PublicKey>, Status)> = None;
+        let mut outstanding: Option<(BTreeSet<View>, BTreeSet<View>, HashSet<PublicKey>, Status)> =
+            None;
         loop {
-            // Set timeout for next proposal
-            let proposal_timeout = if let Some((_, _, _, status)) = &outstanding_proposal {
-                Either::Left(self.runtime.sleep_until(status.2))
-            } else {
-                Either::Right(futures::future::pending())
-            };
-
-            // Set timeout for next notarization
-            let notarization_timeout = if let Some((_, _, _, status)) = &outstanding_notarization {
+            // Set timeout for next request
+            let timeout = if let Some((_, _, _, status)) = &outstanding {
                 Either::Left(self.runtime.sleep_until(status.2))
             } else {
                 Either::Right(futures::future::pending())
@@ -274,78 +206,88 @@ impl<
 
             // Wait for an event
             select! {
-                _ = proposal_timeout => {
+                _ = timeout => {
                     // Penalize requester for timeout
-                    let (digest, parents, mut sent, status) = outstanding_proposal.take().unwrap();
+                    let (notarizations, nullifications, mut sent, status) = outstanding.take().unwrap();
                     self.fetch_performance.put(status.0, self.fetch_timeout);
 
                     // Send message
-                    let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
-                    outstanding_proposal = Some((digest, parents, sent, status));
-                    continue;
-                },
-                _ = notarization_timeout => {
-                    // Penalize requester for timeout
-                    let (view, children, mut sent, status) = outstanding_notarization.take().unwrap();
-                    self.fetch_performance.put(status.0, self.fetch_timeout);
-
-                    // Send message
-                    let status = self.send_notarization_request(view, children, &mut sent,  &mut sender).await;
-                    outstanding_notarization = Some((view, children, sent, status));
+                    let status = self.send_request(&notarizations, &nullifications, &mut sent,  &mut sender).await;
+                    outstanding = Some((notarizations, nullifications, sent, status));
                     continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = mailbox.unwrap();
                     match msg {
-                        Message::Notarized {view, notarization, last_finalized} => {
+                        Message::Fetch { notarizations, nullifications } => {
+                            // If request already exists, just add to it
+                            if outstanding.is_some() {
+                                let (existing_notarizations, existing_nullifications, _, _) = outstanding.as_mut().unwrap();
+                                existing_notarizations.extend(notarizations);
+                                existing_nullifications.extend(nullifications);
+                                continue;
+                            }
+
+                            // If request does not exist, create it
+                            let mut sent = HashSet::new();
+                            let notarizations = notarizations.into_iter().collect();
+                            let nullifications = nullifications.into_iter().collect();
+                            let status = self.send_request(&notarizations, &nullifications, &mut sent, &mut sender).await;
+                            outstanding = Some((notarizations, nullifications, sent, status));
+                        }
+                        Message::Notarized { notarization } => {
                             // Update stored validators
-                            let validators = self.application.participants(view).unwrap();
+                            let view = notarization.proposal.as_ref().unwrap().view;
+                            let validators = self.supervisor.participants(view).unwrap();
                             self.fetch_performance.retain(self.fetch_timeout, validators);
 
-                            // Add notarization to cache
-                            let notarizations = self.notarizations.entry(view).or_default();
-                            if notarization.digest.is_none() {
-                                notarizations.null = Some(notarization);
-                            } else {
-                                notarizations.digest = Some(notarization);
+                            // If waiting for this notarization, remove it
+                            if let Some((notarizations, nullifications, _, _)) = &outstanding {
+                                notarizations.remove(&view);
                             }
 
-                            // Remove notarization from cache less than last finalized
-                            self.notarizations.retain(|view, _| *view >= last_finalized);
+                            // Add notarization to cache
+                            let notarizations = self.notarizations.insert(view, notarization);
                         }
-                        Message::Proposals {digest, parents} => {
-                            // Send message
-                            let mut sent = HashSet::new();
-                            let status = self.send_block_request(digest.clone(), parents, &mut sent, &mut sender).await;
-                            outstanding_proposal = Some((digest, parents, sent, status));
-                        },
-                        Message::CancelProposals {} => {
-                            // Cancel outstanding proposal
-                            outstanding_proposal = None;
-                            debug!("canceled outstanding proposal");
-                        },
-                        Message::FilledProposals {recipient, proposals} => {
-                            // Send message
-                            let msg = wire::Backfiller {
-                                payload: Some(wire::backfiller::Payload::ProposalResponse(wire::ProposalResponse {
-                                    proposals,
-                                })),
+                        Message::Nullified { nullification } => {
+                            // Update stored validators
+                            let view = nullification.view;
+                            let validators = self.supervisor.participants(view).unwrap();
+                            self.fetch_performance.retain(self.fetch_timeout, validators);
+
+                            // If waiting for this nullification, remove it
+                            if let Some((notarizations, nullifications, _, _)) = &outstanding {
+                                nullifications.remove(&view);
                             }
-                            .encode_to_vec()
-                            .into();
-                            sender.send(Recipients::One(recipient), msg, false).await.unwrap();
-                        },
-                        Message::Notarizations { view, children } => {
-                            // Send message
-                            let mut sent = HashSet::new();
-                            let status = self.send_notarization_request(view, children, &mut sent, &mut sender).await;
-                            outstanding_notarization = Some((view, children, sent, status));
-                        },
-                        Message::CancelNotarizations {} => {
-                            // Cancel outstanding notarization
-                            outstanding_notarization = None;
-                            debug!("canceled outstanding notarization");
-                        },
+
+                            // Add nullification to cache
+                            let nullifications = self.nullifications.insert(view, nullification);
+                        }
+                        Message::Finalized { view } => {
+                            // Remove notarizations no longer needed
+                            loop {
+                                let notarization = match self.notarizations.first_key_value() {
+                                    Some((first, _)) => *first,
+                                    None => break,
+                                };
+                                if notarization >= view {
+                                    break;
+                                }
+                                self.notarizations.remove(&notarization);
+                            }
+
+                            // Remove nullifications no longer needed
+                            loop {
+                                let nullification = match self.nullifications.first_key_value() {
+                                    Some((first, _)) => *first,
+                                    None => break,
+                                };
+                                if nullification >= view {
+                                    break;
+                                }
+                                self.nullifications.remove(&nullification);
+                            }
+                        }
                     }
                 },
                 network = receiver.recv() => {

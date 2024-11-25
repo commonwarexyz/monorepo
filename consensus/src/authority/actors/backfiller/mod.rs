@@ -10,10 +10,9 @@ use governor::Quota;
 pub use ingress::Mailbox;
 use std::time::Duration;
 
-pub struct Config<C: Scheme, H: Hasher, A: Automaton, S: Supervisor> {
+pub struct Config<C: Scheme, H: Hasher, S: Supervisor> {
     pub crypto: C,
     pub hasher: H,
-    pub application: A,
     pub supervisor: S,
 
     pub namespace: Bytes,
