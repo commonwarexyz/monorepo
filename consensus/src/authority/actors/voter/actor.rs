@@ -565,6 +565,16 @@ impl<
         }
     }
 
+    fn missing_nullifications(&self, parent: View) -> Vec<View> {
+        let mut missing = Vec::new();
+        for view in (parent + 1)..self.view {
+            if !self.is_nullified(view) {
+                missing.push(view);
+            }
+        }
+        missing
+    }
+
     async fn propose(&mut self) -> Option<(Context, oneshot::Receiver<Digest>)> {
         // Check if we are leader
         {
@@ -2051,11 +2061,18 @@ impl<
             if let Some(parent) = round.at_least_one_honest() {
                 if parent >= self.last_finalized {
                     // Compute missing nullifications
+                    let mut missing_notarizations = Vec::new();
+                    if self.is_notarized(parent).is_none() {
+                        missing_notarizations.push(parent);
+                    }
+                    let missing_nullifications = self.missing_nullifications(parent);
 
                     // Enqueue missing
                     warn!(
                         view,
-                        parent = parent,
+                        parent,
+                        ?missing_notarizations,
+                        ?missing_nullifications,
                         "at least one honest voter for parent"
                     );
                 } else {
