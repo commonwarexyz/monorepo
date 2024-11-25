@@ -628,19 +628,27 @@ impl<
         // If retry, broadcast notarization that led us to enter this view
         let past_view = self.view - 1;
         if retry && past_view > 0 {
-            match self.construct_notarization(past_view, true) {
-                Some(notarization) => {
-                    let msg = wire::Voter {
-                        payload: Some(wire::voter::Payload::Notarization(notarization)),
-                    }
-                    .encode_to_vec()
-                    .into();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
-                    debug!(view = past_view, "rebroadcast entry notarization");
+            if let Some(notarization) = self.construct_notarization(past_view, true) {
+                let msg = wire::Voter {
+                    payload: Some(wire::voter::Payload::Notarization(notarization)),
                 }
-                None => {
-                    warn!(view = past_view, "no notarization to rebroadcast");
+                .encode_to_vec()
+                .into();
+                sender.send(Recipients::All, msg, true).await.unwrap();
+                debug!(view = past_view, "rebroadcast entry notarization");
+            } else if let Some(nullification) = self.construct_nullification(past_view, true) {
+                let msg = wire::Voter {
+                    payload: Some(wire::voter::Payload::Nullification(nullification)),
                 }
+                .encode_to_vec()
+                .into();
+                sender.send(Recipients::All, msg, true).await.unwrap();
+                debug!(view = past_view, "rebroadcast entry nullification");
+            } else {
+                warn!(
+                    view = past_view,
+                    "unable to rebroadcast entry notarization/nullification"
+                );
             }
         }
 

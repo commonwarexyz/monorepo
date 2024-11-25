@@ -497,7 +497,7 @@ mod tests {
                                 other.clone(),
                                 Link {
                                     latency: 50.0,
-                                    jitter: 10.0,
+                                    jitter: 50.0,
                                     success_rate: 1.0,
                                 },
                             )
