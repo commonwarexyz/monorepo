@@ -424,6 +424,8 @@ pub struct Config {
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     pub timeout: Option<Duration>,
+
+    pub storage: Option<Arc<Mutex<HashMap<String, Partition>>>>,
 }
 
 impl Default for Config {
@@ -433,6 +435,7 @@ impl Default for Config {
             seed: 42,
             cycle: Duration::from_millis(1),
             timeout: None,
+            storage: None,
         }
     }
 }
@@ -448,7 +451,7 @@ pub struct Executor {
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
-    partitions: Mutex<HashMap<String, Partition>>,
+    partitions: Arc<Mutex<HashMap<String, Partition>>>,
     signaler: Mutex<Signaler>,
     signal: Signal,
 }
@@ -460,6 +463,12 @@ impl Executor {
         if cfg.timeout.is_some() && cfg.cycle == Duration::default() {
             panic!("cycle duration must be non-zero when timeout is set");
         }
+
+        // Ensure storage exists
+        let partitions = match cfg.storage {
+            Some(storage) => storage,
+            None => Arc::new(Mutex::new(HashMap::new())),
+        };
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(cfg.registry));
@@ -482,7 +491,7 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
-            partitions: Mutex::new(HashMap::new()),
+            partitions,
             signaler: Mutex::new(signaler),
             signal,
         });
@@ -1053,7 +1062,8 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
-struct Partition {
+#[derive(Clone)]
+pub struct Partition {
     blobs: HashMap<Vec<u8>, Vec<u8>>,
 }
 
