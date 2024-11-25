@@ -72,7 +72,6 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     verified: HashSet<Digest>,
     notarized_views: HashSet<Digest>,
     finalized_views: HashSet<Digest>,
-    last_finalized: u64,
 }
 
 impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
@@ -105,7 +104,6 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 pending: HashMap::new(),
 
                 verified: HashSet::new(),
-                last_finalized: 0,
                 notarized_views: HashSet::new(),
                 finalized_views: HashSet::new(),
             },

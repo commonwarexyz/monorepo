@@ -31,18 +31,7 @@ impl<
         S: Supervisor<Seed = (), Index = View>,
     > Engine<E, C, H, A, S>
 {
-    pub fn new(runtime: E, mut cfg: Config<C, H, A, S>) -> Self {
-        // Sort the validators at each view
-        if cfg.validators.is_empty() {
-            panic!("no validators specified");
-        }
-        for (_, validators) in cfg.validators.iter_mut() {
-            if validators.is_empty() {
-                panic!("no validators specified");
-            }
-            validators.sort();
-        }
-
+    pub fn new(runtime: E, cfg: Config<C, H, A, S>) -> Self {
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
             runtime.clone(),

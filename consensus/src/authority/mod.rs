@@ -287,7 +287,6 @@ mod tests {
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-                    validators: view_validators.clone(),
                 };
                 let engine = Engine::new(runtime.clone(), cfg);
                 runtime.spawn("engine", async move {
