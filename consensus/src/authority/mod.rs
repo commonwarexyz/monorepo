@@ -179,7 +179,6 @@ mod tests {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
-        hash::Hash,
         num::NonZeroU32,
         sync::{Arc, Mutex},
         time::Duration,
@@ -425,12 +424,14 @@ mod tests {
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
         let rng = Arc::new(Mutex::new(StdRng::seed_from_u64(seed)));
         let storage = Arc::new(Mutex::new(HashMap::new()));
+        let notarized = Arc::new(Mutex::new(HashMap::new()));
         let finalized = Arc::new(Mutex::new(HashMap::new()));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         while completed.lock().unwrap().len() != n as usize {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
             let rng = rng.clone();
+            let notarized = notarized.clone();
             let finalized = finalized.clone();
             let completed = completed.clone();
             let cfg = deterministic::Config {
@@ -469,7 +470,7 @@ mod tests {
                 let hasher = Sha256::default();
                 let prover = Prover::new(hasher.clone(), namespace.clone());
                 let relay = Arc::new(mocks::relay::Relay::new());
-                let mut supervisors = Vec::new();
+                let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
                 let mut engine_handlers = Vec::new();
                 for scheme in schemes.into_iter() {
@@ -511,7 +512,7 @@ mod tests {
                     };
                     let supervisor =
                         mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
-                    supervisors.push(supervisor.clone());
+                    supervisors.insert(validator.clone(), supervisor.clone());
                     let application_cfg = mocks::actor::ApplicationConfig {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
@@ -563,29 +564,69 @@ mod tests {
                 // Wait for all engines to finish
                 runtime.spawn("confirmed", async move {
                     loop {
-                        // Parse finalization events
+                        // Parse events
                         let (validator, event) = done_receiver.next().await.unwrap();
-                        if let mocks::actor::Progress::Finalized(proof, digest) = event {
-                            let (view, _, payload, _) =
-                                prover.deserialize_finalization(proof, 5, true).unwrap();
-                            if digest != payload {
-                                panic!(
-                                    "finalization mismatch digest: {:?}, payload: {:?}",
-                                    digest, payload
-                                );
-                            }
-                            {
-                                let mut finalized = finalized.lock().unwrap();
-                                finalized.insert(view, digest);
-                                if (finalized.len() as u64) < required_containers {
-                                    continue;
+                        match event {
+                            mocks::actor::Progress::Notarized(proof, digest) => {
+                                // Check correctness of proof
+                                let (view, _, payload, _) =
+                                    prover.deserialize_notarization(proof, 5, true).unwrap();
+                                if digest != payload {
+                                    panic!(
+                                        "notarization mismatch digest: {:?}, payload: {:?}",
+                                        digest, payload
+                                    );
+                                }
+
+                                // Store notarized
+                                {
+                                    let mut notarized = notarized.lock().unwrap();
+                                    if let Some(previous) = notarized.insert(view, digest.clone())
+                                    {
+                                        if previous != digest {
+                                            panic!(
+                                                "notarization mismatch at {:?} previous: {:?}, current: {:?}",
+                                                view, previous, digest
+                                            );
+                                        }
+                                    }
+                                    if (notarized.len() as u64) < required_containers {
+                                        continue;
+                                    }
                                 }
                             }
-                            completed.lock().unwrap().insert(validator);
+                            mocks::actor::Progress::Finalized(proof, digest) => {
+                                // Check correctness of proof
+                                let (view, _, payload, _) =
+                                    prover.deserialize_finalization(proof, 5, true).unwrap();
+                                if digest != payload {
+                                    panic!(
+                                        "finalization mismatch digest: {:?}, payload: {:?}",
+                                        digest, payload
+                                    );
+                                }
+
+                                // Store finalized
+                                {
+                                    let mut finalized = finalized.lock().unwrap();
+                                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                                        if previous != digest {
+                                            panic!(
+                                                "finalization mismatch at {:?} previous: {:?}, current: {:?}",
+                                                view, previous, digest
+                                            );
+                                        }
+                                    }
+                                    if (finalized.len() as u64) < required_containers {
+                                        continue;
+                                    }
+                                }
+                                completed.lock().unwrap().insert(validator);
+                            }
                         }
 
                         // Check supervisors for correct activity
-                        for supervisor in supervisors.iter() {
+                        for (_, supervisor) in supervisors.iter() {
                             // Ensure no faults
                             let faults = supervisor.faults.lock().unwrap();
                             assert!(faults.is_empty());
@@ -593,7 +634,7 @@ mod tests {
                     }
                 });
 
-                // Restarting
+                // Exit at random points for unclean shutdown of entire set
                 let wait =
                     runtime.gen_range(Duration::from_millis(10)..Duration::from_millis(2000));
                 runtime.sleep(wait).await;
