@@ -8,12 +8,12 @@ use crate::{
         actors::voter,
         encoder::{notarize_namespace, nullify_namespace},
         verifier::{threshold, verify_notarization, verify_nullification},
-        wire, Context, View,
+        wire, View,
     },
-    Automaton, Supervisor,
+    Supervisor,
 };
 use bytes::Bytes;
-use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
@@ -190,11 +190,13 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
     pub async fn run(
         mut self,
-        voter: &mut voter::Mailbox,
+        mut voter: voter::Mailbox,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {
         // Wait for an event
+        let mut current_view = 0;
+        let mut finalized_view = 0;
         let mut outstanding: Option<(BTreeSet<View>, BTreeSet<View>, HashSet<PublicKey>, Status)> =
             None;
         loop {
@@ -237,8 +239,15 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             outstanding = Some((notarizations, nullifications, sent, status));
                         }
                         Message::Notarized { notarization } => {
-                            // Update stored validators
+                            // Update current view
                             let view = notarization.proposal.as_ref().unwrap().view;
+                            if view > current_view {
+                                current_view = view;
+                            } else {
+                                continue;
+                            }
+
+                            // Update stored validators
                             let validators = self.supervisor.participants(view).unwrap();
                             self.fetch_performance.retain(self.fetch_timeout, validators);
 
@@ -251,8 +260,15 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             self.notarizations.insert(view, notarization);
                         }
                         Message::Nullified { nullification } => {
-                            // Update stored validators
+                            // Update current view
                             let view = nullification.view;
+                            if view > current_view {
+                                current_view = view;
+                            } else {
+                                continue;
+                            }
+
+                            // Update stored validators
                             let validators = self.supervisor.participants(view).unwrap();
                             self.fetch_performance.retain(self.fetch_timeout, validators);
 
@@ -265,6 +281,16 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             self.nullifications.insert(view, nullification);
                         }
                         Message::Finalized { view } => {
+                            // Update current view
+                            if view > current_view {
+                                current_view = view;
+                            }
+                            if view > finalized_view {
+                                finalized_view = view;
+                            } else {
+                                continue;
+                            }
+
                             // Remove unneeded cache
                             self.notarizations.retain(|k, _| *k >= view);
                             self.nullifications.retain(|k, _| *k >= view);
@@ -314,6 +340,9 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     if populated_bytes + size > self.max_fetch_size {
                                         break;
                                     }
+                                    if notarizations_found.len() + 1 > self.max_fetch_count as usize {
+                                        break;
+                                    }
                                     populated_bytes += size;
                                     notarizations_found.push(notarization.clone());
                                 }
@@ -326,13 +355,16 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     if populated_bytes + size > self.max_fetch_size {
                                         break;
                                     }
+                                    if notarizations_found.len() + nullifications_found.len() + 1 > self.max_fetch_count as usize {
+                                        break;
+                                    }
                                     populated_bytes += size;
                                     nullifications_found.push(nullification.clone());
                                 }
                             }
 
                             // Send response
-                            debug!(notarizations = notarizations_found.len(), nullifications = nullifications_found.len(), sender = hex(&s), "sending response");
+                            debug!(notarizations_found = notarizations_found.len(), nullifications_found = nullifications_found.len(), sender = hex(&s), "sending response");
                             let response = wire::Backfiller {
                                 payload: Some(wire::backfiller::Payload::Response(wire::Response {
                                     notarizations: notarizations_found,
@@ -384,7 +416,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             }
 
                             // Parse notarizations
-                            let mut useful = false;
+                            let mut notarizations_found = BTreeSet::new();
+                            let mut nullifications_found = BTreeSet::new();
                             for notarization in response.notarizations {
                                 let view = match notarization.proposal.as_ref() {
                                     Some(proposal) => proposal.view,
@@ -411,7 +444,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 notarizations.remove(&view);
                                 self.notarizations.insert(view, notarization.clone());
                                 voter.notarization(notarization).await;
-                                useful = true;
+                                notarizations_found.insert(view);
                             }
 
                             // Parse nullifications
@@ -435,13 +468,19 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 nullifications.remove(&view);
                                 self.nullifications.insert(view, nullification.clone());
                                 voter.nullification(nullification).await;
-                                useful = true;
+                                nullifications_found.insert(view);
                             }
 
                             // Update performance
-                            if useful {
+                            if !notarizations_found.is_empty() || !nullifications_found.is_empty() {
                                 let duration = received.duration_since(status.1).unwrap();
-                                self.fetch_performance.put(s, duration);
+                                self.fetch_performance.put(s.clone(), duration);
+                                debug!(
+                                    notarizations_found = ?notarizations_found.into_iter().collect::<Vec<_>>(),
+                                    nullifications_found = ?nullifications_found.into_iter().collect::<Vec<_>>(),
+                                    sender = hex(&s),
+                                    "request successful",
+                                );
                             }
 
                             // If still work to do, send another request

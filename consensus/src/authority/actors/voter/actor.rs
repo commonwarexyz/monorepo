@@ -1,6 +1,7 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
+        actors::backfiller,
         encoder::{
             finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
             proposal_message,
@@ -1868,7 +1869,12 @@ impl<
         Some(finalization)
     }
 
-    async fn broadcast(&mut self, sender: &mut impl Sender, view: u64) {
+    async fn broadcast(
+        &mut self,
+        backfiller: &mut backfiller::Mailbox,
+        sender: &mut impl Sender,
+        view: u64,
+    ) {
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the vote
@@ -1893,6 +1899,9 @@ impl<
 
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false) {
+            // Update backfiller
+            backfiller.notarized(notarization.clone()).await;
+
             // Handle the notarization
             self.handle_notarization(notarization.clone()).await;
 
@@ -1926,6 +1935,9 @@ impl<
         //
         // We handle broadcast of nullify in `timeout`.
         if let Some(nullification) = self.construct_nullification(view, false) {
+            // Update backfiller
+            backfiller.nullified(nullification.clone()).await;
+
             // Handle the nullification
             self.handle_nullification(nullification.clone()).await;
 
@@ -1965,6 +1977,9 @@ impl<
                         ?missing_nullifications,
                         ">= 1 honest voter for nullified parent"
                     );
+                    backfiller
+                        .fetch(missing_notarizations, missing_nullifications)
+                        .await;
                 } else {
                     // Broadcast last finalized
                     debug!(
@@ -2017,6 +2032,9 @@ impl<
 
         // Attempt to finalization
         if let Some(finalization) = self.construct_finalization(view, false) {
+            // Update backfiller
+            backfiller.finalized(view).await;
+
             // Handle the finalization
             self.handle_finalization(finalization.clone()).await;
 
@@ -2047,7 +2065,12 @@ impl<
         };
     }
 
-    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        mut self,
+        mut backfiller: backfiller::Mailbox,
+        mut sender: impl Sender,
+        mut receiver: impl Receiver,
+    ) {
         // Compute genesis
         let genesis = self.application.genesis().await;
         self.genesis = Some(genesis);
@@ -2255,8 +2278,17 @@ impl<
                     }
                 },
                 mailbox = self.mailbox_receiver.next() => {
-                    // TODO: store notarizations we've backfilled (verified in backfiller to avoid using compute in this loop)
-                    unimplemented!()
+                    let msg = mailbox.unwrap();
+                    match msg {
+                        Message::Notarization{ notarization }  => {
+                            view = notarization.proposal.as_ref().unwrap().view;
+                            self.handle_notarization(notarization).await;
+                        },
+                        Message::Nullification { nullification } => {
+                            view = nullification.view;
+                            self.handle_nullification(nullification).await;
+                        },
+                    }
                 },
                 msg = receiver.recv() => {
                     // Parse message
@@ -2333,7 +2365,7 @@ impl<
             };
 
             // Attempt to send any new view messages
-            self.broadcast(&mut sender, view).await;
+            self.broadcast(&mut backfiller, &mut sender, view).await;
 
             // After sending all required messages, prune any views
             // we no longer need
