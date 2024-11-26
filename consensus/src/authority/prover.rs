@@ -39,21 +39,19 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         }
     }
 
-    fn serialize_proposal(
-        view: View,
-        parent: View,
-        payload: &Digest,
+    pub(crate) fn serialize_proposal(
+        proposal: &wire::Proposal,
         public_key: &PublicKey,
         signature: &Signature,
     ) -> Proof {
         // Setup proof
-        let len = 8 + 8 + payload.len() + public_key.len() + signature.len();
+        let len = 8 + 8 + proposal.payload.len() + public_key.len() + signature.len();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
-        proof.put_u64(view);
-        proof.put_u64(parent);
-        proof.extend_from_slice(payload);
+        proof.put_u64(proposal.view);
+        proof.put_u64(proposal.parent);
+        proof.extend_from_slice(&proposal.payload);
         proof.extend_from_slice(public_key);
         proof.extend_from_slice(signature);
         proof.into()
@@ -99,21 +97,23 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((view, parent, payload, public_key))
     }
 
-    fn serialize_aggregation(
-        view: View,
-        parent: View,
-        payload: &Digest,
+    pub(crate) fn serialize_aggregation(
+        proposal: &wire::Proposal,
         signatures: Vec<(&PublicKey, &Signature)>,
     ) -> Proof {
         // Setup proof
         let (public_key_len, signature_len) = C::len();
-        let len = 8 + 8 + payload.len() + 4 + signatures.len() * (public_key_len + signature_len);
+        let len = 8
+            + 8
+            + proposal.payload.len()
+            + 4
+            + signatures.len() * (public_key_len + signature_len);
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
-        proof.put_u64(view);
-        proof.put_u64(parent);
-        proof.extend_from_slice(payload);
+        proof.put_u64(proposal.view);
+        proof.put_u64(proposal.parent);
+        proof.extend_from_slice(&proposal.payload);
         proof.put_u32(signatures.len() as u32);
         for (public_key, signature) in signatures {
             proof.extend_from_slice(public_key);
@@ -174,38 +174,12 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((view, parent, payload, seen.into_iter().collect()))
     }
 
-    pub(crate) fn serialize_notarize(
-        proposal: &wire::Proposal,
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> Proof {
-        Self::serialize_proposal(
-            proposal.view,
-            proposal.parent,
-            &proposal.payload,
-            public_key,
-            signature,
-        )
-    }
-
     pub fn deserialize_notarize(
         &self,
         proof: Proof,
         check_sig: bool,
     ) -> Option<(View, View, Digest, PublicKey)> {
         Self::deserialize_proposal(proof, check_sig, &self.notarize_namespace)
-    }
-
-    pub(crate) fn serialize_notarization(
-        proposal: &wire::Proposal,
-        signatures: Vec<(&PublicKey, &Signature)>,
-    ) -> Proof {
-        Self::serialize_aggregation(
-            proposal.view,
-            proposal.parent,
-            &proposal.payload,
-            signatures,
-        )
     }
 
     pub fn deserialize_notarization(
@@ -217,38 +191,12 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_aggregation(proof, max, check_sigs, &self.notarize_namespace)
     }
 
-    pub(crate) fn serialize_finalize(
-        proposal: &wire::Proposal,
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> Proof {
-        Self::serialize_proposal(
-            proposal.view,
-            proposal.parent,
-            &proposal.payload,
-            public_key,
-            signature,
-        )
-    }
-
     pub fn deserialize_finalize(
         &self,
         proof: Proof,
         check_sig: bool,
     ) -> Option<(View, View, Digest, PublicKey)> {
         Self::deserialize_proposal(proof, check_sig, &self.finalize_namespace)
-    }
-
-    pub(crate) fn serialize_finalization(
-        proposal: &wire::Proposal,
-        signatures: Vec<(&PublicKey, &Signature)>,
-    ) -> Proof {
-        Self::serialize_aggregation(
-            proposal.view,
-            proposal.parent,
-            &proposal.payload,
-            signatures,
-        )
     }
 
     pub fn deserialize_finalization(

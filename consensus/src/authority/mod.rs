@@ -110,12 +110,14 @@
 //!   won't just immediately be dropped?
 
 mod actors;
+#[cfg(test)]
 mod byzantine;
 mod config;
 pub use config::Config;
 mod encoder;
 mod engine;
 pub use engine::Engine;
+#[cfg(test)]
 mod mocks;
 pub mod prover;
 mod verifier;

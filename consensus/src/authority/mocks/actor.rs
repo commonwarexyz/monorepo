@@ -22,11 +22,9 @@ use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    hash::Hash,
     sync::{Arc, Mutex},
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
-use tracing::debug;
 
 const GENESIS_BYTES: &[u8] = b"genesis";
 
@@ -76,7 +74,6 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
 }
 
 impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
-    // TODO: need to input broadcast artifacts into automaton concurrently?
     pub fn new(runtime: E, cfg: ApplicationConfig<H>) -> (Self, Mailbox) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());

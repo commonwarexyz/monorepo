@@ -179,7 +179,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         }
         let entry = self.notarizes.entry(digest).or_default();
         let signature = &notarize.signature.as_ref().unwrap().signature;
-        let proof = Prover::<C, H>::serialize_notarize(proposal, public_key, signature);
+        let proof = Prover::<C, H>::serialize_proposal(proposal, public_key, signature);
         entry.insert(public_key_index, notarize);
         self.supervisor.report(NOTARIZE, proof).await;
         true
@@ -353,7 +353,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         }
         let entry = self.finalizes.entry(digest).or_default();
         let signature = &finalize.signature.as_ref().unwrap().signature;
-        let proof = Prover::<C, H>::serialize_finalize(proposal, public_key, signature);
+        let proof = Prover::<C, H>::serialize_proposal(proposal, public_key, signature);
         entry.insert(public_key_index, finalize);
         self.supervisor.report(FINALIZE, proof).await;
         true
@@ -1880,7 +1880,7 @@ impl<
                 let public_key = validators.get(signature.public_key as usize).unwrap();
                 signatures.push((public_key, &signature.signature));
             }
-            let proof = Prover::<C, H>::serialize_notarization(proposal, signatures);
+            let proof = Prover::<C, H>::serialize_aggregation(proposal, signatures);
             self.application
                 .notarized(
                     proof,
@@ -2023,7 +2023,7 @@ impl<
                 let public_key = validators.get(signature.public_key as usize).unwrap();
                 signatures.push((public_key, &signature.signature));
             }
-            let proof = Prover::<C, H>::serialize_finalization(proposal, signatures);
+            let proof = Prover::<C, H>::serialize_aggregation(proposal, signatures);
             self.application
                 .finalized(
                     proof,
