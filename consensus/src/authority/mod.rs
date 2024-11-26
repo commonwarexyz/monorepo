@@ -112,17 +112,18 @@
 mod actors;
 mod byzantine;
 mod config;
+pub use config::Config;
 mod encoder;
 mod engine;
+pub use engine::Engine;
 mod mocks;
 pub mod prover;
 mod verifier;
-
-use commonware_cryptography::Digest;
-
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
+
+use commonware_cryptography::Digest;
 
 pub type View = u64;
 
@@ -1879,14 +1880,18 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_slow_and_lossy_links() {
+    fn test_slow_and_lossy_links(seed: u64) -> String {
         // Create runtime
         let n = 5;
-        let required_containers = 100;
+        let required_containers = 50;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(3_000));
+        let cfg = deterministic::Config {
+            seed: Seed::Number(seed),
+            timeout: Some(Duration::from_secs(3_000)),
+            ..deterministic::Config::default()
+        };
+        let (executor, runtime, auditor) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -2048,6 +2053,21 @@ mod tests {
                 }
             }
         });
+        auditor.state()
+    }
+
+    #[test_traced]
+    fn test_determinism() {
+        for seed in 0..5 {
+            // Run test with seed
+            let state_1 = test_slow_and_lossy_links(seed);
+
+            // Run test again with same seed
+            let state_2 = test_slow_and_lossy_links(seed);
+
+            // Ensure states are equal
+            assert_eq!(state_1, state_2);
+        }
     }
 
     #[test_traced]

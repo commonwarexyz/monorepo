@@ -2,7 +2,7 @@ mod actor;
 mod ingress;
 mod priority_queue;
 
-use crate::{Automaton, Supervisor};
+use crate::Supervisor;
 pub use actor::Actor;
 use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};

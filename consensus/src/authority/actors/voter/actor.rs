@@ -30,8 +30,7 @@ use prost::Message as _;
 use rand::Rng;
 use std::{
     cmp::max,
-    collections::{BTreeMap, HashMap, HashSet},
-    ptr::null,
+    collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
@@ -977,7 +976,7 @@ impl<
         let payload = proposal.payload.clone();
         debug!(
             view = proposal.view,
-            digest = hex(&proposal_digest),
+            digest = hex(proposal_digest),
             payload = hex(&payload),
             "requested proposal verification",
         );
