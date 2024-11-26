@@ -545,17 +545,37 @@ impl<
         round.nullifies.len() >= threshold as usize
     }
 
-    fn find_parent(&self) -> Option<(View, Digest)> {
+    fn is_finalized(&self, view: View) -> Option<&wire::Proposal> {
+        let round = self.views.get(&view)?;
+        let (digest, proposal) = round.proposal.as_ref()?;
+        let finalizes = round.finalizes.get(digest)?;
+        let validators = self.supervisor.participants(view)?;
+        let (threshold, _) = threshold(validators)?;
+        if finalizes.len() < threshold as usize {
+            return None;
+        }
+        Some(proposal)
+    }
+
+    fn find_parent(&self) -> Result<(View, Digest), View> {
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
-                return Some((GENESIS_VIEW, self.genesis.as_ref().unwrap().clone()));
+                return Ok((GENESIS_VIEW, self.genesis.as_ref().unwrap().clone()));
             }
 
             // If have notarization, return
             let parent = self.is_notarized(cursor);
             if let Some(parent) = parent {
-                return Some((cursor, parent.payload.clone()));
+                return Ok((cursor, parent.payload.clone()));
+            }
+
+            // If have finalization, return
+            //
+            // We never want to build on some view less than finalized and this prevents that
+            let parent = self.is_finalized(cursor);
+            if let Some(parent) = parent {
+                return Ok((cursor, parent.payload.clone()));
             }
 
             // If have nullification, continue
@@ -565,7 +585,7 @@ impl<
             }
 
             // We can't find a valid parent, return
-            return None;
+            return Err(cursor);
         }
     }
 
@@ -579,7 +599,10 @@ impl<
         missing
     }
 
-    async fn propose(&mut self) -> Option<(Context, oneshot::Receiver<Digest>)> {
+    async fn propose(
+        &mut self,
+        backfiller: &mut backfiller::Mailbox,
+    ) -> Option<(Context, oneshot::Receiver<Digest>)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -604,13 +627,14 @@ impl<
 
         // Find best parent
         let (parent_view, parent_payload) = match self.find_parent() {
-            Some(parent) => parent,
-            None => {
+            Ok(parent) => parent,
+            Err(view) => {
                 debug!(
                     view = self.view,
-                    reason = "no parent",
+                    missing = view,
                     "skipping proposal opportunity"
                 );
+                backfiller.fetch(vec![view], vec![view]).await;
                 return None;
             }
         };
@@ -2145,7 +2169,7 @@ impl<
         let mut pending_verify = None;
         loop {
             // Attempt to propose a container
-            if let Some((context, new_propose)) = self.propose().await {
+            if let Some((context, new_propose)) = self.propose(&mut backfiller).await {
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
             }
