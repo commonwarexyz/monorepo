@@ -2,7 +2,7 @@ mod actor;
 mod ingress;
 mod priority_queue;
 
-use crate::Automaton;
+use crate::{Automaton, Supervisor};
 pub use actor::Actor;
 use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};
@@ -10,10 +10,10 @@ use governor::Quota;
 pub use ingress::Mailbox;
 use std::time::Duration;
 
-pub struct Config<C: Scheme, H: Hasher, A: Automaton> {
+pub struct Config<C: Scheme, H: Hasher, S: Supervisor> {
     pub crypto: C,
     pub hasher: H,
-    pub application: A,
+    pub supervisor: S,
 
     pub namespace: Bytes,
     pub fetch_timeout: Duration,

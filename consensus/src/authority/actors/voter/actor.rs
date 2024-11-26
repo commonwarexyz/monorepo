@@ -1,11 +1,13 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
+        actors::backfiller,
         encoder::{
             finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
             proposal_message,
         },
         prover::Prover,
+        verifier::{threshold, verify_notarization, verify_nullification},
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
@@ -29,7 +31,6 @@ use rand::Rng;
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap, HashSet},
-    pin,
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
@@ -41,7 +42,7 @@ type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<PublicKey, wire::Fina
 
 const GENESIS_VIEW: View = 0;
 
-struct Round<C: Scheme, H: Hasher, S: Supervisor> {
+struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     hasher: H,
     supervisor: S,
     _crypto: PhantomData<C>,
@@ -74,7 +75,7 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, H: Hasher, S: Supervisor> Round<C, H, S> {
+impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
     pub fn new(
         hasher: H,
         supervisor: S,
@@ -392,6 +393,27 @@ impl<C: Scheme, H: Hasher, S: Supervisor> Round<C, H, S> {
         }
         None
     }
+
+    pub fn at_least_one_honest(&self) -> Option<View> {
+        let participants = self.supervisor.participants(self.view)?;
+        let threshold = quorum(participants.len() as u32)?;
+        let at_least_one_honest = (threshold - 1) / 2 + 1;
+        for (_, notarizes) in self.notarizes.iter() {
+            if notarizes.len() < at_least_one_honest as usize {
+                continue;
+            }
+            let parent = notarizes
+                .values()
+                .next()
+                .unwrap()
+                .proposal
+                .as_ref()
+                .unwrap()
+                .parent;
+            return Some(parent);
+        }
+        None
+    }
 }
 
 pub struct Actor<
@@ -501,7 +523,7 @@ impl<
         let round = self.views.get(&view)?;
         let (digest, proposal) = round.proposal.as_ref()?;
         let notarizes = round.notarizes.get(digest)?;
-        let (threshold, _) = self.threshold(view)?;
+        let (threshold, _) = threshold(&self.supervisor, view)?;
         if notarizes.len() < threshold as usize {
             return None;
         }
@@ -513,7 +535,7 @@ impl<
             Some(round) => round,
             None => return false,
         };
-        let (threshold, _) = match self.threshold(view) {
+        let (threshold, _) = match threshold(&self.supervisor, view) {
             Some(threshold) => threshold,
             None => return false,
         };
@@ -542,6 +564,16 @@ impl<
             // We can't find a valid parent, return
             return None;
         }
+    }
+
+    fn missing_nullifications(&self, parent: View) -> Vec<View> {
+        let mut missing = Vec::new();
+        for view in (parent + 1)..self.view {
+            if !self.is_nullified(view) {
+                missing.push(view);
+            }
+        }
+        missing
     }
 
     async fn propose(&mut self) -> Option<(Context, oneshot::Receiver<Digest>)> {
@@ -1070,16 +1102,6 @@ impl<
         }
     }
 
-    fn threshold(&self, view: View) -> Option<(u32, u32)> {
-        let validators = match self.supervisor.participants(view) {
-            Some(validators) => validators,
-            None => return None,
-        };
-        let len = validators.len() as u32;
-        let threshold = quorum(len).expect("not enough validators for a quorum");
-        Some((threshold, len))
-    }
-
     async fn notarize(&mut self, notarize: wire::Notarize) {
         // Extract proposal
         let proposal = match &notarize.proposal {
@@ -1225,7 +1247,7 @@ impl<
         }
 
         // Ensure notarization has valid number of signatures
-        let (threshold, count) = match self.threshold(proposal.view) {
+        let (threshold, count) = match threshold(&self.supervisor, proposal.view) {
             Some(participation) => participation,
             None => {
                 debug!(
@@ -1236,62 +1258,12 @@ impl<
                 return;
             }
         };
-        if notarization.signatures.len() < threshold as usize {
-            debug!(
-                threshold,
-                signatures = notarization.signatures.len(),
-                reason = "insufficient signatures",
-                "dropping notarization"
-            );
+
+        // Verify notarization
+        if !verify_notarization::<C>(threshold, count, &self.notarize_namespace, &notarization) {
+            debug!(reason = "invalid notarization", "dropping notarization");
             return;
         }
-        if notarization.signatures.len() > count as usize {
-            debug!(
-                threshold,
-                signatures = notarization.signatures.len(),
-                reason = "too many signatures",
-                "dropping notarization"
-            );
-            return;
-        }
-
-        // Verify threshold notarization
-        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        let mut seen = HashSet::new();
-        for signature in notarization.signatures.iter() {
-            // Verify signature
-            if !C::validate(&signature.public_key) {
-                debug!(
-                    signer = hex(&signature.public_key),
-                    reason = "invalid validator",
-                    "dropping notarization"
-                );
-                return;
-            }
-
-            // Ensure we haven't seen this signature before
-            if seen.contains(&signature.public_key) {
-                debug!(
-                    signer = hex(&signature.public_key),
-                    reason = "duplicate signature",
-                    "dropping notarization"
-                );
-                return;
-            }
-            seen.insert(signature.public_key.clone());
-
-            // Verify signature
-            if !C::verify(
-                &self.notarize_namespace,
-                &message,
-                &signature.public_key,
-                &signature.signature,
-            ) {
-                debug!(reason = "invalid signature", "dropping notarization");
-                return;
-            }
-        }
-        debug!(view = proposal.view, "notarization verified");
 
         // Handle notarization
         self.handle_notarization(notarization).await;
@@ -1368,11 +1340,11 @@ impl<
             return;
         }
 
-        // Determine if we already broadcast notarization for this view (in which
+        // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
         let round = self.views.get_mut(&nullification.view);
         if let Some(ref round) = round {
-            if round.broadcast_notarization {
+            if round.broadcast_nullification {
                 trace!(
                     view = nullification.view,
                     reason = "already broadcast notarization",
@@ -1383,7 +1355,7 @@ impl<
         }
 
         // Ensure notarization has valid number of signatures
-        let (threshold, count) = match self.threshold(nullification.view) {
+        let (threshold, count) = match threshold(&self.supervisor, nullification.view) {
             Some(participation) => participation,
             None => {
                 debug!(
@@ -1394,62 +1366,12 @@ impl<
                 return;
             }
         };
-        if nullification.signatures.len() < threshold as usize {
-            debug!(
-                threshold,
-                signatures = nullification.signatures.len(),
-                reason = "insufficient signatures",
-                "dropping nullification"
-            );
+
+        // Verify nullification
+        if !verify_nullification::<C>(threshold, count, &self.nullify_namespace, &nullification) {
+            debug!(reason = "invalid nullification", "dropping nullification");
             return;
         }
-        if nullification.signatures.len() > count as usize {
-            debug!(
-                threshold,
-                signatures = nullification.signatures.len(),
-                reason = "too many signatures",
-                "dropping nullification"
-            );
-            return;
-        }
-
-        // Verify threshold notarization
-        let message = nullify_message(nullification.view);
-        let mut seen = HashSet::new();
-        for signature in nullification.signatures.iter() {
-            // Verify signature
-            if !C::validate(&signature.public_key) {
-                debug!(
-                    signer = hex(&signature.public_key),
-                    reason = "invalid validator",
-                    "dropping notarization"
-                );
-                return;
-            }
-
-            // Ensure we haven't seen this signature before
-            if seen.contains(&signature.public_key) {
-                debug!(
-                    signer = hex(&signature.public_key),
-                    reason = "duplicate signature",
-                    "dropping notarization"
-                );
-                return;
-            }
-            seen.insert(signature.public_key.clone());
-
-            // Verify signature
-            if !C::verify(
-                &self.nullify_namespace,
-                &message,
-                &signature.public_key,
-                &signature.signature,
-            ) {
-                debug!(reason = "invalid signature", "dropping notarization");
-                return;
-            }
-        }
-        debug!(view = nullification.view, "nullification verified");
 
         // Handle notarization
         self.handle_nullification(nullification).await;
@@ -1494,9 +1416,6 @@ impl<
         // Clear leader and advance deadlines (if they exist)
         round.leader_deadline = None;
         round.advance_deadline = None;
-
-        // TODO: If `> f` notarized a given proposal, then we should backfill missing
-        // notarizations
 
         // Enter next view
         self.enter_view(nullification.view + 1);
@@ -1651,7 +1570,7 @@ impl<
         }
 
         // Ensure finalization has valid number of signatures
-        let (threshold, count) = match self.threshold(proposal.view) {
+        let (threshold, count) = match threshold(&self.supervisor, proposal.view) {
             Some(participation) => participation,
             None => {
                 debug!(
@@ -1950,7 +1869,12 @@ impl<
         Some(finalization)
     }
 
-    async fn broadcast(&mut self, sender: &mut impl Sender, view: u64) {
+    async fn broadcast(
+        &mut self,
+        backfiller: &mut backfiller::Mailbox,
+        sender: &mut impl Sender,
+        view: u64,
+    ) {
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the vote
@@ -1975,6 +1899,9 @@ impl<
 
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false) {
+            // Update backfiller
+            backfiller.notarized(notarization.clone()).await;
+
             // Handle the notarization
             self.handle_notarization(notarization.clone()).await;
 
@@ -2008,6 +1935,9 @@ impl<
         //
         // We handle broadcast of nullify in `timeout`.
         if let Some(nullification) = self.construct_nullification(view, false) {
+            // Update backfiller
+            backfiller.nullified(nullification.clone()).await;
+
             // Handle the nullification
             self.handle_nullification(nullification.clone()).await;
 
@@ -2026,6 +1956,58 @@ impl<
             .encode_to_vec()
             .into();
             sender.send(Recipients::All, msg, true).await.unwrap();
+
+            // If `>= f+1` notarized a given proposal, then we should backfill missing
+            // notarizations
+            let round = self.views.get(&view).expect("missing round");
+            if let Some(parent) = round.at_least_one_honest() {
+                if parent >= self.last_finalized {
+                    // Compute missing nullifications
+                    let mut missing_notarizations = Vec::new();
+                    if self.is_notarized(parent).is_none() {
+                        missing_notarizations.push(parent);
+                    }
+                    let missing_nullifications = self.missing_nullifications(parent);
+
+                    // Fetch any missing
+                    if !missing_notarizations.is_empty() || !missing_nullifications.is_empty() {
+                        warn!(
+                            proposal_view = view,
+                            parent,
+                            ?missing_notarizations,
+                            ?missing_nullifications,
+                            ">= 1 honest voter for nullified parent we can't verify"
+                        );
+                        backfiller
+                            .fetch(missing_notarizations, missing_nullifications)
+                            .await;
+                    }
+                } else {
+                    // Broadcast last finalized
+                    debug!(
+                    parent,
+                    last_finalized = self.last_finalized,
+                    "not backfilling because parent is behind finalized tip, broadcasting finalized"
+                );
+                    let finalization = self.construct_finalization(self.last_finalized, true);
+                    if let Some(finalization) = finalization {
+                        let msg = wire::Voter {
+                            payload: Some(wire::voter::Payload::Finalization(finalization)),
+                        }
+                        .encode_to_vec()
+                        .into();
+                        sender
+                            .send(Recipients::All, msg, true)
+                            .await
+                            .expect("unable to broadcast finalization");
+                    } else {
+                        warn!(
+                            last_finalized = self.last_finalized,
+                            "unable to construct last finalization"
+                        );
+                    }
+                }
+            }
         }
 
         // Attempt to finalize
@@ -2052,6 +2034,9 @@ impl<
 
         // Attempt to finalization
         if let Some(finalization) = self.construct_finalization(view, false) {
+            // Update backfiller
+            backfiller.finalized(view).await;
+
             // Handle the finalization
             self.handle_finalization(finalization.clone()).await;
 
@@ -2082,7 +2067,12 @@ impl<
         };
     }
 
-    pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
+    pub async fn run(
+        mut self,
+        mut backfiller: backfiller::Mailbox,
+        mut sender: impl Sender,
+        mut receiver: impl Receiver,
+    ) {
         // Compute genesis
         let genesis = self.application.genesis().await;
         self.genesis = Some(genesis);
@@ -2290,8 +2280,17 @@ impl<
                     }
                 },
                 mailbox = self.mailbox_receiver.next() => {
-                    // TODO: store notarizations we've backfilled (verified in backfiller to avoid using compute in this loop)
-                    unimplemented!()
+                    let msg = mailbox.unwrap();
+                    match msg {
+                        Message::Notarization{ notarization }  => {
+                            view = notarization.proposal.as_ref().unwrap().view;
+                            self.handle_notarization(notarization).await;
+                        },
+                        Message::Nullification { nullification } => {
+                            view = nullification.view;
+                            self.handle_nullification(nullification).await;
+                        },
+                    }
                 },
                 msg = receiver.recv() => {
                     // Parse message
@@ -2368,7 +2367,7 @@ impl<
             };
 
             // Attempt to send any new view messages
-            self.broadcast(&mut sender, view).await;
+            self.broadcast(&mut backfiller, &mut sender, view).await;
 
             // After sending all required messages, prune any views
             // we no longer need
