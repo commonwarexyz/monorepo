@@ -38,6 +38,10 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
     _reservation: tracker::Reservation<E>,
 }
 
+// The maximum overhead caused by protobuf encoding chunk data.
+// TODO: Remove this constant (https://github.com/commonwarexyz/monorepo/issues/186).
+const CHUNK_HEADER_SIZE: usize = 64 /* protobuf overhead */ + 12 /* chunk info */;
+
 impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
     pub fn new(runtime: E, cfg: Config, reservation: tracker::Reservation<E>) -> (Self, Relay) {
         let (control_sender, control_receiver) = mpsc::channel(cfg.mailbox_size);
@@ -139,7 +143,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         let rate_limits = Arc::new(rate_limits);
 
         // Send/Receive messages from the peer
-        let (max_content_size, mut conn_sender, mut conn_receiver) = connection.split();
+        let (max_message_size, mut conn_sender, mut conn_receiver) = connection.split();
+        let max_chunk_size = max_message_size - CHUNK_HEADER_SIZE;
         let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender",{
             let runtime = self.runtime.clone();
             let mut tracker = tracker.clone();
@@ -200,7 +205,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 return Err(Error::InvalidChannel);
                             }
                             let (_, max_size) = entry.unwrap();
-                            Self::send_content(*max_size, max_content_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
+                            Self::send_content(*max_size, max_chunk_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
                         },
                         msg_low = self.low.next() => {
                             let msg = match msg_low {
@@ -212,7 +217,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 return Err(Error::InvalidChannel);
                             }
                             let (_, max_size) = entry.unwrap();
-                            Self::send_content(*max_size, max_content_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
+                            Self::send_content(*max_size, max_chunk_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
                         }
                     }
                 }
@@ -311,7 +316,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                             let total_parts = chunk.total_parts;
                             if total_parts > 1 {
                                 // Ensure first part is the max size
-                                if chunk_len != max_content_size {
+                                if chunk_len != max_chunk_size {
                                     return Err(Error::InvalidChunk);
                                 }
 
@@ -340,7 +345,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                     }
                                     let chunk_len = chunk.content.len();
                                     if chunk.part != total_parts - 1
-                                        && chunk_len != max_content_size
+                                        && chunk_len != max_chunk_size
                                     {
                                         return Err(Error::InvalidChunk);
                                     }
