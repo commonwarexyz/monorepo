@@ -47,6 +47,7 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<In
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
+    activity_timeout: u64,
     fetch_timeout: Duration,
     max_fetch_count: u64,
     max_fetch_size: usize,
@@ -82,6 +83,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
                 mailbox_receiver: receiver,
 
+                activity_timeout: cfg.activity_timeout,
                 fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
@@ -294,15 +296,24 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 continue;
                             }
 
-                            // Remove unneeded cache
-                            self.notarizations.retain(|k, _| *k >= view);
-                            self.nullifications.retain(|k, _| *k >= view);
-
                             // Remove outstanding
                             if let Some((notarizations, nullifications, _, _)) = &mut outstanding {
                                 notarizations.retain(|v| *v >= view);
                                 nullifications.retain(|v| *v >= view);
                             }
+
+                            // Set prune depth
+                            if view < self.activity_timeout {
+                                continue;
+                            }
+                            let min_view = view - self.activity_timeout;
+
+                            // Remove unneeded cache
+                            //
+                            // We keep some buffer of old messages around in case it helps other
+                            // peers.
+                            self.notarizations.retain(|k, _| *k >= min_view);
+                            self.nullifications.retain(|k, _| *k >= min_view);
                         }
                     }
 

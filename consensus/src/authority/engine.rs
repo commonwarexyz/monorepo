@@ -66,6 +66,7 @@ impl<
                 hasher: cfg.hasher,
                 supervisor: cfg.supervisor,
                 namespace: cfg.namespace,
+                activity_timeout: cfg.activity_timeout,
                 fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
