@@ -27,17 +27,19 @@ use prost::Message as _;
 use rand::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
+    marker::PhantomData,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
 
 type Status = (PublicKey, SystemTime, SystemTime);
+type Outstanding = (BTreeSet<View>, BTreeSet<View>, HashSet<PublicKey>, Status);
 
 pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     runtime: E,
     crypto: C,
-    hasher: H,
     supervisor: S,
+    _hasher: PhantomData<H>,
 
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
@@ -59,7 +61,7 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<In
 }
 
 impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> Actor<E, C, H, S> {
-    pub fn new(runtime: E, cfg: Config<C, H, S>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize rate limiter
         //
         // This ensures we don't exceed the inbound rate limit on any peer we are communicating with (which
@@ -72,8 +74,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             Self {
                 runtime,
                 crypto: cfg.crypto,
-                hasher: cfg.hasher,
                 supervisor: cfg.supervisor,
+                _hasher: PhantomData,
 
                 notarize_namespace: notarize_namespace(&cfg.namespace),
                 nullify_namespace: nullify_namespace(&cfg.namespace),
@@ -199,8 +201,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         // Wait for an event
         let mut current_view = 0;
         let mut finalized_view = 0;
-        let mut outstanding: Option<(BTreeSet<View>, BTreeSet<View>, HashSet<PublicKey>, Status)> =
-            None;
+        let mut outstanding: Option<Outstanding> = None;
         loop {
             // Set timeout for next request
             let timeout = if let Some((_, _, _, status)) = &outstanding {

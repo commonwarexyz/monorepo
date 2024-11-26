@@ -164,13 +164,12 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Proof, Supervisor};
     use bytes::Bytes;
     use byzantine::{
         conflicter::{self, Conflicter},
         nuller::{self, Nuller},
     };
-    use commonware_cryptography::{Ed25519, Hasher, PublicKey, Scheme, Sha256};
+    use commonware_cryptography::{Ed25519, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{
@@ -230,7 +229,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -482,7 +481,7 @@ mod tests {
 
                 // Create engines
                 let hasher = Sha256::default();
-                let prover = Prover::new(hasher.clone(), namespace.clone());
+                let prover = Prover::new(namespace.clone());
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -696,7 +695,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1041,7 +1040,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1243,7 +1242,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1448,7 +1447,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1649,7 +1648,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1919,7 +1918,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2105,7 +2104,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2312,7 +2311,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();

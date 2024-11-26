@@ -45,7 +45,7 @@ impl<
             journal,
             voter::Config {
                 crypto: cfg.crypto.clone(),
-                hasher: cfg.hasher.clone(),
+                hasher: cfg.hasher,
                 application: cfg.application,
                 supervisor: cfg.supervisor.clone(),
                 registry: cfg.registry,
@@ -63,7 +63,6 @@ impl<
             runtime.clone(),
             backfiller::Config {
                 crypto: cfg.crypto,
-                hasher: cfg.hasher,
                 supervisor: cfg.supervisor,
                 namespace: cfg.namespace,
                 activity_timeout: cfg.activity_timeout,

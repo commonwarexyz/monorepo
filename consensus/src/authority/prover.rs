@@ -20,7 +20,7 @@ use tracing::debug;
 #[derive(Clone)]
 pub struct Prover<C: Scheme, H: Hasher> {
     _crypto: PhantomData<C>,
-    hasher: H,
+    _hasher: PhantomData<H>,
 
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
@@ -28,10 +28,10 @@ pub struct Prover<C: Scheme, H: Hasher> {
 }
 
 impl<C: Scheme, H: Hasher> Prover<C, H> {
-    pub fn new(hasher: H, namespace: Bytes) -> Self {
+    pub fn new(namespace: Bytes) -> Self {
         Self {
             _crypto: PhantomData,
-            hasher,
+            _hasher: PhantomData,
 
             notarize_namespace: notarize_namespace(&namespace),
             nullify_namespace: nullify_namespace(&namespace),
@@ -113,7 +113,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let mut proof = Vec::with_capacity(len);
         proof.put_u64(view);
         proof.put_u64(parent);
-        proof.extend_from_slice(&payload);
+        proof.extend_from_slice(payload);
         proof.put_u32(signatures.len() as u32);
         for (public_key, signature) in signatures {
             proof.extend_from_slice(public_key);
@@ -282,10 +282,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         proof.put_u64(view);
         proof.extend_from_slice(public_key);
         proof.put_u64(parent_1);
-        proof.extend_from_slice(&payload_1);
+        proof.extend_from_slice(payload_1);
         proof.extend_from_slice(signature_1);
         proof.put_u64(parent_2);
-        proof.extend_from_slice(&payload_2);
+        proof.extend_from_slice(payload_2);
         proof.extend_from_slice(signature_2);
         proof.into()
     }

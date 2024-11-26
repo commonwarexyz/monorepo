@@ -1,11 +1,10 @@
 use super::{Context, View};
 use crate::{Automaton, Supervisor};
 use bytes::Bytes;
-use commonware_cryptography::{Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Hasher, Scheme};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
-    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::Duration,
 };

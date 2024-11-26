@@ -5,14 +5,13 @@ mod priority_queue;
 use crate::Supervisor;
 pub use actor::Actor;
 use bytes::Bytes;
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::Scheme;
 use governor::Quota;
 pub use ingress::Mailbox;
 use std::time::Duration;
 
-pub struct Config<C: Scheme, H: Hasher, S: Supervisor> {
+pub struct Config<C: Scheme, S: Supervisor> {
     pub crypto: C,
-    pub hasher: H,
     pub supervisor: S,
 
     pub namespace: Bytes,
