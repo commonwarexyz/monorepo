@@ -227,13 +227,8 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
     }
 
     fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable {
-        if !force
-            && (self.broadcast_notarization
-                || self.broadcast_nullification
-                || !self.verified_proposal)
-        {
-            // We only want to broadcast a notarization if we have verified some proposal at
-            // this point.
+        if !force && (self.broadcast_notarization || self.broadcast_nullification) {
+            // We want to broadcast a notarization, even if we haven't yet verified a proposal.
             return None;
         }
         for (proposal, notarizes) in self.notarizes.iter() {
@@ -241,34 +236,26 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 continue;
             }
 
-            // Ensure we have the proposal we are going to broadcast a notarization for
-            let proposal = match &self.proposal {
-                Some((digest, pro)) => {
-                    if digest != proposal {
-                        debug!(
-                            view = self.view,
-                            proposal = hex(proposal),
-                            reason = "proposal mismatch",
-                            "skipping notarization broadcast"
-                        );
-                        continue;
-                    }
-                    debug!(
-                        view = self.view,
-                        proposal = hex(proposal),
-                        "broadcasting notarization"
-                    );
-                    pro
-                }
-                None => {
-                    continue;
-                }
-            };
-
             // There should never exist enough votes for multiple proposals, so it doesn't
             // matter which one we choose.
+            debug!(
+                view = self.view,
+                proposal = hex(proposal),
+                verified = self.verified_proposal,
+                "broadcasting notarization"
+            );
             self.broadcast_notarization = true;
-            return Some((proposal.clone(), notarizes));
+
+            // Grab the proposal
+            let proposal = notarizes
+                .values()
+                .next()
+                .unwrap()
+                .proposal
+                .as_ref()
+                .unwrap()
+                .clone();
+            return Some((proposal, notarizes));
         }
         None
     }
@@ -374,9 +361,8 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
     }
 
     fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable {
-        if !force && (self.broadcast_finalization || !self.verified_proposal) {
-            // We only want to broadcast a finalization if we have verified some proposal at
-            // this point.
+        if !force && self.broadcast_finalization {
+            // We want to broadcast a finalization, even if we haven't yet verified a proposal.
             return None;
         }
         for (proposal, finalizes) in self.finalizes.iter() {
@@ -384,34 +370,26 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 continue;
             }
 
-            // Ensure we have the proposal we are going to broadcast a finalization for
-            let proposal = match &self.proposal {
-                Some((digest, pro)) => {
-                    if digest != proposal {
-                        debug!(
-                            proposal = hex(proposal),
-                            digest = hex(digest),
-                            reason = "proposal mismatch",
-                            "skipping finalization broadcast"
-                        );
-                        continue;
-                    }
-                    debug!(
-                        view = self.view,
-                        proposal = hex(proposal),
-                        "broadcasting finalization"
-                    );
-                    pro
-                }
-                None => {
-                    continue;
-                }
-            };
-
             // There should never exist enough finalizes for multiple proposals, so it doesn't
             // matter which one we choose.
+            debug!(
+                view = self.view,
+                proposal = hex(proposal),
+                verified = self.verified_proposal,
+                "broadcasting finalization"
+            );
             self.broadcast_finalization = true;
-            return Some((proposal.clone(), finalizes));
+
+            // Grab the proposal
+            let proposal = finalizes
+                .values()
+                .next()
+                .unwrap()
+                .proposal
+                .as_ref()
+                .unwrap()
+                .clone();
+            return Some((proposal, finalizes));
         }
         None
     }
@@ -466,7 +444,6 @@ pub struct Actor<
     nullify_retry: Duration,
     activity_timeout: View,
 
-    mailbox_sender: Mailbox,
     mailbox_receiver: mpsc::Receiver<Message>,
 
     last_finalized: View,
@@ -527,7 +504,6 @@ impl<
 
                 activity_timeout: cfg.activity_timeout,
 
-                mailbox_sender: mailbox.clone(),
                 mailbox_receiver,
 
                 last_finalized: 0,
@@ -1828,7 +1804,7 @@ impl<
         Some(finalization)
     }
 
-    async fn broadcast(
+    async fn notify(
         &mut self,
         backfiller: &mut backfiller::Mailbox,
         sender: &mut impl Sender,
@@ -1859,9 +1835,6 @@ impl<
 
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false) {
-            unimplemented!(
-                "backfiller/application only notified of notarized/finalized if they end up broadcasting (which they won't do if never verify"
-            );
             // Update backfiller
             backfiller.notarized(notarization.clone()).await;
 
@@ -2363,7 +2336,7 @@ impl<
             };
 
             // Attempt to send any new view messages
-            self.broadcast(&mut backfiller, &mut sender, view).await;
+            self.notify(&mut backfiller, &mut sender, view).await;
 
             // After sending all required messages, prune any views
             // we no longer need

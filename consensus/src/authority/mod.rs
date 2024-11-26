@@ -42,7 +42,7 @@
 //!
 //! Upon receiving `2f+1` votes for `c`:
 //! * Cancel `t_a`
-//! * Broadcast `c` and notarization for `c`
+//! * Broadcast `c` and notarization for `c` (even if we have not verified `c`)
 //! * Notarize `c` at height `h` (and recursively notarize its parents)
 //! * If have not broadcast null vote for view `v`, broadcast finalize for `c`
 //! * Enter `v+1`
@@ -54,7 +54,7 @@
 //!   between `c_parent` and `c`, if `c_parent` is less than last finalized, broadcast finalization instead
 //!
 //! Upon receiving `2f+1` finalizes for `c`:
-//! * Broadcast finalization for `c`
+//! * Broadcast finalization for `c` (even if we have not verified `c`)
 //! * Finalize `c` at height `h` (and recursively finalize its parents)
 //!
 //! Upon `t_l` or `t_a` firing:
@@ -1206,10 +1206,10 @@ mod tests {
     fn test_slow_validator() {
         // Create runtime
         let n = 5;
-        let required_containers = 30;
+        let required_containers = 50;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(300));
+        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
