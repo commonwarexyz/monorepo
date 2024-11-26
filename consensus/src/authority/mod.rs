@@ -34,6 +34,7 @@
 //! * Set timer for leader proposal `t_l` and advance `t_a`
 //!     * If leader `l` has not been active (no votes) in last `r` views, set `t_l` to 0.
 //! * If leader, propose container `c` for view `v`
+//!   * If can't propose container because missing notarization/nullification for a previous view, fetch it
 //!
 //! Upon receiving first container `c` from `l`:
 //! * Cancel `t_l`
