@@ -18,6 +18,7 @@ pub struct Config<C: Scheme, H: Hasher, A: Automaton, S: Supervisor> {
 
     pub registry: Arc<Mutex<Registry>>,
     pub namespace: Bytes,
+    pub mailbox_size: usize,
     pub leader_timeout: Duration,
     pub notarization_timeout: Duration,
     pub nullify_retry: Duration,

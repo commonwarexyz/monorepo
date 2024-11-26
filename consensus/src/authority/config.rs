@@ -22,6 +22,8 @@ pub struct Config<
 
     pub registry: Arc<Mutex<Registry>>,
 
+    pub mailbox_size: usize,
+
     pub namespace: Bytes,
 
     pub leader_timeout: Duration,

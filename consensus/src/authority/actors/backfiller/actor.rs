@@ -23,6 +23,7 @@ use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
     RateLimiter,
 };
+use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prost::Message as _;
 use rand::Rng;
 use std::{
@@ -32,8 +33,12 @@ use std::{
 };
 use tracing::{debug, warn};
 
-type Status = (PublicKey, SystemTime, SystemTime);
-type Outstanding = (BTreeSet<View>, BTreeSet<View>, HashSet<PublicKey>, Status);
+/// Request to a peer that started at a given time and expires at another time.
+type Request = (PublicKey, SystemTime, SystemTime);
+
+/// Unfilled dependencies and the set of peers we've already requested from (since
+/// all outstanding items were resolved).
+type Outstanding = (BTreeSet<View>, BTreeSet<View>, HashSet<PublicKey>, Request);
 
 pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     runtime: E,
@@ -58,18 +63,51 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<In
     fetch_performance: PriorityQueue,
 
     incorrect: HashSet<PublicKey>,
+
+    outstanding_notarizations: Gauge,
+    outstanding_nullifications: Gauge,
+    served_notarizations: Counter,
+    served_nullifications: Counter,
 }
 
 impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> Actor<E, C, H, S> {
     pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
-        // Initialize rate limiter
-        //
-        // This ensures we don't exceed the inbound rate limit on any peer we are communicating with (which
-        // would halt their processing of all our messages).
+        // Initialize rate limiter with the max allowed fetch rate. This ensures we don't exceed the
+        // inbound rate limit on any peer we are communicating with (which would halt their processing
+        // of all our messages).
         let fetch_rate_limiter = RateLimiter::hashmap_with_clock(cfg.fetch_rate_per_peer, &runtime);
 
+        // Initialize metrics
+        let outstanding_notarizations = Gauge::default();
+        let outstanding_nullifications = Gauge::default();
+        let served_notarizations = Counter::default();
+        let served_nullifications = Counter::default();
+        {
+            let mut registry = cfg.registry.lock().unwrap();
+            registry.register(
+                "outstanding_notarizations",
+                "outstanding notarizations",
+                outstanding_notarizations.clone(),
+            );
+            registry.register(
+                "outstanding_nullifications",
+                "outstanding nullifications",
+                outstanding_nullifications.clone(),
+            );
+            registry.register(
+                "served_notarizations",
+                "served notarizations",
+                served_notarizations.clone(),
+            );
+            registry.register(
+                "served_nullifications",
+                "served nullifications",
+                served_nullifications.clone(),
+            );
+        }
+
         // Initialize mailbox
-        let (sender, receiver) = mpsc::channel(1024);
+        let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
         (
             Self {
                 runtime,
@@ -93,6 +131,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 fetch_performance: PriorityQueue::new(),
 
                 incorrect: HashSet::new(),
+
+                outstanding_notarizations,
+                outstanding_nullifications,
+                served_notarizations,
+                served_nullifications,
             },
             Mailbox::new(sender),
         )
@@ -103,7 +146,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         msg: Bytes,
         sent: &mut HashSet<PublicKey>,
         sender: &mut impl Sender,
-    ) -> Status {
+    ) -> Request {
         // Loop until we find a recipient
         loop {
             let iter = self.fetch_performance.iter();
@@ -177,7 +220,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         nullifications: &BTreeSet<View>,
         sent: &mut HashSet<PublicKey>,
         sender: &mut impl Sender,
-    ) -> Status {
+    ) -> Request {
         // Create new message
         let msg = wire::Backfiller {
             payload: Some(wire::backfiller::Payload::Request(wire::Request {
@@ -204,9 +247,15 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         let mut outstanding: Option<Outstanding> = None;
         loop {
             // Set timeout for next request
-            let timeout = if let Some((_, _, _, status)) = &outstanding {
+            let timeout = if let Some((notarizations, nullifications, _, status)) = &outstanding {
+                self.outstanding_notarizations
+                    .set(notarizations.len() as i64);
+                self.outstanding_nullifications
+                    .set(nullifications.len() as i64);
                 Either::Left(self.runtime.sleep_until(status.2))
             } else {
+                self.outstanding_notarizations.set(0);
+                self.outstanding_nullifications.set(0);
                 Either::Right(futures::future::pending())
             };
 
@@ -360,6 +409,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     }
                                     populated_bytes += size;
                                     notarizations_found.push(notarization.clone());
+                                    self.served_notarizations.inc();
                                 }
                             }
 
@@ -375,6 +425,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     }
                                     populated_bytes += size;
                                     nullifications_found.push(nullification.clone());
+                                    self.served_nullifications.inc();
                                 }
                             }
 
@@ -422,6 +473,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             // Ensure response isn't too big
                             if response.notarizations.len() + response.nullifications.len() > self.max_fetch_count as usize {
                                 warn!(sender = hex(&s), "response too large");
+                                self.incorrect.insert(s);
 
                                 // Pick new recipient
                                 let (notarizations, nullifications, mut sent, _) = outstanding.take().unwrap();
@@ -438,16 +490,18 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     Some(proposal) => proposal.view,
                                     None => {
                                         warn!(sender = hex(&s), "missing proposal");
-                                        continue;
+                                        self.incorrect.insert(s.clone());
+                                        break;
                                     },
                                 };
                                 if !notarizations.contains(&view) {
-                                    debug!(view, sender = hex(&s), "unnecessry notarization");
+                                    debug!(view, sender = hex(&s), "unnecessary notarization");
                                     continue;
                                 }
                                 if !verify_notarization::<S,C>(&self.supervisor, &self.notarize_namespace, &notarization) {
                                     warn!(view, sender = hex(&s), "invalid notarization");
-                                    continue;
+                                    self.incorrect.insert(s.clone());
+                                    break;
                                 }
                                 notarizations.remove(&view);
                                 self.notarizations.insert(view, notarization.clone());
@@ -459,12 +513,13 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             for nullification in response.nullifications {
                                 let view = nullification.view;
                                 if !nullifications.contains(&view) {
-                                    debug!(view, sender = hex(&s), "unnecessry nullification");
+                                    debug!(view, sender = hex(&s), "unnecessary nullification");
                                     continue;
                                 }
                                 if !verify_nullification::<S,C>(&self.supervisor, &self.nullify_namespace, &nullification) {
                                     warn!(view, sender = hex(&s), "invalid nullification");
-                                    continue;
+                                    self.incorrect.insert(s.clone());
+                                    break;
                                 }
                                 nullifications.remove(&view);
                                 self.nullifications.insert(view, nullification.clone());
@@ -485,13 +540,13 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             }
 
                             // If still work to do, send another request
-                            if !notarizations.is_empty() || !nullifications.is_empty() {
-                                let (notarizations, nullifications, mut sent, _) = outstanding.take().unwrap();
-                                let status = self.send_request(&notarizations, &nullifications, &mut sent, &mut sender).await;
-                                outstanding = Some((notarizations, nullifications, sent, status));
-                            } else {
+                            if notarizations.is_empty() && nullifications.is_empty() {
                                 outstanding = None;
+                                continue;
                             }
+                            let (notarizations, nullifications, mut sent, _) = outstanding.take().unwrap();
+                            let status = self.send_request(&notarizations, &nullifications, &mut sent, &mut sender).await;
+                            outstanding = Some((notarizations, nullifications, sent, status));
                         },
                     }
                 },

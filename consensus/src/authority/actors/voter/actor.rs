@@ -473,7 +473,7 @@ impl<
         }
 
         // Initialize store
-        let (mailbox_sender, mailbox_receiver) = mpsc::channel(1024);
+        let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {

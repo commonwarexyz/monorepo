@@ -48,7 +48,8 @@ impl<
                 hasher: cfg.hasher,
                 application: cfg.application,
                 supervisor: cfg.supervisor.clone(),
-                registry: cfg.registry,
+                registry: cfg.registry.clone(),
+                mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace.clone(),
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
@@ -64,6 +65,8 @@ impl<
             backfiller::Config {
                 crypto: cfg.crypto,
                 supervisor: cfg.supervisor,
+                registry: cfg.registry,
+                mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,
                 activity_timeout: cfg.activity_timeout,
                 fetch_timeout: cfg.fetch_timeout,
