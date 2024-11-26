@@ -23,7 +23,8 @@ pub async fn send_frame<S: Sink>(
         .map_err(|_| Error::SendTooLarge(n))?;
 
     // Send the length of the message
-    sink.send(&len.to_be_bytes())
+    let f: [u8; 4] = len.to_be_bytes();
+    sink.send(&f)
         .await
         .map_err(|_| Error::SendFailed)?;
 
@@ -62,4 +63,31 @@ pub async fn recv_frame<T: Stream>(
         .map_err(|_| Error::ReadFailed)?;
 
     Ok(Bytes::from(buf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_runtime::{
+        Runner,
+        deterministic::Executor,
+        mocks::MockSink,
+    };
+
+    #[test]
+    fn test_send_frame() {
+        const MAX_MESSAGE_SIZE: usize = 1024;
+        let (mut sink, _) = MockSink::new();
+        // buffer is a random byte array
+        let buf = [0u8; 1024];
+        buf.iter().for_each(|&byte| {
+            assert_eq!(byte, 0);
+        });
+
+        let (executor, _runtime, _) = Executor::default();
+        executor.start(async move {
+            let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
+            assert!(result.is_ok());
+        });
+    }
 }
