@@ -756,10 +756,10 @@ impl<
         let public_key = participants.get(public_key_index)?.clone();
 
         // Verify the signature
-        let message = nullify_message(nullify.view);
+        let nullify_message = nullify_message(nullify.view);
         if !C::verify(
             &self.nullify_namespace,
-            &message,
+            &nullify_message,
             &public_key,
             &signature.signature,
         ) {
@@ -854,22 +854,9 @@ impl<
 
             // Check parent validity
             if proposal.view <= proposal.parent {
-                debug!(
-                    view = proposal.view,
-                    parent = proposal.parent,
-                    reason = "invalid parent",
-                    "dropping proposal"
-                );
                 return None;
             }
             if proposal.parent < self.last_finalized {
-                debug!(
-                    view = proposal.view,
-                    parent = proposal.parent,
-                    last_finalized = self.last_finalized,
-                    reason = "parent behind finalized tip",
-                    "dropping proposal"
-                );
                 return None;
             }
             (proposal_digest, proposal)
@@ -878,7 +865,6 @@ impl<
         // Ensure we have required notarizations
         let mut cursor = match self.view {
             0 => {
-                debug!(self.view, reason = "invalid view", "dropping proposal");
                 return None;
             }
             _ => self.view - 1,
@@ -894,11 +880,7 @@ impl<
                 let parent_proposal = match self.is_notarized(cursor) {
                     Some(parent) => parent,
                     None => {
-                        trace!(
-                            view = cursor,
-                            reason = "missing notarization",
-                            "skipping verify"
-                        );
+                        trace!(view = cursor, "parent proposal is not notarized");
                         return None;
                     }
                 };
@@ -909,7 +891,10 @@ impl<
 
             // Check nullification exists in gap
             if !self.is_nullified(cursor) {
-                debug!(view = cursor, "missing nullification");
+                trace!(
+                    view = cursor,
+                    "missing nullification during proposal verification"
+                );
                 return None;
             }
             cursor -= 1;
@@ -1076,11 +1061,6 @@ impl<
 
         // Ensure we are in the right view to process this message
         if !self.interesting(proposal.view, false) {
-            trace!(
-                notarize_view = proposal.view,
-                our_view = self.view,
-                "dropping notarize"
-            );
             return None;
         }
 
@@ -1293,7 +1273,7 @@ impl<
 
         // Verify the signature
         let finalize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        if C::verify(
+        if !C::verify(
             &self.finalize_namespace,
             &finalize_message,
             &public_key,
