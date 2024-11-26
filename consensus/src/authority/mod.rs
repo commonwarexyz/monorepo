@@ -374,6 +374,11 @@ mod tests {
                             panic!("view: {}, payloads: {:?}", view, hex_payloads);
                         }
 
+                        // Only check at views below timeout
+                        if *view > latest_complete {
+                            continue;
+                        }
+
                         // Ensure everyone participating
                         let digest = finalized.get(view).expect("view should be finalized");
                         let voters = payloads.get(digest).expect("digest should exist");
@@ -414,12 +419,6 @@ mod tests {
 
                 // Ensure exceptions within allowed
                 assert!(exceptions <= max_exceptions);
-            }
-
-            // Stop execution and wait for all engines to stop
-            runtime.stop(-1);
-            for handler in engine_handlers.into_iter() {
-                let _ = handler.await;
             }
         });
     }
