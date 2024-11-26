@@ -370,11 +370,9 @@ mod tests {
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
-                        // Ensure no skips (height == view)
+                        // Ensure only one payload proposed per view
                         if payloads.len() > 1 {
-                            let hex_payloads =
-                                payloads.iter().map(|p| hex(p.0)).collect::<Vec<String>>();
-                            panic!("view: {}, payloads: {:?}", view, hex_payloads);
+                            panic!("view: {}", view);
                         }
 
                         // Only check at views below timeout
@@ -386,8 +384,9 @@ mod tests {
                         let digest = finalized.get(view).expect("view should be finalized");
                         let voters = payloads.get(digest).expect("digest should exist");
                         if voters.len() < threshold as usize {
-                            // We can't verify that everyone participated at every height because some nodes may have started later.
-                            panic!("view: {}, voters: {:?}", view, voters);
+                            // We can't verify that everyone participated at every view because some nodes may
+                            // have started later.
+                            panic!("view: {}", view);
                         }
                         if voters.len() != n as usize {
                             exceptions += 1;
@@ -396,23 +395,24 @@ mod tests {
                 }
                 {
                     let finalizes = supervisor.finalizes.lock().unwrap();
-                    for (height, views) in finalizes.iter() {
-                        // Ensure no skips (height == view)
-                        if views.len() > 1 {
-                            panic!("height: {}, views: {:?}", height, views);
+                    for (view, payloads) in finalizes.iter() {
+                        // Ensure only one payload proposed per view
+                        if payloads.len() > 1 {
+                            panic!("view: {}", view);
                         }
 
                         // Only check at views below timeout
-                        if *height > latest_complete {
+                        if *view > latest_complete {
                             continue;
                         }
 
                         // Ensure everyone participating
-                        let digest = finalized.get(height).expect("height should be finalized");
-                        let finalizers = views.get(digest).expect("digest should exist");
+                        let digest = finalized.get(view).expect("view should be finalized");
+                        let finalizers = payloads.get(digest).expect("digest should exist");
                         if finalizers.len() < threshold as usize {
-                            // We can't verify that everyone participated at every height because some nodes may have started later.
-                            panic!("height: {}, finalizers: {:?}", height, finalizers);
+                            // We can't verify that everyone participated at every view because some nodes may
+                            // have started later.
+                            panic!("view: {}", view);
                         }
                         if finalizers.len() != n as usize {
                             exceptions += 1;
