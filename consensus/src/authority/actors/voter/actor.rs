@@ -1859,6 +1859,9 @@ impl<
 
         // Attempt to notarization
         if let Some(notarization) = self.construct_notarization(view, false) {
+            unimplemented!(
+                "backfiller/application only notified of notarized/finalized if they end up broadcasting (which they won't do if never verify"
+            );
             // Update backfiller
             backfiller.notarized(notarization.clone()).await;
 
@@ -1874,9 +1877,6 @@ impl<
                 .expect("unable to sync journal");
 
             // Alert application
-            unimplemented!(
-                "application only notified of notarized/finalized if they end up broadcasting (which they won't do if never verify"
-            );
             let validators = self.supervisor.participants(view).unwrap();
             let proposal = notarization.proposal.as_ref().unwrap();
             let mut signatures = Vec::with_capacity(notarization.signatures.len());
