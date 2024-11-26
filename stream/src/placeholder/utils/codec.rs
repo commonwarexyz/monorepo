@@ -71,23 +71,115 @@ mod tests {
     use commonware_runtime::{
         Runner,
         deterministic::Executor,
-        mocks::MockSink,
+        mock_channel,
     };
+    use rand::Rng;
 
     #[test]
-    fn test_send_frame() {
+    fn test_send_recv() {
         const MAX_MESSAGE_SIZE: usize = 1024;
-        let (mut sink, _) = MockSink::new();
-        // buffer is a random byte array
-        let buf = [0u8; 1024];
-        buf.iter().for_each(|&byte| {
-            assert_eq!(byte, 0);
-        });
+        let (mut sink, mut stream) = mock_channel::new();
+
+        let mut buf = [0u8; 512];
+        rand::thread_rng().fill(&mut buf);
 
         let (executor, _runtime, _) = Executor::default();
         executor.start(async move {
             let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
+
+            let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
+            assert_eq!(data.len(), buf.len());
+            assert_eq!(data, Bytes::from(buf.to_vec()));
         });
     }
+
+    #[test]
+    fn test_send_frame() {
+        const MAX_MESSAGE_SIZE: usize = 1024;
+        let (mut sink, mut stream) = mock_channel::new();
+
+        let mut buf = [0u8; 512];
+        rand::thread_rng().fill(&mut buf);
+
+        let (executor, _runtime, _) = Executor::default();
+        executor.start(async move {
+            let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
+            assert!(result.is_ok());
+
+            let mut b = [0u8; 4];
+            stream.recv(&mut b).await.unwrap();
+            assert_eq!(b, (buf.len() as u32).to_be_bytes());
+
+            let mut b = [0u8; 512];
+            stream.recv(&mut b).await.unwrap();
+            assert_eq!(b, buf);
+        });
+    }
+
+    #[test]
+    fn test_read_frame() {
+        const MAX_MESSAGE_SIZE: usize = 1024;
+        let (mut sink, mut stream) = mock_channel::new();
+
+        let mut buf = [0u8; 512];
+        rand::thread_rng().fill(&mut buf);
+
+        let (executor, _runtime, _) = Executor::default();
+        executor.start(async move {
+            let mut b = [0u8; 4];
+            (buf.len() as u32).to_be_bytes().iter().enumerate().for_each(|(i, &byte)| {
+                b[i] = byte;
+            });
+            sink.send(&b).await.unwrap();
+
+            sink.send(&buf).await.unwrap();
+
+            let data = recv_frame(&mut stream, MAX_MESSAGE_SIZE).await.unwrap();
+            assert_eq!(data.len(), buf.len());
+            assert_eq!(data, Bytes::from(buf.to_vec()));
+        });
+    }
+
+    /*
+    #[test]
+    fn test_read_frame_timeout() {
+        // TODO
+    }
+
+    #[test]
+    fn test_read_frame_error_too_large() {
+        // TODO
+    }
+
+    #[test]
+    fn test_read_frame_error_zero_size() {
+        // TODO
+    }
+
+    #[test]
+    fn test_read_frame_error_stream_closed() {
+        // TODO
+    }
+
+    #[test]
+    fn test_read_frame_error_read_failed() {
+        // TODO
+    }
+
+    #[test]
+    fn test_send_frame_error_too_large() {
+        // TODO
+    }
+
+    #[test]
+    fn test_send_frame_error_zero_size() {
+        // TODO
+    }
+
+    #[test]
+    fn test_send_frame_error_send_failed() {
+        // TODO
+    }
+    */
 }

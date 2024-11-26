@@ -22,7 +22,14 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{utils::Signaler, Clock, Error, Handle, Signal};
+use crate::{
+    mock_channel::{self, ByteSink, ByteStream},
+    utils::Signaler,
+    Clock,
+    Error,
+    Handle,
+    Signal,
+};
 use bytes::Bytes;
 use commonware_utils::hex;
 use futures::{
@@ -850,8 +857,8 @@ impl ReasonablyRealtime for Context {}
 
 type Dialable = mpsc::UnboundedSender<(
     SocketAddr,
-    mpsc::UnboundedSender<Bytes>,   // Dialee -> Dialer
-    mpsc::UnboundedReceiver<Bytes>, // Dialer -> Dialee
+    ByteSink,   // Dialee -> Dialer
+    ByteStream, // Dialer -> Dialee
 )>;
 
 /// Implementation of [`crate::Network`] for the `deterministic` runtime.
@@ -893,7 +900,7 @@ impl Networking {
 
         // Bind the socket
         let (sender, receiver) = mpsc::unbounded();
-        listeners.insert(socket, sender.clone());
+        listeners.insert(socket, sender);
         Ok(Listener {
             auditor: self.auditor.clone(),
             address: socket,
@@ -922,8 +929,8 @@ impl Networking {
         };
 
         // Construct connection
-        let (dialer_sender, dialer_receiver) = mpsc::unbounded();
-        let (dialee_sender, dialee_receiver) = mpsc::unbounded();
+        let (dialer_sender, dialer_receiver) = mock_channel::new();
+        let (dialee_sender, dialee_receiver) = mock_channel::new();
         sender
             .send((dialer, dialer_sender, dialee_receiver))
             .await
@@ -963,8 +970,8 @@ pub struct Listener {
     address: SocketAddr,
     listener: mpsc::UnboundedReceiver<(
         SocketAddr,
-        mpsc::UnboundedSender<Bytes>,
-        mpsc::UnboundedReceiver<Bytes>,
+        ByteSink,
+        ByteStream,
     )>,
 }
 
@@ -997,16 +1004,15 @@ pub struct Sink {
     auditor: Arc<Auditor>,
     me: SocketAddr,
     peer: SocketAddr,
-    sender: mpsc::UnboundedSender<Bytes>,
+    sender: ByteSink,
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
-        let bytes = Bytes::copy_from_slice(msg);
-        self.auditor.send(self.me, self.peer, bytes.clone());
-        self.sender.send(bytes)
+        self.auditor.send(self.me, self.peer, Bytes::copy_from_slice(msg));
+        self.sender.send(msg)
             .await
-            .map_err(|_| Error::WriteFailed)?;
+            .map_err(|_| Error::SendFailed)?;
         self.metrics.network_bandwidth.inc_by(msg.len() as u64);
         Ok(())
     }
@@ -1017,16 +1023,14 @@ pub struct Stream {
     auditor: Arc<Auditor>,
     me: SocketAddr,
     peer: SocketAddr,
-    receiver: mpsc::UnboundedReceiver<Bytes>,
+    receiver: ByteStream,
 }
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        let msg = self.receiver.next()
-            .await
-            .ok_or(Error::ReadFailed)?;
-        self.auditor.recv(self.me, self.peer, msg.clone());
-        buf.copy_from_slice(&msg);
+        self.receiver.recv(buf).await
+            .map_err(|_| Error::RecvFailed)?;
+        self.auditor.recv(self.me, self.peer, Bytes::copy_from_slice(buf));
         Ok(())
     }
 }

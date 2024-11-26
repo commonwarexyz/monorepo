@@ -253,17 +253,16 @@ mod tests {
     use super::*;
     use commonware_runtime::{
         deterministic::Executor,
-        mocks::{MockSink, MockStream},
+        mock_channel,
         Runner,
     };
-    use futures::SinkExt;
 
     #[test]
     fn test_sender_nonce_overflow() {
         let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (sink, _) = MockSink::new();
+            let (sink, _) = mock_channel::new();
             let mut sender = Sender {
                 cipher,
                 sink,
@@ -282,7 +281,7 @@ mod tests {
         let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (sink, _) = MockSink::new();
+            let (sink, _) = mock_channel::new();
             let mut sender = Sender {
                 cipher,
                 sink,
@@ -301,7 +300,7 @@ mod tests {
         let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (stream, _) = MockStream::new();
+            let (_, stream) = mock_channel::new();
             let mut receiver = Receiver {
                 cipher,
                 stream,
@@ -320,7 +319,7 @@ mod tests {
         let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (stream, _) = MockStream::new();
+            let (_, stream) = mock_channel::new();
             let mut receiver = Receiver {
                 cipher,
                 stream,
@@ -339,7 +338,7 @@ mod tests {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (stream, mut sender) = MockStream::new();
+            let (mut sink, stream) = mock_channel::new();
             let mut receiver = Receiver {
                 cipher,
                 stream,
@@ -349,8 +348,7 @@ mod tests {
                 seq: 0,
             };
 
-            // Send invalid ciphertext
-            sender.send(Bytes::from("invalid data")).await.unwrap();
+            send_frame(&mut sink, b"invalid data", receiver.max_message_size).await.unwrap();
 
             let result = receiver.receive().await;
             assert!(matches!(result, Err(Error::DecryptionFailed)));

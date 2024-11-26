@@ -12,7 +12,7 @@
 //! expect breaking changes and occasional instability.
 
 pub mod deterministic;
-pub mod mocks;
+pub mod mock_channel;
 pub mod tokio;
 
 mod utils;
@@ -41,6 +41,10 @@ pub enum Error {
     WriteFailed,
     #[error("read failed")]
     ReadFailed,
+    #[error("send failed")]
+    SendFailed,
+    #[error("recv failed")]
+    RecvFailed,
     #[error("partition creation failed: {0}")]
     PartitionCreationFailed(String),
     #[error("partition missing: {0}")]

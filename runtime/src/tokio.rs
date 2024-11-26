@@ -432,7 +432,7 @@ impl crate::Sink for Sink {
         timeout(self.context.executor.cfg.write_timeout, self.sink.write_all(msg))
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::WriteFailed)?;
+            .map_err(|_| Error::SendFailed)?;
         self.context
             .executor
             .metrics
@@ -457,7 +457,7 @@ impl crate::Stream for Stream {
         timeout(self.context.executor.cfg.read_timeout, self.stream.read_exact(buf))
             .await
             .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::ReadFailed)?;
+            .map_err(|_| Error::RecvFailed)?;
 
         // Record metrics
         self.context
