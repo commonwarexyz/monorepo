@@ -7,7 +7,7 @@ use crate::{
     authority::{
         actors::voter,
         encoder::{notarize_namespace, nullify_namespace},
-        verifier::{threshold, verify_notarization, verify_nullification},
+        verifier::{verify_notarization, verify_nullification},
         wire, View,
     },
     Supervisor,
@@ -433,14 +433,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     debug!(view, sender = hex(&s), "unnecessry notarization");
                                     continue;
                                 }
-                                let (threshold, count) = match threshold::<S>(&self.supervisor, view) {
-                                    Some(threshold) => threshold,
-                                    None => {
-                                        warn!(view, sender = hex(&s), "missing view");
-                                        continue;
-                                    },
-                                };
-                                if !verify_notarization::<C>(threshold, count, &self.notarize_namespace, &notarization) {
+                                if !verify_notarization::<S,C>(&self.supervisor, &self.notarize_namespace, &notarization) {
                                     warn!(view, sender = hex(&s), "invalid notarization");
                                     continue;
                                 }
@@ -457,14 +450,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     debug!(view, sender = hex(&s), "unnecessry nullification");
                                     continue;
                                 }
-                                let (threshold, count) = match threshold::<S>(&self.supervisor, view) {
-                                    Some(threshold) => threshold,
-                                    None => {
-                                        warn!(view, sender = hex(&s), "missing view");
-                                        continue;
-                                    },
-                                };
-                                if !verify_nullification::<C>(threshold, count, &self.nullify_namespace, &nullification) {
+                                if !verify_nullification::<S,C>(&self.supervisor, &self.nullify_namespace, &nullification) {
                                     warn!(view, sender = hex(&s), "invalid nullification");
                                     continue;
                                 }

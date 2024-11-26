@@ -22,6 +22,7 @@ use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    hash::Hash,
     sync::{Arc, Mutex},
     time::{Duration, UNIX_EPOCH},
 };
@@ -305,7 +306,7 @@ type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
 pub struct Supervisor<C: Scheme, H: Hasher> {
-    participants: BTreeMap<View, (HashSet<PublicKey>, Vec<PublicKey>)>,
+    participants: BTreeMap<View, (HashMap<PublicKey, u32>, Vec<PublicKey>)>,
 
     prover: Prover<C, H>,
 
@@ -318,12 +319,12 @@ impl<C: Scheme, H: Hasher> Supervisor<C, H> {
     pub fn new(cfg: SupervisorConfig<C, H>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, mut validators) in cfg.participants.into_iter() {
-            let mut set = HashSet::new();
-            for validator in validators.iter() {
-                set.insert(validator.clone());
+            let mut map = HashMap::new();
+            for (index, validator) in validators.iter().enumerate() {
+                map.insert(validator.clone(), index as u32);
             }
             validators.sort();
-            parsed_participants.insert(view, (set.clone(), validators));
+            parsed_participants.insert(view, (map, validators));
         }
         Self {
             participants: parsed_participants,
@@ -359,14 +360,14 @@ impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
         Some(&closest.1)
     }
 
-    fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<bool> {
+    fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, p)) => p,
             None => {
                 panic!("no participants in required range");
             }
         };
-        Some(closest.0.contains(candidate))
+        closest.0.get(candidate).cloned()
     }
 
     async fn report(&self, activity: Activity, proof: Proof) {
