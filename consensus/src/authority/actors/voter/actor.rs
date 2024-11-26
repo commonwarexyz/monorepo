@@ -1969,17 +1969,19 @@ impl<
                     }
                     let missing_nullifications = self.missing_nullifications(parent);
 
-                    // Enqueue missing
-                    warn!(
-                        proposal_view = view,
-                        parent,
-                        ?missing_notarizations,
-                        ?missing_nullifications,
-                        ">= 1 honest voter for nullified parent"
-                    );
-                    backfiller
-                        .fetch(missing_notarizations, missing_nullifications)
-                        .await;
+                    // Fetch any missing
+                    if !missing_notarizations.is_empty() || !missing_nullifications.is_empty() {
+                        warn!(
+                            proposal_view = view,
+                            parent,
+                            ?missing_notarizations,
+                            ?missing_nullifications,
+                            ">= 1 honest voter for nullified parent we can't verify"
+                        );
+                        backfiller
+                            .fetch(missing_notarizations, missing_nullifications)
+                            .await;
+                    }
                 } else {
                     // Broadcast last finalized
                     debug!(

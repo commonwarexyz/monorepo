@@ -330,7 +330,14 @@ mod tests {
                             digest, payload
                         );
                     }
-                    finalized.insert(view, digest);
+                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                        if previous != digest {
+                            panic!(
+                                "finalization mismatch at {:?} previous: {:?}, current: {:?}",
+                                view, previous, digest
+                            );
+                        }
+                    }
                     if (finalized.len() as u64) < required_containers {
                         continue;
                     }
@@ -768,8 +775,8 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
-                    max_fetch_size: 1024 * 512,
+                    max_fetch_count: 1, // force many fetches
+                    max_fetch_size: 1024 * 1024,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     replay_concurrency: 1,
                 };
@@ -960,24 +967,36 @@ mod tests {
                     .await;
             }));
 
-            // Wait for new engine to finish
+            // Wait for new engine to finalize required
+            let mut finalized = HashMap::new();
+            let mut validator_finalized = HashSet::new();
             loop {
-                let (candidate, _event) = done_receiver.next().await.unwrap();
-                if validator != candidate {
-                    continue;
+                let (candidate, event) = done_receiver.next().await.unwrap();
+                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                    let (view, _, payload, _) =
+                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    if digest != payload {
+                        panic!(
+                            "finalization mismatch digest: {:?}, payload: {:?}",
+                            digest, payload
+                        );
+                    }
+                    if let Some(previous) = finalized.insert(view, digest.clone()) {
+                        if previous != digest {
+                            panic!(
+                                "finalization mismatch at {:?} previous: {:?}, current: {:?}",
+                                view, previous, digest
+                            );
+                        }
+                    }
+                    if validator == candidate {
+                        validator_finalized.insert(view);
+                    }
                 }
-                panic!("should not be able to notarize or finalize")
+                if validator_finalized.len() == required_containers as usize {
+                    break;
+                }
             }
         });
-
-        // Create a bunch of nullifications with 3/4 validators
-
-        // Disconnect 1/3 live validators
-
-        // Start new node that hasn't been live (back to 3/4)
-
-        // Recover network links so that can notarize
-
-        // New node must backfill all nullifications to verify proposal
     }
 }
