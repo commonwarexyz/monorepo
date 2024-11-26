@@ -280,7 +280,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         if (self.nullifies.len() as u32) < threshold {
             return None;
         }
-        self.broadcast_notarization = true;
+        self.broadcast_nullification = true;
         Some((self.view, &self.nullifies))
     }
 
@@ -373,7 +373,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         true
     }
 
-    fn finalizable_proposal(&mut self, threshold: u32, force: bool) -> Finalizable {
+    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable {
         if !force && (self.broadcast_finalization || !self.verified_proposal) {
             // We only want to broadcast a finalization if we have verified some proposal at
             // this point.
@@ -396,6 +396,11 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                         );
                         continue;
                     }
+                    debug!(
+                        view = self.view,
+                        proposal = hex(proposal),
+                        "broadcasting finalization"
+                    );
                     pro
                 }
                 None => {
@@ -1807,7 +1812,7 @@ impl<
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (proposal, finalizes) = round.finalizable_proposal(threshold, force)?;
+        let (proposal, finalizes) = round.finalizable(threshold, force)?;
 
         // Construct finalization
         let mut signatures = Vec::new();
@@ -1869,6 +1874,9 @@ impl<
                 .expect("unable to sync journal");
 
             // Alert application
+            unimplemented!(
+                "application only notified of notarized/finalized if they end up broadcasting (which they won't do if never verify"
+            );
             let validators = self.supervisor.participants(view).unwrap();
             let proposal = notarization.proposal.as_ref().unwrap();
             let mut signatures = Vec::with_capacity(notarization.signatures.len());
