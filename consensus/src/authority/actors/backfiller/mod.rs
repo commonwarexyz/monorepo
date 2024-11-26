@@ -16,6 +16,7 @@ pub struct Config<C: Scheme, H: Hasher, S: Supervisor> {
     pub supervisor: S,
 
     pub namespace: Bytes,
+    pub activity_timeout: u64,
     pub fetch_timeout: Duration,
     pub max_fetch_count: u64,
     pub max_fetch_size: usize,

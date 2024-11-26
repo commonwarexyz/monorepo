@@ -227,13 +227,8 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
     }
 
     fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable {
-        if !force
-            && (self.broadcast_notarization
-                || self.broadcast_nullification
-                || !self.verified_proposal)
-        {
-            // We only want to broadcast a notarization if we have verified some proposal at
-            // this point.
+        if !force && (self.broadcast_notarization || self.broadcast_nullification) {
+            // We want to broadcast a notarization, even if we haven't yet verified a proposal.
             return None;
         }
         for (proposal, notarizes) in self.notarizes.iter() {
@@ -241,34 +236,26 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 continue;
             }
 
-            // Ensure we have the proposal we are going to broadcast a notarization for
-            let proposal = match &self.proposal {
-                Some((digest, pro)) => {
-                    if digest != proposal {
-                        debug!(
-                            view = self.view,
-                            proposal = hex(proposal),
-                            reason = "proposal mismatch",
-                            "skipping notarization broadcast"
-                        );
-                        continue;
-                    }
-                    debug!(
-                        view = self.view,
-                        proposal = hex(proposal),
-                        "broadcasting notarization"
-                    );
-                    pro
-                }
-                None => {
-                    continue;
-                }
-            };
-
             // There should never exist enough votes for multiple proposals, so it doesn't
             // matter which one we choose.
+            debug!(
+                view = self.view,
+                proposal = hex(proposal),
+                verified = self.verified_proposal,
+                "broadcasting notarization"
+            );
             self.broadcast_notarization = true;
-            return Some((proposal.clone(), notarizes));
+
+            // Grab the proposal
+            let proposal = notarizes
+                .values()
+                .next()
+                .unwrap()
+                .proposal
+                .as_ref()
+                .unwrap()
+                .clone();
+            return Some((proposal, notarizes));
         }
         None
     }
@@ -280,7 +267,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         if (self.nullifies.len() as u32) < threshold {
             return None;
         }
-        self.broadcast_notarization = true;
+        self.broadcast_nullification = true;
         Some((self.view, &self.nullifies))
     }
 
@@ -373,10 +360,9 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         true
     }
 
-    fn finalizable_proposal(&mut self, threshold: u32, force: bool) -> Finalizable {
-        if !force && (self.broadcast_finalization || !self.verified_proposal) {
-            // We only want to broadcast a finalization if we have verified some proposal at
-            // this point.
+    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable {
+        if !force && self.broadcast_finalization {
+            // We want to broadcast a finalization, even if we haven't yet verified a proposal.
             return None;
         }
         for (proposal, finalizes) in self.finalizes.iter() {
@@ -384,29 +370,26 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 continue;
             }
 
-            // Ensure we have the proposal we are going to broadcast a finalization for
-            let proposal = match &self.proposal {
-                Some((digest, pro)) => {
-                    if digest != proposal {
-                        debug!(
-                            proposal = hex(proposal),
-                            digest = hex(digest),
-                            reason = "proposal mismatch",
-                            "skipping finalization broadcast"
-                        );
-                        continue;
-                    }
-                    pro
-                }
-                None => {
-                    continue;
-                }
-            };
-
             // There should never exist enough finalizes for multiple proposals, so it doesn't
             // matter which one we choose.
+            debug!(
+                view = self.view,
+                proposal = hex(proposal),
+                verified = self.verified_proposal,
+                "broadcasting finalization"
+            );
             self.broadcast_finalization = true;
-            return Some((proposal.clone(), finalizes));
+
+            // Grab the proposal
+            let proposal = finalizes
+                .values()
+                .next()
+                .unwrap()
+                .proposal
+                .as_ref()
+                .unwrap()
+                .clone();
+            return Some((proposal, finalizes));
         }
         None
     }
@@ -461,7 +444,6 @@ pub struct Actor<
     nullify_retry: Duration,
     activity_timeout: View,
 
-    mailbox_sender: Mailbox,
     mailbox_receiver: mpsc::Receiver<Message>,
 
     last_finalized: View,
@@ -522,7 +504,6 @@ impl<
 
                 activity_timeout: cfg.activity_timeout,
 
-                mailbox_sender: mailbox.clone(),
                 mailbox_receiver,
 
                 last_finalized: 0,
@@ -564,17 +545,37 @@ impl<
         round.nullifies.len() >= threshold as usize
     }
 
-    fn find_parent(&self) -> Option<(View, Digest)> {
+    fn is_finalized(&self, view: View) -> Option<&wire::Proposal> {
+        let round = self.views.get(&view)?;
+        let (digest, proposal) = round.proposal.as_ref()?;
+        let finalizes = round.finalizes.get(digest)?;
+        let validators = self.supervisor.participants(view)?;
+        let (threshold, _) = threshold(validators)?;
+        if finalizes.len() < threshold as usize {
+            return None;
+        }
+        Some(proposal)
+    }
+
+    fn find_parent(&self) -> Result<(View, Digest), View> {
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
-                return Some((GENESIS_VIEW, self.genesis.as_ref().unwrap().clone()));
+                return Ok((GENESIS_VIEW, self.genesis.as_ref().unwrap().clone()));
             }
 
             // If have notarization, return
             let parent = self.is_notarized(cursor);
             if let Some(parent) = parent {
-                return Some((cursor, parent.payload.clone()));
+                return Ok((cursor, parent.payload.clone()));
+            }
+
+            // If have finalization, return
+            //
+            // We never want to build on some view less than finalized and this prevents that
+            let parent = self.is_finalized(cursor);
+            if let Some(parent) = parent {
+                return Ok((cursor, parent.payload.clone()));
             }
 
             // If have nullification, continue
@@ -584,7 +585,7 @@ impl<
             }
 
             // We can't find a valid parent, return
-            return None;
+            return Err(cursor);
         }
     }
 
@@ -598,7 +599,10 @@ impl<
         missing
     }
 
-    async fn propose(&mut self) -> Option<(Context, oneshot::Receiver<Digest>)> {
+    async fn propose(
+        &mut self,
+        backfiller: &mut backfiller::Mailbox,
+    ) -> Option<(Context, oneshot::Receiver<Digest>)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -623,13 +627,14 @@ impl<
 
         // Find best parent
         let (parent_view, parent_payload) = match self.find_parent() {
-            Some(parent) => parent,
-            None => {
+            Ok(parent) => parent,
+            Err(view) => {
                 debug!(
                     view = self.view,
-                    reason = "no parent",
+                    missing = view,
                     "skipping proposal opportunity"
                 );
+                backfiller.fetch(vec![view], vec![view]).await;
                 return None;
             }
         };
@@ -1807,7 +1812,7 @@ impl<
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (proposal, finalizes) = round.finalizable_proposal(threshold, force)?;
+        let (proposal, finalizes) = round.finalizable(threshold, force)?;
 
         // Construct finalization
         let mut signatures = Vec::new();
@@ -1823,7 +1828,7 @@ impl<
         Some(finalization)
     }
 
-    async fn broadcast(
+    async fn notify(
         &mut self,
         backfiller: &mut backfiller::Mailbox,
         sender: &mut impl Sender,
@@ -2164,7 +2169,7 @@ impl<
         let mut pending_verify = None;
         loop {
             // Attempt to propose a container
-            if let Some((context, new_propose)) = self.propose().await {
+            if let Some((context, new_propose)) = self.propose(&mut backfiller).await {
                 pending_propose_context = Some(context);
                 pending_propose = Some(new_propose);
             }
@@ -2355,7 +2360,7 @@ impl<
             };
 
             // Attempt to send any new view messages
-            self.broadcast(&mut backfiller, &mut sender, view).await;
+            self.notify(&mut backfiller, &mut sender, view).await;
 
             // After sending all required messages, prune any views
             // we no longer need
