@@ -220,7 +220,10 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
-                    let msg = mailbox.unwrap();
+                    let msg = match mailbox {
+                        Some(msg) => msg,
+                        None => break,
+                    };
                     match msg {
                         Message::Fetch { notarizations, nullifications } => {
                             // If request already exists, just add to it
