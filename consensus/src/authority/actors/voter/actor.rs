@@ -19,7 +19,6 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
 use commonware_storage::journal::Journal;
 use commonware_utils::{hex, quorum};
-use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,

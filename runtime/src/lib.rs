@@ -233,7 +233,6 @@ pub trait Blob: Clone + Send + Sync + 'static {
 mod tests {
     use super::*;
     use commonware_macros::select;
-    use core::panic;
     use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
     use prometheus_client::encoding::text::encode;
     use prometheus_client::registry::Registry;
