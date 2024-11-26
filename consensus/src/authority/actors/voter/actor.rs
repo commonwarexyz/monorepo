@@ -57,7 +57,7 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     requested_proposal: bool,
     verified_proposal: bool,
 
-    // Track votes for all proposals (ensuring any participant only has one recorded vote)
+    // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
     notaries: HashMap<u32, Digest>,
     notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
     broadcast_notarize: bool,
@@ -123,33 +123,33 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, Seed = ()>> Round<C, H, S
         self.hasher.update(&message);
         let digest = self.hasher.finalize();
 
-        // Check if already voted
+        // Check if already notarized
         let public_key_index = notarize.signature.as_ref().unwrap().public_key;
         if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
             if previous_notarize == &digest {
                 trace!(
                     view = self.view,
                     signer = hex(public_key),
-                    previous_vote = hex(previous_notarize),
-                    "already voted"
+                    previous_notarize = hex(previous_notarize),
+                    "already notarized"
                 );
                 return false;
             }
 
             // Create fault
-            let previous_vote = self
+            let previous_notarize = self
                 .notarizes
                 .get(previous_notarize)
                 .unwrap()
                 .get(&public_key_index)
                 .unwrap();
-            let previous_proposal = previous_vote.proposal.as_ref().unwrap();
+            let previous_proposal = previous_notarize.proposal.as_ref().unwrap();
             let proof = Prover::<C, H>::serialize_conflicting_notarize(
                 self.view,
                 public_key,
                 previous_proposal.parent,
                 &previous_proposal.payload,
-                &previous_vote.signature.as_ref().unwrap().signature,
+                &previous_notarize.signature.as_ref().unwrap().signature,
                 proposal.parent,
                 &proposal.payload,
                 &notarize.signature.as_ref().unwrap().signature,
@@ -164,7 +164,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, Seed = ()>> Round<C, H, S
             return false;
         }
 
-        // Store the vote
+        // Store the notarize
         if self
             .notaries
             .insert(public_key_index, digest.clone())
@@ -189,7 +189,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, Seed = ()>> Round<C, H, S
         let public_key_index = nullify.signature.as_ref().unwrap().public_key;
         let finalize = self.finalizers.get(&public_key_index);
         if finalize.is_none() {
-            // Store the null vote
+            // Store the nullify
             return self.nullifies.insert(public_key_index, nullify).is_none();
         }
         let finalize = finalize.unwrap();
@@ -230,7 +230,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, Seed = ()>> Round<C, H, S
                 continue;
             }
 
-            // There should never exist enough votes for multiple proposals, so it doesn't
+            // There should never exist enough notarizes for multiple proposals, so it doesn't
             // matter which one we choose.
             debug!(
                 view = self.view,
@@ -270,7 +270,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, Seed = ()>> Round<C, H, S
         public_key: &PublicKey,
         finalize: wire::Finalize,
     ) -> bool {
-        // Check if also issued null vote
+        // Check if also issued nullify
         let proposal = finalize.proposal.as_ref().unwrap();
         let public_key_index = finalize.signature.as_ref().unwrap().public_key;
         let null = self.nullifies.get(&public_key_index);
@@ -652,13 +652,13 @@ impl<
             return deadline;
         }
 
-        // If no deadlines are still set (waiting for null votes),
-        // return next try for null container vote
+        // If no deadlines are still set (waiting for nullify),
+        // return next try for nullify.
         if let Some(deadline) = view.nullify_retry {
             return deadline;
         }
 
-        // Set null vote retry, if none already set
+        // Set nullify retry, if none already set
         let null_retry = self.runtime.current() + self.nullify_retry;
         view.nullify_retry = Some(null_retry);
         null_retry
@@ -772,7 +772,7 @@ impl<
     }
 
     async fn handle_nullify(&mut self, public_key: &PublicKey, nullify: wire::Nullify) {
-        // Check to see if vote is for proposal in view
+        // Check to see if nullify is for proposal in view
         let view = nullify.view;
         let round = self
             .views
@@ -1079,7 +1079,7 @@ impl<
             trace!(
                 notarize_view = proposal.view,
                 our_view = self.view,
-                "dropping vote"
+                "dropping notarize"
             );
             return None;
         }
@@ -1109,14 +1109,14 @@ impl<
     }
 
     async fn handle_notarize(&mut self, public_key: &PublicKey, notarize: wire::Notarize) {
-        // Check to see if vote is for proposal in view
+        // Check to see if notarize is for proposal in view
         let view = notarize.proposal.as_ref().unwrap().view;
         let round = self
             .views
             .entry(view)
             .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
 
-        // Handle vote
+        // Handle notarize
         let notarize_bytes = wire::Voter {
             payload: Some(wire::voter::Payload::Notarize(notarize.clone())),
         }
@@ -1462,13 +1462,13 @@ impl<
         };
         let threshold =
             quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (proposal, votes) = round.notarizable(threshold, force)?;
+        let (proposal, notarizes) = round.notarizable(threshold, force)?;
 
         // Construct notarization
         let mut signatures = Vec::new();
         for validator in 0..(validators.len() as u32) {
-            if let Some(vote) = votes.get(&validator) {
-                signatures.push(vote.signature.clone().unwrap());
+            if let Some(notarize) = notarizes.get(&validator) {
+                signatures.push(notarize.signature.clone().unwrap());
             }
         }
         let notarization = wire::Notarization {
@@ -1519,11 +1519,11 @@ impl<
             return None;
         }
         if !round.broadcast_notarize {
-            // Ensure we vote before we finalize
+            // Ensure we notarize before we finalize
             return None;
         }
         if !round.broadcast_notarization {
-            // Ensure we notarize before we finalize
+            // Ensure we broadcast notarization before we finalize
             return None;
         }
         if round.broadcast_finalize {
@@ -1592,7 +1592,7 @@ impl<
     ) {
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
-            // Handle the vote
+            // Handle the notarize
             self.handle_notarize(&self.crypto.public_key(), notarize.clone())
                 .await;
 
@@ -1604,7 +1604,7 @@ impl<
                 .await
                 .expect("unable to sync journal");
 
-            // Broadcast the vote
+            // Broadcast the notarize
             let msg = wire::Voter {
                 payload: Some(wire::voter::Payload::Notarize(notarize)),
             }
@@ -1699,7 +1699,7 @@ impl<
                             parent,
                             ?missing_notarizations,
                             ?missing_nullifications,
-                            ">= 1 honest voter for nullified parent we can't verify"
+                            ">= 1 honest notarize for nullified parent"
                         );
                         backfiller
                             .fetch(missing_notarizations, missing_nullifications)
@@ -1826,7 +1826,7 @@ impl<
                 let (_, _, _, msg) = msg.expect("unable to decode journal message");
                 // We must wrap the message in Voter so we decode the right type of message (otherwise,
                 // we can parse a finalize as a notarize)
-                let msg = wire::Voter::decode(msg).expect("unable to decode voter message");
+                let msg = wire::Voter::decode(msg).expect("journal message is unexpected format");
                 let msg = msg.payload.expect("missing payload");
                 match msg {
                     wire::voter::Payload::Notarize(notarize) => {
@@ -2053,8 +2053,6 @@ impl<
                     };
 
                     // Process message
-                    //
-                    // All messages are semantically verified before being passed to the `voter`.
                     match payload {
                         wire::voter::Payload::Notarize(notarize) => {
                             view = match &notarize.proposal {
