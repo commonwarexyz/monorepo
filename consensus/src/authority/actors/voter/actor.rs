@@ -2082,7 +2082,7 @@ impl<
                         self.handle_notarize(&public_key, notarize).await;
 
                         // Update round info
-                        if public_key == &self.crypto.public_key() {
+                        if public_key == self.crypto.public_key() {
                             observed_view = max(observed_view, proposal.view);
                             let round = self.views.get_mut(&proposal.view).expect("missing round");
                             let proposal_message =
@@ -2108,7 +2108,7 @@ impl<
                         self.handle_nullify(&public_key, nullify).await;
 
                         // Update round info
-                        if public_key == &self.crypto.public_key() {
+                        if public_key == self.crypto.public_key() {
                             observed_view = max(observed_view, view);
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_nullify = true;
@@ -2130,7 +2130,7 @@ impl<
                         // Update round info
                         //
                         // If we are sending a finalize message, we must be in the next view
-                        if public_key == &self.crypto.public_key() {
+                        if public_key == self.crypto.public_key() {
                             observed_view = max(observed_view, view + 1);
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_notarization = true;
