@@ -31,6 +31,7 @@ use rand::Rng;
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap, HashSet},
+    ptr::null,
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
@@ -59,18 +60,18 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     verified_proposal: bool,
 
     // Track votes for all proposals (ensuring any participant only has one recorded vote)
-    notaries: HashMap<PublicKey, Digest>,
-    notarizes: HashMap<Digest, HashMap<PublicKey, wire::Notarize>>,
+    notaries: HashMap<u32, Digest>,
+    notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
-    nullifies: HashMap<PublicKey, wire::Nullify>,
+    nullifies: HashMap<u32, wire::Nullify>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalizers: HashMap<PublicKey, Digest>,
-    finalizes: HashMap<Digest, HashMap<PublicKey, wire::Finalize>>,
+    finalizers: HashMap<u32, Digest>,
+    finalizes: HashMap<Digest, HashMap<u32, wire::Finalize>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
@@ -146,14 +147,15 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 .unwrap();
             let previous_proposal = previous_vote.proposal.as_ref().unwrap();
             let proof = Prover::<C, H>::serialize_conflicting_notarize(
+                public_key,
                 previous_proposal.view,
                 previous_proposal.parent,
                 &previous_proposal.payload,
-                &previous_vote.signature.as_ref().unwrap(),
+                &previous_vote.signature.as_ref().unwrap().signature,
                 proposal.view,
                 proposal.parent,
                 &proposal.payload,
-                &notarize.signature.as_ref().unwrap(),
+                &notarize.signature.as_ref().unwrap().signature,
             );
             self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
@@ -685,11 +687,15 @@ impl<
         }
 
         // Construct nullify
+        let public_key = self
+            .supervisor
+            .is_participant(self.view, &self.crypto.public_key())
+            .unwrap();
         let message = nullify_message(self.view);
         let null = wire::Nullify {
             view: self.view,
             signature: Some(wire::Signature {
-                public_key: self.crypto.public_key(),
+                public_key,
                 signature: self.crypto.sign(&self.nullify_namespace, &message),
             }),
         };
@@ -734,43 +740,41 @@ impl<
                 return;
             }
         };
-        if !C::validate(&signature.public_key) {
-            debug!(reason = "invalid signature", "dropping vote");
-            return;
-        }
 
         // Verify that signer is a validator
-        let is_participant = match self
-            .supervisor
-            .is_participant(nullify.view, &signature.public_key)
-        {
-            Some(is) => is,
+        let public_key = match self.supervisor.participants(nullify.view) {
+            Some(validators) => {
+                let public_key = validators.get(signature.public_key as usize);
+                if let Some(public_key) = public_key {
+                    public_key
+                } else {
+                    debug!(
+                        view = nullify.view,
+                        signer = signature.public_key,
+                        reason = "invalid validator",
+                        "dropping nullify"
+                    );
+                    return;
+                }
+            }
             None => {
                 debug!(
                     view = nullify.view,
                     our_view = self.view,
-                    signer = hex(&signature.public_key),
+                    signer = signature.public_key,
                     reason = "unable to compute participants for view",
                     "dropping vote"
                 );
                 return;
             }
         };
-        if !is_participant {
-            debug!(
-                signer = hex(&signature.public_key),
-                reason = "invalid validator",
-                "dropping vote"
-            );
-            return;
-        }
 
         // Verify the signature
         let message = nullify_message(nullify.view);
         if !C::verify(
             &self.nullify_namespace,
             &message,
-            &signature.public_key,
+            public_key,
             &signature.signature,
         ) {
             debug!(reason = "invalid signature", "dropping vote");
@@ -860,6 +864,7 @@ impl<
             if round.leader == self.crypto.public_key() {
                 return None;
             }
+            let leader_index = self.supervisor.is_participant(self.view, &round.leader)?;
 
             // If we already broadcast nullify or set proposal, do nothing
             if round.broadcast_nullify {
@@ -870,11 +875,11 @@ impl<
             }
 
             // Check if leader has signed a digest
-            let proposal_digest = round.notaries.get(&round.leader)?;
+            let proposal_digest = round.notaries.get(&leader_index)?;
             let proposal = round
                 .notarizes
                 .get(proposal_digest)?
-                .get(&round.leader)?
+                .get(&leader_index)?
                 .proposal
                 .as_ref()?;
 
@@ -1022,8 +1027,6 @@ impl<
         self.view = view;
         info!(view, "entered view");
 
-        // TODO: alert backfiller we've entered a new view
-
         // Check if we should fast exit this view
         if view < self.activity_timeout || leader == self.crypto.public_key() {
             // Don't fast exit the view
@@ -1031,18 +1034,23 @@ impl<
         }
         let mut next = view - 1;
         while next > view - self.activity_timeout {
-            if !self.supervisor.is_participant(next, &leader).unwrap() {
-                // Don't punish a participant if they weren't online at any point during
-                // the lookback window.
-                return;
-            }
+            let leader_index = match self.supervisor.is_participant(next, &leader) {
+                Some(index) => index,
+                None => {
+                    // Don't punish a participant if they weren't online at any point during
+                    // the lookback window.
+                    return;
+                }
+            };
             let round = match self.views.get(&next) {
                 Some(round) => round,
                 None => {
                     return;
                 }
             };
-            if round.notaries.contains_key(&leader) || round.nullifies.contains_key(&leader) {
+            if round.notaries.contains_key(&leader_index)
+                || round.nullifies.contains_key(&leader_index)
+            {
                 return;
             }
             next -= 1;
@@ -1130,43 +1138,41 @@ impl<
                 return;
             }
         };
-        if !C::validate(&signature.public_key) {
-            debug!(reason = "invalid signature", "dropping vote");
-            return;
-        }
 
         // Verify that signer is a validator
-        let is_participant = match self
-            .supervisor
-            .is_participant(proposal.view, &signature.public_key)
-        {
-            Some(is) => is,
+        let public_key = match self.supervisor.participants(proposal.view) {
+            Some(validators) => {
+                let public_key = validators.get(signature.public_key as usize);
+                if let Some(public_key) = public_key {
+                    public_key
+                } else {
+                    debug!(
+                        view = proposal.view,
+                        signer = signature.public_key,
+                        reason = "invalid validator",
+                        "dropping vote"
+                    );
+                    return;
+                }
+            }
             None => {
                 debug!(
                     view = proposal.view,
                     our_view = self.view,
-                    signer = hex(&signature.public_key),
+                    signer = signature.public_key,
                     reason = "unable to compute participants for view",
                     "dropping vote"
                 );
                 return;
             }
         };
-        if !is_participant {
-            debug!(
-                signer = hex(&signature.public_key),
-                reason = "invalid validator",
-                "dropping vote"
-            );
-            return;
-        }
 
         // Verify the signature
         let notarize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         if !C::verify(
             &self.notarize_namespace,
             &notarize_message,
-            &signature.public_key,
+            public_key,
             &signature.signature,
         ) {
             debug!(reason = "invalid signature", "dropping vote");
@@ -1450,45 +1456,45 @@ impl<
                 return;
             }
         };
-        if !C::validate(&signature.public_key) {
-            debug!(reason = "invalid public key", "dropping finalize");
-            return;
-        }
 
         // Verify that signer is a validator
-        let is_participant = match self
-            .supervisor
-            .is_participant(proposal.view, &signature.public_key)
-        {
-            Some(is) => is,
+        let public_key = match self.supervisor.participants(proposal.view) {
+            Some(validators) => {
+                let public_key = validators.get(signature.public_key as usize);
+                if let Some(public_key) = public_key {
+                    public_key
+                } else {
+                    debug!(
+                        view = proposal.view,
+                        signer = signature.public_key,
+                        reason = "invalid validator",
+                        "dropping vote"
+                    );
+                    return;
+                }
+            }
             None => {
                 debug!(
-                    signer = hex(&signature.public_key),
+                    view = proposal.view,
+                    our_view = self.view,
+                    signer = signature.public_key,
                     reason = "unable to compute participants for view",
                     "dropping vote"
                 );
                 return;
             }
         };
-        if !is_participant {
-            debug!(
-                signer = hex(&signature.public_key),
-                reason = "invalid validator",
-                "dropping finalize"
-            );
-            return;
-        }
 
         // Verify the signature
         let finalize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         if !C::verify(
             &self.finalize_namespace,
             &finalize_message,
-            &signature.public_key,
+            public_key,
             &signature.signature,
         ) {
             debug!(
-                signer = hex(&signature.public_key),
+                signer = hex(public_key),
                 digest = hex(&finalize_message),
                 reason = "invalid signature",
                 "dropping finalize"
@@ -1601,23 +1607,38 @@ impl<
         }
 
         // Verify threshold finalization
-        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        let mut seen = HashSet::new();
-        for signature in finalization.signatures.iter() {
-            // Verify signature
-            if !C::validate(&signature.public_key) {
+        let validators = match self.supervisor.participants(proposal.view) {
+            Some(validators) => validators,
+            None => {
                 debug!(
-                    signer = hex(&signature.public_key),
-                    reason = "invalid validator",
+                    view = proposal.view,
+                    reason = "unable to compute participants for view",
                     "dropping finalization"
                 );
                 return;
             }
+        };
+        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+        let mut seen = HashSet::new();
+        for signature in finalization.signatures.iter() {
+            // Get public key
+            let public_key = match validators.get(signature.public_key as usize) {
+                Some(public_key) => public_key,
+                None => {
+                    debug!(
+                        view = proposal.view,
+                        signer = signature.public_key,
+                        reason = "invalid validator",
+                        "dropping finalization"
+                    );
+                    return;
+                }
+            };
 
             // Ensure we haven't seen this signature before
             if seen.contains(&signature.public_key) {
                 debug!(
-                    signer = hex(&signature.public_key),
+                    signer = hex(public_key),
                     reason = "duplicate signature",
                     "dropping finalization"
                 );
@@ -1629,7 +1650,7 @@ impl<
             if !C::verify(
                 &self.finalize_namespace,
                 &message,
-                &signature.public_key,
+                public_key,
                 &signature.signature,
             ) {
                 debug!(reason = "invalid signature", "dropping finalization");
@@ -1718,12 +1739,15 @@ impl<
         if !round.verified_proposal {
             return None;
         }
+        let public_key = self
+            .supervisor
+            .is_participant(view, &self.crypto.public_key())?;
         let proposal = &round.proposal.as_ref().unwrap().1;
         round.broadcast_notarize = true;
         Some(wire::Notarize {
             proposal: Some(proposal.clone()),
             signature: Some(wire::Signature {
-                public_key: self.crypto.public_key(),
+                public_key,
                 signature: self.crypto.sign(
                     &self.notarize_namespace,
                     &proposal_message(proposal.view, proposal.parent, &proposal.payload),
@@ -1823,11 +1847,14 @@ impl<
                 return None;
             }
         };
+        let public_key = self
+            .supervisor
+            .is_participant(view, &self.crypto.public_key())?;
         round.broadcast_finalize = true;
         Some(wire::Finalize {
             proposal: Some(proposal.clone()),
             signature: Some(wire::Signature {
-                public_key: self.crypto.public_key(),
+                public_key,
                 signature: self.crypto.sign(
                     &self.finalize_namespace,
                     &proposal_message(proposal.view, proposal.parent, &proposal.payload),
@@ -2101,8 +2128,11 @@ impl<
                     wire::voter::Payload::Notarize(notarize) => {
                         // Handle notarize
                         let proposal = notarize.proposal.as_ref().unwrap().clone();
-                        let me = notarize.signature.as_ref().unwrap().public_key
-                            == self.crypto.public_key();
+                        let my_index = self
+                            .supervisor
+                            .is_participant(proposal.view, &self.crypto.public_key())
+                            .unwrap();
+                        let me = notarize.signature.as_ref().unwrap().public_key == my_index;
                         self.handle_notarize(notarize).await;
 
                         // Update round info
@@ -2121,8 +2151,11 @@ impl<
                     wire::voter::Payload::Nullify(nullify) => {
                         // Handle nullify
                         let view = nullify.view;
-                        let me = nullify.signature.as_ref().unwrap().public_key
-                            == self.crypto.public_key();
+                        let my_index = self
+                            .supervisor
+                            .is_participant(nullify.view, &self.crypto.public_key())
+                            .unwrap();
+                        let me = nullify.signature.as_ref().unwrap().public_key == my_index;
                         self.handle_nullify(nullify).await;
 
                         // Update round info
@@ -2135,8 +2168,11 @@ impl<
                     wire::voter::Payload::Finalize(finalize) => {
                         // Handle finalize
                         let view = finalize.proposal.as_ref().unwrap().view;
-                        let me = finalize.signature.as_ref().unwrap().public_key
-                            == self.crypto.public_key();
+                        let my_index = self
+                            .supervisor
+                            .is_participant(view, &self.crypto.public_key())
+                            .unwrap();
+                        let me = finalize.signature.as_ref().unwrap().public_key == my_index;
                         self.handle_finalize(finalize).await;
 
                         // Update round info

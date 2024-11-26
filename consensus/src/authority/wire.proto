@@ -20,8 +20,7 @@ message Proposal {
 }
 
 message Signature {
-    // TODO: replace with index
-    bytes public_key = 1;
+    uint32 public_key = 1;
     bytes signature = 2;
 }
 
