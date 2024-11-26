@@ -122,7 +122,7 @@ pub trait Supervisor: Clone + Send + 'static {
     fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
 
     // Indicate whether a PublicKey is a participant at the given view.
-    fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<bool>;
+    fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
 
     /// Report a contribution to the application that can be externally proven.
     ///

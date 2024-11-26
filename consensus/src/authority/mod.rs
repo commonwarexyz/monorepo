@@ -69,10 +69,10 @@
 //! * Distinct Leader timeout (in addition to notarization timeout)
 //!     * Skip leader timeout/notarization timeout if we haven't seen a participant vote in some number of views
 //! * Don't assume that all notarizations are sent with each proposal
-//! * Periodically retry building of proposal
-//! * [NOT SAFE] Backfill containers from notarizing peers rather than passing along with notarization message
+//! * Backfill containers from notarizing peers rather than passing along with notarization message
 //! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)/no dedicated
 //!   "sync" phase
+//! * Send indices of public keys rather than public keys themselves
 //! * Only multicast proposal `c` in `v` on transition to `v+1  to peers that haven't already voted for `c`
 //! * Only multicast dependent notarizations (notarization for `c_parent` and null notarizations between `c_parent` and `c`) for `v` to peers that
 //!   didn't vote for `c`
