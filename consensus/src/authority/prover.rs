@@ -103,7 +103,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         view: View,
         parent: View,
         payload: &Digest,
-        signatures: &[(PublicKey, Signature)],
+        signatures: Vec<(&PublicKey, &Signature)>,
     ) -> Proof {
         // Setup proof
         let (public_key_len, signature_len) = C::len();
@@ -198,7 +198,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
     pub(crate) fn serialize_notarization(
         proposal: &wire::Proposal,
-        signatures: &[(PublicKey, Signature)],
+        signatures: Vec<(&PublicKey, &Signature)>,
     ) -> Proof {
         Self::serialize_aggregation(
             proposal.view,
@@ -241,7 +241,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
     pub(crate) fn serialize_finalization(
         proposal: &wire::Proposal,
-        signatures: &[(PublicKey, Signature)],
+        signatures: Vec<(&PublicKey, &Signature)>,
     ) -> Proof {
         Self::serialize_aggregation(
             proposal.view,
