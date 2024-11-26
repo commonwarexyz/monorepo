@@ -74,15 +74,11 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
-    pub fn new(
-        hasher: H,
-        supervisor: S,
-        view: View,
-        leader: PublicKey,
-        leader_deadline: Option<SystemTime>,
-        advance_deadline: Option<SystemTime>,
-    ) -> Self {
+impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, Seed = ()>> Round<C, H, S> {
+    pub fn new(hasher: H, supervisor: S, view: View) -> Self {
+        let leader = supervisor
+            .leader(view, ())
+            .expect("unable to compute leader");
         Self {
             hasher,
             supervisor,
@@ -90,8 +86,8 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
 
             view,
             leader,
-            leader_deadline,
-            advance_deadline,
+            leader_deadline: None,
+            advance_deadline: None,
             nullify_retry: None,
 
             requested_proposal: false,
@@ -638,7 +634,7 @@ impl<
         };
 
         // Request proposal from application
-        debug!(view = self.view, "requested proposal");
+        debug!(view = self.view, "requested proposal from automaton");
         let context = Context {
             view: self.view,
             parent: (parent_view, parent_payload),
@@ -745,54 +741,19 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, nullify: wire::Nullify) {
+    async fn nullify(&mut self, nullify: wire::Nullify) -> Option<()> {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
-            debug!(
-                nullify_view = nullify.view,
-                our_view = self.view,
-                "dropping vote"
-            );
-            return;
+            return None;
         }
 
         // Parse signature
-        let signature = match &nullify.signature {
-            Some(signature) => signature,
-            _ => {
-                debug!(reason = "missing signature", "dropping vote");
-                return;
-            }
-        };
+        let signature = nullify.signature.as_ref()?;
 
         // Verify that signer is a validator
-        let public_key = match self.supervisor.participants(nullify.view) {
-            Some(validators) => {
-                let public_key = validators.get(signature.public_key as usize);
-                if let Some(public_key) = public_key {
-                    public_key
-                } else {
-                    debug!(
-                        view = nullify.view,
-                        signer = signature.public_key,
-                        reason = "invalid validator",
-                        "dropping nullify"
-                    );
-                    return;
-                }
-            }
-            None => {
-                debug!(
-                    view = nullify.view,
-                    our_view = self.view,
-                    signer = signature.public_key,
-                    reason = "unable to compute participants for view",
-                    "dropping vote"
-                );
-                return;
-            }
-        }
-        .clone();
+        let participants = self.supervisor.participants(nullify.view)?;
+        let public_key_index: usize = signature.public_key.try_into().ok()?;
+        let public_key = participants.get(public_key_index)?.clone();
 
         // Verify the signature
         let message = nullify_message(nullify.view);
@@ -802,38 +763,21 @@ impl<
             &public_key,
             &signature.signature,
         ) {
-            debug!(reason = "invalid signature", "dropping vote");
-            return;
+            return None;
         }
 
         // Handle nullify
         self.handle_nullify(&public_key, nullify).await;
+        Some(())
     }
 
     async fn handle_nullify(&mut self, public_key: &PublicKey, nullify: wire::Nullify) {
         // Check to see if vote is for proposal in view
         let view = nullify.view;
-        let leader = match self.supervisor.leader(view, ()) {
-            Some(leader) => leader,
-            None => {
-                debug!(
-                    view = nullify.view,
-                    reason = "unable to compute leader",
-                    "dropping null"
-                );
-                return;
-            }
-        };
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                self.hasher.clone(),
-                self.supervisor.clone(),
-                view,
-                leader,
-                None,
-                None,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
 
         // Handle nullify
         let nullify_bytes = wire::Voter {
@@ -1033,26 +977,17 @@ impl<
         }
 
         // Setup new view
-        let leader = self
-            .supervisor
-            .leader(view, ())
-            .expect("unable to get leader");
-        let entry = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                self.hasher.clone(),
-                self.supervisor.clone(),
-                view,
-                leader.clone(),
-                None,
-                None,
-            )
-        });
-        entry.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
-        entry.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+        round.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
+        round.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         self.view = view;
         info!(view, "entered view");
 
         // Check if we should fast exit this view
+        let leader = round.leader.clone();
         if view < self.activity_timeout || leader == self.crypto.public_key() {
             // Don't fast exit the view
             return;
@@ -1135,63 +1070,27 @@ impl<
         }
     }
 
-    async fn notarize(&mut self, notarize: wire::Notarize) {
+    async fn notarize(&mut self, notarize: wire::Notarize) -> Option<()> {
         // Extract proposal
-        let proposal = match &notarize.proposal {
-            Some(proposal) => proposal,
-            _ => {
-                debug!(reason = "missing proposal", "dropping finalize");
-                return;
-            }
-        };
+        let proposal = notarize.proposal.as_ref()?;
 
         // Ensure we are in the right view to process this message
         if !self.interesting(proposal.view, false) {
-            debug!(
+            trace!(
                 notarize_view = proposal.view,
                 our_view = self.view,
                 "dropping vote"
             );
-            return;
+            return None;
         }
 
         // Parse signature
-        let signature = match &notarize.signature {
-            Some(signature) => signature,
-            _ => {
-                debug!(reason = "missing signature", "dropping vote");
-                return;
-            }
-        };
+        let signature = notarize.signature.as_ref()?;
 
         // Verify that signer is a validator
-        let public_key = match self.supervisor.participants(proposal.view) {
-            Some(validators) => {
-                let public_key = validators.get(signature.public_key as usize);
-                if let Some(public_key) = public_key {
-                    public_key
-                } else {
-                    debug!(
-                        view = proposal.view,
-                        signer = signature.public_key,
-                        reason = "invalid validator",
-                        "dropping vote"
-                    );
-                    return;
-                }
-            }
-            None => {
-                debug!(
-                    view = proposal.view,
-                    our_view = self.view,
-                    signer = signature.public_key,
-                    reason = "unable to compute participants for view",
-                    "dropping vote"
-                );
-                return;
-            }
-        }
-        .clone();
+        let participants = self.supervisor.participants(proposal.view)?;
+        let public_key_index: usize = signature.public_key.try_into().ok()?;
+        let public_key = participants.get(public_key_index)?.clone();
 
         // Verify the signature
         let notarize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
@@ -1201,31 +1100,21 @@ impl<
             &public_key,
             &signature.signature,
         ) {
-            debug!(reason = "invalid signature", "dropping vote");
-            return;
+            return None;
         }
 
         // Handle notarize
         self.handle_notarize(&public_key, notarize).await;
+        Some(())
     }
 
     async fn handle_notarize(&mut self, public_key: &PublicKey, notarize: wire::Notarize) {
         // Check to see if vote is for proposal in view
         let view = notarize.proposal.as_ref().unwrap().view;
-        let leader = self
-            .supervisor
-            .leader(view, ())
-            .expect("unable to get leader");
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                self.hasher.clone(),
-                self.supervisor.clone(),
-                view,
-                leader,
-                None,
-                None,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
 
         // Handle vote
         let notarize_bytes = wire::Voter {
@@ -1245,42 +1134,25 @@ impl<
 
     async fn notarization(&mut self, notarization: wire::Notarization) {
         // Extract proposal
-        let proposal = match &notarization.proposal {
-            Some(proposal) => proposal,
-            _ => {
-                debug!(reason = "missing proposal", "dropping finalize");
-                return;
-            }
+        let Some(proposal) = &notarization.proposal else {
+            return;
         };
 
         // Check if we are still in a view where this notarization could help
         if !self.interesting(proposal.view, true) {
-            trace!(
-                notarization_view = proposal.view,
-                our_view = self.view,
-                reason = "outdated notarization",
-                "dropping notarization"
-            );
             return;
         }
 
         // Determine if we already broadcast notarization for this view (in which
         // case we can ignore this message)
-        let round = self.views.get_mut(&proposal.view);
-        if let Some(ref round) = round {
+        if let Some(ref round) = self.views.get_mut(&proposal.view) {
             if round.broadcast_notarization {
-                trace!(
-                    view = proposal.view,
-                    reason = "already broadcast notarization",
-                    "dropping notarization"
-                );
                 return;
             }
         }
 
         // Verify notarization
         if !verify_notarization::<S, C>(&self.supervisor, &self.notarize_namespace, &notarization) {
-            debug!(reason = "invalid notarization", "dropping notarization");
             return;
         }
 
@@ -1291,20 +1163,10 @@ impl<
     async fn handle_notarization(&mut self, notarization: wire::Notarization) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
         let view = notarization.proposal.as_ref().unwrap().view;
-        let leader = self
-            .supervisor
-            .leader(view, ())
-            .expect("unable to get leader");
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                self.hasher.clone(),
-                self.supervisor.clone(),
-                view,
-                leader,
-                None,
-                None,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
         let validators = self.supervisor.participants(view).unwrap();
         for signature in &notarization.signatures {
             let notarize = wire::Notarize {
@@ -1352,25 +1214,13 @@ impl<
     async fn nullification(&mut self, nullification: wire::Nullification) {
         // Check if we are still in a view where this notarization could help
         if !self.interesting(nullification.view, true) {
-            trace!(
-                nullification_view = nullification.view,
-                our_view = self.view,
-                reason = "outdated",
-                "dropping nullification"
-            );
             return;
         }
 
         // Determine if we already broadcast nullification for this view (in which
         // case we can ignore this message)
-        let round = self.views.get_mut(&nullification.view);
-        if let Some(ref round) = round {
+        if let Some(ref round) = self.views.get_mut(&nullification.view) {
             if round.broadcast_nullification {
-                trace!(
-                    view = nullification.view,
-                    reason = "already broadcast notarization",
-                    "dropping notarization"
-                );
                 return;
             }
         }
@@ -1378,7 +1228,6 @@ impl<
         // Verify nullification
         if !verify_nullification::<S, C>(&self.supervisor, &self.nullify_namespace, &nullification)
         {
-            debug!(reason = "invalid nullification", "dropping nullification");
             return;
         }
 
@@ -1388,18 +1237,11 @@ impl<
 
     async fn handle_nullification(&mut self, nullification: wire::Nullification) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
-        let leader = self
-            .supervisor
-            .leader(nullification.view, ())
-            .expect("unable to get leader");
         let round = self.views.entry(nullification.view).or_insert_with(|| {
             Round::new(
                 self.hasher.clone(),
                 self.supervisor.clone(),
                 nullification.view,
-                leader,
-                None,
-                None,
             )
         });
         let validators = self.supervisor.participants(nullification.view).unwrap();
@@ -1432,103 +1274,46 @@ impl<
         self.enter_view(nullification.view + 1);
     }
 
-    async fn finalize(&mut self, finalize: wire::Finalize) {
+    async fn finalize(&mut self, finalize: wire::Finalize) -> Option<()> {
         // Extract proposal
-        let proposal = match &finalize.proposal {
-            Some(proposal) => proposal,
-            _ => {
-                debug!(reason = "missing proposal", "dropping finalize");
-                return;
-            }
-        };
+        let proposal = finalize.proposal.as_ref()?;
 
         // Ensure we are in the right view to process this message
         if !self.interesting(proposal.view, false) {
-            debug!(
-                finalize_view = proposal.view,
-                our_view = self.view,
-                reason = "incorrect view",
-                "dropping finalize"
-            );
-            return;
+            return None;
         }
 
         // Parse signature
-        let signature = match &finalize.signature {
-            Some(signature) => signature,
-            _ => {
-                debug!(reason = "missing signature", "dropping finalize");
-                return;
-            }
-        };
+        let signature = finalize.signature.as_ref()?;
 
         // Verify that signer is a validator
-        let public_key = match self.supervisor.participants(proposal.view) {
-            Some(validators) => {
-                let public_key = validators.get(signature.public_key as usize);
-                if let Some(public_key) = public_key {
-                    public_key
-                } else {
-                    debug!(
-                        view = proposal.view,
-                        signer = signature.public_key,
-                        reason = "invalid validator",
-                        "dropping vote"
-                    );
-                    return;
-                }
-            }
-            None => {
-                debug!(
-                    view = proposal.view,
-                    our_view = self.view,
-                    signer = signature.public_key,
-                    reason = "unable to compute participants for view",
-                    "dropping vote"
-                );
-                return;
-            }
-        }
-        .clone();
+        let participants = self.supervisor.participants(proposal.view)?;
+        let public_key_index: usize = signature.public_key.try_into().ok()?;
+        let public_key = participants.get(public_key_index)?.clone();
 
         // Verify the signature
         let finalize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        if !C::verify(
+        if C::verify(
             &self.finalize_namespace,
             &finalize_message,
             &public_key,
             &signature.signature,
         ) {
-            debug!(
-                signer = hex(&public_key),
-                digest = hex(&finalize_message),
-                reason = "invalid signature",
-                "dropping finalize"
-            );
-            return;
+            return None;
         }
 
         // Handle finalize
         self.handle_finalize(&public_key, finalize).await;
+        Some(())
     }
 
     async fn handle_finalize(&mut self, public_key: &PublicKey, finalize: wire::Finalize) {
         // Get view for finalize
         let view = finalize.proposal.as_ref().unwrap().view;
-        let leader = self
-            .supervisor
-            .leader(view, ())
-            .expect("unable to get leader");
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                self.hasher.clone(),
-                self.supervisor.clone(),
-                view,
-                leader,
-                None,
-                None,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
 
         // Handle finalize
         let finalize_bytes = wire::Voter {
@@ -1548,42 +1333,25 @@ impl<
 
     async fn finalization(&mut self, finalization: wire::Finalization) {
         // Extract proposal
-        let proposal = match &finalization.proposal {
-            Some(proposal) => proposal,
-            _ => {
-                debug!(reason = "missing proposal", "dropping finalize");
-                return;
-            }
+        let Some(proposal) = &finalization.proposal else {
+            return;
         };
 
         // Check if we are still in a view where this finalization could help
         if !self.interesting(proposal.view, true) {
-            trace!(
-                finalization_view = proposal.view,
-                our_view = self.view,
-                reason = "outdated finalization",
-                "dropping finalization"
-            );
             return;
         }
 
         // Determine if we already broadcast finalization for this view (in which
         // case we can ignore this message)
-        let round = self.views.get_mut(&proposal.view);
-        if let Some(ref round) = round {
+        if let Some(ref round) = self.views.get_mut(&proposal.view) {
             if round.broadcast_finalization {
-                trace!(
-                    view = proposal.view,
-                    reason = "already broadcast finalization",
-                    "dropping finalization"
-                );
                 return;
             }
         }
 
         // Verify finalization
         if !verify_finalization::<S, C>(&self.supervisor, &self.finalize_namespace, &finalization) {
-            debug!(reason = "invalid finalization", "dropping finalization");
             return;
         }
 
@@ -1594,20 +1362,10 @@ impl<
     async fn handle_finalization(&mut self, finalization: wire::Finalization) {
         // Add signatures to view (needed to broadcast finalization if we get proposal)
         let view = finalization.proposal.as_ref().unwrap().view;
-        let leader = self
-            .supervisor
-            .leader(view, ())
-            .expect("unable to get leader");
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                self.hasher.clone(),
-                self.supervisor.clone(),
-                view,
-                leader,
-                None,
-                None,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
         let validators = self.supervisor.participants(view).unwrap();
         for signature in finalization.signatures.iter() {
             let finalize = wire::Finalize {
@@ -2236,7 +1994,7 @@ impl<
                         payload: proposed.clone(),
                     };
                     if !self.our_proposal(proposal_digest, proposal.clone()).await {
-                        debug!(view = context.view, "failed to propose container");
+                        warn!(view = context.view, "failed to record our container");
                         continue;
                     }
                     view = self.view;
@@ -2250,19 +2008,18 @@ impl<
                     pending_verify = None;
 
                     // Try to use result
-                    let verified = match verified {
-                        Ok(verified) => verified,
+                    match verified {
+                        Ok(verified) => {
+                            if !verified {
+                                debug!(view = context.view, "proposal failed verification");
+                                continue;
+                            }
+                        },
                         Err(err) => {
                             debug!(?err, view = context.view, "failed to verify proposal");
                             continue;
                         }
                     };
-
-                    // Digest should never be verified again
-                    if !verified {
-                        debug!(view = context.view, "proposal failed verification");
-                        continue;
-                    }
 
                     // Handle verified proposal
                     view = context.view;
@@ -2285,20 +2042,14 @@ impl<
                 },
                 msg = receiver.recv() => {
                     // Parse message
-                    let (s, msg) = msg.unwrap();
-                    let msg = match wire::Voter::decode(msg) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            debug!(?err, sender = hex(&s), "failed to decode message");
-                            continue;
-                        }
+                    let Ok((_, msg)) = msg else {
+                        break;
                     };
-                    let payload = match msg.payload {
-                        Some(payload) => payload,
-                        None => {
-                            debug!(sender = hex(&s), "message missing payload");
-                            continue;
-                        }
+                    let Ok(msg) = wire::Voter::decode(msg) else {
+                        continue;
+                    };
+                    let Some(payload) = msg.payload else {
+                        continue;
                     };
 
                     // Process message
@@ -2309,7 +2060,6 @@ impl<
                             view = match &notarize.proposal {
                                 Some(proposal) => proposal.view,
                                 None => {
-                                    debug!(sender = hex(&s), "missing proposal in notarize");
                                     continue;
                                 }
                             };
@@ -2319,7 +2069,6 @@ impl<
                             view = match &notarization.proposal {
                                 Some(proposal) => proposal.view,
                                 None => {
-                                    debug!(sender = hex(&s), "missing proposal in notarization");
                                     continue;
                                 }
                             };
@@ -2337,7 +2086,6 @@ impl<
                             view = match &finalize.proposal {
                                 Some(proposal) => proposal.view,
                                 None => {
-                                    debug!(sender = hex(&s), "missing proposal in finalize");
                                     continue;
                                 }
                             };
@@ -2347,7 +2095,6 @@ impl<
                             view = match &finalization.proposal {
                                 Some(proposal) => proposal.view,
                                 None => {
-                                    debug!(sender = hex(&s), "missing proposal in finalization");
                                     continue;
                                 }
                             };
