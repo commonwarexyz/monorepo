@@ -5,15 +5,23 @@
 //! All decisions made to minimize container time and finalization latency without sacrificing
 //! the ability to attribute uptime and faults.
 //!
-//! # Externalizable Uptime and Faults
+//! # Decoupled Payload Broadcast
+//!
+//! Consensus comes to agreement over payload digests but is not responsible for disseminating
+//! said payload (or ensuring it dependencies are fulfilled during verification).
+//!
+//! TODO: move to lib.rs?
+//!
+//! # External Activity Tracking (Uptime and Faults)
 //!
 //! Instead of handling uptime and fault tracking internally, the application is notified of all
 //! activity and can incorportate such information as needed (into the payload or otherwise).
 //!
-//! # Sync
+//! # Instant Sync
 //!
-//! Wait for container notarization at tip (2f+1), fetch heights backwards (don't
-//! need to backfill views).
+//! Consensus only cares about participating at tip and doesn't attempt to backfill historical
+//! consensus results. As a result, Consensus can jump ahead to the current view upon observing
+//! a notarization for view `v`.
 //!
 //! # Async Handling
 //!
