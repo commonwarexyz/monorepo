@@ -18,12 +18,16 @@
 //! # Async Handling
 //!
 //! All application interaction occurs asynchronously, meaning that the engine can continue processing messages
-//! while a payload is being built or verified (usually take hundreds of milliseconds).
+//! while a payload is being built or verified (usually takes hundreds of milliseconds).
 //!
 //! # Dedicated Processing for Consensus Messages
 //!
 //! All peer interaction related to consensus is strictly prioritized over any other messages (i.e. helping new
 //! peers sync to the network).
+//!
+//! # No Disk Reads During Consensus Handling
+//!
+//! All reads are done in-memory. Data is flushed to a WAL.
 //!
 //! # Specification for View `v`
 //!
@@ -110,19 +114,21 @@
 //!   won't just immediately be dropped?
 
 mod actors;
-mod byzantine;
 mod config;
+pub use config::Config;
 mod encoder;
 mod engine;
+pub use engine::Engine;
+mod metrics;
+#[cfg(test)]
 mod mocks;
 pub mod prover;
 mod verifier;
-
-use commonware_cryptography::Digest;
-
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
+
+use commonware_cryptography::Digest;
 
 pub type View = u64;
 
@@ -163,13 +169,8 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Proof, Supervisor};
     use bytes::Bytes;
-    use byzantine::{
-        conflicter::{self, Conflicter},
-        nuller::{self, Nuller},
-    };
-    use commonware_cryptography::{Ed25519, Hasher, PublicKey, Scheme, Sha256};
+    use commonware_cryptography::{Ed25519, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{
@@ -229,7 +230,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -238,11 +239,11 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (container_sender, container_receiver) = oracle
+                let (voter_sender, voter_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
-                let (vote_sender, vote_receiver) = oracle
+                let (backfiller_sender, backfiller_receiver) = oracle
                     .register(validator.clone(), 1, 1024 * 1024)
                     .await
                     .unwrap();
@@ -267,14 +268,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -283,7 +284,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -300,6 +301,7 @@ mod tests {
                     application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -315,8 +317,8 @@ mod tests {
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine
                         .run(
-                            (container_sender, container_receiver),
-                            (vote_sender, vote_receiver),
+                            (voter_sender, voter_receiver),
+                            (backfiller_sender, backfiller_receiver),
                         )
                         .await;
                 }));
@@ -327,7 +329,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -368,11 +370,9 @@ mod tests {
                 {
                     let notarizes = supervisor.notarizes.lock().unwrap();
                     for (view, payloads) in notarizes.iter() {
-                        // Ensure no skips (height == view)
+                        // Ensure only one payload proposed per view
                         if payloads.len() > 1 {
-                            let hex_payloads =
-                                payloads.iter().map(|p| hex(p.0)).collect::<Vec<String>>();
-                            panic!("view: {}, payloads: {:?}", view, hex_payloads);
+                            panic!("view: {}", view);
                         }
 
                         // Only check at views below timeout
@@ -384,8 +384,9 @@ mod tests {
                         let digest = finalized.get(view).expect("view should be finalized");
                         let voters = payloads.get(digest).expect("digest should exist");
                         if voters.len() < threshold as usize {
-                            // We can't verify that everyone participated at every height because some nodes may have started later.
-                            panic!("view: {}, voters: {:?}", view, voters);
+                            // We can't verify that everyone participated at every view because some nodes may
+                            // have started later.
+                            panic!("view: {}", view);
                         }
                         if voters.len() != n as usize {
                             exceptions += 1;
@@ -394,23 +395,24 @@ mod tests {
                 }
                 {
                     let finalizes = supervisor.finalizes.lock().unwrap();
-                    for (height, views) in finalizes.iter() {
-                        // Ensure no skips (height == view)
-                        if views.len() > 1 {
-                            panic!("height: {}, views: {:?}", height, views);
+                    for (view, payloads) in finalizes.iter() {
+                        // Ensure only one payload proposed per view
+                        if payloads.len() > 1 {
+                            panic!("view: {}", view);
                         }
 
                         // Only check at views below timeout
-                        if *height > latest_complete {
+                        if *view > latest_complete {
                             continue;
                         }
 
                         // Ensure everyone participating
-                        let digest = finalized.get(height).expect("height should be finalized");
-                        let finalizers = views.get(digest).expect("digest should exist");
+                        let digest = finalized.get(view).expect("view should be finalized");
+                        let finalizers = payloads.get(digest).expect("digest should exist");
                         if finalizers.len() < threshold as usize {
-                            // We can't verify that everyone participated at every height because some nodes may have started later.
-                            panic!("height: {}, finalizers: {:?}", height, finalizers);
+                            // We can't verify that everyone participated at every view because some nodes may
+                            // have started later.
+                            panic!("view: {}", view);
                         }
                         if finalizers.len() != n as usize {
                             exceptions += 1;
@@ -481,7 +483,7 @@ mod tests {
 
                 // Create engines
                 let hasher = Sha256::default();
-                let prover = Prover::new(hasher.clone(), namespace.clone());
+                let prover = Prover::new(namespace.clone());
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -519,14 +521,14 @@ mod tests {
                     }
 
                     // Start engine
-                    let supervisor_config = mocks::actor::SupervisorConfig {
+                    let supervisor_config = mocks::supervisor::Config {
                         prover: prover.clone(),
                         participants: view_validators.clone(),
                     };
                     let supervisor =
-                        mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                        mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                     supervisors.insert(validator.clone(), supervisor.clone());
-                    let application_cfg = mocks::actor::ApplicationConfig {
+                    let application_cfg = mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
                         participant: validator,
@@ -535,7 +537,7 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) =
-                        mocks::actor::Application::new(runtime.clone(), application_cfg);
+                        mocks::application::Application::new(runtime.clone(), application_cfg);
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
@@ -552,6 +554,7 @@ mod tests {
                         application,
                         supervisor,
                         registry: Arc::new(Mutex::new(Registry::default())),
+                        mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -580,7 +583,7 @@ mod tests {
                         // Parse events
                         let (validator, event) = done_receiver.next().await.unwrap();
                         match event {
-                            mocks::actor::Progress::Notarized(proof, digest) => {
+                            mocks::application::Progress::Notarized(proof, digest) => {
                                 // Check correctness of proof
                                 let (view, _, payload, _) =
                                     prover.deserialize_notarization(proof, 5, true).unwrap();
@@ -608,7 +611,7 @@ mod tests {
                                     }
                                 }
                             }
-                            mocks::actor::Progress::Finalized(proof, digest) => {
+                            mocks::application::Progress::Finalized(proof, digest) => {
                                 // Check correctness of proof
                                 let (view, _, payload, _) =
                                     prover.deserialize_finalization(proof, 5, true).unwrap();
@@ -695,7 +698,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -709,11 +712,11 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (container_sender, container_receiver) = oracle
+                let (voter_sender, voter_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
-                let (vote_sender, vote_receiver) = oracle
+                let (backfiller_sender, backfiller_receiver) = oracle
                     .register(validator.clone(), 1, 1024 * 1024)
                     .await
                     .unwrap();
@@ -741,14 +744,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -757,7 +760,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -774,6 +777,7 @@ mod tests {
                     application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -789,8 +793,8 @@ mod tests {
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine
                         .run(
-                            (container_sender, container_receiver),
-                            (vote_sender, vote_receiver),
+                            (voter_sender, voter_receiver),
+                            (backfiller_sender, backfiller_receiver),
                         )
                         .await;
                 }));
@@ -801,7 +805,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -919,13 +923,14 @@ mod tests {
             }
 
             // Start engine
-            let supervisor_config = mocks::actor::SupervisorConfig {
+            let supervisor_config = mocks::supervisor::Config {
                 prover: prover.clone(),
                 participants: view_validators.clone(),
             };
-            let supervisor = mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+            let supervisor =
+                mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
             supervisors.push(supervisor.clone());
-            let application_cfg = mocks::actor::ApplicationConfig {
+            let application_cfg = mocks::application::Config {
                 hasher: hasher.clone(),
                 relay: relay.clone(),
                 participant: validator.clone(),
@@ -934,7 +939,7 @@ mod tests {
                 verify_latency: (10.0, 5.0),
             };
             let (actor, application) =
-                mocks::actor::Application::new(runtime.clone(), application_cfg);
+                mocks::application::Application::new(runtime.clone(), application_cfg);
             runtime.spawn("application", async move {
                 actor.run().await;
             });
@@ -951,6 +956,7 @@ mod tests {
                 application,
                 supervisor,
                 registry: Arc::new(Mutex::new(Registry::default())),
+                mailbox_size: 1024,
                 namespace: namespace.clone(),
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
@@ -977,7 +983,7 @@ mod tests {
             let mut validator_finalized = HashSet::new();
             loop {
                 let (candidate, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -1040,7 +1046,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1054,11 +1060,11 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (container_sender, container_receiver) = oracle
+                let (voter_sender, voter_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
-                let (vote_sender, vote_receiver) = oracle
+                let (backfiller_sender, backfiller_receiver) = oracle
                     .register(validator.clone(), 1, 1024 * 1024)
                     .await
                     .unwrap();
@@ -1086,14 +1092,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -1102,7 +1108,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -1119,6 +1125,7 @@ mod tests {
                     application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1134,8 +1141,8 @@ mod tests {
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine
                         .run(
-                            (container_sender, container_receiver),
-                            (vote_sender, vote_receiver),
+                            (voter_sender, voter_receiver),
+                            (backfiller_sender, backfiller_receiver),
                         )
                         .await;
                 }));
@@ -1146,7 +1153,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -1242,7 +1249,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1251,11 +1258,11 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (container_sender, container_receiver) = oracle
+                let (voter_sender, voter_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
-                let (vote_sender, vote_receiver) = oracle
+                let (backfiller_sender, backfiller_receiver) = oracle
                     .register(validator.clone(), 1, 1024 * 1024)
                     .await
                     .unwrap();
@@ -1280,15 +1287,15 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = if idx_scheme == 0 {
-                    mocks::actor::ApplicationConfig {
+                    mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
                         participant: validator,
@@ -1297,7 +1304,7 @@ mod tests {
                         verify_latency: (3_000.0, 5.0),
                     }
                 } else {
-                    mocks::actor::ApplicationConfig {
+                    mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
                         participant: validator,
@@ -1307,7 +1314,7 @@ mod tests {
                     }
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -1324,6 +1331,7 @@ mod tests {
                     application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1339,8 +1347,8 @@ mod tests {
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine
                         .run(
-                            (container_sender, container_receiver),
-                            (vote_sender, vote_receiver),
+                            (voter_sender, voter_receiver),
+                            (backfiller_sender, backfiller_receiver),
                         )
                         .await;
                 }));
@@ -1351,7 +1359,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -1447,7 +1455,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1456,11 +1464,11 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (container_sender, container_receiver) = oracle
+                let (voter_sender, voter_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
-                let (vote_sender, vote_receiver) = oracle
+                let (backfiller_sender, backfiller_receiver) = oracle
                     .register(validator.clone(), 1, 1024 * 1024)
                     .await
                     .unwrap();
@@ -1485,14 +1493,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -1501,7 +1509,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -1518,6 +1526,7 @@ mod tests {
                     application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1533,8 +1542,8 @@ mod tests {
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine
                         .run(
-                            (container_sender, container_receiver),
-                            (vote_sender, vote_receiver),
+                            (voter_sender, voter_receiver),
+                            (backfiller_sender, backfiller_receiver),
                         )
                         .await;
                 }));
@@ -1575,7 +1584,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -1648,7 +1657,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1657,11 +1666,11 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (container_sender, container_receiver) = oracle
+                let (voter_sender, voter_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
-                let (vote_sender, vote_receiver) = oracle
+                let (backfiller_sender, backfiller_receiver) = oracle
                     .register(validator.clone(), 1, 1024 * 1024)
                     .await
                     .unwrap();
@@ -1686,14 +1695,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -1702,7 +1711,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -1719,6 +1728,7 @@ mod tests {
                     application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -1734,8 +1744,8 @@ mod tests {
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine
                         .run(
-                            (container_sender, container_receiver),
-                            (vote_sender, vote_receiver),
+                            (voter_sender, voter_receiver),
+                            (backfiller_sender, backfiller_receiver),
                         )
                         .await;
                 }));
@@ -1747,7 +1757,7 @@ mod tests {
             let mut highest_finalized = 0;
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 10, true).unwrap();
                     if digest != payload {
@@ -1841,7 +1851,7 @@ mod tests {
             let mut completed = HashSet::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 10, true).unwrap();
                     if digest != payload {
@@ -1879,14 +1889,18 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_slow_and_lossy_links() {
+    fn test_slow_and_lossy_links(seed: u64) -> String {
         // Create runtime
         let n = 5;
-        let required_containers = 100;
+        let required_containers = 50;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(3_000));
+        let cfg = deterministic::Config {
+            seed: Seed::Number(seed),
+            timeout: Some(Duration::from_secs(3_000)),
+            ..deterministic::Config::default()
+        };
+        let (executor, runtime, auditor) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1914,7 +1928,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1923,11 +1937,11 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (container_sender, container_receiver) = oracle
+                let (voter_sender, voter_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
-                let (vote_sender, vote_receiver) = oracle
+                let (backfiller_sender, backfiller_receiver) = oracle
                     .register(validator.clone(), 1, 1024 * 1024)
                     .await
                     .unwrap();
@@ -1952,14 +1966,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -1968,7 +1982,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -1985,6 +1999,7 @@ mod tests {
                     application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    mailbox_size: 1024,
                     namespace: namespace.clone(),
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
@@ -2000,8 +2015,8 @@ mod tests {
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine
                         .run(
-                            (container_sender, container_receiver),
-                            (vote_sender, vote_receiver),
+                            (voter_sender, voter_receiver),
+                            (backfiller_sender, backfiller_receiver),
                         )
                         .await;
                 }));
@@ -2012,7 +2027,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -2048,6 +2063,21 @@ mod tests {
                 }
             }
         });
+        auditor.state()
+    }
+
+    #[test_traced]
+    fn test_determinism() {
+        for seed in 0..5 {
+            // Run test with seed
+            let state_1 = test_slow_and_lossy_links(seed);
+
+            // Run test again with same seed
+            let state_2 = test_slow_and_lossy_links(seed);
+
+            // Ensure states are equal
+            assert_eq!(state_1, state_2);
+        }
     }
 
     #[test_traced]
@@ -2085,7 +2115,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2093,11 +2123,11 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (container_sender, container_receiver) = oracle
+                let (voter_sender, voter_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
-                let (vote_sender, vote_receiver) = oracle
+                let (backfiller_sender, backfiller_receiver) = oracle
                     .register(validator.clone(), 1, 1024 * 1024)
                     .await
                     .unwrap();
@@ -2122,31 +2152,31 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 if idx_scheme == 0 {
-                    let cfg = conflicter::Config {
+                    let cfg = mocks::conflicter::Config {
                         crypto: scheme,
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: Conflicter<_, _, Sha256, _> =
-                        conflicter::Conflicter::new(runtime.clone(), cfg);
+                    let engine: mocks::conflicter::Conflicter<_, _, Sha256, _> =
+                        mocks::conflicter::Conflicter::new(runtime.clone(), cfg);
                     runtime.spawn("byzantine_engine", async move {
                         engine
                             .run(
-                                (container_sender, container_receiver),
-                                (vote_sender, vote_receiver),
+                                (voter_sender, voter_receiver),
+                                (backfiller_sender, backfiller_receiver),
                             )
                             .await;
                     });
                 } else {
                     supervisors.push(supervisor.clone());
-                    let application_cfg = mocks::actor::ApplicationConfig {
+                    let application_cfg = mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
                         participant: validator,
@@ -2155,7 +2185,7 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) =
-                        mocks::actor::Application::new(runtime.clone(), application_cfg);
+                        mocks::application::Application::new(runtime.clone(), application_cfg);
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
@@ -2172,6 +2202,7 @@ mod tests {
                         application,
                         supervisor,
                         registry: Arc::new(Mutex::new(Registry::default())),
+                        mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2187,8 +2218,8 @@ mod tests {
                     runtime.spawn("engine", async move {
                         engine
                             .run(
-                                (container_sender, container_receiver),
-                                (vote_sender, vote_receiver),
+                                (voter_sender, voter_receiver),
+                                (backfiller_sender, backfiller_receiver),
                             )
                             .await;
                     });
@@ -2200,7 +2231,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -2292,7 +2323,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(hasher.clone(), namespace.clone());
+            let prover = Prover::new(namespace.clone());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2300,11 +2331,11 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (container_sender, container_receiver) = oracle
+                let (voter_sender, voter_receiver) = oracle
                     .register(validator.clone(), 0, 1024 * 1024)
                     .await
                     .unwrap();
-                let (vote_sender, vote_receiver) = oracle
+                let (backfiller_sender, backfiller_receiver) = oracle
                     .register(validator.clone(), 1, 1024 * 1024)
                     .await
                     .unwrap();
@@ -2329,30 +2360,31 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 if idx_scheme == 0 {
-                    let cfg = nuller::Config {
+                    let cfg = mocks::nuller::Config {
                         crypto: scheme,
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: Nuller<_, _, Sha256, _> = nuller::Nuller::new(runtime.clone(), cfg);
+                    let engine: mocks::nuller::Nuller<_, _, Sha256, _> =
+                        mocks::nuller::Nuller::new(runtime.clone(), cfg);
                     runtime.spawn("byzantine_engine", async move {
                         engine
                             .run(
-                                (container_sender, container_receiver),
-                                (vote_sender, vote_receiver),
+                                (voter_sender, voter_receiver),
+                                (backfiller_sender, backfiller_receiver),
                             )
                             .await;
                     });
                 } else {
                     supervisors.push(supervisor.clone());
-                    let application_cfg = mocks::actor::ApplicationConfig {
+                    let application_cfg = mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
                         participant: validator,
@@ -2361,7 +2393,7 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) =
-                        mocks::actor::Application::new(runtime.clone(), application_cfg);
+                        mocks::application::Application::new(runtime.clone(), application_cfg);
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
@@ -2378,6 +2410,7 @@ mod tests {
                         application,
                         supervisor,
                         registry: Arc::new(Mutex::new(Registry::default())),
+                        mailbox_size: 1024,
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
@@ -2393,8 +2426,8 @@ mod tests {
                     runtime.spawn("engine", async move {
                         engine
                             .run(
-                                (container_sender, container_receiver),
-                                (vote_sender, vote_receiver),
+                                (voter_sender, voter_receiver),
+                                (backfiller_sender, backfiller_receiver),
                             )
                             .await;
                     });
@@ -2406,7 +2439,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {

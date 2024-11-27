@@ -8,7 +8,7 @@ use commonware_utils::{hex, quorum};
 use std::collections::HashSet;
 use tracing::debug;
 
-pub fn threshold(validators: &Vec<PublicKey>) -> Option<(u32, u32)> {
+pub fn threshold(validators: &[PublicKey]) -> Option<(u32, u32)> {
     let len = validators.len() as u32;
     let threshold = quorum(len).expect("not enough validators for a quorum");
     Some((threshold, len))
@@ -97,7 +97,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
             );
             return false;
         }
-        seen.insert(signature.public_key.clone());
+        seen.insert(signature.public_key);
 
         // Verify signature
         if !C::verify(namespace, &message, public_key, &signature.signature) {
@@ -183,7 +183,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
             );
             return false;
         }
-        seen.insert(signature.public_key.clone());
+        seen.insert(signature.public_key);
 
         // Verify signature
         if !C::verify(namespace, &message, public_key, &signature.signature) {
@@ -278,10 +278,10 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
             );
             return false;
         }
-        seen.insert(signature.public_key.clone());
+        seen.insert(signature.public_key);
 
         // Verify signature
-        if !C::verify(&namespace, &message, public_key, &signature.signature) {
+        if !C::verify(namespace, &message, public_key, &signature.signature) {
             debug!(reason = "invalid signature", "dropping finalization");
             return false;
         }
