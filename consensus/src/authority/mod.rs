@@ -18,12 +18,16 @@
 //! # Async Handling
 //!
 //! All application interaction occurs asynchronously, meaning that the engine can continue processing messages
-//! while a payload is being built or verified (usually take hundreds of milliseconds).
+//! while a payload is being built or verified (usually takes hundreds of milliseconds).
 //!
 //! # Dedicated Processing for Consensus Messages
 //!
 //! All peer interaction related to consensus is strictly prioritized over any other messages (i.e. helping new
 //! peers sync to the network).
+//!
+//! # No Disk Reads During Consensus Handling
+//!
+//! All reads are done in-memory. Data is flushed to a WAL.
 //!
 //! # Specification for View `v`
 //!
