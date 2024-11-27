@@ -8,14 +8,18 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-// A mock channel struct that is used internally by the ByteSink and ByteStream.
+// A mock channel struct that is used internally by ByteSink and ByteStream.
 struct ByteChannel {
+    // Stores the bytes sent by the sink that are not yet read by the stream.
     buffer: VecDeque<u8>,
+
+    // If the stream is waiting to read bytes, the waiter stores the number of
+    // bytes that the stream is waiting for, as well as the oneshot sender that
+    // the sink uses to send the bytes to the stream directly.
     waiter: Option<(usize, oneshot::Sender<Bytes>)>,
 }
 
-// Returns an async-safe sink/stream pair that share an underlying ByteChannel.
-// The buffer is wrapped in a mutex and an Arc to allow for shared ownership across async tasks.
+// Returns an async-safe ByteSink/ByteStream pair that share an underlying ByteChannel.
 pub fn new() -> (ByteSink, ByteStream) {
     let channel = Arc::new(Mutex::new(ByteChannel {
         buffer: VecDeque::new(),
@@ -53,7 +57,8 @@ impl Sink for ByteSink {
         };
 
         // Resolve the waiter.
-        os_send.send(data).map_err(|_| Error::SendFailed)?;
+        os_send.send(data)
+            .map_err(|_| Error::SendFailed)?;
         Ok(())
     }
 }
@@ -64,8 +69,7 @@ pub struct ByteStream {
 }
 
 impl Stream for ByteStream {
-    // Blocks until the buffer has enough bytes to fill `buf`.
-    // Does not hold the lock unless it needs to.
+    // Blocks until the buffer has enough bytes to fill `buf` exactly.
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();
@@ -78,15 +82,16 @@ impl Stream for ByteStream {
                 return Ok(());
             }
 
-            // Otherwise, create a oneshot receiver and store it in the channel.
+            // Otherwise, populate the waiter.
             assert!(channel.waiter.is_none());
             let (os_send, os_recv) = oneshot::channel();
             channel.waiter = Some((buf.len(), os_send));
             os_recv
         };
 
-        // Wait for the oneshot receiver to be resolved.
-        let data = os_recv.await.map_err(|_| Error::RecvFailed)?;
+        // Wait for the waiter to be resolved.
+        let data = os_recv.await
+            .map_err(|_| Error::RecvFailed)?;
         buf.copy_from_slice(&data);
         Ok(())
     }
@@ -95,7 +100,17 @@ impl Stream for ByteStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::executor::block_on;
+    use crate::{
+        Clock,
+        deterministic::Executor,
+        Runner,
+    };
+    use commonware_macros::select;
+    use futures::{
+        executor::block_on,
+        join,
+    };
+    use std::time::Duration;
 
     #[test]
     fn test_send_recv() {
@@ -154,31 +169,70 @@ mod tests {
         assert_eq!(buf, data);
     }
 
-    /*
     #[test]
     fn test_recv_error() {
-        // TODO: If the oneshot sender is dropped before the oneshot receiver is resolved,
-        // the recv function should return an error.
         let (sink, mut stream) = new();
+        let (executor, _runtime, _) = Executor::default();
 
-        let mut buf = vec![0; 5];
-
-        block_on(async {
-            drop(sink.channel.lock().unwrap().waiter.take());
-            let result = stream.recv(&mut buf).await;
-            assert_eq!(result, Err(Error::RecvFailed));
+        // If the oneshot sender is dropped before the oneshot receiver is resolved,
+        // the recv function should return an error.
+        executor.start(async move {
+            let mut buf = vec![0; 5];
+            let (v, _) = join!(
+                stream.recv(&mut buf),
+                async {
+                    // Take the waiter and drop it.
+                    sink.channel.lock().unwrap().waiter.take();
+                },
+            );
+            assert_eq!(v, Err(Error::RecvFailed));
         });
     }
 
     #[test]
     fn test_send_error() {
-        // TODO: If the waiter value has a min, but the oneshot sender is dropped,
-        // the send function should return an error.
+        let (mut sink, mut stream) = new();
+        let (executor, runtime, _) = Executor::default();
+
+        // If the waiter value has a min, but the oneshot receiver is dropped,
+        // the send function should return an error when attempting to send the data.
+        executor.start(async move {
+            let mut buf = vec![0; 5];
+
+            // Create a waiter using a recv call.
+            // But then drop the receiver.
+            select! {
+                v = stream.recv(&mut buf) => {
+                    panic!("unexpected value: {:?}", v);
+                },
+                _ = runtime.sleep(Duration::from_millis(100)) => {
+                    "timeout"
+                },
+            };
+            drop(stream);
+
+            // Try to send a message (longer than the requested amount), but the receiver is dropped.
+            let result = sink.send(b"hello world").await;
+            assert_eq!(result, Err(Error::SendFailed));
+        });
     }
 
     #[test]
     fn test_recv_timeout() {
-        // TODO: If there is no data to read, test that the recv function just blocks. A timeout should return first.
+        let (_sink, mut stream) = new();
+        let (executor, runtime, _) = Executor::default();
+
+        // If there is no data to read, test that the recv function just blocks. A timeout should return first.
+        executor.start(async move {
+            let mut buf = vec![0; 5];
+            select! {
+                v = stream.recv(&mut buf) => {
+                    panic!("unexpected value: {:?}", v);
+                },
+                _ = runtime.sleep(Duration::from_millis(100)) => {
+                    "timeout"
+                },
+            };
+        });
     }
-    */
 }

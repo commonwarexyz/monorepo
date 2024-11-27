@@ -2,9 +2,6 @@ use super::super::Error;
 use bytes::Bytes;
 use commonware_runtime::{Sink, Stream};
 
-// TODO: Test this and write a suitable comment.
-const ENCRYPTION_TAG_PADDING: usize = 16;
-
 // Sends data with a 4-byte length prefix.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
@@ -49,7 +46,7 @@ pub async fn recv_frame<T: Stream>(
 
     // Validate frame size
     let len = u32::from_be_bytes(buf) as usize;
-    if len > max_message_size + ENCRYPTION_TAG_PADDING {
+    if len > max_message_size {
         return Err(Error::ReadTooLarge(len));
     }
     if len == 0 {
@@ -76,13 +73,13 @@ mod tests {
     use rand::Rng;
 
     #[test]
-    fn test_send_recv() {
-        const MAX_MESSAGE_SIZE: usize = 1024;
+    fn test_send_recv_at_max_message_size() {
+        const MAX_MESSAGE_SIZE: usize = 512;
         let (mut sink, mut stream) = mock_channel::new();
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
-            let mut buf = [0u8; 512];
+            let mut buf = [0u8; MAX_MESSAGE_SIZE];
             runtime.fill(&mut buf);
 
             let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
@@ -101,7 +98,7 @@ mod tests {
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
-            let mut buf = [0u8; 512];
+            let mut buf = [0u8; MAX_MESSAGE_SIZE];
             runtime.fill(&mut buf);
 
             let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
@@ -111,7 +108,7 @@ mod tests {
             stream.recv(&mut b).await.unwrap();
             assert_eq!(b, (buf.len() as u32).to_be_bytes());
 
-            let mut b = [0u8; 512];
+            let mut b = [0u8; MAX_MESSAGE_SIZE];
             stream.recv(&mut b).await.unwrap();
             assert_eq!(b, buf);
         });
@@ -125,7 +122,7 @@ mod tests {
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
-            let mut buf = [0u8; 512];
+            let mut buf = [0u8; MAX_MESSAGE_SIZE];
             runtime.fill(&mut buf);
 
             let mut b = [0u8; 4];
@@ -141,46 +138,4 @@ mod tests {
             assert_eq!(data, Bytes::from(buf.to_vec()));
         });
     }
-
-    /*
-    #[test]
-    fn test_read_frame_timeout() {
-        // TODO
-    }
-
-    #[test]
-    fn test_read_frame_error_too_large() {
-        // TODO
-    }
-
-    #[test]
-    fn test_read_frame_error_zero_size() {
-        // TODO
-    }
-
-    #[test]
-    fn test_read_frame_error_stream_closed() {
-        // TODO
-    }
-
-    #[test]
-    fn test_read_frame_error_read_failed() {
-        // TODO
-    }
-
-    #[test]
-    fn test_send_frame_error_too_large() {
-        // TODO
-    }
-
-    #[test]
-    fn test_send_frame_error_zero_size() {
-        // TODO
-    }
-
-    #[test]
-    fn test_send_frame_error_send_failed() {
-        // TODO
-    }
-    */
 }

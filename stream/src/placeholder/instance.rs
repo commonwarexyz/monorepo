@@ -16,6 +16,10 @@ use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use rand::{CryptoRng, Rng};
 
+// When encrypting data, an encryption tag is appended to the ciphertext.
+// This constant represents the size of the encryption tag in bytes.
+const ENCRYPTION_TAG_LENGTH: usize = 16;
+
 pub struct Instance<C: Scheme, Si: Sink, St: Stream> {
     config: Config<C>,
     dialer: bool,
@@ -198,7 +202,11 @@ impl<Si: Sink> Sender<Si> {
             .map_err(|_| Error::EncryptionFailed)?;
 
         // Send data
-        send_frame(&mut self.sink, &msg, self.max_message_size).await?;
+        send_frame(
+            &mut self.sink,
+            &msg,
+            self.max_message_size + ENCRYPTION_TAG_LENGTH,
+        ).await?;
         Ok(())
     }
 }
@@ -229,7 +237,10 @@ impl<St: Stream> Receiver<St> {
 
     pub async fn receive(&mut self) -> Result<Bytes, Error> {
         // Read data
-        let msg = recv_frame(&mut self.stream, self.max_message_size).await?;
+        let msg = recv_frame(
+            &mut self.stream,
+            self.max_message_size + ENCRYPTION_TAG_LENGTH,
+        ).await?;
 
         // Decrypt data
         let nonce = self.peer_nonce()?;
@@ -347,6 +358,93 @@ mod tests {
 
             let result = receiver.receive().await;
             assert!(matches!(result, Err(Error::DecryptionFailed)));
+        });
+    }
+
+    #[test]
+    fn test_send_too_large() {
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+            let message = b"hello world";
+            let (sink, _) = mock_channel::new();
+            let mut sender = Sender {
+                cipher,
+                sink,
+                max_message_size: message.len() - 1,
+                dialer: true,
+                iter: 0,
+                seq: 0,
+            };
+
+            let result = sender.send(message).await;
+            let expected_length = message.len() + ENCRYPTION_TAG_LENGTH;
+            assert!(matches!(result, Err(Error::SendTooLarge(n)) if n == expected_length));
+        });
+    }
+
+    #[test]
+    fn test_receive_too_large() {
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+            let message = b"hello world";
+            let (sink, stream) = mock_channel::new();
+
+            let mut sender = Sender {
+                cipher: cipher.clone(),
+                sink,
+                max_message_size: message.len(),
+                dialer: true,
+                iter: 0,
+                seq: 0,
+            };
+            let mut receiver = Receiver {
+                cipher,
+                stream,
+                max_message_size: message.len() - 1,
+                dialer: false,
+                iter: 0,
+                seq: 0,
+            };
+
+            sender.send(message).await.unwrap();
+            let result = receiver.receive().await;
+            let expected_length = message.len() + ENCRYPTION_TAG_LENGTH;
+            assert!(matches!(result, Err(Error::ReadTooLarge(n)) if n == expected_length));
+        });
+    }
+
+    #[test]
+    fn test_send_receive() {
+        let (executor, _, _) = Executor::default();
+        executor.start(async move {
+            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
+            let message = b"hello world";
+            let max_message_size = message.len();
+
+            let (sink, stream) = mock_channel::new();
+            let mut sender = Sender {
+                cipher: cipher.clone(),
+                sink,
+                max_message_size,
+                dialer: true,
+                iter: 0,
+                seq: 0,
+            };
+            let mut receiver = Receiver {
+                cipher,
+                stream,
+                max_message_size,
+                dialer: false,
+                iter: 0,
+                seq: 0,
+            };
+
+            // Send data
+            sender.send(message).await.unwrap();
+            let data = receiver.receive().await.unwrap();
+            assert_eq!(data, &message[..]);
         });
     }
 }
