@@ -114,8 +114,6 @@
 //!   won't just immediately be dropped?
 
 mod actors;
-#[cfg(test)]
-mod byzantine;
 mod config;
 pub use config::Config;
 mod encoder;
@@ -172,10 +170,6 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use byzantine::{
-        conflicter::{self, Conflicter},
-        nuller::{self, Nuller},
-    };
     use commonware_cryptography::{Ed25519, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network};
@@ -2165,13 +2159,13 @@ mod tests {
                 let supervisor =
                     mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 if idx_scheme == 0 {
-                    let cfg = conflicter::Config {
+                    let cfg = mocks::conflicter::Config {
                         crypto: scheme,
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: Conflicter<_, _, Sha256, _> =
-                        conflicter::Conflicter::new(runtime.clone(), cfg);
+                    let engine: mocks::conflicter::Conflicter<_, _, Sha256, _> =
+                        mocks::conflicter::Conflicter::new(runtime.clone(), cfg);
                     runtime.spawn("byzantine_engine", async move {
                         engine
                             .run(
@@ -2373,12 +2367,13 @@ mod tests {
                 let supervisor =
                     mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 if idx_scheme == 0 {
-                    let cfg = nuller::Config {
+                    let cfg = mocks::nuller::Config {
                         crypto: scheme,
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: Nuller<_, _, Sha256, _> = nuller::Nuller::new(runtime.clone(), cfg);
+                    let engine: mocks::nuller::Nuller<_, _, Sha256, _> =
+                        mocks::nuller::Nuller::new(runtime.clone(), cfg);
                     runtime.spawn("byzantine_engine", async move {
                         engine
                             .run(
