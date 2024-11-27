@@ -134,14 +134,14 @@
 //! // Configure network
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
-//! let max_message_size = 1_024; // 1KB
+//! const MAX_MESSAGE_SIZE: usize = 1_024; // 1KB
 //! let p2p_cfg = authenticated::Config::aggressive(
 //!     signer.clone(),
 //!     application_namespace,
 //!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,
-//!     max_message_size,
+//!     MAX_MESSAGE_SIZE,
 //! );
 //!
 //! // Start runtime
@@ -156,12 +156,14 @@
 //!     oracle.register(0, vec![signer.public_key(), peer1, peer2, peer3]);
 //!
 //!     // Register some channel
+//!     const MAX_MESSAGE_BACKLOG: usize = 128;
+//!     const COMPRESSION_LEVEL: Option<u8> = Some(3);
 //!     let (sender, receiver) = network.register(
 //!         0,
 //!         Quota::per_second(NonZeroU32::new(1).unwrap()),
-//!         max_message_size,
-//!         128, // max backlog
-//!         Some(3), // compression level
+//!         MAX_MESSAGE_SIZE,
+//!         MAX_MESSAGE_BACKLOG,
+//!         COMPRESSION_LEVEL,
 //!     );
 //!
 //!     // Run network
@@ -232,6 +234,10 @@ mod tests {
         One,
     }
 
+    const ONE_KILOBYTE: usize = 1_024;
+    const ONE_MEGABYTE: usize = 1_024 * ONE_KILOBYTE;
+    const DEFAULT_MESSAGE_BACKLOG: usize = 128;
+
     /// Test connectivity between `n` peers.
     ///
     /// We set a unique `base_port` for each test to avoid "address already in use"
@@ -284,8 +290,8 @@ mod tests {
             let (mut sender, mut receiver) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(5).unwrap()), // Ensure we hit the rate limit
-                1_024,
-                128,
+                ONE_KILOBYTE,
+                DEFAULT_MESSAGE_BACKLOG,
                 None,
             );
 
@@ -400,21 +406,21 @@ mod tests {
 
     fn run_deterministic_test(seed: u64, mode: Mode) {
         // Configure test
-        let max_message_size = 1_024 * 1_024; // 1MB
-        let n = 25;
-        let base_port = 3000;
+        const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
+        const NUM_PEERS: usize = 25;
+        const BASE_PORT: u16 = 3000;
 
         // Run first instance
         let (executor, runtime, auditor) = deterministic::Executor::seeded(seed);
         executor.start(async move {
-            run_network(runtime, max_message_size, base_port, n, mode).await;
+            run_network(runtime, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
         });
         let state = auditor.state();
 
         // Compare result to second instance
         let (executor, runtime, auditor) = deterministic::Executor::seeded(seed);
         executor.start(async move {
-            run_network(runtime, max_message_size, base_port, n, mode).await;
+            run_network(runtime, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
         });
         assert_eq!(state, auditor.state());
     }
@@ -445,10 +451,10 @@ mod tests {
         let cfg = tokio::Config::default();
         let (executor, runtime) = tokio::Executor::init(cfg.clone());
         executor.start(async move {
-            let max_message_size = 1_024 * 1_024; // 1MB
+            const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
             let base_port = 3000;
             let n = 10;
-            run_network(runtime, max_message_size, base_port, n, Mode::One).await;
+            run_network(runtime, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
         });
     }
 
@@ -508,8 +514,8 @@ mod tests {
                 let (mut sender, mut receiver) = network.register(
                     0,
                     Quota::per_second(NonZeroU32::new(10).unwrap()),
-                    1_024 * 1_024, // 1MB
-                    128,
+                    ONE_MEGABYTE,
+                    DEFAULT_MESSAGE_BACKLOG,
                     None,
                 );
 
@@ -609,8 +615,8 @@ mod tests {
                 let (mut sender, mut receiver) = network.register(
                     0,
                     Quota::per_second(NonZeroU32::new(10).unwrap()),
-                    5 * 1_024 * 1_024, // 5MB
-                    128,
+                    5 * ONE_MEGABYTE,
+                    DEFAULT_MESSAGE_BACKLOG,
                     compression,
                 );
 
@@ -711,8 +717,8 @@ mod tests {
             let (mut sender, _) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                1_024 * 1_024, // 1MB
-                128,
+                ONE_MEGABYTE,
+                DEFAULT_MESSAGE_BACKLOG,
                 compression,
             );
 

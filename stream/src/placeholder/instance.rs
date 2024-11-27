@@ -258,7 +258,7 @@ mod tests {
     use super::*;
     use commonware_runtime::{
         deterministic::Executor,
-        mock_channel,
+        mocks,
         Runner,
     };
 
@@ -267,7 +267,7 @@ mod tests {
         let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (sink, _) = mock_channel::new();
+            let (sink, _) = mocks::new();
             let mut sender = Sender {
                 cipher,
                 sink,
@@ -286,7 +286,7 @@ mod tests {
         let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (sink, _) = mock_channel::new();
+            let (sink, _) = mocks::new();
             let mut sender = Sender {
                 cipher,
                 sink,
@@ -305,7 +305,7 @@ mod tests {
         let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (_, stream) = mock_channel::new();
+            let (_, stream) = mocks::new();
             let mut receiver = Receiver {
                 cipher,
                 stream,
@@ -324,7 +324,7 @@ mod tests {
         let (executuor, _, _) = Executor::default();
         executuor.start(async {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (_, stream) = mock_channel::new();
+            let (_, stream) = mocks::new();
             let mut receiver = Receiver {
                 cipher,
                 stream,
@@ -343,7 +343,7 @@ mod tests {
         let (executor, _, _) = Executor::default();
         executor.start(async move {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (mut sink, stream) = mock_channel::new();
+            let (mut sink, stream) = mocks::new();
             let mut receiver = Receiver {
                 cipher,
                 stream,
@@ -367,7 +367,7 @@ mod tests {
         executor.start(async move {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let message = b"hello world";
-            let (sink, _) = mock_channel::new();
+            let (sink, _) = mocks::new();
             let mut sender = Sender {
                 cipher,
                 sink,
@@ -389,7 +389,7 @@ mod tests {
         executor.start(async move {
             let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
             let message = b"hello world";
-            let (sink, stream) = mock_channel::new();
+            let (sink, stream) = mocks::new();
 
             let mut sender = Sender {
                 cipher: cipher.clone(),
@@ -423,7 +423,7 @@ mod tests {
             let message = b"hello world";
             let max_message_size = message.len();
 
-            let (sink, stream) = mock_channel::new();
+            let (sink, stream) = mocks::new();
             let mut sender = Sender {
                 cipher: cipher.clone(),
                 sink,

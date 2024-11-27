@@ -156,7 +156,7 @@ fn main() {
     }
 
     // Configure network
-    let max_message_size = 1024; // 1 KB
+    const MAX_MESSAGE_SIZE: usize = 1024; // 1 KB
     let p2p_registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
@@ -164,7 +164,7 @@ fn main() {
         p2p_registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        max_message_size,
+        MAX_MESSAGE_SIZE,
     );
 
     // Start runtime
@@ -179,12 +179,14 @@ fn main() {
         oracle.register(0, recipients).await;
 
         // Initialize chat
+        const MAX_MESSAGE_BACKLOG: usize = 128;
+        const COMPRESSION_LEVEL: Option<u8> = Some(3);
         let (chat_sender, chat_receiver) = network.register(
             handler::CHANNEL,
             Quota::per_second(NonZeroU32::new(128).unwrap()),
-            max_message_size,
-            128,  // 128 messages inflight
-            Some(3),
+            MAX_MESSAGE_SIZE,
+            MAX_MESSAGE_BACKLOG,
+            COMPRESSION_LEVEL,
         );
 
         // Start network

@@ -1,6 +1,10 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{Error, Sink, Stream};
+use crate::{
+    Error,
+    Sink as SinkTrait,
+    Stream as StreamTrait,
+};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use std::{
@@ -8,8 +12,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-// A mock channel struct that is used internally by ByteSink and ByteStream.
-struct ByteChannel {
+// A mock channel struct that is used internally by Sink and Stream.
+struct Channel {
     // Stores the bytes sent by the sink that are not yet read by the stream.
     buffer: VecDeque<u8>,
 
@@ -19,24 +23,24 @@ struct ByteChannel {
     waiter: Option<(usize, oneshot::Sender<Bytes>)>,
 }
 
-// Returns an async-safe ByteSink/ByteStream pair that share an underlying ByteChannel.
-pub fn new() -> (ByteSink, ByteStream) {
-    let channel = Arc::new(Mutex::new(ByteChannel {
+// Returns an async-safe Sink/Stream pair that share an underlying ByteChannel.
+pub fn new() -> (Sink, Stream) {
+    let channel = Arc::new(Mutex::new(Channel {
         buffer: VecDeque::new(),
         waiter: None,
     }));
     (
-        ByteSink { channel: channel.clone() },
-        ByteStream { channel },
+        Sink { channel: channel.clone() },
+        Stream { channel },
     )
 }
 
 // A mock sink that implements the Sink trait.
-pub struct ByteSink {
-    channel: Arc<Mutex<ByteChannel>>,
+pub struct Sink {
+    channel: Arc<Mutex<Channel>>,
 }
 
-impl Sink for ByteSink {
+impl SinkTrait for Sink {
     // Writes the message to the buffer.
     // Resolves the oneshot receiver if-and-only-if the buffer is large enough.
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
@@ -64,11 +68,11 @@ impl Sink for ByteSink {
 }
 
 // A mock stream that implements the Stream trait.
-pub struct ByteStream {
-    channel: Arc<Mutex<ByteChannel>>,
+pub struct Stream {
+    channel: Arc<Mutex<Channel>>,
 }
 
-impl Stream for ByteStream {
+impl StreamTrait for Stream {
     // Blocks until the buffer has enough bytes to fill `buf` exactly.
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         let os_recv = {
@@ -172,7 +176,7 @@ mod tests {
     #[test]
     fn test_recv_error() {
         let (sink, mut stream) = new();
-        let (executor, _runtime, _) = Executor::default();
+        let (executor, _, _) = Executor::default();
 
         // If the oneshot sender is dropped before the oneshot receiver is resolved,
         // the recv function should return an error.

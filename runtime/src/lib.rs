@@ -12,7 +12,7 @@
 //! expect breaking changes and occasional instability.
 
 pub mod deterministic;
-pub mod mock_channel;
+pub mod mocks;
 pub mod tokio;
 
 mod utils;

@@ -21,13 +21,11 @@ pub async fn send_frame<S: Sink>(
 
     // Send the length of the message
     let f: [u8; 4] = len.to_be_bytes();
-    sink.send(&f)
-        .await
+    sink.send(&f).await
         .map_err(|_| Error::SendFailed)?;
 
     // Send the rest of the message
-    sink.send(buf)
-        .await
+    sink.send(buf).await
         .map_err(|_| Error::SendFailed)?;
 
     Ok(())
@@ -40,8 +38,7 @@ pub async fn recv_frame<T: Stream>(
 ) -> Result<Bytes, Error> {
     // Read the first 4 bytes to get the length of the message
     let mut buf = [0u8; 4];
-    stream.recv(&mut buf)
-        .await
+    stream.recv(&mut buf).await
         .map_err(|_| Error::StreamClosed)?;
 
     // Validate frame size
@@ -55,8 +52,7 @@ pub async fn recv_frame<T: Stream>(
 
     // Read the rest of the message
     let mut buf = vec![0u8; len];
-    stream.recv(&mut buf)
-        .await
+    stream.recv(&mut buf).await
         .map_err(|_| Error::ReadFailed)?;
 
     Ok(Bytes::from(buf))
@@ -68,14 +64,14 @@ mod tests {
     use commonware_runtime::{
         Runner,
         deterministic::Executor,
-        mock_channel,
+        mocks,
     };
     use rand::Rng;
 
     #[test]
     fn test_send_recv_at_max_message_size() {
         const MAX_MESSAGE_SIZE: usize = 512;
-        let (mut sink, mut stream) = mock_channel::new();
+        let (mut sink, mut stream) = mocks::new();
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
@@ -94,7 +90,7 @@ mod tests {
     #[test]
     fn test_send_frame() {
         const MAX_MESSAGE_SIZE: usize = 1024;
-        let (mut sink, mut stream) = mock_channel::new();
+        let (mut sink, mut stream) = mocks::new();
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
@@ -117,8 +113,7 @@ mod tests {
     #[test]
     fn test_read_frame() {
         const MAX_MESSAGE_SIZE: usize = 1024;
-        let (mut sink, mut stream) = mock_channel::new();
-
+        let (mut sink, mut stream) = mocks::new();
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {

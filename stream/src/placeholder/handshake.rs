@@ -197,7 +197,7 @@ mod tests {
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{
         deterministic::Executor,
-        mock_channel,
+        mocks,
         Runner,
     };
     use x25519_dalek::PublicKey;
@@ -292,8 +292,8 @@ mod tests {
             .unwrap();
 
             // Setup a mock sink and stream
-            let (sink, _) = mock_channel::new();
-            let (mut stream_sender, stream) = mock_channel::new();
+            let (sink, _) = mocks::new();
+            let (mut stream_sender, stream) = mocks::new();
 
             // Send message over stream
             runtime.spawn("stream_sender", async move {
@@ -341,8 +341,8 @@ mod tests {
             .unwrap();
 
             // Setup a mock sink and stream
-            let (sink, _) = mock_channel::new();
-            let (mut stream_sender, stream) = mock_channel::new();
+            let (sink, _) = mocks::new();
+            let (mut stream_sender, stream) = mocks::new();
 
             // Send message over stream
             runtime.spawn("stream_sender", async move {
@@ -374,8 +374,8 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Setup a mock sink and stream
-            let (sink, _) = mock_channel::new();
-            let (mut stream_sender, stream) = mock_channel::new();
+            let (sink, _) = mocks::new();
+            let (mut stream_sender, stream) = mocks::new();
 
             // Send invalid data over stream
             runtime.spawn("stream_sender", async move {
@@ -412,8 +412,8 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Setup a mock sink and stream
-            let (sink, _) = mock_channel::new();
-            let (mut stream_sender, stream) = mock_channel::new();
+            let (sink, _) = mocks::new();
+            let (mut stream_sender, stream) = mocks::new();
 
             // Accept connections but do nothing
             runtime.spawn("stream_sender", {
