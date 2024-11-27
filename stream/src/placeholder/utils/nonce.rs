@@ -1,6 +1,6 @@
 use chacha20poly1305::Nonce;
 
-pub fn to_bytes(dialer: bool, iter: u16, seq: u64) -> Nonce {
+pub fn encode(dialer: bool, iter: u16, seq: u64) -> Nonce {
     let mut result = Nonce::default();
     if dialer {
         result[0] = 0b10000000; // Set the first bit of the byte
@@ -17,27 +17,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_to_bytes() {
+    fn test_encode() {
         // Test case 1: dialer is true
-        let nonce = to_bytes(true, 1, 1);
+        let nonce = encode(true, 1, 1);
         assert_eq!(nonce[0], 0b10000000);
         assert_eq!(&nonce[2..4], &1u16.to_be_bytes());
         assert_eq!(&nonce[4..], &1u64.to_be_bytes());
 
         // Test case 2: dialer is false
-        let nonce = to_bytes(false, 1, 1);
+        let nonce = encode(false, 1, 1);
         assert_eq!(nonce[0], 0b00000000);
         assert_eq!(&nonce[2..4], &1u16.to_be_bytes());
         assert_eq!(&nonce[4..], &1u64.to_be_bytes());
 
         // Test case 3: different iter and seq values
-        let nonce = to_bytes(true, 65535, 123456789);
+        let nonce = encode(true, 65535, 123456789);
         assert_eq!(nonce[0], 0b10000000);
         assert_eq!(&nonce[2..4], &65535u16.to_be_bytes());
         assert_eq!(&nonce[4..], &123456789u64.to_be_bytes());
 
         // Test case 4: iter is 0
-        let nonce = to_bytes(true, 0, 123456789);
+        let nonce = encode(true, 0, 123456789);
         assert_eq!(nonce[0], 0b10000000);
         assert_eq!(&nonce[2..4], &0u16.to_be_bytes());
         assert_eq!(&nonce[4..], &123456789u64.to_be_bytes());

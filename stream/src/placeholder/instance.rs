@@ -2,7 +2,7 @@ use super::{
     handshake::{create_handshake, Handshake, IncomingHandshake},
     utils::{
         codec::{recv_frame, send_frame},
-        nonce::to_bytes,
+        nonce::encode,
     },
     x25519, Config, Error,
 };
@@ -188,7 +188,7 @@ impl<Si: Sink> Sender<Si> {
             self.iter += 1;
             self.seq = 0;
         }
-        let nonce = to_bytes(self.dialer, self.iter, self.seq);
+        let nonce = encode(self.dialer, self.iter, self.seq);
         self.seq += 1;
         Ok(nonce)
     }
@@ -230,7 +230,7 @@ impl<St: Stream> Receiver<St> {
             self.iter += 1;
             self.seq = 0;
         }
-        let nonce = to_bytes(!self.dialer, self.iter, self.seq);
+        let nonce = encode(!self.dialer, self.iter, self.seq);
         self.seq += 1;
         Ok(nonce)
     }
@@ -296,7 +296,7 @@ mod tests {
                 seq: u64::MAX,
             };
             let nonce_result = sender.my_nonce().unwrap();
-            assert_eq!(nonce_result, to_bytes(true, 1, 0));
+            assert_eq!(nonce_result, encode(true, 1, 0));
         });
     }
 
@@ -334,7 +334,7 @@ mod tests {
                 seq: u64::MAX,
             };
             let nonce_result = receiver.peer_nonce().unwrap();
-            assert_eq!(nonce_result, to_bytes(true, 1, 0));
+            assert_eq!(nonce_result, encode(true, 1, 0));
         });
     }
 
