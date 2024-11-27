@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use crate::{
     authority::{
         encoder::{finalize_namespace, notarize_namespace, proposal_message},
@@ -14,6 +12,7 @@ use commonware_runtime::{Clock, Spawner};
 use commonware_utils::hex;
 use prost::Message;
 use rand::{CryptoRng, Rng};
+use std::marker::PhantomData;
 use tracing::debug;
 
 pub struct Config<C: Scheme, S: Supervisor<Index = View>> {
