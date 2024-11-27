@@ -1,16 +1,7 @@
-use super::{
-    ingress::{Mailbox, Message},
-    relay::Relay,
-};
-use crate::{
-    authority::{
-        prover::Prover, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE,
-        NOTARIZE, NULLIFY_AND_FINALIZE,
-    },
-    Activity, Proof, Supervisor as Su,
-};
+use super::relay::Relay;
+use crate::{authority::Context, Automaton as Au, Finalizer as Fi, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::Clock;
 use commonware_utils::hex;
@@ -21,10 +12,107 @@ use futures::{
 use rand::{Rng, RngCore};
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::{Arc, Mutex},
+    collections::{HashMap, HashSet},
+    sync::Arc,
     time::Duration,
 };
+
+pub enum Message {
+    Genesis {
+        response: oneshot::Sender<Digest>,
+    },
+    Propose {
+        context: Context,
+        response: oneshot::Sender<Digest>,
+    },
+    Verify {
+        context: Context,
+        payload: Digest,
+        response: oneshot::Sender<bool>,
+    },
+    Broadcast {
+        payload: Digest,
+    },
+    Notarized {
+        proof: Proof,
+        payload: Digest,
+    },
+    Finalized {
+        proof: Proof,
+        payload: Digest,
+    },
+}
+
+#[derive(Clone)]
+pub struct Mailbox {
+    sender: mpsc::Sender<Message>,
+}
+
+impl Mailbox {
+    pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
+        Self { sender }
+    }
+}
+
+impl Au for Mailbox {
+    type Context = Context;
+
+    async fn genesis(&mut self) -> Digest {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Genesis { response })
+            .await
+            .expect("Failed to send genesis");
+        receiver.await.expect("Failed to receive genesis")
+    }
+
+    async fn propose(&mut self, context: Context) -> oneshot::Receiver<Digest> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Propose { context, response })
+            .await
+            .expect("Failed to send propose");
+        receiver
+    }
+
+    async fn verify(&mut self, context: Context, payload: Digest) -> oneshot::Receiver<bool> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(Message::Verify {
+                context,
+                payload,
+                response,
+            })
+            .await
+            .expect("Failed to send verify");
+        receiver
+    }
+}
+
+impl Re for Mailbox {
+    async fn broadcast(&mut self, payload: Digest) {
+        self.sender
+            .send(Message::Broadcast { payload })
+            .await
+            .expect("Failed to send broadcast");
+    }
+}
+
+impl Fi for Mailbox {
+    async fn notarized(&mut self, proof: Proof, payload: Digest) {
+        self.sender
+            .send(Message::Notarized { proof, payload })
+            .await
+            .expect("Failed to send notarized");
+    }
+
+    async fn finalized(&mut self, proof: Proof, payload: Digest) {
+        self.sender
+            .send(Message::Finalized { proof, payload })
+            .await
+            .expect("Failed to send finalized");
+    }
+}
 
 const GENESIS_BYTES: &[u8] = b"genesis";
 
@@ -35,7 +123,7 @@ pub enum Progress {
     Finalized(Proof, Digest),
 }
 
-pub struct ApplicationConfig<H: Hasher> {
+pub struct Config<H: Hasher> {
     pub hasher: H,
 
     pub relay: Arc<Relay>,
@@ -74,7 +162,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
 }
 
 impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
-    pub fn new(runtime: E, cfg: ApplicationConfig<H>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, cfg: Config<H>) -> (Self, Mailbox) {
         // Register self on relay
         let broadcast = cfg.relay.register(cfg.participant.clone());
 
@@ -288,158 +376,6 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-pub struct SupervisorConfig<C: Scheme, H: Hasher> {
-    pub prover: Prover<C, H>,
-    pub participants: BTreeMap<View, Vec<PublicKey>>,
-}
-
-type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
-type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
-
-#[derive(Clone)]
-pub struct Supervisor<C: Scheme, H: Hasher> {
-    participants: BTreeMap<View, (HashMap<PublicKey, u32>, Vec<PublicKey>)>,
-
-    prover: Prover<C, H>,
-
-    pub notarizes: Arc<Mutex<Participation>>,
-    pub finalizes: Arc<Mutex<Participation>>,
-    pub faults: Arc<Mutex<Faults>>,
-}
-
-impl<C: Scheme, H: Hasher> Supervisor<C, H> {
-    pub fn new(cfg: SupervisorConfig<C, H>) -> Self {
-        let mut parsed_participants = BTreeMap::new();
-        for (view, mut validators) in cfg.participants.into_iter() {
-            let mut map = HashMap::new();
-            for (index, validator) in validators.iter().enumerate() {
-                map.insert(validator.clone(), index as u32);
-            }
-            validators.sort();
-            parsed_participants.insert(view, (map, validators));
-        }
-        Self {
-            participants: parsed_participants,
-            prover: cfg.prover,
-            notarizes: Arc::new(Mutex::new(HashMap::new())),
-            finalizes: Arc::new(Mutex::new(HashMap::new())),
-            faults: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-}
-
-impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
-    type Index = View;
-    type Seed = ();
-
-    fn leader(&self, index: Self::Index, _seed: Self::Seed) -> Option<PublicKey> {
-        let closest = match self.participants.range(..=index).next_back() {
-            Some((_, p)) => p,
-            None => {
-                panic!("no participants in required range");
-            }
-        };
-        Some(closest.1[index as usize % closest.1.len()].clone())
-    }
-
-    fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>> {
-        let closest = match self.participants.range(..=index).next_back() {
-            Some((_, p)) => p,
-            None => {
-                panic!("no participants in required range");
-            }
-        };
-        Some(&closest.1)
-    }
-
-    fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32> {
-        let closest = match self.participants.range(..=index).next_back() {
-            Some((_, p)) => p,
-            None => {
-                panic!("no participants in required range");
-            }
-        };
-        closest.0.get(candidate).cloned()
-    }
-
-    async fn report(&self, activity: Activity, proof: Proof) {
-        // We check signatures for all messages to ensure that the prover is working correctly
-        // but in production this isn't necessary (as signatures are already verified in
-        // consensus).
-        match activity {
-            NOTARIZE => {
-                let (view, _, payload, public_key) =
-                    self.prover.deserialize_notarize(proof, true).unwrap();
-                self.notarizes
-                    .lock()
-                    .unwrap()
-                    .entry(view)
-                    .or_default()
-                    .entry(payload)
-                    .or_default()
-                    .insert(public_key);
-            }
-            FINALIZE => {
-                let (view, _, payload, public_key) =
-                    self.prover.deserialize_finalize(proof, true).unwrap();
-                self.finalizes
-                    .lock()
-                    .unwrap()
-                    .entry(view)
-                    .or_default()
-                    .entry(payload)
-                    .or_default()
-                    .insert(public_key);
-            }
-            CONFLICTING_NOTARIZE => {
-                let (public_key, view) = self
-                    .prover
-                    .deserialize_conflicting_notarize(proof, true)
-                    .unwrap();
-                self.faults
-                    .lock()
-                    .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(CONFLICTING_NOTARIZE);
-            }
-            CONFLICTING_FINALIZE => {
-                let (public_key, view) = self
-                    .prover
-                    .deserialize_conflicting_finalize(proof, true)
-                    .unwrap();
-                self.faults
-                    .lock()
-                    .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(CONFLICTING_FINALIZE);
-            }
-            NULLIFY_AND_FINALIZE => {
-                let (public_key, view) = self
-                    .prover
-                    .deserialize_nullify_finalize(proof, true)
-                    .unwrap();
-                self.faults
-                    .lock()
-                    .unwrap()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(NULLIFY_AND_FINALIZE);
-            }
-            unexpected => {
-                panic!("unexpected activity: {}", unexpected);
             }
         }
     }

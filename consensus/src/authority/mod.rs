@@ -274,14 +274,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -290,7 +290,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -335,7 +335,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -527,14 +527,14 @@ mod tests {
                     }
 
                     // Start engine
-                    let supervisor_config = mocks::actor::SupervisorConfig {
+                    let supervisor_config = mocks::supervisor::Config {
                         prover: prover.clone(),
                         participants: view_validators.clone(),
                     };
                     let supervisor =
-                        mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                        mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                     supervisors.insert(validator.clone(), supervisor.clone());
-                    let application_cfg = mocks::actor::ApplicationConfig {
+                    let application_cfg = mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
                         participant: validator,
@@ -543,7 +543,7 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) =
-                        mocks::actor::Application::new(runtime.clone(), application_cfg);
+                        mocks::application::Application::new(runtime.clone(), application_cfg);
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
@@ -589,7 +589,7 @@ mod tests {
                         // Parse events
                         let (validator, event) = done_receiver.next().await.unwrap();
                         match event {
-                            mocks::actor::Progress::Notarized(proof, digest) => {
+                            mocks::application::Progress::Notarized(proof, digest) => {
                                 // Check correctness of proof
                                 let (view, _, payload, _) =
                                     prover.deserialize_notarization(proof, 5, true).unwrap();
@@ -617,7 +617,7 @@ mod tests {
                                     }
                                 }
                             }
-                            mocks::actor::Progress::Finalized(proof, digest) => {
+                            mocks::application::Progress::Finalized(proof, digest) => {
                                 // Check correctness of proof
                                 let (view, _, payload, _) =
                                     prover.deserialize_finalization(proof, 5, true).unwrap();
@@ -750,14 +750,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -766,7 +766,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -811,7 +811,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -929,13 +929,14 @@ mod tests {
             }
 
             // Start engine
-            let supervisor_config = mocks::actor::SupervisorConfig {
+            let supervisor_config = mocks::supervisor::Config {
                 prover: prover.clone(),
                 participants: view_validators.clone(),
             };
-            let supervisor = mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+            let supervisor =
+                mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
             supervisors.push(supervisor.clone());
-            let application_cfg = mocks::actor::ApplicationConfig {
+            let application_cfg = mocks::application::Config {
                 hasher: hasher.clone(),
                 relay: relay.clone(),
                 participant: validator.clone(),
@@ -944,7 +945,7 @@ mod tests {
                 verify_latency: (10.0, 5.0),
             };
             let (actor, application) =
-                mocks::actor::Application::new(runtime.clone(), application_cfg);
+                mocks::application::Application::new(runtime.clone(), application_cfg);
             runtime.spawn("application", async move {
                 actor.run().await;
             });
@@ -988,7 +989,7 @@ mod tests {
             let mut validator_finalized = HashSet::new();
             loop {
                 let (candidate, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -1097,14 +1098,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -1113,7 +1114,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -1158,7 +1159,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -1292,15 +1293,15 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = if idx_scheme == 0 {
-                    mocks::actor::ApplicationConfig {
+                    mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
                         participant: validator,
@@ -1309,7 +1310,7 @@ mod tests {
                         verify_latency: (3_000.0, 5.0),
                     }
                 } else {
-                    mocks::actor::ApplicationConfig {
+                    mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
                         participant: validator,
@@ -1319,7 +1320,7 @@ mod tests {
                     }
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -1364,7 +1365,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -1498,14 +1499,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -1514,7 +1515,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -1589,7 +1590,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -1700,14 +1701,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -1716,7 +1717,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -1762,7 +1763,7 @@ mod tests {
             let mut highest_finalized = 0;
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 10, true).unwrap();
                     if digest != payload {
@@ -1856,7 +1857,7 @@ mod tests {
             let mut completed = HashSet::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 10, true).unwrap();
                     if digest != payload {
@@ -1971,14 +1972,14 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
-                let application_cfg = mocks::actor::ApplicationConfig {
+                let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
                     participant: validator,
@@ -1987,7 +1988,7 @@ mod tests {
                     verify_latency: (10.0, 5.0),
                 };
                 let (actor, application) =
-                    mocks::actor::Application::new(runtime.clone(), application_cfg);
+                    mocks::application::Application::new(runtime.clone(), application_cfg);
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
@@ -2032,7 +2033,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -2157,12 +2158,12 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 if idx_scheme == 0 {
                     let cfg = conflicter::Config {
                         crypto: scheme,
@@ -2181,7 +2182,7 @@ mod tests {
                     });
                 } else {
                     supervisors.push(supervisor.clone());
-                    let application_cfg = mocks::actor::ApplicationConfig {
+                    let application_cfg = mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
                         participant: validator,
@@ -2190,7 +2191,7 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) =
-                        mocks::actor::Application::new(runtime.clone(), application_cfg);
+                        mocks::application::Application::new(runtime.clone(), application_cfg);
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
@@ -2236,7 +2237,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
@@ -2365,12 +2366,12 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::actor::SupervisorConfig {
+                let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
                 let supervisor =
-                    mocks::actor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
                 if idx_scheme == 0 {
                     let cfg = nuller::Config {
                         crypto: scheme,
@@ -2388,7 +2389,7 @@ mod tests {
                     });
                 } else {
                     supervisors.push(supervisor.clone());
-                    let application_cfg = mocks::actor::ApplicationConfig {
+                    let application_cfg = mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
                         participant: validator,
@@ -2397,7 +2398,7 @@ mod tests {
                         verify_latency: (10.0, 5.0),
                     };
                     let (actor, application) =
-                        mocks::actor::Application::new(runtime.clone(), application_cfg);
+                        mocks::application::Application::new(runtime.clone(), application_cfg);
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
@@ -2443,7 +2444,7 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::actor::Progress::Finalized(proof, digest) = event {
+                if let mocks::application::Progress::Finalized(proof, digest) = event {
                     let (view, _, payload, _) =
                         prover.deserialize_finalization(proof, 5, true).unwrap();
                     if digest != payload {
