@@ -167,7 +167,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
                 return Err(Error::HandshakeTimeout);
             },
             result = recv_frame(&mut stream, max_message_size) => {
-                result.map_err(|_| Error::ReadFailed)?
+                result.map_err(|_| Error::RecvFailed)?
             },
         };
 

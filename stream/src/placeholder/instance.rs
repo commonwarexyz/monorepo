@@ -68,7 +68,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
                 return Err(Error::HandshakeTimeout)
             },
             result = recv_frame(&mut stream, config.max_message_size) => {
-                result.map_err(|_| Error::ReadFailed)?
+                result.map_err(|_| Error::RecvFailed)?
             },
         };
 
@@ -411,7 +411,7 @@ mod tests {
             sender.send(message).await.unwrap();
             let result = receiver.receive().await;
             let expected_length = message.len() + ENCRYPTION_TAG_LENGTH;
-            assert!(matches!(result, Err(Error::ReadTooLarge(n)) if n == expected_length));
+            assert!(matches!(result, Err(Error::RecvTooLarge(n)) if n == expected_length));
         });
     }
 

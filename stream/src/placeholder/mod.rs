@@ -143,10 +143,10 @@ pub enum Error {
     InvalidSignature,
     #[error("wrong peer")]
     WrongPeer,
-    #[error("read failed")]
-    ReadFailed,
-    #[error("read too large: {0} bytes")]
-    ReadTooLarge(usize),
+    #[error("recv failed")]
+    RecvFailed,
+    #[error("recv too large: {0} bytes")]
+    RecvTooLarge(usize),
     #[error("send failed")]
     SendFailed,
     #[error("send zero size")]
