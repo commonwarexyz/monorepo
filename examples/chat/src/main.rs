@@ -156,6 +156,7 @@ fn main() {
     }
 
     // Configure network
+    let max_message_size = 1024; // 1 KB
     let p2p_registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
@@ -163,6 +164,7 @@ fn main() {
         p2p_registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        max_message_size,
     );
 
     // Start runtime
@@ -180,7 +182,7 @@ fn main() {
         let (chat_sender, chat_receiver) = network.register(
             handler::CHANNEL,
             Quota::per_second(NonZeroU32::new(128).unwrap()),
-            1024, // 1 KB max message size
+            max_message_size,
             128,  // 128 messages inflight
             Some(3),
         );

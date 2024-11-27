@@ -152,6 +152,7 @@ impl<C: Scheme> Config<C> {
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
+        max_message_size: usize,
     ) -> Self {
         Self {
             crypto,
@@ -162,7 +163,7 @@ impl<C: Scheme> Config<C> {
             bootstrappers,
 
             allow_private_ips: true,
-            max_message_size: 2^16,
+            max_message_size,
             mailbox_size: 1_000,
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),

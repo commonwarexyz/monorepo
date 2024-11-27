@@ -449,10 +449,7 @@ pub struct Stream {
 }
 
 impl crate::Stream for Stream {
-    async fn recv(
-        &mut self,
-        buf: &mut [u8],
-    ) -> Result<(), Error> {
+    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         // Wait for the stream to be readable
         timeout(self.context.executor.cfg.read_timeout, self.stream.read_exact(buf))
             .await

@@ -134,12 +134,14 @@
 //! // Configure network
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
+//! let max_message_size = 1_024; // 1KB
 //! let p2p_cfg = authenticated::Config::aggressive(
 //!     signer.clone(),
 //!     application_namespace,
 //!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,
+//!     max_message_size,
 //! );
 //!
 //! // Start runtime
@@ -157,7 +159,7 @@
 //!     let (sender, receiver) = network.register(
 //!         0,
 //!         Quota::per_second(NonZeroU32::new(1).unwrap()),
-//!         1024, // max message size
+//!         max_message_size,
 //!         128, // max backlog
 //!         Some(3), // compression level
 //!     );

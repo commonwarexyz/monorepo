@@ -144,6 +144,8 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
 
         // Send/Receive messages from the peer
         let (max_message_size, mut conn_sender, mut conn_receiver) = connection.split();
+        // TODO: would normally check for underflow here, but CHUNK_HEADER_SIZE is being removed,
+        // see (https://github.com/commonwarexyz/monorepo/issues/186).
         let max_chunk_size = max_message_size - CHUNK_HEADER_SIZE;
         let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender",{
             let runtime = self.runtime.clone();

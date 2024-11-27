@@ -145,8 +145,6 @@ pub enum Error {
     WrongPeer,
     #[error("read failed")]
     ReadFailed,
-    #[error("read malformed")]
-    ReadMalformed,
     #[error("read too large: {0} bytes")]
     ReadTooLarge(usize),
     #[error("send failed")]

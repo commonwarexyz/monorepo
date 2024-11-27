@@ -209,12 +209,14 @@ fn main() {
     }
 
     // Configure network
+    let max_message_size = 1024 * 1024; // 1 MB
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
         APPLICATION_NAMESPACE,
         Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        max_message_size,
     );
 
     // Start runtime
@@ -257,7 +259,7 @@ fn main() {
             let (contributor_sender, contributor_receiver) = network.register(
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                1024 * 1024, // 1 MB max message size
+                max_message_size,
                 256,         // 256 messages in flight
                 Some(3),
             );

@@ -931,9 +931,7 @@ impl Networking {
         // Construct connection
         let (dialer_sender, dialer_receiver) = mock_channel::new();
         let (dialee_sender, dialee_receiver) = mock_channel::new();
-        sender
-            .send((dialer, dialer_sender, dialee_receiver))
-            .await
+        sender.send((dialer, dialer_sender, dialee_receiver)).await
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
             Sink {
@@ -1010,8 +1008,7 @@ pub struct Sink {
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         self.auditor.send(self.me, self.peer, Bytes::copy_from_slice(msg));
-        self.sender.send(msg)
-            .await
+        self.sender.send(msg).await
             .map_err(|_| Error::SendFailed)?;
         self.metrics.network_bandwidth.inc_by(msg.len() as u64);
         Ok(())

@@ -198,10 +198,7 @@ impl<Si: Sink> Sender<Si> {
             .map_err(|_| Error::EncryptionFailed)?;
 
         // Send data
-        send_frame(
-            &mut self.sink,
-            &msg, self.max_message_size
-        ).await?;
+        send_frame(&mut self.sink, &msg, self.max_message_size).await?;
         Ok(())
     }
 }
@@ -232,10 +229,7 @@ impl<St: Stream> Receiver<St> {
 
     pub async fn receive(&mut self) -> Result<Bytes, Error> {
         // Read data
-        let msg = recv_frame(
-            &mut self.stream,
-            self.max_message_size
-        ).await?;
+        let msg = recv_frame(&mut self.stream, self.max_message_size).await?;
 
         // Decrypt data
         let nonce = self.peer_nonce()?;
