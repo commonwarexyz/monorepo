@@ -2,7 +2,7 @@ use super::{
     handshake::{create_handshake, Handshake, IncomingHandshake},
     utils::{
         codec::{recv_frame, send_frame},
-        nonce::nonce_bytes,
+        nonce::to_bytes,
     },
     x25519, Config, Error,
 };
@@ -184,7 +184,7 @@ impl<Si: Sink> Sender<Si> {
             self.iter += 1;
             self.seq = 0;
         }
-        let nonce = nonce_bytes(self.dialer, self.iter, self.seq);
+        let nonce = to_bytes(self.dialer, self.iter, self.seq);
         self.seq += 1;
         Ok(nonce)
     }
@@ -225,7 +225,7 @@ impl<St: Stream> Receiver<St> {
             self.iter += 1;
             self.seq = 0;
         }
-        let nonce = nonce_bytes(!self.dialer, self.iter, self.seq);
+        let nonce = to_bytes(!self.dialer, self.iter, self.seq);
         self.seq += 1;
         Ok(nonce)
     }
@@ -291,7 +291,7 @@ mod tests {
                 seq: u64::MAX,
             };
             let nonce_result = sender.my_nonce().unwrap();
-            assert_eq!(nonce_result, nonce_bytes(true, 1, 0));
+            assert_eq!(nonce_result, to_bytes(true, 1, 0));
         });
     }
 
@@ -329,7 +329,7 @@ mod tests {
                 seq: u64::MAX,
             };
             let nonce_result = receiver.peer_nonce().unwrap();
-            assert_eq!(nonce_result, nonce_bytes(true, 1, 0));
+            assert_eq!(nonce_result, to_bytes(true, 1, 0));
         });
     }
 
@@ -348,6 +348,7 @@ mod tests {
                 seq: 0,
             };
 
+            // Send invalid ciphertext
             send_frame(&mut sink, b"invalid data", receiver.max_message_size).await.unwrap();
 
             let result = receiver.receive().await;

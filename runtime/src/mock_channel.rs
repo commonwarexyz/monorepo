@@ -43,9 +43,9 @@ impl Sink for ByteSink {
             // If there is a waiter and the buffer is large enough,
             // return the waiter (while clearing the waiter field).
             // Otherwise, return early.
-            if channel.waiter.as_ref().map_or(false, |(min, _)| *min <= channel.buffer.len()) {
-                let (min, os_send) = channel.waiter.take().unwrap();
-                let data: Vec<u8> = channel.buffer.drain(0..min).collect();
+            if channel.waiter.as_ref().map_or(false, |(requested, _)| *requested <= channel.buffer.len()) {
+                let (requested, os_send) = channel.waiter.take().unwrap();
+                let data: Vec<u8> = channel.buffer.drain(0..requested).collect();
                 (os_send, Bytes::from(data))
             } else {
                 return Ok(());
@@ -142,8 +142,11 @@ mod tests {
 
         block_on(async {
             futures::try_join!(
-                sink.send(data),
                 stream.recv(&mut buf),
+                async {
+                    std::thread::sleep(std::time::Duration::from_millis(10_000));
+                    sink.send(data).await
+                },
             )
             .unwrap();
         });

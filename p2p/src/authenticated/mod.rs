@@ -443,7 +443,10 @@ mod tests {
         let cfg = tokio::Config::default();
         let (executor, runtime) = tokio::Executor::init(cfg.clone());
         executor.start(async move {
-            run_network(runtime, cfg.maximum_buffer_size, 3000, 10, Mode::One).await;
+            let max_message_size = 1_024 * 1_024; // 1MB
+            let base_port = 3000;
+            let n = 10;
+            run_network(runtime, max_message_size, base_port, n, Mode::One).await;
         });
     }
 

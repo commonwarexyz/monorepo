@@ -80,11 +80,11 @@ mod tests {
         const MAX_MESSAGE_SIZE: usize = 1024;
         let (mut sink, mut stream) = mock_channel::new();
 
-        let mut buf = [0u8; 512];
-        rand::thread_rng().fill(&mut buf);
-
-        let (executor, _runtime, _) = Executor::default();
+        let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
+            let mut buf = [0u8; 512];
+            runtime.fill(&mut buf);
+
             let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
 
@@ -99,11 +99,11 @@ mod tests {
         const MAX_MESSAGE_SIZE: usize = 1024;
         let (mut sink, mut stream) = mock_channel::new();
 
-        let mut buf = [0u8; 512];
-        rand::thread_rng().fill(&mut buf);
-
-        let (executor, _runtime, _) = Executor::default();
+        let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
+            let mut buf = [0u8; 512];
+            runtime.fill(&mut buf);
+
             let result = send_frame(&mut sink, &buf, MAX_MESSAGE_SIZE).await;
             assert!(result.is_ok());
 
@@ -122,11 +122,12 @@ mod tests {
         const MAX_MESSAGE_SIZE: usize = 1024;
         let (mut sink, mut stream) = mock_channel::new();
 
-        let mut buf = [0u8; 512];
-        rand::thread_rng().fill(&mut buf);
 
-        let (executor, _runtime, _) = Executor::default();
+        let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
+            let mut buf = [0u8; 512];
+            runtime.fill(&mut buf);
+
             let mut b = [0u8; 4];
             (buf.len() as u32).to_be_bytes().iter().enumerate().for_each(|(i, &byte)| {
                 b[i] = byte;
