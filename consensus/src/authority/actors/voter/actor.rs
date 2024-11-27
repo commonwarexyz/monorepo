@@ -741,19 +741,27 @@ impl<
         debug!(view = self.view, "broadcasted nullify");
     }
 
-    async fn nullify(&mut self, nullify: wire::Nullify) -> Option<()> {
+    async fn nullify(&mut self, nullify: wire::Nullify) {
         // Ensure we are in the right view to process this message
         if !self.interesting(nullify.view, false) {
-            return None;
+            return;
         }
 
         // Parse signature
-        let signature = nullify.signature.as_ref()?;
+        let Some(signature) = nullify.signature.as_ref() else {
+            return;
+        };
 
         // Verify that signer is a validator
-        let participants = self.supervisor.participants(nullify.view)?;
-        let public_key_index: usize = signature.public_key.try_into().ok()?;
-        let public_key = participants.get(public_key_index)?.clone();
+        let Some(participants) = self.supervisor.participants(nullify.view) else {
+            return;
+        };
+        let Ok(public_key_index) = usize::try_from(signature.public_key) else {
+            return;
+        };
+        let Some(public_key) = participants.get(public_key_index).cloned() else {
+            return;
+        };
 
         // Verify the signature
         let nullify_message = nullify_message(nullify.view);
@@ -763,12 +771,11 @@ impl<
             &public_key,
             &signature.signature,
         ) {
-            return None;
+            return;
         }
 
         // Handle nullify
         self.handle_nullify(&public_key, nullify).await;
-        Some(())
     }
 
     async fn handle_nullify(&mut self, public_key: &PublicKey, nullify: wire::Nullify) {
@@ -1055,22 +1062,32 @@ impl<
         }
     }
 
-    async fn notarize(&mut self, notarize: wire::Notarize) -> Option<()> {
+    async fn notarize(&mut self, notarize: wire::Notarize) {
         // Extract proposal
-        let proposal = notarize.proposal.as_ref()?;
+        let Some(proposal) = notarize.proposal.as_ref() else {
+            return;
+        };
 
         // Ensure we are in the right view to process this message
         if !self.interesting(proposal.view, false) {
-            return None;
+            return;
         }
 
         // Parse signature
-        let signature = notarize.signature.as_ref()?;
+        let Some(signature) = notarize.signature.as_ref() else {
+            return;
+        };
 
         // Verify that signer is a validator
-        let participants = self.supervisor.participants(proposal.view)?;
-        let public_key_index: usize = signature.public_key.try_into().ok()?;
-        let public_key = participants.get(public_key_index)?.clone();
+        let Some(participants) = self.supervisor.participants(proposal.view) else {
+            return;
+        };
+        let Ok(public_key_index) = usize::try_from(signature.public_key) else {
+            return;
+        };
+        let Some(public_key) = participants.get(public_key_index).cloned() else {
+            return;
+        };
 
         // Verify the signature
         let notarize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
@@ -1080,12 +1097,11 @@ impl<
             &public_key,
             &signature.signature,
         ) {
-            return None;
+            return;
         }
 
         // Handle notarize
         self.handle_notarize(&public_key, notarize).await;
-        Some(())
     }
 
     async fn handle_notarize(&mut self, public_key: &PublicKey, notarize: wire::Notarize) {
@@ -1254,22 +1270,32 @@ impl<
         self.enter_view(nullification.view + 1);
     }
 
-    async fn finalize(&mut self, finalize: wire::Finalize) -> Option<()> {
+    async fn finalize(&mut self, finalize: wire::Finalize) {
         // Extract proposal
-        let proposal = finalize.proposal.as_ref()?;
+        let Some(proposal) = finalize.proposal.as_ref() else {
+            return;
+        };
 
         // Ensure we are in the right view to process this message
         if !self.interesting(proposal.view, false) {
-            return None;
+            return;
         }
 
         // Parse signature
-        let signature = finalize.signature.as_ref()?;
+        let Some(signature) = finalize.signature.as_ref() else {
+            return;
+        };
 
         // Verify that signer is a validator
-        let participants = self.supervisor.participants(proposal.view)?;
-        let public_key_index: usize = signature.public_key.try_into().ok()?;
-        let public_key = participants.get(public_key_index)?.clone();
+        let Some(participants) = self.supervisor.participants(proposal.view) else {
+            return;
+        };
+        let Ok(public_key_index) = usize::try_from(signature.public_key) else {
+            return;
+        };
+        let Some(public_key) = participants.get(public_key_index).cloned() else {
+            return;
+        };
 
         // Verify the signature
         let finalize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
@@ -1279,12 +1305,11 @@ impl<
             &public_key,
             &signature.signature,
         ) {
-            return None;
+            return;
         }
 
         // Handle finalize
         self.handle_finalize(&public_key, finalize).await;
-        Some(())
     }
 
     async fn handle_finalize(&mut self, public_key: &PublicKey, finalize: wire::Finalize) {
