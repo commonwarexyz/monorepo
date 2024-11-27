@@ -121,6 +121,7 @@ pub use config::Config;
 mod encoder;
 mod engine;
 pub use engine::Engine;
+mod metrics;
 #[cfg(test)]
 mod mocks;
 pub mod prover;

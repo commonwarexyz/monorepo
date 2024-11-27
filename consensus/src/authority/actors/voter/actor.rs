@@ -6,6 +6,7 @@ use crate::{
             finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
             proposal_message,
         },
+        metrics,
         prover::Prover,
         verifier::{threshold, verify_finalization, verify_notarization, verify_nullification},
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
@@ -24,7 +25,7 @@ use futures::{
     future::Either,
     pin_mut, StreamExt,
 };
-use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge};
 use prost::Message as _;
 use rand::Rng;
 use std::{
@@ -446,6 +447,8 @@ pub struct Actor<
 
     current_view: Gauge,
     tracked_views: Gauge,
+    received_messages: Family<metrics::PeerMessage, Counter>,
+    broadcast_messages: Family<metrics::Message, Counter>,
 }
 
 impl<
@@ -466,10 +469,22 @@ impl<
         // Initialize metrics
         let current_view = Gauge::<i64, AtomicI64>::default();
         let tracked_views = Gauge::<i64, AtomicI64>::default();
+        let received_messages = Family::<metrics::PeerMessage, Counter>::default();
+        let broadcast_messages = Family::<metrics::Message, Counter>::default();
         {
             let mut registry = cfg.registry.lock().unwrap();
             registry.register("current_view", "current view", current_view.clone());
             registry.register("tracked_views", "tracked views", tracked_views.clone());
+            registry.register(
+                "received_messages",
+                "received messages",
+                received_messages.clone(),
+            );
+            registry.register(
+                "broadcast_messages",
+                "broadcast messages",
+                broadcast_messages.clone(),
+            );
         }
 
         // Initialize store
@@ -506,6 +521,8 @@ impl<
 
                 current_view,
                 tracked_views,
+                received_messages,
+                broadcast_messages,
             },
             mailbox,
         )
@@ -688,6 +705,9 @@ impl<
                 .encode_to_vec()
                 .into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
+                self.broadcast_messages
+                    .get_or_create(&metrics::NOTARIZATION)
+                    .inc();
                 debug!(view = past_view, "rebroadcast entry notarization");
             } else if let Some(nullification) = self.construct_nullification(past_view, true) {
                 let msg = wire::Voter {
@@ -696,6 +716,9 @@ impl<
                 .encode_to_vec()
                 .into();
                 sender.send(Recipients::All, msg, true).await.unwrap();
+                self.broadcast_messages
+                    .get_or_create(&metrics::NULLIFICATION)
+                    .inc();
                 debug!(view = past_view, "rebroadcast entry nullification");
             } else {
                 warn!(
@@ -738,6 +761,9 @@ impl<
         .encode_to_vec()
         .into();
         sender.send(Recipients::All, msg, true).await.unwrap();
+        self.broadcast_messages
+            .get_or_create(&metrics::NULLIFY)
+            .inc();
         debug!(view = self.view, "broadcasted nullify");
     }
 
@@ -1616,6 +1642,9 @@ impl<
             .encode_to_vec()
             .into();
             sender.send(Recipients::All, msg, true).await.unwrap();
+            self.broadcast_messages
+                .get_or_create(&metrics::NOTARIZE)
+                .inc();
         };
 
         // Attempt to notarization
@@ -1657,6 +1686,9 @@ impl<
             .encode_to_vec()
             .into();
             sender.send(Recipients::All, msg, true).await.unwrap();
+            self.broadcast_messages
+                .get_or_create(&metrics::NOTARIZATION)
+                .inc();
         };
 
         // Attempt to nullification
@@ -1684,6 +1716,9 @@ impl<
             .encode_to_vec()
             .into();
             sender.send(Recipients::All, msg, true).await.unwrap();
+            self.broadcast_messages
+                .get_or_create(&metrics::NULLIFICATION)
+                .inc();
 
             // If `>= f+1` notarized a given proposal, then we should backfill missing
             // notarizations
@@ -1728,6 +1763,9 @@ impl<
                             .send(Recipients::All, msg, true)
                             .await
                             .expect("unable to broadcast finalization");
+                        self.broadcast_messages
+                            .get_or_create(&metrics::FINALIZATION)
+                            .inc();
                     } else {
                         warn!(
                             last_finalized = self.last_finalized,
@@ -1759,6 +1797,9 @@ impl<
             .encode_to_vec()
             .into();
             sender.send(Recipients::All, msg, true).await.unwrap();
+            self.broadcast_messages
+                .get_or_create(&metrics::FINALIZE)
+                .inc();
         };
 
         // Attempt to finalization
@@ -1800,6 +1841,9 @@ impl<
             .encode_to_vec()
             .into();
             sender.send(Recipients::All, msg, true).await.unwrap();
+            self.broadcast_messages
+                .get_or_create(&metrics::FINALIZATION)
+                .inc();
         };
     }
 
@@ -2047,7 +2091,7 @@ impl<
                 },
                 msg = receiver.recv() => {
                     // Parse message
-                    let Ok((_, msg)) = msg else {
+                    let Ok((s, msg)) = msg else {
                         break;
                     };
                     let Ok(msg) = wire::Voter::decode(msg) else {
@@ -2060,6 +2104,7 @@ impl<
                     // Process message
                     match payload {
                         wire::voter::Payload::Notarize(notarize) => {
+                            self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
                             view = match &notarize.proposal {
                                 Some(proposal) => proposal.view,
                                 None => {
@@ -2069,6 +2114,7 @@ impl<
                             self.notarize(notarize).await;
                         }
                         wire::voter::Payload::Notarization(notarization) => {
+                            self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
                             view = match &notarization.proposal {
                                 Some(proposal) => proposal.view,
                                 None => {
@@ -2078,14 +2124,17 @@ impl<
                             self.notarization(notarization).await;
                         }
                         wire::voter::Payload::Nullify(nullify) => {
+                            self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
                             view = nullify.view;
                             self.nullify(nullify).await;
                         }
                         wire::voter::Payload::Nullification(nullification) => {
+                            self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
                             view = nullification.view;
                             self.nullification(nullification).await;
                         }
                         wire::voter::Payload::Finalize(finalize) => {
+                            self.received_messages.get_or_create(&metrics::PeerMessage::finalize(&s)).inc();
                             view = match &finalize.proposal {
                                 Some(proposal) => proposal.view,
                                 None => {
@@ -2095,6 +2144,7 @@ impl<
                             self.finalize(finalize).await;
                         }
                         wire::voter::Payload::Finalization(finalization) => {
+                            self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
                             view = match &finalization.proposal {
                                 Some(proposal) => proposal.view,
                                 None => {
