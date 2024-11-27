@@ -23,7 +23,7 @@ struct Channel {
     waiter: Option<(usize, oneshot::Sender<Bytes>)>,
 }
 
-// Returns an async-safe Sink/Stream pair that share an underlying ByteChannel.
+/// Returns an async-safe Sink/Stream pair that share an underlying buffer of bytes.
 pub fn new() -> (Sink, Stream) {
     let channel = Arc::new(Mutex::new(Channel {
         buffer: VecDeque::new(),
@@ -35,14 +35,13 @@ pub fn new() -> (Sink, Stream) {
     )
 }
 
-// A mock sink that implements the Sink trait.
+/// A mock sink that implements the Sink trait.
 pub struct Sink {
     channel: Arc<Mutex<Channel>>,
 }
 
 impl SinkTrait for Sink {
-    // Writes the message to the buffer.
-    // Resolves the oneshot receiver if-and-only-if the buffer is large enough.
+    /// Writes the message to the buffer.
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
@@ -67,13 +66,13 @@ impl SinkTrait for Sink {
     }
 }
 
-// A mock stream that implements the Stream trait.
+/// A mock stream that implements the Stream trait.
 pub struct Stream {
     channel: Arc<Mutex<Channel>>,
 }
 
 impl StreamTrait for Stream {
-    // Blocks until the buffer has enough bytes to fill `buf` exactly.
+    /// Blocks until the buffer has enough bytes to fill `buf` exactly.
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();

@@ -2,7 +2,8 @@ use super::super::Error;
 use bytes::Bytes;
 use commonware_runtime::{Sink, Stream};
 
-// Sends data with a 4-byte length prefix.
+/// Sends data to the sink with a 4-byte length prefix.
+/// Returns an error if the message is too large or the stream is closed.
 pub async fn send_frame<S: Sink>(
     sink: &mut S,
     buf: &[u8],
@@ -31,7 +32,8 @@ pub async fn send_frame<S: Sink>(
     Ok(())
 }
 
-// Receives data with a 4-byte length prefix.
+/// Receives data from the stream with a 4-byte length prefix.
+/// Returns an error if the message is too large or the stream is closed.
 pub async fn recv_frame<T: Stream>(
     stream: &mut T,
     max_message_size: usize,

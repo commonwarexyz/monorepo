@@ -161,8 +161,8 @@ pub trait Sink: Sync + Send + 'static {
 /// Interface that any runtime must implement to receive
 /// messages over a network connection.
 pub trait Stream: Sync + Send + 'static {
-    // Receive a message from the stream, storing it in the given buffer.
-    // Reads exactly the number of bytes that fit in the buffer.
+    /// Receive a message from the stream, storing it in the given buffer.
+    /// Reads exactly the number of bytes that fit in the buffer.
     fn recv(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
