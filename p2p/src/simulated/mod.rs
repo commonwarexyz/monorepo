@@ -55,7 +55,7 @@
 //!     let (sender, receiver) = oracle.register(
 //!         peers[0].clone(),
 //!         0,
-//!         1024 * 1024, // 1KB
+//!         1024 * 1024, // 1MB
 //!     ).await.unwrap();
 //!
 //!     // ... Use sender and receiver ...

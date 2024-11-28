@@ -1,4 +1,8 @@
-use super::{x25519, Error};
+use super::{
+    utils::codec::recv_frame,
+    Error,
+    x25519,
+};
 use crate::placeholder::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
@@ -147,6 +151,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
         runtime: E,
         crypto: &C,
         namespace: &[u8],
+        max_message_size: usize,
         synchrony_bound: Duration,
         max_handshake_age: Duration,
         handshake_timeout: Duration,
@@ -161,8 +166,8 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
             _ = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout);
             },
-            result = stream.recv() => {
-                result.map_err(|_| Error::ReadFailed)?
+            result = recv_frame(&mut stream, max_message_size) => {
+                result.map_err(|_| Error::RecvFailed)?
             },
         };
 
@@ -188,16 +193,17 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::placeholder::utils::codec::send_frame;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{
         deterministic::Executor,
-        mocks::{MockSink, MockStream},
+        mocks,
         Runner,
     };
-    use futures::SinkExt;
     use x25519_dalek::PublicKey;
 
     const TEST_NAMESPACE: &[u8] = b"test_namespace";
+    const ONE_MEGABYTE: usize = 1024 * 1024;
 
     #[test]
     fn test_handshake_create_verify() {
@@ -286,12 +292,12 @@ mod tests {
             .unwrap();
 
             // Setup a mock sink and stream
-            let (sink, _) = MockSink::new();
-            let (stream, mut stream_sender) = MockStream::new();
+            let (sink, _) = mocks::Channel::init();
+            let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send message over stream
             runtime.spawn("stream_sender", async move {
-                stream_sender.send(handshake_bytes).await.unwrap();
+                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE).await.unwrap();
             });
 
             // Call the verify function
@@ -299,6 +305,7 @@ mod tests {
                 runtime,
                 &recipient,
                 TEST_NAMESPACE,
+                ONE_MEGABYTE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -334,12 +341,12 @@ mod tests {
             .unwrap();
 
             // Setup a mock sink and stream
-            let (sink, _) = MockSink::new();
-            let (stream, mut stream_sender) = MockStream::new();
+            let (sink, _) = mocks::Channel::init();
+            let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send message over stream
             runtime.spawn("stream_sender", async move {
-                stream_sender.send(handshake_bytes).await.unwrap();
+                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE).await.unwrap();
             });
 
             // Call the verify function
@@ -347,6 +354,7 @@ mod tests {
                 runtime,
                 &Ed25519::from_seed(2),
                 TEST_NAMESPACE,
+                ONE_MEGABYTE,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -366,12 +374,12 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Setup a mock sink and stream
-            let (sink, _) = MockSink::new();
-            let (stream, mut stream_sender) = MockStream::new();
+            let (sink, _) = mocks::Channel::init();
+            let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send invalid data over stream
             runtime.spawn("stream_sender", async move {
-                stream_sender.send(Bytes::from("mock data")).await.unwrap();
+                send_frame(&mut stream_sender, b"mock data", ONE_MEGABYTE).await.unwrap();
             });
 
             // Call the verify function
@@ -379,6 +387,7 @@ mod tests {
                 runtime,
                 &Ed25519::from_seed(0),
                 TEST_NAMESPACE,
+                ONE_MEGABYTE,
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
@@ -403,8 +412,8 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Setup a mock sink and stream
-            let (sink, _) = MockSink::new();
-            let (stream, mut stream_sender) = MockStream::new();
+            let (sink, _) = mocks::Channel::init();
+            let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Accept connections but do nothing
             runtime.spawn("stream_sender", {
@@ -420,7 +429,7 @@ mod tests {
                         ephemeral_public_key,
                     )
                     .unwrap();
-                    stream_sender.send(handshake_bytes).await.unwrap();
+                    send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE).await.unwrap();
                 }
             });
 
@@ -429,6 +438,7 @@ mod tests {
                 runtime,
                 &recipient,
                 TEST_NAMESPACE,
+                ONE_MEGABYTE,
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),

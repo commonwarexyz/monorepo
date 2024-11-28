@@ -22,8 +22,14 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{utils::Signaler, Clock, Error, Handle, Signal};
-use bytes::Bytes;
+use crate::{
+    mocks,
+    utils::Signaler,
+    Clock,
+    Error,
+    Handle,
+    Signal,
+};
 use commonware_utils::hex;
 use futures::{
     channel::mpsc,
@@ -209,25 +215,25 @@ impl Auditor {
         *hash = hasher.finalize().to_vec();
     }
 
-    fn send(&self, sender: SocketAddr, receiver: SocketAddr, message: Bytes) {
+    fn send(&self, sender: SocketAddr, receiver: SocketAddr, message: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
         hasher.update(b"send");
         hasher.update(sender.to_string().as_bytes());
         hasher.update(receiver.to_string().as_bytes());
-        hasher.update(&message);
+        hasher.update(message);
         *hash = hasher.finalize().to_vec();
     }
 
-    fn recv(&self, receiver: SocketAddr, sender: SocketAddr, message: Bytes) {
+    fn recv(&self, receiver: SocketAddr, sender: SocketAddr, message: &[u8]) {
         let mut hash = self.hash.lock().unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&*hash);
         hasher.update(b"recv");
         hasher.update(receiver.to_string().as_bytes());
         hasher.update(sender.to_string().as_bytes());
-        hasher.update(&message);
+        hasher.update(message);
         *hash = hasher.finalize().to_vec();
     }
 
@@ -850,8 +856,8 @@ impl ReasonablyRealtime for Context {}
 
 type Dialable = mpsc::UnboundedSender<(
     SocketAddr,
-    mpsc::UnboundedSender<Bytes>,   // Dialee -> Dialer
-    mpsc::UnboundedReceiver<Bytes>, // Dialer -> Dialee
+    mocks::Sink,   // Dialee -> Dialer
+    mocks::Stream, // Dialer -> Dialee
 )>;
 
 /// Implementation of [`crate::Network`] for the `deterministic` runtime.
@@ -893,7 +899,7 @@ impl Networking {
 
         // Bind the socket
         let (sender, receiver) = mpsc::unbounded();
-        listeners.insert(socket, sender.clone());
+        listeners.insert(socket, sender);
         Ok(Listener {
             auditor: self.auditor.clone(),
             address: socket,
@@ -922,11 +928,9 @@ impl Networking {
         };
 
         // Construct connection
-        let (dialer_sender, dialer_receiver) = mpsc::unbounded();
-        let (dialee_sender, dialee_receiver) = mpsc::unbounded();
-        sender
-            .send((dialer, dialer_sender, dialee_receiver))
-            .await
+        let (dialer_sender, dialer_receiver) = mocks::Channel::init();
+        let (dialee_sender, dialee_receiver) = mocks::Channel::init();
+        sender.send((dialer, dialer_sender, dialee_receiver)).await
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
             Sink {
@@ -963,8 +967,8 @@ pub struct Listener {
     address: SocketAddr,
     listener: mpsc::UnboundedReceiver<(
         SocketAddr,
-        mpsc::UnboundedSender<Bytes>,
-        mpsc::UnboundedReceiver<Bytes>,
+        mocks::Sink,
+        mocks::Stream,
     )>,
 }
 
@@ -997,18 +1001,15 @@ pub struct Sink {
     auditor: Arc<Auditor>,
     me: SocketAddr,
     peer: SocketAddr,
-    sender: mpsc::UnboundedSender<Bytes>,
+    sender: mocks::Sink,
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
-        let len = msg.len();
-        self.auditor.send(self.me, self.peer, msg.clone());
-        self.sender
-            .send(msg)
-            .await
-            .map_err(|_| Error::WriteFailed)?;
-        self.metrics.network_bandwidth.inc_by(len as u64);
+    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
+        self.auditor.send(self.me, self.peer, msg);
+        self.sender.send(msg).await
+            .map_err(|_| Error::SendFailed)?;
+        self.metrics.network_bandwidth.inc_by(msg.len() as u64);
         Ok(())
     }
 }
@@ -1018,14 +1019,15 @@ pub struct Stream {
     auditor: Arc<Auditor>,
     me: SocketAddr,
     peer: SocketAddr,
-    receiver: mpsc::UnboundedReceiver<Bytes>,
+    receiver: mocks::Stream,
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self) -> Result<Bytes, Error> {
-        let msg = self.receiver.next().await.ok_or(Error::ReadFailed)?;
-        self.auditor.recv(self.me, self.peer, msg.clone());
-        Ok(msg)
+    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+        self.receiver.recv(buf).await
+            .map_err(|_| Error::RecvFailed)?;
+        self.auditor.recv(self.me, self.peer, buf);
+        Ok(())
     }
 }
 
