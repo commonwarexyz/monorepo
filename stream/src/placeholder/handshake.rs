@@ -292,8 +292,8 @@ mod tests {
             .unwrap();
 
             // Setup a mock sink and stream
-            let (sink, _) = mocks::new();
-            let (mut stream_sender, stream) = mocks::new();
+            let (sink, _) = mocks::Channel::init();
+            let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send message over stream
             runtime.spawn("stream_sender", async move {
@@ -341,8 +341,8 @@ mod tests {
             .unwrap();
 
             // Setup a mock sink and stream
-            let (sink, _) = mocks::new();
-            let (mut stream_sender, stream) = mocks::new();
+            let (sink, _) = mocks::Channel::init();
+            let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send message over stream
             runtime.spawn("stream_sender", async move {
@@ -374,8 +374,8 @@ mod tests {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             // Setup a mock sink and stream
-            let (sink, _) = mocks::new();
-            let (mut stream_sender, stream) = mocks::new();
+            let (sink, _) = mocks::Channel::init();
+            let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Send invalid data over stream
             runtime.spawn("stream_sender", async move {
@@ -412,8 +412,8 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Setup a mock sink and stream
-            let (sink, _) = mocks::new();
-            let (mut stream_sender, stream) = mocks::new();
+            let (sink, _) = mocks::Channel::init();
+            let (mut stream_sender, stream) = mocks::Channel::init();
 
             // Accept connections but do nothing
             runtime.spawn("stream_sender", {

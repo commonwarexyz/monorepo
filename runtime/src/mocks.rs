@@ -12,28 +12,31 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-// A mock channel struct that is used internally by Sink and Stream.
-struct Channel {
-    // Stores the bytes sent by the sink that are not yet read by the stream.
+/// A mock channel struct that is used internally by Sink and Stream.
+pub struct Channel {
+    /// Stores the bytes sent by the sink that are not yet read by the stream.
     buffer: VecDeque<u8>,
 
-    // If the stream is waiting to read bytes, the waiter stores the number of
-    // bytes that the stream is waiting for, as well as the oneshot sender that
-    // the sink uses to send the bytes to the stream directly.
+    /// If the stream is waiting to read bytes, the waiter stores the number of
+    /// bytes that the stream is waiting for, as well as the oneshot sender that
+    /// the sink uses to send the bytes to the stream directly.
     waiter: Option<(usize, oneshot::Sender<Bytes>)>,
 }
 
-/// Returns an async-safe Sink/Stream pair that share an underlying buffer of bytes.
-pub fn new() -> (Sink, Stream) {
-    let channel = Arc::new(Mutex::new(Channel {
-        buffer: VecDeque::new(),
-        waiter: None,
-    }));
-    (
-        Sink { channel: channel.clone() },
-        Stream { channel },
-    )
+impl Channel {
+    /// Returns an async-safe Sink/Stream pair that share an underlying buffer of bytes.
+    pub fn init() -> (Sink, Stream) {
+        let channel = Arc::new(Mutex::new(Channel {
+            buffer: VecDeque::new(),
+            waiter: None,
+        }));
+        (
+            Sink { channel: channel.clone() },
+            Stream { channel },
+        )
+    }
 }
+
 
 /// A mock sink that implements the Sink trait.
 pub struct Sink {
@@ -41,7 +44,6 @@ pub struct Sink {
 }
 
 impl SinkTrait for Sink {
-    /// Writes the message to the buffer.
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let (os_send, data) = {
             let mut channel = self.channel.lock().unwrap();
@@ -72,7 +74,6 @@ pub struct Stream {
 }
 
 impl StreamTrait for Stream {
-    /// Blocks until the buffer has enough bytes to fill `buf` exactly.
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         let os_recv = {
             let mut channel = self.channel.lock().unwrap();
@@ -113,11 +114,14 @@ mod tests {
         executor::block_on,
         join,
     };
-    use std::time::Duration;
+    use std::{
+        thread::sleep,
+        time::Duration,
+    };
 
     #[test]
     fn test_send_recv() {
-        let (mut sink, mut stream) = new();
+        let (mut sink, mut stream) = Channel::init();
 
         let data = b"hello world";
         let mut buf = vec![0; data.len()];
@@ -132,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_send_recv_partial_multiple() {
-        let (mut sink, mut stream) = new();
+        let (mut sink, mut stream) = Channel::init();
 
         let data1 = b"hello";
         let data2 = b"world";
@@ -153,7 +157,7 @@ mod tests {
 
     #[test]
     fn test_send_recv_async() {
-        let (mut sink, mut stream) = new();
+        let (mut sink, mut stream) = Channel::init();
 
         let data = b"hello world";
         let mut buf = vec![0; data.len()];
@@ -162,7 +166,7 @@ mod tests {
             futures::try_join!(
                 stream.recv(&mut buf),
                 async {
-                    std::thread::sleep(std::time::Duration::from_millis(10_000));
+                    sleep(Duration::from_millis(10_000));
                     sink.send(data).await
                 },
             )
@@ -174,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_recv_error() {
-        let (sink, mut stream) = new();
+        let (sink, mut stream) = Channel::init();
         let (executor, _, _) = Executor::default();
 
         // If the oneshot sender is dropped before the oneshot receiver is resolved,
@@ -194,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_send_error() {
-        let (mut sink, mut stream) = new();
+        let (mut sink, mut stream) = Channel::init();
         let (executor, runtime, _) = Executor::default();
 
         // If the waiter value has a min, but the oneshot receiver is dropped,
@@ -222,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_recv_timeout() {
-        let (_sink, mut stream) = new();
+        let (_sink, mut stream) = Channel::init();
         let (executor, runtime, _) = Executor::default();
 
         // If there is no data to read, test that the recv function just blocks. A timeout should return first.

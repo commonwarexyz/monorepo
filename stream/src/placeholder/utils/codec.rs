@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn test_send_recv_at_max_message_size() {
-        let (mut sink, mut stream) = mocks::new();
+        let (mut sink, mut stream) = mocks::Channel::init();
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
@@ -92,7 +92,7 @@ mod tests {
 
     #[test]
     fn test_send_recv_multiple() {
-        let (mut sink, mut stream) = mocks::new();
+        let (mut sink, mut stream) = mocks::Channel::init();
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_send_frame() {
-        let (mut sink, mut stream) = mocks::new();
+        let (mut sink, mut stream) = mocks::Channel::init();
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn test_send_frame_too_large() {
         const MAX_MESSAGE_SIZE: usize = 1024;
-        let (mut sink, _) = mocks::new();
+        let (mut sink, _) = mocks::Channel::init();
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn test_send_zero_size() {
-        let (mut sink, _) = mocks::new();
+        let (mut sink, _) = mocks::Channel::init();
 
         let (executor, _, _) = Executor::default();
         executor.start(async move {
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn test_read_frame() {
-        let (mut sink, mut stream) = mocks::new();
+        let (mut sink, mut stream) = mocks::Channel::init();
 
         let (executor, mut runtime, _) = Executor::default();
         executor.start(async move {
@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_read_frame_too_large() {
-        let (mut sink, mut stream) = mocks::new();
+        let (mut sink, mut stream) = mocks::Channel::init();
 
         let (executor, _, _) = Executor::default();
         executor.start(async move {
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_read_zero_size() {
-        let (mut sink, mut stream) = mocks::new();
+        let (mut sink, mut stream) = mocks::Channel::init();
 
         let (executor, _, _) = Executor::default();
         executor.start(async move {

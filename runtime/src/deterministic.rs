@@ -928,8 +928,8 @@ impl Networking {
         };
 
         // Construct connection
-        let (dialer_sender, dialer_receiver) = mocks::new();
-        let (dialee_sender, dialee_receiver) = mocks::new();
+        let (dialer_sender, dialer_receiver) = mocks::Channel::init();
+        let (dialee_sender, dialee_receiver) = mocks::Channel::init();
         sender.send((dialer, dialer_sender, dialee_receiver)).await
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
