@@ -150,16 +150,14 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
             Sender {
                 cipher: self.cipher.clone(),
                 sink: self.sink,
-
                 max_message_size: self.config.max_message_size,
                 nonce: NonceInfo::new(self.dialer),
             },
             Receiver {
                 cipher: self.cipher,
                 stream: self.stream,
-
                 max_message_size: self.config.max_message_size,
-                nonce: NonceInfo::new(self.dialer),
+                nonce: NonceInfo::new(!self.dialer),
             },
         )
     }
@@ -176,11 +174,11 @@ pub struct Sender<Si: Sink> {
 impl<Si: Sink> Sender<Si> {
     pub async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         // Encrypt data
-        self.nonce.inc()?;
         let msg = self
             .cipher
             .encrypt(&self.nonce.encode(), msg.as_ref())
             .map_err(|_| Error::EncryptionFailed)?;
+        self.nonce.inc()?;
 
         // Send data
         send_frame(
@@ -209,11 +207,11 @@ impl<St: Stream> Receiver<St> {
         ).await?;
 
         // Decrypt data
-        self.nonce.inc()?;
         let msg = self
             .cipher
             .decrypt(&self.nonce.encode(), msg.as_ref())
             .map_err(|_| Error::DecryptionFailed)?;
+        self.nonce.inc()?;
 
         Ok(Bytes::from(msg))
     }
@@ -306,17 +304,18 @@ mod tests {
             let max_message_size = message.len();
 
             let (sink, stream) = mocks::Channel::init();
+            let is_dialer = false;
             let mut sender = Sender {
                 cipher: cipher.clone(),
                 sink,
                 max_message_size,
-                nonce: NonceInfo::new(true),
+                nonce: NonceInfo::new(is_dialer),
             };
             let mut receiver = Receiver {
                 cipher,
                 stream,
                 max_message_size,
-                nonce: NonceInfo::new(false),
+                nonce: NonceInfo::new(is_dialer),
             };
 
             // Send data
