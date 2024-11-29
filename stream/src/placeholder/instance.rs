@@ -1,5 +1,10 @@
 use super::{
-    handshake::{create_handshake, Handshake, IncomingHandshake},
+    handshake::{
+        create_handshake,
+        get_current_time_ms,
+        Handshake,
+        IncomingHandshake,
+    },
     utils::{
         codec::{recv_frame, send_frame},
         nonce,
@@ -44,10 +49,11 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
+        let timestamp_ms = get_current_time_ms(&runtime);
         let msg = create_handshake(
-            runtime.clone(),
             &mut config.crypto,
             &config.namespace,
+            timestamp_ms,
             peer.clone(),
             ephemeral,
         )?;
@@ -112,10 +118,11 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
+        let timestamp_ms = get_current_time_ms(&runtime);
         let msg = create_handshake(
-            runtime.clone(),
             &mut config.crypto,
             &config.namespace,
+            timestamp_ms,
             handshake.peer_public_key.clone(),
             ephemeral,
         )?;

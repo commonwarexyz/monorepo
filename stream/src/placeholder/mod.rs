@@ -28,7 +28,7 @@
 //! message Handshake {
 //!     bytes recipient_public_key = 1;
 //!     bytes ephemeral_public_key = 2;
-//!     uint64 timestamp = 3;
+//!     uint64 timestamp_ms = 3;
 //!     Signature signature = 4;
 //! }
 //! ```
@@ -163,6 +163,8 @@ pub enum Error {
     EncryptionFailed,
     #[error("decryption failed")]
     DecryptionFailed,
-    #[error("invalid timestamp")]
-    InvalidTimestamp,
+    #[error("invalid timestamp: too old")]
+    InvalidTimestampOld,
+    #[error("invalid timestamp: too far in the future")]
+    InvalidTimestampFuture,
 }

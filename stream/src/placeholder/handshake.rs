@@ -1,5 +1,8 @@
 use super::{
-    utils::codec::recv_frame,
+    utils::{
+        codec::recv_frame,
+        time,
+    },
     Error,
     x25519,
 };
@@ -18,32 +21,35 @@ fn suffix_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NAMESPACE_SUFFIX_HANDSHAKE)
 }
 
-pub fn create_handshake<E: Clock, C: Scheme>(
-    runtime: E,
+/// Get the current time in milliseconds since the Unix epoch.
+/// If the system clock is set to before the Unix epoch, this function will panic.
+/// The result saturates at the maximum value of u64.
+pub fn get_current_time_ms<E: Clock> (runtime: &E) -> u64 {
+    let time = runtime.current()
+        .duration_since(UNIX_EPOCH)
+        .expect("failed to get current time");
+    time::to_millis(time)
+}
+
+pub fn create_handshake<C: Scheme>(
     crypto: &mut C,
     namespace: &[u8],
+    timestamp_ms: u64,
     recipient_public_key: PublicKey,
     ephemeral_public_key: x25519_dalek::PublicKey,
 ) -> Result<Bytes, Error> {
-    // Get current time
-    let timestamp = runtime
-        .current()
-        .duration_since(UNIX_EPOCH)
-        .expect("failed to get current time")
-        .as_secs();
-
     // Sign their public key
     let mut payload = Vec::new();
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key.as_bytes());
-    payload.extend_from_slice(&timestamp.to_be_bytes());
+    payload.extend_from_slice(&timestamp_ms.to_be_bytes());
     let signature = crypto.sign(&suffix_namespace(namespace), &payload);
 
     // Send handshake
     Ok(wire::Handshake {
         recipient_public_key,
         ephemeral_public_key: x25519::encode_public_key(ephemeral_public_key),
-        timestamp,
+        timestamp_ms,
         signature: Some(wire::Signature {
             public_key: crypto.public_key(),
             signature,
@@ -95,16 +101,12 @@ impl Handshake {
         // unlike the peer identity) and/or from blocking a peer from connecting
         // to others (if an adversary recovered a handshake message could open a
         // connection to a peer first, peers only maintain one connection per peer).
-        let current_time = runtime
-            .current()
-            .duration_since(UNIX_EPOCH)
-            .expect("failed to get current time")
-            .as_secs();
-        if handshake.timestamp + max_handshake_age.as_secs() < current_time {
-            return Err(Error::InvalidTimestamp);
+        let current_time_ms = get_current_time_ms(&runtime);
+        if time::to_millis(max_handshake_age).saturating_add(handshake.timestamp_ms) < current_time_ms {
+            return Err(Error::InvalidTimestampOld);
         }
-        if handshake.timestamp > current_time + synchrony_bound.as_secs() {
-            return Err(Error::InvalidTimestamp);
+        if handshake.timestamp_ms > time::to_millis(synchrony_bound).saturating_add(current_time_ms) {
+            return Err(Error::InvalidTimestampFuture);
         }
 
         // Get signature from peer
@@ -118,7 +120,7 @@ impl Handshake {
         let mut payload = Vec::new();
         payload.extend_from_slice(&our_public_key);
         payload.extend_from_slice(&handshake.ephemeral_public_key);
-        payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
+        payload.extend_from_slice(&handshake.timestamp_ms.to_be_bytes());
 
         // Verify signature
         if !C::verify(
@@ -216,10 +218,11 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Create handshake message
+            let current_timestamp_ms = get_current_time_ms(&runtime);
             let handshake_bytes = create_handshake(
-                runtime.clone(),
                 &mut sender,
                 TEST_NAMESPACE,
+                current_timestamp_ms,
                 recipient.public_key(),
                 ephemeral_public_key,
             ).unwrap();
@@ -229,13 +232,10 @@ mod tests {
                 .expect("failed to decode handshake");
 
             // Verify the timestamp
-            let current_timestamp = runtime
-                .current()
-                .duration_since(UNIX_EPOCH)
-                .expect("failed to get current time")
-                .as_secs();
-            assert!(handshake.timestamp <= current_timestamp);
-            assert!(handshake.timestamp + 5 >= current_timestamp); // Allow a 5-second window
+            let synchrony_bound = Duration::from_secs(5);
+            let max_handshake_age = Duration::from_secs(5);
+            assert!(handshake.timestamp_ms <= current_timestamp_ms + time::to_millis(synchrony_bound));
+            assert!(handshake.timestamp_ms + time::to_millis(max_handshake_age) >= current_timestamp_ms);
 
             // Verify the signature
             assert_eq!(handshake.recipient_public_key, recipient.public_key());
@@ -246,7 +246,7 @@ mod tests {
             let mut payload = Vec::new();
             payload.extend_from_slice(&handshake.recipient_public_key);
             payload.extend_from_slice(&handshake.ephemeral_public_key);
-            payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
+            payload.extend_from_slice(&handshake.timestamp_ms.to_be_bytes());
 
             // Verify signature
             assert!(Ed25519::verify(
@@ -261,8 +261,8 @@ mod tests {
                 runtime,
                 &recipient,
                 TEST_NAMESPACE,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
+                synchrony_bound,
+                max_handshake_age,
                 handshake_bytes,
             )
             .unwrap();
@@ -283,9 +283,9 @@ mod tests {
 
             // Create handshake message
             let handshake_bytes = create_handshake(
-                runtime.clone(),
                 &mut sender,
                 TEST_NAMESPACE,
+                0, // timestamp_ms
                 recipient.public_key(),
                 ephemeral_public_key,
             )
@@ -332,9 +332,9 @@ mod tests {
 
             // Create handshake message
             let handshake_bytes = create_handshake(
-                runtime.clone(),
                 &mut sender,
                 TEST_NAMESPACE,
+                0, // timestamp_ms
                 Ed25519::from_seed(1).public_key(),
                 ephemeral_public_key,
             )
@@ -421,10 +421,11 @@ mod tests {
                 let recipient = recipient.clone();
                 async move {
                     runtime.sleep(Duration::from_secs(10)).await;
+                    let timestamp_ms = get_current_time_ms(&runtime);
                     let handshake_bytes = create_handshake(
-                        runtime,
                         &mut sender,
                         TEST_NAMESPACE,
+                        timestamp_ms,
                         recipient.public_key(),
                         ephemeral_public_key,
                     )
@@ -461,9 +462,9 @@ mod tests {
             let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
 
             let handshake = create_handshake(
-                runtime.clone(),
                 &mut crypto,
                 TEST_NAMESPACE,
+                0, // timestamp_ms
                 recipient_public_key,
                 ephemeral_public_key,
             )
@@ -508,9 +509,9 @@ mod tests {
             let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
 
             let handshake = create_handshake(
-                runtime.clone(),
                 &mut crypto,
                 TEST_NAMESPACE,
+                0, // timestamp_ms
                 recipient_public_key,
                 ephemeral_public_key,
             )
@@ -545,9 +546,9 @@ mod tests {
             let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
 
             let handshake = create_handshake(
-                runtime.clone(),
                 &mut crypto,
                 TEST_NAMESPACE,
+                0, // timestamp_ms
                 recipient_public_key,
                 ephemeral_public_key,
             )
@@ -584,41 +585,104 @@ mod tests {
     }
 
     #[test]
-    fn test_handshake_verify_invalid_timestamp() {
+    fn test_handshake_verify_invalid_timestamp_old() {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {
             let mut crypto = Ed25519::from_seed(0);
             let recipient_public_key = crypto.public_key();
             let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
 
-            // Sleep a long time (time starts at 0 in deterministic executor)
-            runtime.sleep(Duration::from_secs(100000)).await;
+            let timeout_duration = Duration::from_secs(5);
+            let synchrony_bound = Duration::from_secs(0);
 
-            // Create a handshake
+            // Create a handshake, setting the timestamp to 0.
             let handshake = create_handshake(
-                runtime.clone(),
                 &mut crypto,
                 TEST_NAMESPACE,
+                0, // timestamp_ms
                 recipient_public_key,
                 ephemeral_public_key,
-            )
-            .unwrap();
+            ).unwrap();
 
-            // Tamper with the handshake to make the timestamp invalid
-            let mut handshake = wire::Handshake::decode(handshake)
-                .expect("failed to decode handshake");
-            handshake.timestamp = 0;
+            // Time starts at 0 in deterministic executor.
+            // Sleep for the exact timeout duration.
+            runtime.sleep(timeout_duration).await;
 
-            // Verify the handshake
+            // Verify the handshake, it should be fine still.
+            Handshake::verify(
+                runtime.clone(),
+                &crypto,
+                TEST_NAMESPACE,
+                synchrony_bound,
+                timeout_duration,
+                handshake.encode_to_vec().into(),
+            ).unwrap(); // no error
+
+            // Timeout by waiting 1 more millisecond.
+            runtime.sleep(Duration::from_millis(1)).await;
+
+            // Verify that a timeout error is returned.
             let result = Handshake::verify(
                 runtime,
                 &crypto,
                 TEST_NAMESPACE,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
+                synchrony_bound,
+                timeout_duration,
                 handshake.encode_to_vec().into(),
             );
-            assert!(matches!(result, Err(Error::InvalidTimestamp)));
+            assert!(matches!(result, Err(Error::InvalidTimestampOld)));
+        });
+    }
+
+    #[test]
+    fn test_handshake_verify_invalid_timestamp_future() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            let mut crypto = Ed25519::from_seed(0);
+            let recipient_public_key = crypto.public_key();
+            let ephemeral_public_key = x25519_dalek::PublicKey::from([0u8; 32]);
+
+            let timeout_duration = Duration::from_secs(0);
+            let synchrony_bound = Duration::from_secs(5);
+
+            // Create a handshake at the synchrony bound.
+            let handshake_ok = create_handshake(
+                &mut crypto,
+                TEST_NAMESPACE,
+                time::to_millis(synchrony_bound),
+                recipient_public_key.clone(),
+                ephemeral_public_key,
+            ).unwrap();
+
+            // Create a handshake 1ms too far into the future.
+            let handshake_late = create_handshake(
+                &mut crypto,
+                TEST_NAMESPACE,
+                time::to_millis(synchrony_bound) + 1,
+                recipient_public_key,
+                ephemeral_public_key,
+            ).unwrap();
+
+            // Verify the okay handshake.
+            Handshake::verify(
+                runtime.clone(),
+                &crypto,
+                TEST_NAMESPACE,
+                synchrony_bound,
+                timeout_duration,
+                handshake_ok,
+            ).unwrap(); // no error
+
+            // Handshake too far into the future fails.
+            let result = Handshake::verify(
+                runtime,
+                &crypto,
+                TEST_NAMESPACE,
+                synchrony_bound,
+                timeout_duration,
+                handshake_late,
+            );
+            assert!(matches!(result, Err(Error::InvalidTimestampFuture)));
         });
     }
 
