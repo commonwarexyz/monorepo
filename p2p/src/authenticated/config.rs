@@ -42,8 +42,6 @@ pub struct Config<C: Scheme> {
     pub allow_private_ips: bool,
 
     /// Maximum size allowed for messages over any connection.
-    ///
-    /// Messages larger than this size will be chunked.
     pub max_message_size: usize,
 
     /// Message backlog allowed for internal actors.

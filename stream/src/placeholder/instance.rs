@@ -144,9 +144,8 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         })
     }
 
-    pub fn split(self) -> (usize, Sender<Si>, Receiver<St>) {
+    pub fn split(self) -> (Sender<Si>, Receiver<St>) {
         (
-            self.config.max_message_size,
             Sender {
                 cipher: self.cipher.clone(),
                 sink: self.sink,

@@ -43,8 +43,6 @@ pub enum Error {
     MessageDropped,
     #[error("message too large: {0}")]
     MessageTooLarge(usize),
-    #[error("invalid chunk")]
-    InvalidChunk,
     #[error("invalid channel")]
     InvalidChannel,
     #[error("channel closed: {0}")]
