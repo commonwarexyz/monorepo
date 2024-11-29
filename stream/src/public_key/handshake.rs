@@ -3,7 +3,7 @@ use super::{
     Error,
     x25519,
 };
-use crate::placeholder::wire;
+use crate::public_key::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
@@ -183,7 +183,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::placeholder::utils::codec::send_frame;
+    use crate::public_key::utils::codec::send_frame;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{
         deterministic::Executor,

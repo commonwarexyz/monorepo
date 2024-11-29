@@ -7,7 +7,7 @@ use crate::authenticated::{
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
-use commonware_stream::placeholder::{Instance, Sender};
+use commonware_stream::public_key::{Instance, Sender};
 use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};

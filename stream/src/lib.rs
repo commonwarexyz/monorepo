@@ -1,3 +1,3 @@
 //! [Placeholder description]
 
-pub mod placeholder;
+pub mod public_key;
