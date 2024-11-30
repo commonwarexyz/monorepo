@@ -13,22 +13,12 @@ use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::union;
 use prost::Message;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 const NAMESPACE_SUFFIX_HANDSHAKE: &[u8] = b"_HANDSHAKE";
 
 fn suffix_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NAMESPACE_SUFFIX_HANDSHAKE)
-}
-
-/// Get the current time in milliseconds since the Unix epoch.
-/// If the system clock is set to before the Unix epoch, this function will panic.
-/// The result saturates at the maximum value of u64.
-pub fn get_current_time_ms<E: Clock> (runtime: &E) -> u64 {
-    let time = runtime.current()
-        .duration_since(UNIX_EPOCH)
-        .expect("failed to get current time");
-    time::to_millis(time)
 }
 
 pub fn create_handshake<C: Scheme>(
@@ -101,7 +91,7 @@ impl Handshake {
         // unlike the peer identity) and/or from blocking a peer from connecting
         // to others (if an adversary recovered a handshake message could open a
         // connection to a peer first, peers only maintain one connection per peer).
-        let current_time_ms = get_current_time_ms(&runtime);
+        let current_time_ms = time::to_millis(time::epoch_time(&runtime));
         if time::to_millis(max_handshake_age).saturating_add(handshake.timestamp_ms) < current_time_ms {
             return Err(Error::InvalidTimestampOld);
         }
@@ -218,7 +208,7 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Create handshake message
-            let current_time_ms = get_current_time_ms(&runtime);
+            let current_time_ms = time::to_millis(time::epoch_time(&runtime));
             let handshake_bytes = create_handshake(
                 &mut sender,
                 TEST_NAMESPACE,
@@ -421,7 +411,7 @@ mod tests {
                 let recipient = recipient.clone();
                 async move {
                     runtime.sleep(Duration::from_secs(10)).await;
-                    let timestamp_ms = get_current_time_ms(&runtime);
+                    let timestamp_ms = time::to_millis(time::epoch_time(&runtime));
                     let handshake_bytes = create_handshake(
                         &mut sender,
                         TEST_NAMESPACE,

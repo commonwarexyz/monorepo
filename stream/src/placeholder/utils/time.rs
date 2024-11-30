@@ -1,4 +1,12 @@
-use std::time::Duration;
+use commonware_runtime::Clock;
+use std::time::{Duration, UNIX_EPOCH};
+
+/// Get the current duration since the Unix epoch.
+/// If the system clock is set to before the Unix epoch, this function will panic.
+pub fn epoch_time<E: Clock> (runtime: &E) -> Duration {
+    runtime.current().duration_since(UNIX_EPOCH)
+        .expect("failed to get current time")
+}
 
 /// Convert a `Duration` to epoch milliseconds.
 /// If the duration is too large, it will be clamped to the maximum value of `u64`.

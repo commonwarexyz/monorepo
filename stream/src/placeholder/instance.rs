@@ -1,13 +1,13 @@
 use super::{
     handshake::{
         create_handshake,
-        get_current_time_ms,
         Handshake,
         IncomingHandshake,
     },
     utils::{
         codec::{recv_frame, send_frame},
         nonce,
+        time,
     },
     x25519, Config, Error,
 };
@@ -49,7 +49,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
-        let timestamp_ms = get_current_time_ms(&runtime);
+        let timestamp_ms = time::to_millis(time::epoch_time(&runtime));
         let msg = create_handshake(
             &mut config.crypto,
             &config.namespace,
@@ -118,7 +118,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
-        let timestamp_ms = get_current_time_ms(&runtime);
+        let timestamp_ms = time::to_millis(time::epoch_time(&runtime));
         let msg = create_handshake(
             &mut config.crypto,
             &config.namespace,
