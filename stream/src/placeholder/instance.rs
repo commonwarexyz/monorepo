@@ -2,7 +2,7 @@ use super::{
     handshake::{create_handshake, Handshake, IncomingHandshake},
     utils::{
         codec::{recv_frame, send_frame},
-        nonce::NonceInfo,
+        nonce,
     },
     x25519, Config, Error,
 };
@@ -151,13 +151,13 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
                 cipher: self.cipher.clone(),
                 sink: self.sink,
                 max_message_size: self.config.max_message_size,
-                nonce: NonceInfo::new(self.dialer),
+                nonce: nonce::Info::new(self.dialer),
             },
             Receiver {
                 cipher: self.cipher,
                 stream: self.stream,
                 max_message_size: self.config.max_message_size,
-                nonce: NonceInfo::new(!self.dialer),
+                nonce: nonce::Info::new(!self.dialer),
             },
         )
     }
@@ -168,7 +168,7 @@ pub struct Sender<Si: Sink> {
     sink: Si,
 
     max_message_size: usize,
-    nonce: NonceInfo,
+    nonce: nonce::Info,
 }
 
 impl<Si: Sink> Sender<Si> {
@@ -195,7 +195,7 @@ pub struct Receiver<St: Stream> {
     stream: St,
 
     max_message_size: usize,
-    nonce: NonceInfo,
+    nonce: nonce::Info,
 }
 
 impl<St: Stream> Receiver<St> {
@@ -236,7 +236,7 @@ mod tests {
                 cipher,
                 stream,
                 max_message_size: 1024,
-                nonce: NonceInfo::new(false),
+                nonce: nonce::Info::new(false),
             };
 
             // Send invalid ciphertext
@@ -258,7 +258,7 @@ mod tests {
                 cipher,
                 sink,
                 max_message_size: message.len() - 1,
-                nonce: NonceInfo::new(true),
+                nonce: nonce::Info::new(true),
             };
 
             let result = sender.send(message).await;
@@ -279,13 +279,13 @@ mod tests {
                 cipher: cipher.clone(),
                 sink,
                 max_message_size: message.len(),
-                nonce: NonceInfo::new(true),
+                nonce: nonce::Info::new(true),
             };
             let mut receiver = Receiver {
                 cipher,
                 stream,
                 max_message_size: message.len() - 1,
-                nonce: NonceInfo::new(false),
+                nonce: nonce::Info::new(false),
             };
 
             sender.send(message).await.unwrap();
@@ -309,13 +309,13 @@ mod tests {
                 cipher: cipher.clone(),
                 sink,
                 max_message_size,
-                nonce: NonceInfo::new(is_dialer),
+                nonce: nonce::Info::new(is_dialer),
             };
             let mut receiver = Receiver {
                 cipher,
                 stream,
                 max_message_size,
-                nonce: NonceInfo::new(is_dialer),
+                nonce: nonce::Info::new(is_dialer),
             };
 
             // Send data

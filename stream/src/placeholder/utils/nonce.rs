@@ -3,13 +3,13 @@ use chacha20poly1305::Nonce;
 
 /// A struct that holds the nonce information.
 /// Dialer is a boolean that is true if the nonce is for the dialer side.
-pub struct NonceInfo {
+pub struct Info {
     dialer: bool,
     iter: u16,
     seq: u64,
 }
 
-impl NonceInfo {
+impl Info {
     pub fn new(dialer: bool) -> Self {
         Self {
             dialer,
@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn test_encode() {
         // Test case 1: dialer is true
-        let ni = NonceInfo {
+        let ni = Info {
             dialer: true,
             iter: 1,
             seq: 1,
@@ -66,7 +66,7 @@ mod tests {
         assert_eq!(&nonce[4..], &1u64.to_be_bytes());
 
         // Test case 2: dialer is false
-        let ni = NonceInfo {
+        let ni = Info {
             dialer: false,
             iter: 1,
             seq: 1,
@@ -77,7 +77,7 @@ mod tests {
         assert_eq!(&nonce[4..], &1u64.to_be_bytes());
 
         // Test case 3: different iter and seq values
-        let ni = NonceInfo {
+        let ni = Info {
             dialer: true,
             iter: 65535,
             seq: 123456789,
@@ -88,7 +88,7 @@ mod tests {
         assert_eq!(&nonce[4..], &123456789u64.to_be_bytes());
 
         // Test case 4: iter is 0
-        let ni = NonceInfo {
+        let ni = Info {
             dialer: true,
             iter: 0,
             seq: 123456789,
@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn test_inc() {
         const ITER: u16 = 5;
-        let mut ni = NonceInfo {
+        let mut ni = Info {
             dialer: true,
             iter: ITER,
             seq: 0,
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn test_inc_seq_overflow() {
         const ITER: u16 = 5;
-        let mut ni = NonceInfo {
+        let mut ni = Info {
             dialer: true,
             iter: ITER,
             seq: u64::MAX,
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_inc_seq_iter_overflow() {
-        let mut ni = NonceInfo {
+        let mut ni = Info {
             dialer: true,
             iter: u16::MAX,
             seq: u64::MAX,
