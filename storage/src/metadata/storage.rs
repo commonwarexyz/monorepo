@@ -200,9 +200,7 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
         let past_timestamp = &self.blobs[self.cursor].1;
         let mut next_timestamp = self
             .runtime
-            .current()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .epoch()
             .as_nanos();
         if next_timestamp <= *past_timestamp {
             // While it is possible that extremely high-frequency updates to `Metadata` (more than

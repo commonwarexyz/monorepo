@@ -1,8 +1,5 @@
 use super::{
-    utils::{
-        codec::recv_frame,
-        time,
-    },
+    utils::codec::recv_frame,
     Error,
     x25519,
 };
@@ -11,7 +8,7 @@ use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::union;
+use commonware_utils::{union, duration::Utils as _};
 use prost::Message;
 use std::time::{Duration, SystemTime};
 
@@ -91,11 +88,11 @@ impl Handshake {
         // unlike the peer identity) and/or from blocking a peer from connecting
         // to others (if an adversary recovered a handshake message could open a
         // connection to a peer first, peers only maintain one connection per peer).
-        let current_time_ms = time::to_millis(time::epoch_time(&runtime));
-        if time::to_millis(max_handshake_age).saturating_add(handshake.timestamp_ms) < current_time_ms {
+        let current_time_ms = runtime.epoch().as_millis_u64();
+        if max_handshake_age.as_millis_u64().saturating_add(handshake.timestamp_ms) < current_time_ms {
             return Err(Error::InvalidTimestampOld);
         }
-        if handshake.timestamp_ms > time::to_millis(synchrony_bound).saturating_add(current_time_ms) {
+        if handshake.timestamp_ms > synchrony_bound.as_millis_u64().saturating_add(current_time_ms) {
             return Err(Error::InvalidTimestampFuture);
         }
 
@@ -208,7 +205,7 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Create handshake message
-            let current_time_ms = time::to_millis(time::epoch_time(&runtime));
+            let current_time_ms = runtime.epoch().as_millis_u64();
             let handshake_bytes = create_handshake(
                 &mut sender,
                 TEST_NAMESPACE,
@@ -224,8 +221,8 @@ mod tests {
             // Verify the timestamp
             let synchrony_bound = Duration::from_secs(5);
             let max_handshake_age = Duration::from_secs(5);
-            assert!(handshake.timestamp_ms <= current_time_ms + time::to_millis(synchrony_bound));
-            assert!(handshake.timestamp_ms + time::to_millis(max_handshake_age) >= current_time_ms);
+            assert!(handshake.timestamp_ms <= current_time_ms + synchrony_bound.as_millis_u64());
+            assert!(handshake.timestamp_ms + max_handshake_age.as_millis_u64() >= current_time_ms);
 
             // Verify the signature
             assert_eq!(handshake.recipient_public_key, recipient.public_key());
@@ -411,7 +408,7 @@ mod tests {
                 let recipient = recipient.clone();
                 async move {
                     runtime.sleep(Duration::from_secs(10)).await;
-                    let timestamp_ms = time::to_millis(time::epoch_time(&runtime));
+                    let timestamp_ms = runtime.epoch().as_millis_u64();
                     let handshake_bytes = create_handshake(
                         &mut sender,
                         TEST_NAMESPACE,
@@ -639,7 +636,7 @@ mod tests {
             let handshake_ok = create_handshake(
                 &mut crypto,
                 TEST_NAMESPACE,
-                time::to_millis(synchrony_bound),
+                synchrony_bound.as_millis_u64(),
                 recipient_public_key.clone(),
                 ephemeral_public_key,
             ).unwrap();
@@ -648,7 +645,7 @@ mod tests {
             let handshake_late = create_handshake(
                 &mut crypto,
                 TEST_NAMESPACE,
-                time::to_millis(synchrony_bound) + 1,
+                synchrony_bound.as_millis_u64() + 1,
                 recipient_public_key,
                 ephemeral_public_key,
             ).unwrap();

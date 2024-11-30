@@ -7,7 +7,7 @@ use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::{hex, union};
+use commonware_utils::{hex, union, duration::Utils as _};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
@@ -20,7 +20,7 @@ use rand::{
     prelude::{IteratorRandom, SliceRandom},
     Rng,
 };
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
@@ -107,7 +107,7 @@ impl AddressCount {
     }
     fn set_network(&mut self, address: Signature) -> bool {
         if let Some(Address::Network(past)) = &self.address {
-            if past.peer.timestamp >= address.peer.timestamp {
+            if past.peer.timestamp_ms >= address.peer.timestamp_ms {
                 return false;
             }
         }
@@ -161,17 +161,13 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
 impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
     pub fn new(runtime: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
         // Construct IP signature
-        let current_time = runtime
-            .current()
-            .duration_since(UNIX_EPOCH)
-            .expect("failed to get current time")
-            .as_secs();
-        let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
+        let timestamp_ms = runtime.epoch().as_millis_u64();
+        let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, timestamp_ms);
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
         let ip_signature = cfg.crypto.sign(&ip_namespace, &payload_bytes);
         let ip_signature = wire::Peer {
             socket: socket_bytes,
-            timestamp: current_time,
+            timestamp_ms,
             signature: Some(wire::Signature {
                 public_key: cfg.crypto.public_key(),
                 signature: ip_signature,
@@ -369,7 +365,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         // over some interval because a malicious peer may just replay
         // old IPs to prevent us from propogating a new one.
         let record = self.peers.get_mut(peer).unwrap();
-        let wire_time = address.peer.timestamp;
+        let wire_time = address.peer.timestamp_ms;
         if !record.set_network(address) {
             trace!(peer = hex(peer), wire_time, "stored peer newer");
             return false;
@@ -432,13 +428,8 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             }
 
             // If any timestamp is too far into the future, disconnect from the peer
-            let current_time = self
-                .runtime
-                .current()
-                .duration_since(UNIX_EPOCH)
-                .expect("failed to get current time")
-                .as_secs();
-            if peer.timestamp > current_time + self.synchrony_bound.as_secs() {
+            let current_time_ms = self.runtime.epoch().as_millis_u64();
+            if peer.timestamp_ms > current_time_ms + self.synchrony_bound.as_millis_u64() {
                 return Err(Error::InvalidSignature);
             }
 
@@ -790,7 +781,7 @@ mod tests {
             let peers = wire::Peers {
                 peers: vec![wire::Peer {
                     socket: socket_bytes,
-                    timestamp: 0,
+                    timestamp_ms: 0,
                     signature: Some(wire::Signature {
                         public_key: peer1.clone(),
                         signature: ip_signature,

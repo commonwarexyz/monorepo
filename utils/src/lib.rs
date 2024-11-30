@@ -2,6 +2,8 @@
 
 use sha2::{Digest, Sha256};
 
+pub mod duration;
+
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
     let mut hex = String::new();
