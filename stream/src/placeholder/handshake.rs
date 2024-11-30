@@ -218,11 +218,11 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Create handshake message
-            let current_timestamp_ms = get_current_time_ms(&runtime);
+            let current_time_ms = get_current_time_ms(&runtime);
             let handshake_bytes = create_handshake(
                 &mut sender,
                 TEST_NAMESPACE,
-                current_timestamp_ms,
+                current_time_ms,
                 recipient.public_key(),
                 ephemeral_public_key,
             ).unwrap();
@@ -234,8 +234,8 @@ mod tests {
             // Verify the timestamp
             let synchrony_bound = Duration::from_secs(5);
             let max_handshake_age = Duration::from_secs(5);
-            assert!(handshake.timestamp_ms <= current_timestamp_ms + time::to_millis(synchrony_bound));
-            assert!(handshake.timestamp_ms + time::to_millis(max_handshake_age) >= current_timestamp_ms);
+            assert!(handshake.timestamp_ms <= current_time_ms + time::to_millis(synchrony_bound));
+            assert!(handshake.timestamp_ms + time::to_millis(max_handshake_age) >= current_time_ms);
 
             // Verify the signature
             assert_eq!(handshake.recipient_public_key, recipient.public_key());

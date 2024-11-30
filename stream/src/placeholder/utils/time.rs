@@ -3,9 +3,7 @@ use std::time::Duration;
 /// Convert a `Duration` to epoch milliseconds.
 /// If the duration is too large, it will be clamped to the maximum value of `u64`.
 pub fn to_millis(duration: Duration) -> u64 {
-    duration.as_secs()
-        .saturating_mul(1_000)
-        .saturating_add(duration.subsec_millis() as u64)
+    duration.as_millis().min(u64::MAX as u128) as u64
 }
 
 #[cfg(test)]
