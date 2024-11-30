@@ -615,7 +615,7 @@ mod tests {
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
-                handshake.encode_to_vec().into(),
+                handshake.clone(),
             ).unwrap(); // no error
 
             // Timeout by waiting 1 more millisecond.
@@ -628,7 +628,7 @@ mod tests {
                 TEST_NAMESPACE,
                 synchrony_bound,
                 timeout_duration,
-                handshake.encode_to_vec().into(),
+                handshake,
             );
             assert!(matches!(result, Err(Error::InvalidTimestampOld)));
         });
