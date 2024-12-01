@@ -86,11 +86,6 @@ img {
 }
 
 .image-container {
-    display: block;
-    margin: 20px 0;
-}
-
-.image-container {
     max-width: 100%;
     height: auto;
     display: block;
