@@ -22,14 +22,7 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{
-    mocks,
-    utils::Signaler,
-    Clock,
-    Error,
-    Handle,
-    Signal,
-};
+use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal};
 use commonware_utils::hex;
 use futures::{
     channel::mpsc,
@@ -60,7 +53,24 @@ use tracing::trace;
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
+/// Label for root task created during `Runner::start`.
 const ROOT_TASK: &str = "root";
+
+/// Seed to use for random number generation.
+#[derive(Clone)]
+pub enum Seed {
+    /// Initialize a new random number generator with the given seed.
+    Number(u64),
+    /// Sampler allows a previously initialized random number generator
+    /// to be used.
+    ///
+    /// This is useful when spawning multiple runtimes from the same
+    /// base seed (typically done to mock unclean exit).
+    Sampler(Arc<Mutex<StdRng>>),
+}
+
+/// Map of names to blob contents.
+pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
@@ -421,12 +431,15 @@ pub struct Config {
     /// Registry for metrics.
     pub registry: Arc<Mutex<Registry>>,
 
-    /// Seed for the random number generator.
-    pub seed: u64,
+    /// Initialization for the random number generator.
+    pub seed: Seed,
 
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
     pub cycle: Duration,
+
+    /// Optional pre-initialized storage.
+    pub storage: Option<Arc<Mutex<HashMap<String, Partition>>>>,
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     pub timeout: Option<Duration>,
@@ -436,8 +449,9 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             registry: Arc::new(Mutex::new(Registry::default())),
-            seed: 42,
+            seed: Seed::Number(42),
             cycle: Duration::from_millis(1),
+            storage: None,
             timeout: None,
         }
     }
@@ -449,12 +463,12 @@ pub struct Executor {
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
-    rng: Mutex<StdRng>,
+    rng: Arc<Mutex<StdRng>>,
     prefix: Mutex<String>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
-    partitions: Mutex<HashMap<String, Partition>>,
+    partitions: Arc<Mutex<HashMap<String, Partition>>>,
     signaler: Mutex<Signaler>,
     signal: Signal,
 }
@@ -466,6 +480,18 @@ impl Executor {
         if cfg.timeout.is_some() && cfg.cycle == Duration::default() {
             panic!("cycle duration must be non-zero when timeout is set");
         }
+
+        // Ensure rng exists
+        let rng = match cfg.seed {
+            Seed::Number(seed) => Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
+            Seed::Sampler(rng) => rng,
+        };
+
+        // Ensure storage exists
+        let partitions = cfg
+            .storage
+            .clone()
+            .unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new())));
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(cfg.registry));
@@ -480,7 +506,7 @@ impl Executor {
             deadline,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
-            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
+            rng,
             prefix: Mutex::new(String::new()),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks {
@@ -488,7 +514,7 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
-            partitions: Mutex::new(HashMap::new()),
+            partitions,
             signaler: Mutex::new(signaler),
             signal,
         });
@@ -508,7 +534,7 @@ impl Executor {
     /// and the provided seed.
     pub fn seeded(seed: u64) -> (Runner, Context, Arc<Auditor>) {
         let cfg = Config {
-            seed,
+            seed: Seed::Number(seed),
             ..Config::default()
         };
         Self::init(cfg)
@@ -930,7 +956,9 @@ impl Networking {
         // Construct connection
         let (dialer_sender, dialer_receiver) = mocks::Channel::init();
         let (dialee_sender, dialee_receiver) = mocks::Channel::init();
-        sender.send((dialer, dialer_sender, dialee_receiver)).await
+        sender
+            .send((dialer, dialer_sender, dialee_receiver))
+            .await
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
             Sink {
@@ -965,11 +993,7 @@ pub struct Listener {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     address: SocketAddr,
-    listener: mpsc::UnboundedReceiver<(
-        SocketAddr,
-        mocks::Sink,
-        mocks::Stream,
-    )>,
+    listener: mpsc::UnboundedReceiver<(SocketAddr, mocks::Sink, mocks::Stream)>,
 }
 
 impl crate::Listener<Sink, Stream> for Listener {
@@ -1007,8 +1031,7 @@ pub struct Sink {
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         self.auditor.send(self.me, self.peer, msg);
-        self.sender.send(msg).await
-            .map_err(|_| Error::SendFailed)?;
+        self.sender.send(msg).await.map_err(|_| Error::SendFailed)?;
         self.metrics.network_bandwidth.inc_by(msg.len() as u64);
         Ok(())
     }
@@ -1024,7 +1047,9 @@ pub struct Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        self.receiver.recv(buf).await
+        self.receiver
+            .recv(buf)
+            .await
             .map_err(|_| Error::RecvFailed)?;
         self.auditor.recv(self.me, self.peer, buf);
         Ok(())
@@ -1054,18 +1079,6 @@ impl RngCore for Context {
 }
 
 impl CryptoRng for Context {}
-
-struct Partition {
-    blobs: HashMap<Vec<u8>, Vec<u8>>,
-}
-
-impl Partition {
-    fn new() -> Self {
-        Self {
-            blobs: HashMap::new(),
-        }
-    }
-}
 
 /// Implementation of [`crate::Blob`] for the `deterministic` runtime.
 pub struct Blob {
@@ -1109,10 +1122,8 @@ impl crate::Storage<Blob> for Context {
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         self.executor.auditor.open(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
-        let partition_entry = partitions
-            .entry(partition.into())
-            .or_insert_with(Partition::new);
-        let content = partition_entry.blobs.entry(name.into()).or_default();
+        let partition_entry = partitions.entry(partition.into()).or_default();
+        let content = partition_entry.entry(name.into()).or_default();
         Ok(Blob::new(
             self.executor.clone(),
             partition.into(),
@@ -1129,7 +1140,6 @@ impl crate::Storage<Blob> for Context {
                 partitions
                     .get_mut(partition)
                     .ok_or(Error::PartitionMissing(partition.into()))?
-                    .blobs
                     .remove(name)
                     .ok_or(Error::BlobMissing(partition.into(), hex(name)))?;
             }
@@ -1148,8 +1158,8 @@ impl crate::Storage<Blob> for Context {
         let partition = partitions
             .get(partition)
             .ok_or(Error::PartitionMissing(partition.into()))?;
-        let mut results = Vec::with_capacity(partition.blobs.len());
-        for name in partition.blobs.keys() {
+        let mut results = Vec::with_capacity(partition.len());
+        for name in partition.keys() {
             results.push(name.clone());
         }
         results.sort(); // deterministic output
@@ -1227,7 +1237,6 @@ impl crate::Blob for Blob {
             .get_mut(&self.partition)
             .ok_or(Error::PartitionMissing(self.partition.clone()))?;
         let content = partition
-            .blobs
             .get_mut(&self.name)
             .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
         *content = new_content;

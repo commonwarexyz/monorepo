@@ -44,7 +44,7 @@ use std::{
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, tcp::OwnedReadHalf, tcp::OwnedWriteHalf},
+    net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
     runtime::{Builder, Runtime},
     sync::Mutex as AsyncMutex,
     task_local,
@@ -429,10 +429,13 @@ pub struct Sink {
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let len = msg.len();
-        timeout(self.context.executor.cfg.write_timeout, self.sink.write_all(msg))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::SendFailed)?;
+        timeout(
+            self.context.executor.cfg.write_timeout,
+            self.sink.write_all(msg),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::SendFailed)?;
         self.context
             .executor
             .metrics
@@ -451,10 +454,13 @@ pub struct Stream {
 impl crate::Stream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         // Wait for the stream to be readable
-        timeout(self.context.executor.cfg.read_timeout, self.stream.read_exact(buf))
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|_| Error::RecvFailed)?;
+        timeout(
+            self.context.executor.cfg.read_timeout,
+            self.stream.read_exact(buf),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::RecvFailed)?;
 
         // Record metrics
         self.context

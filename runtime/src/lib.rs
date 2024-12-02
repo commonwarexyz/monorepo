@@ -71,6 +71,9 @@ pub enum Error {
 /// running tasks.
 pub trait Runner {
     /// Start running a root task.
+    ///
+    /// TODO: It is up to a runtime implementation to handle whether a finished root task should
+    /// lead to all spawned tasks being aborted.
     fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,
@@ -238,7 +241,6 @@ pub trait Blob: Clone + Send + Sync + 'static {
 mod tests {
     use super::*;
     use commonware_macros::select;
-    use core::panic;
     use futures::{channel::mpsc, future::ready, join, SinkExt, StreamExt};
     use prometheus_client::encoding::text::encode;
     use prometheus_client::registry::Registry;
