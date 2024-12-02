@@ -70,8 +70,8 @@
 //!
 //! ## Messages
 //!
-//! To send messages, use the Data message type. This message type is used to send arbitrary bytes to a given channel.
-//! The data must be smaller than the configured maximum message size. If the message is larger, an error will be returned.
+//! Messages are sent using the Data message type. This message type is used to send arbitrary bytes to a given channel.
+//! The message must be smaller (in bytes) than the configured maximum message size. If the message is larger, an error will be returned.
 //! It is possible for a sender to prioritize messages over others.
 //!
 //! ```protobuf
