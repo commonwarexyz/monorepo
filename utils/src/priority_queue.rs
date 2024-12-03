@@ -57,6 +57,11 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PriorityQueue<I, V> {
         self.entries.insert(entry);
     }
 
+    /// Get the value of an item.
+    pub fn get(&self, item: &I) -> Option<V> {
+        self.keys.get(item).cloned()
+    }
+
     /// Remove all previously inserted items not included in `keep`
     /// and add any items not yet seen with a value of `initial`.
     pub fn retain(&mut self, keep: &[I], initial: V) {
