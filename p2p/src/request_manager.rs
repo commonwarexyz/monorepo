@@ -1,26 +1,32 @@
-use std::collections::HashSet;
-
 use commonware_cryptography::PublicKey;
+use commonware_runtime::Clock;
 use governor::{
-    clock::Clock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota, RateLimiter,
+    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
+    RateLimiter,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, SystemTime},
 };
 
-pub struct RequestManager<E: Clock> {
+pub struct RequestManager<E: Clock + GClock> {
     me: PublicKey,
+    runtime: E,
     rate_limiter:
         RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
-    sent: HashSet<PublicKey>,
+    sent: HashMap<PublicKey, SystemTime>,
     participants: Vec<PublicKey>,
     excluded: HashSet<PublicKey>,
 }
 
-impl<E: Clock> RequestManager<E> {
+impl<E: Clock + GClock> RequestManager<E> {
     pub fn new(runtime: E, me: PublicKey, rate_limit: Quota) -> Self {
         let rate_limiter = RateLimiter::hashmap_with_clock(rate_limit, &runtime);
         Self {
             me,
+            runtime,
             rate_limiter,
-            sent: HashSet::new(),
+            sent: HashMap::new(),
             participants: Vec::new(),
             excluded: HashSet::new(),
         }
@@ -39,6 +45,16 @@ impl<E: Clock> RequestManager<E> {
         self.excluded.insert(public_key);
     }
 
+    pub fn resolved(&mut self, public_key: PublicKey) {
+        let Some(start) = self.sent.remove(&public_key) else {
+            return;
+        };
+        let Ok(elapsed) = self.runtime.current().duration_since(start) else {
+            return;
+        };
+    }
+
+    // TODO: track multiple `keys` (like request ID) to enable concurrent requests at the same time
     pub fn select(&mut self) -> Option<PublicKey> {
         for public_key in &self.participants {
             // Check if me
@@ -52,7 +68,7 @@ impl<E: Clock> RequestManager<E> {
             }
 
             // Check if already sent this request
-            if self.sent.contains(public_key) {
+            if self.sent.contains_key(public_key) {
                 continue;
             }
 
@@ -60,9 +76,15 @@ impl<E: Clock> RequestManager<E> {
             if self.rate_limiter.check_key(public_key).is_err() {
                 continue;
             }
-            self.sent.insert(public_key.clone());
+
+            // Record request issuance time
+            let now = self.runtime.current();
+            self.sent.insert(public_key.clone(), now);
             return Some(public_key.clone());
         }
+
+        // Reset sent requests and try again later
+        self.reset();
         None
     }
 }
