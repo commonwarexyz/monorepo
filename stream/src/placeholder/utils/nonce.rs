@@ -2,7 +2,10 @@ use crate::placeholder::Error;
 use chacha20poly1305::Nonce;
 
 /// A struct that holds the nonce information.
-/// Dialer is a boolean that is true if the nonce is for the dialer side.
+///
+/// The nonce contains:
+/// - `dialer`: a boolean that is true if the nonce is for the dialer side.
+/// - `iter` and `seq`: combined, an 80-bit value that can be incremented.
 pub struct Info {
     dialer: bool,
     iter: u16,
@@ -18,9 +21,10 @@ impl Info {
         }
     }
 
-    /// Increments the nonce sequence number.
-    /// If the sequence number overflows, the iteration number is incremented and the sequence number is reset to 0.
-    /// If the iteration number overflows, an error is returned.
+    /// Increments the nonce.
+    ///
+    /// `seq` holds the least significant 64 bits of the nonce, and `iter` holds the most significant 16 bits.
+    /// An error is returned if-and-only-if the nonce overflows.
     pub fn inc(&mut self) -> Result<(), Error> {
         if self.seq == u64::MAX {
             if self.iter == u16::MAX {
