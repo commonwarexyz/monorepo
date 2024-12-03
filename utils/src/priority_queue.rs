@@ -1,5 +1,3 @@
-//! A generic priority queue that ensures any item is only included at most once.
-
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
@@ -25,7 +23,7 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PartialOrd for Entry<I, V> {
     }
 }
 
-/// A generic priority queue that ensures any item is only included at most once.
+/// A generic priority queue that enforces item uniqueness.
 pub struct PriorityQueue<I: Ord + Hash + Clone, V: Ord + Clone> {
     entries: BTreeSet<Entry<I, V>>,
     keys: HashMap<I, V>,
@@ -58,13 +56,13 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PriorityQueue<I, V> {
         self.entries.insert(entry);
     }
 
-    /// Remove all previously inserted items not included in `items`
+    /// Remove all previously inserted items not included in `keep`
     /// and add any items not yet seen with a value of `initial`.
-    pub fn retain(&mut self, items: &[I], initial: V) {
-        // Remove items not in the new set
-        let new_items: HashSet<_> = items.iter().cloned().collect();
+    pub fn retain(&mut self, keep: &[I], initial: V) {
+        // Remove items not in keep
+        let mut retained: HashSet<_> = keep.iter().cloned().collect();
         self.keys.retain(|item, value| {
-            if new_items.contains(item) {
+            if retained.remove(item) {
                 true
             } else {
                 let entry = Entry {
@@ -76,11 +74,9 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PriorityQueue<I, V> {
             }
         });
 
-        // Add new items with the initial value
-        for item in new_items {
-            if !self.keys.contains_key(&item) {
-                self.put(item, initial.clone());
-            }
+        // Add any items not yet removed with the initial value
+        for item in retained {
+            self.put(item, initial.clone());
         }
     }
 

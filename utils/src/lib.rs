@@ -2,7 +2,8 @@
 
 use sha2::{Digest, Sha256};
 
-pub mod priority_queue;
+mod priority_queue;
+pub use priority_queue::PriorityQueue;
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {
