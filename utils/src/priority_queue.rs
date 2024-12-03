@@ -23,7 +23,8 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PartialOrd for Entry<I, V> {
     }
 }
 
-/// A generic priority queue that enforces item uniqueness.
+/// A generic priority queue that enforces item uniqueness and optimizes for
+/// fast priority-ordered iteration rather than memory usage.
 pub struct PriorityQueue<I: Ord + Hash + Clone, V: Ord + Clone> {
     entries: BTreeSet<Entry<I, V>>,
     keys: HashMap<I, V>,
@@ -60,7 +61,7 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PriorityQueue<I, V> {
     /// and add any items not yet seen with a value of `initial`.
     pub fn retain(&mut self, keep: &[I], initial: V) {
         // Remove items not in keep
-        let mut retained: HashSet<_> = keep.iter().cloned().collect();
+        let mut retained: HashSet<_> = keep.iter().collect();
         self.keys.retain(|item, value| {
             if retained.remove(item) {
                 true
@@ -76,7 +77,7 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PriorityQueue<I, V> {
 
         // Add any items not yet removed with the initial value
         for item in retained {
-            self.put(item, initial.clone());
+            self.put(item.clone(), initial.clone());
         }
     }
 
