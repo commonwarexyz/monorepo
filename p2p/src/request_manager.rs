@@ -6,20 +6,21 @@ use governor::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    time::{Duration, SystemTime},
+    hash::Hash,
+    time::SystemTime,
 };
 
-pub struct RequestManager<E: Clock + GClock> {
+pub struct RequestManager<E: Clock + GClock, K: Hash + Eq + Clone> {
     me: PublicKey,
     runtime: E,
     rate_limiter:
         RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
-    sent: HashMap<PublicKey, SystemTime>,
+    sent: HashMap<K, HashMap<PublicKey, SystemTime>>,
     participants: Vec<PublicKey>,
     excluded: HashSet<PublicKey>,
 }
 
-impl<E: Clock + GClock> RequestManager<E> {
+impl<E: Clock + GClock, K: Hash + Eq + Clone> RequestManager<E, K> {
     pub fn new(runtime: E, me: PublicKey, rate_limit: Quota) -> Self {
         let rate_limiter = RateLimiter::hashmap_with_clock(rate_limit, &runtime);
         Self {
@@ -32,11 +33,6 @@ impl<E: Clock + GClock> RequestManager<E> {
         }
     }
 
-    pub fn reset(&mut self) {
-        self.rate_limiter.shrink_to_fit();
-        self.sent.clear();
-    }
-
     pub fn retain(&mut self, public_keys: &[PublicKey]) {
         self.participants = public_keys.to_vec();
     }
@@ -45,8 +41,11 @@ impl<E: Clock + GClock> RequestManager<E> {
         self.excluded.insert(public_key);
     }
 
-    pub fn resolved(&mut self, public_key: PublicKey) {
-        let Some(start) = self.sent.remove(&public_key) else {
+    pub fn resolved(&mut self, key: &K, public_key: &PublicKey) {
+        let Some(mut sent) = self.sent.remove(key) else {
+            return;
+        };
+        let Some(start) = sent.remove(public_key) else {
             return;
         };
         let Ok(elapsed) = self.runtime.current().duration_since(start) else {
@@ -54,8 +53,13 @@ impl<E: Clock + GClock> RequestManager<E> {
         };
     }
 
-    // TODO: track multiple `keys` (like request ID) to enable concurrent requests at the same time
-    pub fn select(&mut self) -> Option<PublicKey> {
+    pub fn cancel(&mut self, key: &K) {
+        self.sent.remove(key);
+    }
+
+    pub fn select(&mut self, key: K) -> Option<PublicKey> {
+        // Create entry if missing
+        let entry = self.sent.entry(key.clone()).or_default();
         for public_key in &self.participants {
             // Check if me
             if *public_key == self.me {
@@ -68,7 +72,7 @@ impl<E: Clock + GClock> RequestManager<E> {
             }
 
             // Check if already sent this request
-            if self.sent.contains_key(public_key) {
+            if entry.contains_key(public_key) {
                 continue;
             }
 
@@ -79,12 +83,13 @@ impl<E: Clock + GClock> RequestManager<E> {
 
             // Record request issuance time
             let now = self.runtime.current();
-            self.sent.insert(public_key.clone(), now);
+            entry.insert(public_key.clone(), now);
             return Some(public_key.clone());
         }
 
         // Reset sent requests and try again later
-        self.reset();
+        self.sent.remove(&key);
+        self.rate_limiter.shrink_to_fit();
         None
     }
 }
