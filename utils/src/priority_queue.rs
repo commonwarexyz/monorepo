@@ -1,79 +1,61 @@
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet};
+//! A generic priority queue that ensures any item is only included at most once.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 
-#[derive(Eq, PartialEq, Clone)]
-pub struct Entry<I: Ord, V: Ord> {
-    pub item: I,
-    pub value: V,
-}
-
-impl<I: Ord, V: Ord> Ord for Entry<I, V> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match self.value.cmp(&other.value) {
-            Ordering::Equal => self.item.cmp(&other.item),
-            other => other,
-        }
-    }
-}
-
-impl<I: Ord, V: Ord> PartialOrd for Entry<I, V> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
+/// A generic priority queue that ensures any item is only included at most once.
 pub struct PriorityQueue<I: Ord + Hash + Clone, V: Ord + Clone> {
-    entries: BTreeSet<Entry<I, V>>,
+    entries: BTreeMap<V, HashSet<I>>,
     keys: HashMap<I, V>,
 }
 
 impl<I: Ord + Hash + Clone, V: Ord + Clone> PriorityQueue<I, V> {
+    /// Create a new priority queue.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            entries: BTreeSet::new(),
+            entries: BTreeMap::new(),
             keys: HashMap::new(),
         }
     }
 
+    /// Insert an item with a value, overwriting the previous value if it exists.
     pub fn put(&mut self, item: I, value: V) {
-        // Check if entry previously existed
-        if let Some(old_value) = self.keys.get(&item) {
-            // Remove old entry
-            let old_entry = Entry {
-                item: item.clone(),
-                value: old_value.clone(),
-            };
-            self.entries.remove(&old_entry);
+        // Check if the item already exists
+        if let Some(old_value) = self.keys.insert(item.clone(), value.clone()) {
+            // Remove the item from the old value's set
+            if let Some(items) = self.entries.get_mut(&old_value) {
+                items.remove(&item);
+                if items.is_empty() {
+                    self.entries.remove(&old_value);
+                }
+            }
         }
-        // Insert new entry
-        let entry = Entry {
-            item: item.clone(),
-            value: value.clone(),
-        };
-        self.entries.insert(entry);
-        self.keys.insert(item, value);
+
+        // Insert the item into the new value's set
+        self.entries.entry(value).or_default().insert(item);
     }
 
+    /// Remove all previously inserted items not included in `items`
+    /// and add any items not yet seen with a value of `initial`.
     pub fn retain(&mut self, initial: V, items: &[I]) {
-        // Turn new items into a set
+        // Remove items not in the new set
         let new_items: HashSet<_> = items.iter().cloned().collect();
-
-        // If a key is not in new keys, remove it
         self.keys.retain(|item, value| {
-            if items.contains(item) {
+            if new_items.contains(item) {
                 true
             } else {
-                self.entries.remove(&Entry {
-                    item: item.clone(),
-                    value: value.clone(),
-                });
+                if let Some(items_set) = self.entries.get_mut(value) {
+                    items_set.remove(item);
+                    if items_set.is_empty() {
+                        self.entries.remove(value);
+                    }
+                }
                 false
             }
         });
 
-        // If a key is in new keys but not in old keys, add it
+        // Add new items with the initial value
         for item in new_items {
             if !self.keys.contains_key(&item) {
                 self.put(item, initial.clone());
@@ -81,9 +63,11 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PriorityQueue<I, V> {
         }
     }
 
-    // Iterate over the entries
-    pub fn iter(&self) -> impl Iterator<Item = &Entry<I, V>> {
-        self.entries.iter()
+    /// Iterate over all items in priority order.
+    pub fn iter(&self) -> impl Iterator<Item = (&I, &V)> {
+        self.entries
+            .iter()
+            .flat_map(|(value, items)| items.iter().map(move |item| (item, value)))
     }
 }
 
@@ -102,10 +86,10 @@ mod tests {
         pq.put(key1, Duration::from_secs(10));
         pq.put(key2, Duration::from_secs(5));
 
-        let entries: Vec<_> = pq.iter().cloned().collect();
+        let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].item, key2);
-        assert_eq!(entries[1].item, key1);
+        assert_eq!(*entries[0].0, key2);
+        assert_eq!(*entries[1].0, key1);
     }
 
     #[test]
@@ -117,9 +101,9 @@ mod tests {
         pq.put(key, Duration::from_secs(10));
         pq.put(key, Duration::from_secs(5));
 
-        let entries: Vec<_> = pq.iter().cloned().collect();
+        let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].value, Duration::from_secs(5));
+        assert_eq!(*entries[0].1, Duration::from_secs(5));
     }
 
     #[test]
@@ -135,13 +119,13 @@ mod tests {
 
         pq.retain(Duration::from_secs(2), &[key1, key3]);
 
-        let entries: Vec<_> = pq.iter().cloned().collect();
+        let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 2);
         assert!(entries
             .iter()
-            .any(|e| e.item == key1 && e.value == Duration::from_secs(10)));
+            .any(|e| *e.0 == key1 && *e.1 == Duration::from_secs(10)));
         assert!(entries
             .iter()
-            .any(|e| e.item == key3 && e.value == Duration::from_secs(2)));
+            .any(|e| *e.0 == key3 && *e.1 == Duration::from_secs(2)));
     }
 }
