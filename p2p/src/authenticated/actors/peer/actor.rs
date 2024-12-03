@@ -63,27 +63,21 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
     }
 
     async fn send_content<Si: Sink>(
-        max_size: usize,
         sender: &mut Sender<Si>,
         peer: &PublicKey,
         data: wire::Data,
         sent_messages: &Family<metrics::Message, Counter>,
     ) -> Result<(), Error> {
-        // Ensure message is not too large
-        let message_len = data.message.len();
-        if message_len > max_size {
-            return Err(Error::MessageTooLarge(message_len));
-        }
+        trace!(
+            peer = hex(peer),
+            "sending data",
+        );
 
         // Send data
         let channel = data.channel;
         let msg = wire::Message {
             payload: Some(wire::message::Payload::Data(data)),
         }.encode_to_vec();
-        trace!(
-            peer = hex(peer),
-            "sending data",
-        );
         sender.send(&msg)
             .await
             .map_err(Error::SendFailed)?;
@@ -113,7 +107,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
 
         // Send/Receive messages from the peer
         let (mut conn_sender, mut conn_receiver) = connection.split();
-        let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender",{
+        let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender", {
             let runtime = self.runtime.clone();
             let mut tracker = tracker.clone();
             let peer = peer.clone();
@@ -172,8 +166,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                             if entry.is_none() {
                                 return Err(Error::InvalidChannel);
                             }
-                            let (_, max_size) = entry.unwrap();
-                            Self::send_content(*max_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
+                            Self::send_content(&mut conn_sender, &peer, msg, &self.sent_messages).await?;
                         },
                         msg_low = self.low.next() => {
                             let msg = match msg_low {
@@ -184,8 +177,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                             if entry.is_none() {
                                 return Err(Error::InvalidChannel);
                             }
-                            let (_, max_size) = entry.unwrap();
-                            Self::send_content(*max_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
+                            Self::send_content(&mut conn_sender, &peer, msg, &self.sent_messages).await?;
                         }
                     }
                 }

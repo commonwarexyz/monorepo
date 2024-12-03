@@ -15,6 +15,12 @@ use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::{debug, info, warn};
 
+/// The maximum overhead of encoding a message in protobuf.
+const PROTOBUF_OVERHEAD: usize =
+    1 + 10 + // Encode Data (field + length varint)
+    1 + 5 + // Encode Channel (field + 32-bit varint)
+    1 + 10; // Encode Message (field + length varint)
+
 /// Implementation of an `authenticated` network.
 pub struct Network<
     Si: Sink,
@@ -153,7 +159,7 @@ impl<
         let connection = placeholder::Config {
             crypto: self.cfg.crypto,
             namespace: self.cfg.namespace,
-            max_message_size: self.cfg.max_message_size,
+            max_message_size: self.cfg.max_message_size + PROTOBUF_OVERHEAD,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,

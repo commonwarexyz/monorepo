@@ -114,9 +114,9 @@ impl<
 
                             // Run peer
                             let e = actor.run(peer.clone(), connection, tracker, channels).await;
-                            info!(error = ?e, peer=hex(&peer), "peer shutdown");
 
                             // Let the router know the peer has exited
+                            info!(error = ?e, peer=hex(&peer), "peer shutdown");
                             router.release(peer).await;
                         }
                     });
