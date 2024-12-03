@@ -41,8 +41,6 @@ pub enum Error {
     UnexpectedFailure(commonware_runtime::Error),
     #[error("message dropped")]
     MessageDropped,
-    #[error("message too large: {0}")]
-    MessageTooLarge(usize),
     #[error("invalid channel")]
     InvalidChannel,
     #[error("channel closed: {0}")]

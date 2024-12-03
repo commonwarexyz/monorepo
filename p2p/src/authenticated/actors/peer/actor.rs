@@ -98,9 +98,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
-        for (channel, (rate, max_size, sender)) in channels.collect() {
+        for (channel, (rate, sender)) in channels.collect() {
             let rate_limiter = RateLimiter::direct_with_clock(rate, &self.runtime);
-            rate_limits.insert(channel, (rate_limiter, max_size));
+            rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
@@ -250,7 +250,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 // are on a newer version than us
                                 continue;
                             }
-                            let (rate_limiter, max_size) = entry.unwrap();
+                            let rate_limiter = entry.unwrap();
                             match rate_limiter.check() {
                                 Ok(_) => {}
                                 Err(negative) => {
@@ -260,12 +260,6 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                     let wait = negative.wait_time_from(runtime.now());
                                     runtime.sleep(wait).await;
                                 }
-                            }
-
-                            // Ensure message is not too large
-                            let len = data.message.len();
-                            if len > *max_size {
-                                return Err(Error::MessageTooLarge(len));
                             }
 
                             // Send message to client

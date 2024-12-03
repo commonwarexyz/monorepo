@@ -153,7 +153,6 @@
 //!     let (sender, receiver) = network.register(
 //!         0,
 //!         Quota::per_second(NonZeroU32::new(1).unwrap()),
-//!         MAX_MESSAGE_SIZE,
 //!         MAX_MESSAGE_BACKLOG,
 //!         COMPRESSION_LEVEL,
 //!     );
@@ -225,8 +224,6 @@ mod tests {
         One,
     }
 
-    const ONE_KILOBYTE: usize = 1_024;
-    const ONE_MEGABYTE: usize = 1_024 * ONE_KILOBYTE;
     const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 
     /// Test connectivity between `n` peers.
@@ -281,7 +278,6 @@ mod tests {
             let (mut sender, mut receiver) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(5).unwrap()), // Ensure we hit the rate limit
-                ONE_KILOBYTE,
                 DEFAULT_MESSAGE_BACKLOG,
                 None,
             );
@@ -505,7 +501,6 @@ mod tests {
                 let (mut sender, mut receiver) = network.register(
                     0,
                     Quota::per_second(NonZeroU32::new(10).unwrap()),
-                    ONE_MEGABYTE,
                     DEFAULT_MESSAGE_BACKLOG,
                     None,
                 );
@@ -587,7 +582,6 @@ mod tests {
             let (mut sender, _) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                ONE_MEGABYTE,
                 DEFAULT_MESSAGE_BACKLOG,
                 compression,
             );

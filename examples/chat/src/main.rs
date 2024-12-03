@@ -184,7 +184,6 @@ fn main() {
         let (chat_sender, chat_receiver) = network.register(
             handler::CHANNEL,
             Quota::per_second(NonZeroU32::new(128).unwrap()),
-            MAX_MESSAGE_SIZE,
             MAX_MESSAGE_BACKLOG,
             COMPRESSION_LEVEL,
         );
