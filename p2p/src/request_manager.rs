@@ -33,6 +33,7 @@ pub struct RequestManager<E: Clock + GClock, C: Scheme, K: Hash + Eq + Clone> {
 
 impl<E: Clock + GClock, C: Scheme, K: Hash + Eq + Clone> RequestManager<E, C, K> {
     // TODO: track timeouts centrally to allow concurrent requests (track by key and participant)
+    // TODO: how to handle "batch requests" (don't have a single key nor can they always be broken up...ex: give me block hash + 10 parents)
     pub fn new(runtime: E, config: Config<C>) -> Self {
         let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, &runtime);
         Self {
