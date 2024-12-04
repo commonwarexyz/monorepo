@@ -40,7 +40,7 @@ pub struct Requester<E: Clock + GClock, C: Scheme> {
     excluded: HashSet<PublicKey>,
 
     id: ID,
-    requests: HashMap<ID, (PublicKey, SystemTime)>,
+    requests: HashMap<ID, (PublicKey, SystemTime, SystemTime)>,
     deadlines: BTreeMap<SystemTime, BTreeSet<ID>>,
 }
 
@@ -78,8 +78,15 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
 
     /// Remove an outstanding request.
     fn remove(&mut self, id: ID) -> Option<(PublicKey, SystemTime)> {
-        let (participant, start) = self.requests.remove(&id)?;
-        self.deadlines.get_mut(&start).map(|ids| ids.remove(&id));
+        let (participant, start, deadline) = self.requests.remove(&id)?;
+        let ids = self
+            .deadlines
+            .get_mut(&deadline)
+            .expect("deadline not found");
+        ids.remove(&id);
+        if ids.is_empty() {
+            self.deadlines.remove(&deadline);
+        }
         Some((participant, start))
     }
 
@@ -111,7 +118,8 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
             // Record request issuance time
             let now = self.runtime.current();
             let deadline = now.checked_add(self.timeout).expect("time overflowed");
-            self.requests.insert(id, (participant.clone(), now));
+            self.requests
+                .insert(id, (participant.clone(), now, deadline));
             self.deadlines.entry(deadline).or_default().insert(id);
             return Some((participant.clone(), id));
         }
@@ -177,7 +185,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn test_requester_resolved() {
+    fn test_requester_basic() {
         // Instantiate runtime
         let (executor, runtime, _auditor) = Executor::seeded(0);
         executor.start(async move {
@@ -236,6 +244,26 @@ mod tests {
             let (participant, id) = requester.request().expect("failed to get participant");
             assert_eq!(participant, other);
             assert_eq!(id, 1);
+
+            // Timeout request
+            requester.timeout(id);
+
+            // Ensure no more requests
+            assert_eq!(requester.request(), None);
+
+            // Sleep until reset
+            runtime.sleep(Duration::from_secs(2)).await;
+
+            // Get request
+            let (participant, id) = requester.request().expect("failed to get participant");
+            assert_eq!(participant, other);
+            assert_eq!(id, 2);
+
+            // Cancel request
+            requester.cancel(id);
+
+            // Ensure no more requests
+            assert_eq!(requester.next(), None);
         });
     }
 }
