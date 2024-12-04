@@ -150,7 +150,7 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
         let Some(past) = self.participants.get(&participant) else {
             return;
         };
-        let performance = past / 2 + elapsed / 2;
+        let performance = past.saturating_add(elapsed) / 2;
         self.participants.put(participant, performance);
     }
 
@@ -164,7 +164,7 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
         let Some(past) = self.participants.get(&participant) else {
             return;
         };
-        let performance = past / 2 + self.timeout.as_millis() / 2;
+        let performance = past.saturating_add(self.timeout.as_millis()) / 2;
         self.participants.put(participant.clone(), performance);
     }
 
