@@ -38,19 +38,14 @@ impl Mailbox {
     }
 }
 
-pub struct Data {
-    pub channel: Channel,
-    pub message: Bytes,
-}
-
 #[derive(Clone)]
 pub struct Relay {
-    low: mpsc::Sender<Data>,
-    high: mpsc::Sender<Data>,
+    low: mpsc::Sender<wire::Data>,
+    high: mpsc::Sender<wire::Data>,
 }
 
 impl Relay {
-    pub fn new(low: mpsc::Sender<Data>, high: mpsc::Sender<Data>) -> Self {
+    pub fn new(low: mpsc::Sender<wire::Data>, high: mpsc::Sender<wire::Data>) -> Self {
         Self { low, high }
     }
 
@@ -68,12 +63,12 @@ impl Relay {
         if priority {
             return self
                 .high
-                .send(Data { channel, message })
+                .send(wire::Data { channel, message })
                 .await
                 .map_err(|_| Error::MessageDropped);
         }
         self.low
-            .send(Data { channel, message })
+            .send(wire::Data { channel, message })
             .await
             .map_err(|_| Error::MessageDropped)
     }
@@ -93,7 +88,7 @@ mod tests {
             let mut relay = Relay::new(low_sender, high_sender);
 
             // Send a high priority message
-            let data = Data {
+            let data = wire::Data {
                 channel: 1,
                 message: Bytes::from("test high prio message"),
             };
@@ -111,7 +106,7 @@ mod tests {
             assert!(low_receiver.try_next().is_err());
 
             // Send a low priority message
-            let data = Data {
+            let data = wire::Data {
                 channel: 1,
                 message: Bytes::from("test low prio message"),
             };

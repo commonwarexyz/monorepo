@@ -1,4 +1,4 @@
-//! Communicate with a peer over an encrypted connection.
+//! Communicate with an authenticated peer over an encrypted connection.
 //!
 //! Encrypted communication with a peer, identified by a developer-specified
 //! cryptographic identity (i.e. BLS, ed25519, etc.).
@@ -157,14 +157,14 @@ pub enum Error {
     StreamClosed,
     #[error("cipher creation failed")]
     CipherCreationFailed,
-    #[error("peer nonce overflow")]
-    PeerNonceOverflow,
-    #[error("our nonce overflow")]
-    OurNonceOverflow,
+    #[error("nonce overflow")]
+    NonceOverflow,
     #[error("encryption failed")]
     EncryptionFailed,
     #[error("decryption failed")]
     DecryptionFailed,
-    #[error("invalid timestamp")]
-    InvalidTimestamp,
+    #[error("timestamp too old: {0}")]
+    InvalidTimestampOld(u64),
+    #[error("timestamp too future: {0}")]
+    InvalidTimestampFuture(u64),
 }

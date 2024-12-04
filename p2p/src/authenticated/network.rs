@@ -9,11 +9,25 @@ use crate::Channel;
 use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
-use commonware_stream::placeholder;
+use commonware_stream::public_key;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::{debug, info, warn};
+
+// The maximum overhead of encoding a `message: Bytes` into a protobuf `message Message`
+// Should be at most 18 bytes for messages under 4GB, but we add a bit of padding.
+//
+// The byte overhead is calculated as follows:
+// - 1  Data field number
+// - 5* Data length varint
+// - 1  Channel field number
+// - 5  Channel value varint
+// - 1  Message field number
+// - 5* Message length varint
+//
+// (*) assumes that the length is no more than 4GB
+const PROTOBUF_OVERHEAD: usize = 64;
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
@@ -76,13 +90,14 @@ impl<
             registry: cfg.registry.clone(),
             mailbox_size: cfg.mailbox_size,
         });
+        let channels = Channels::new(messenger, cfg.max_message_size);
 
         (
             Self {
                 runtime,
                 cfg,
 
-                channels: Channels::new(messenger),
+                channels,
                 tracker,
                 tracker_mailbox,
                 router,
@@ -102,7 +117,6 @@ impl<
     ///
     /// * `channel` - Unique identifier for the channel.
     /// * `rate` - Rate at which messages can be received over the channel.
-    /// * `max_size` - Maximum size of a message that can be sent/received over the channel.
     /// * `backlog` - Maximum number of messages that can be queued on the channel before blocking.
     /// * `compression` - Optional compression level (using `zstd`) to use for messages on the channel.
     ///
@@ -115,12 +129,10 @@ impl<
         &mut self,
         channel: Channel,
         rate: Quota,
-        max_size: usize,
         backlog: usize,
         compression: Option<u8>,
     ) -> (channels::Sender, channels::Receiver) {
-        self.channels
-            .register(channel, rate, max_size, backlog, compression)
+        self.channels.register(channel, rate, backlog, compression)
     }
 
     /// Starts the network.
@@ -150,10 +162,10 @@ impl<
         );
 
         // Start listener
-        let connection = placeholder::Config {
+        let connection = public_key::Config {
             crypto: self.cfg.crypto,
             namespace: self.cfg.namespace,
-            max_message_size: self.cfg.max_message_size,
+            max_message_size: self.cfg.max_message_size + PROTOBUF_OVERHEAD,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,
             handshake_timeout: self.cfg.handshake_timeout,

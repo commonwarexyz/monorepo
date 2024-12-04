@@ -22,15 +22,8 @@
 //! println!("Auditor state: {}", auditor.state());
 //! ```
 
-use crate::{
-    mocks,
-    utils::Signaler,
-    Clock,
-    Error,
-    Handle,
-    Signal,
-};
-use commonware_utils::hex;
+use crate::{mocks, utils::Signaler, Clock, Error, Handle, Signal};
+use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     channel::mpsc,
     task::{waker_ref, ArcWake},
@@ -646,10 +639,7 @@ impl crate::Runner for Runner {
                     .expect("executor time overflowed");
                 current = *time;
             }
-            trace!(
-                now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
-                "time advanced",
-            );
+            trace!(now = current.epoch_millis(), "time advanced",);
 
             // Skip time if there is nothing to do
             if self.executor.tasks.len() == 0 {
@@ -668,10 +658,7 @@ impl crate::Runner for Runner {
                         *time = skip.unwrap();
                         current = *time;
                     }
-                    trace!(
-                        now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
-                        "time skipped",
-                    );
+                    trace!(now = current.epoch_millis(), "time skipped",);
                 }
             }
 
@@ -930,7 +917,9 @@ impl Networking {
         // Construct connection
         let (dialer_sender, dialer_receiver) = mocks::Channel::init();
         let (dialee_sender, dialee_receiver) = mocks::Channel::init();
-        sender.send((dialer, dialer_sender, dialee_receiver)).await
+        sender
+            .send((dialer, dialer_sender, dialee_receiver))
+            .await
             .map_err(|_| Error::ConnectionFailed)?;
         Ok((
             Sink {
@@ -965,11 +954,7 @@ pub struct Listener {
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     address: SocketAddr,
-    listener: mpsc::UnboundedReceiver<(
-        SocketAddr,
-        mocks::Sink,
-        mocks::Stream,
-    )>,
+    listener: mpsc::UnboundedReceiver<(SocketAddr, mocks::Sink, mocks::Stream)>,
 }
 
 impl crate::Listener<Sink, Stream> for Listener {
@@ -1007,8 +992,7 @@ pub struct Sink {
 impl crate::Sink for Sink {
     async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         self.auditor.send(self.me, self.peer, msg);
-        self.sender.send(msg).await
-            .map_err(|_| Error::SendFailed)?;
+        self.sender.send(msg).await.map_err(|_| Error::SendFailed)?;
         self.metrics.network_bandwidth.inc_by(msg.len() as u64);
         Ok(())
     }
@@ -1024,7 +1008,9 @@ pub struct Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
-        self.receiver.recv(buf).await
+        self.receiver
+            .recv(buf)
+            .await
             .map_err(|_| Error::RecvFailed)?;
         self.auditor.recv(self.me, self.peer, buf);
         Ok(())

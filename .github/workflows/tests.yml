@@ -1,4 +1,4 @@
-name: Tests 
+name: Tests
 
 on:
   push:
@@ -22,15 +22,17 @@ jobs:
       uses: ./.github/actions/setup
       with:
         rust-version: ${{ steps.rust-version.outputs.rust_version}}
-    - name: Lint with clippy
-      run: cargo clippy -- -D warnings
+    - name: Lint
+      run: cargo clippy --all-targets --all-features -- -D warnings
+    - name: Fmt
+      run : cargo fmt --all -- --check
     - name: Check docs
       run: cargo doc --no-deps --document-private-items
       env:
         RUSTDOCFLAGS: "-D warnings"
     - name: Run tests
       run: cargo test --verbose
-  
+
   Dependencies:
     runs-on: ubuntu-latest
     steps:
@@ -41,7 +43,7 @@ jobs:
     - name: Get Rust version
       id: rust-version
       run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
-    - name: Run setup 
+    - name: Run setup
       uses: ./.github/actions/setup
       with:
         rust-version: ${{ steps.rust-version.outputs.rust_version}}

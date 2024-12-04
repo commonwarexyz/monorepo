@@ -2,18 +2,19 @@ use super::{
     handshake::{create_handshake, Handshake, IncomingHandshake},
     utils::{
         codec::{recv_frame, send_frame},
-        nonce::encode,
+        nonce,
     },
     x25519, Config, Error,
 };
 use bytes::Bytes;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
-    ChaCha20Poly1305, Nonce,
+    ChaCha20Poly1305,
 };
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
+use commonware_utils::SystemTimeExt as _;
 use rand::{CryptoRng, Rng};
 
 // When encrypting data, an encryption tag is appended to the ciphertext.
@@ -44,10 +45,11 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
+        let timestamp = runtime.current().epoch_millis();
         let msg = create_handshake(
-            runtime.clone(),
             &mut config.crypto,
             &config.namespace,
+            timestamp,
             peer.clone(),
             ephemeral,
         )?;
@@ -112,10 +114,11 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
+        let timestamp = runtime.current().epoch_millis();
         let msg = create_handshake(
-            runtime.clone(),
             &mut config.crypto,
             &config.namespace,
+            timestamp,
             handshake.peer_public_key.clone(),
             ephemeral,
         )?;
@@ -144,26 +147,19 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         })
     }
 
-    pub fn split(self) -> (usize, Sender<Si>, Receiver<St>) {
+    pub fn split(self) -> (Sender<Si>, Receiver<St>) {
         (
-            self.config.max_message_size,
             Sender {
                 cipher: self.cipher.clone(),
                 sink: self.sink,
-
                 max_message_size: self.config.max_message_size,
-                dialer: self.dialer,
-                iter: 0,
-                seq: 0,
+                nonce: nonce::Info::new(self.dialer),
             },
             Receiver {
                 cipher: self.cipher,
                 stream: self.stream,
-
                 max_message_size: self.config.max_message_size,
-                dialer: self.dialer,
-                iter: 0,
-                seq: 0,
+                nonce: nonce::Info::new(!self.dialer),
             },
         )
     }
@@ -174,39 +170,25 @@ pub struct Sender<Si: Sink> {
     sink: Si,
 
     max_message_size: usize,
-    dialer: bool,
-    iter: u16,
-    seq: u64,
+    nonce: nonce::Info,
 }
 
 impl<Si: Sink> Sender<Si> {
-    fn my_nonce(&mut self) -> Result<Nonce, Error> {
-        if self.seq == u64::MAX {
-            if self.iter == u16::MAX {
-                return Err(Error::OurNonceOverflow);
-            }
-            self.iter += 1;
-            self.seq = 0;
-        }
-        let nonce = encode(self.dialer, self.iter, self.seq);
-        self.seq += 1;
-        Ok(nonce)
-    }
-
     pub async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         // Encrypt data
-        let nonce = self.my_nonce()?;
         let msg = self
             .cipher
-            .encrypt(&nonce, msg.as_ref())
+            .encrypt(&self.nonce.encode(), msg.as_ref())
             .map_err(|_| Error::EncryptionFailed)?;
+        self.nonce.inc()?;
 
         // Send data
         send_frame(
             &mut self.sink,
             &msg,
             self.max_message_size + ENCRYPTION_TAG_LENGTH,
-        ).await?;
+        )
+        .await?;
         Ok(())
     }
 }
@@ -216,38 +198,24 @@ pub struct Receiver<St: Stream> {
     stream: St,
 
     max_message_size: usize,
-    dialer: bool,
-    iter: u16,
-    seq: u64,
+    nonce: nonce::Info,
 }
 
 impl<St: Stream> Receiver<St> {
-    fn peer_nonce(&mut self) -> Result<Nonce, Error> {
-        if self.seq == u64::MAX {
-            if self.iter == u16::MAX {
-                return Err(Error::PeerNonceOverflow);
-            }
-            self.iter += 1;
-            self.seq = 0;
-        }
-        let nonce = encode(!self.dialer, self.iter, self.seq);
-        self.seq += 1;
-        Ok(nonce)
-    }
-
     pub async fn receive(&mut self) -> Result<Bytes, Error> {
         // Read data
         let msg = recv_frame(
             &mut self.stream,
             self.max_message_size + ENCRYPTION_TAG_LENGTH,
-        ).await?;
+        )
+        .await?;
 
         // Decrypt data
-        let nonce = self.peer_nonce()?;
         let msg = self
             .cipher
-            .decrypt(&nonce, msg.as_ref())
+            .decrypt(&self.nonce.encode(), msg.as_ref())
             .map_err(|_| Error::DecryptionFailed)?;
+        self.nonce.inc()?;
 
         Ok(Bytes::from(msg))
     }
@@ -256,87 +224,7 @@ impl<St: Stream> Receiver<St> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{
-        deterministic::Executor,
-        mocks,
-        Runner,
-    };
-
-    #[test]
-    fn test_sender_nonce_overflow() {
-        let (executuor, _, _) = Executor::default();
-        executuor.start(async {
-            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (sink, _) = mocks::Channel::init();
-            let mut sender = Sender {
-                cipher,
-                sink,
-                max_message_size: 0,
-                dialer: true,
-                iter: u16::MAX,
-                seq: u64::MAX,
-            };
-            let nonce_result = sender.my_nonce();
-            assert!(matches!(nonce_result, Err(Error::OurNonceOverflow)));
-        });
-    }
-
-    #[test]
-    fn test_sender_seq_overflow() {
-        let (executuor, _, _) = Executor::default();
-        executuor.start(async {
-            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (sink, _) = mocks::Channel::init();
-            let mut sender = Sender {
-                cipher,
-                sink,
-                max_message_size: 0,
-                dialer: true,
-                iter: 0,
-                seq: u64::MAX,
-            };
-            let nonce_result = sender.my_nonce().unwrap();
-            assert_eq!(nonce_result, encode(true, 1, 0));
-        });
-    }
-
-    #[test]
-    fn test_receiver_nonce_overflow() {
-        let (executuor, _, _) = Executor::default();
-        executuor.start(async {
-            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (_, stream) = mocks::Channel::init();
-            let mut receiver = Receiver {
-                cipher,
-                stream,
-                max_message_size: 0,
-                dialer: false,
-                iter: u16::MAX,
-                seq: u64::MAX,
-            };
-            let nonce_result = receiver.peer_nonce();
-            assert!(matches!(nonce_result, Err(Error::PeerNonceOverflow)));
-        });
-    }
-
-    #[test]
-    fn test_receiver_seq_overflow() {
-        let (executuor, _, _) = Executor::default();
-        executuor.start(async {
-            let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
-            let (_, stream) = mocks::Channel::init();
-            let mut receiver = Receiver {
-                cipher,
-                stream,
-                max_message_size: 0,
-                dialer: false,
-                iter: 0,
-                seq: u64::MAX,
-            };
-            let nonce_result = receiver.peer_nonce().unwrap();
-            assert_eq!(nonce_result, encode(true, 1, 0));
-        });
-    }
+    use commonware_runtime::{deterministic::Executor, mocks, Runner};
 
     #[test]
     fn test_decryption_failure() {
@@ -348,13 +236,13 @@ mod tests {
                 cipher,
                 stream,
                 max_message_size: 1024,
-                dialer: false,
-                iter: 0,
-                seq: 0,
+                nonce: nonce::Info::new(false),
             };
 
             // Send invalid ciphertext
-            send_frame(&mut sink, b"invalid data", receiver.max_message_size).await.unwrap();
+            send_frame(&mut sink, b"invalid data", receiver.max_message_size)
+                .await
+                .unwrap();
 
             let result = receiver.receive().await;
             assert!(matches!(result, Err(Error::DecryptionFailed)));
@@ -372,9 +260,7 @@ mod tests {
                 cipher,
                 sink,
                 max_message_size: message.len() - 1,
-                dialer: true,
-                iter: 0,
-                seq: 0,
+                nonce: nonce::Info::new(true),
             };
 
             let result = sender.send(message).await;
@@ -395,17 +281,13 @@ mod tests {
                 cipher: cipher.clone(),
                 sink,
                 max_message_size: message.len(),
-                dialer: true,
-                iter: 0,
-                seq: 0,
+                nonce: nonce::Info::new(true),
             };
             let mut receiver = Receiver {
                 cipher,
                 stream,
                 max_message_size: message.len() - 1,
-                dialer: false,
-                iter: 0,
-                seq: 0,
+                nonce: nonce::Info::new(false),
             };
 
             sender.send(message).await.unwrap();
@@ -424,21 +306,18 @@ mod tests {
             let max_message_size = message.len();
 
             let (sink, stream) = mocks::Channel::init();
+            let is_dialer = false;
             let mut sender = Sender {
                 cipher: cipher.clone(),
                 sink,
                 max_message_size,
-                dialer: true,
-                iter: 0,
-                seq: 0,
+                nonce: nonce::Info::new(is_dialer),
             };
             let mut receiver = Receiver {
                 cipher,
                 stream,
                 max_message_size,
-                dialer: false,
-                iter: 0,
-                seq: 0,
+                nonce: nonce::Info::new(is_dialer),
             };
 
             // Send data

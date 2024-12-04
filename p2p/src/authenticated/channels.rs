@@ -130,13 +130,15 @@ impl crate::Receiver for Receiver {
 #[derive(Clone)]
 pub struct Channels {
     messenger: Messenger,
-    receivers: BTreeMap<Channel, (Quota, usize, mpsc::Sender<Message>)>,
+    max_size: usize,
+    receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message>)>,
 }
 
 impl Channels {
-    pub fn new(messenger: Messenger) -> Self {
+    pub fn new(messenger: Messenger, max_size: usize) -> Self {
         Self {
             messenger,
+            max_size,
             receivers: BTreeMap::new(),
         }
     }
@@ -145,25 +147,20 @@ impl Channels {
         &mut self,
         channel: Channel,
         rate: governor::Quota,
-        max_size: usize,
         backlog: usize,
         compression: Option<u8>,
     ) -> (Sender, Receiver) {
         let (sender, receiver) = mpsc::channel(backlog);
-        if self
-            .receivers
-            .insert(channel, (rate, max_size, sender))
-            .is_some()
-        {
+        if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {}", channel);
         }
         (
-            Sender::new(channel, max_size, compression, self.messenger.clone()),
-            Receiver::new(max_size, compression.is_some(), receiver),
+            Sender::new(channel, self.max_size, compression, self.messenger.clone()),
+            Receiver::new(self.max_size, compression.is_some(), receiver),
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u32, (Quota, usize, mpsc::Sender<Message>)> {
+    pub fn collect(self) -> BTreeMap<u32, (Quota, mpsc::Sender<Message>)> {
         self.receivers
     }
 }

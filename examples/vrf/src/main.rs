@@ -261,7 +261,6 @@ fn main() {
             let (contributor_sender, contributor_receiver) = network.register(
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                MAX_MESSAGE_SIZE,
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
             );
@@ -284,7 +283,6 @@ fn main() {
             let (vrf_sender, vrf_receiver) = network.register(
                 handlers::VRF_CHANNEL,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                MAX_MESSAGE_SIZE,
                 DEFAULT_MESSAGE_BACKLOG,
                 None,
             );
@@ -300,7 +298,6 @@ fn main() {
             let (arbiter_sender, arbiter_receiver) = network.register(
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                MAX_MESSAGE_SIZE,
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
             );

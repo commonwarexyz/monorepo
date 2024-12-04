@@ -37,7 +37,7 @@ impl Message {
             message: Self::PEERS_TYPE,
         }
     }
-    pub fn new_chunk(peer: &PublicKey, channel: Channel) -> Self {
+    pub fn new_data(peer: &PublicKey, channel: Channel) -> Self {
         Self {
             peer: hex(peer),
             message: channel as i32,

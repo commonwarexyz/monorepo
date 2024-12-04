@@ -11,7 +11,6 @@
 //! * Automatic Peer Discovery Using Bit Vectors (Used as Ping/Pongs)
 //! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
 //! * Optional Message Compression (using `zstd`)
-//! * Embedded Message Chunking
 //!
 //! # Design
 //!
@@ -69,25 +68,18 @@
 //! This allows peers that have a more up-to-date version of the peer set to connect, exchange application-level information, and for
 //! the said peer to potentially learn of an updated peer set (of which it is part)._
 //!
-//! ## Chunking
+//! ## Messages
 //!
-//! To support arbitrarily large messages (while maintaining a small frame size), this crate automatically chunks messages
-//! that exceed the frame size (the frame size is configurable). A connection will be blocked until all chunks of a given
-//! message are sent. It is possible for a sender to prioritize messages over others but not to be interleaved with an
-//! ongoing multi-chunk message.
+//! Messages are sent using the Data message type. This message type is used to send arbitrary bytes to a given channel.
+//! The message must be smaller (in bytes) than the configured maximum message size. If the message is larger, an error will be returned.
+//! It is possible for a sender to prioritize messages over others.
 //!
 //! ```protobuf
-//! message Chunk {
+//! message Data {
 //!     uint32 channel = 1;
-//!     uint32 part = 2;
-//!     uint32 total_parts = 3;
-//!     bytes content = 4;
+//!     bytes message = 2;
 //! }
 //! ```
-//!
-//! To minimize the number of chunks sent and to ensure each chunk is full (otherwise someone could send us a million chunks
-//! each 1 byte), content is compressed (if enabled) before chunking rather than after. As a result, the configuration
-//! chosen for frame size has no impact on compression efficiency.
 //!
 //! # Example
 //!
@@ -161,7 +153,6 @@
 //!     let (sender, receiver) = network.register(
 //!         0,
 //!         Quota::per_second(NonZeroU32::new(1).unwrap()),
-//!         MAX_MESSAGE_SIZE,
 //!         MAX_MESSAGE_BACKLOG,
 //!         COMPRESSION_LEVEL,
 //!     );
@@ -210,7 +201,6 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
-    use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -234,8 +224,6 @@ mod tests {
         One,
     }
 
-    const ONE_KILOBYTE: usize = 1_024;
-    const ONE_MEGABYTE: usize = 1_024 * ONE_KILOBYTE;
     const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 
     /// Test connectivity between `n` peers.
@@ -290,7 +278,6 @@ mod tests {
             let (mut sender, mut receiver) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(5).unwrap()), // Ensure we hit the rate limit
-                ONE_KILOBYTE,
                 DEFAULT_MESSAGE_BACKLOG,
                 None,
             );
@@ -514,7 +501,6 @@ mod tests {
                 let (mut sender, mut receiver) = network.register(
                     0,
                     Quota::per_second(NonZeroU32::new(10).unwrap()),
-                    ONE_MEGABYTE,
                     DEFAULT_MESSAGE_BACKLOG,
                     None,
                 );
@@ -562,127 +548,6 @@ mod tests {
         });
     }
 
-    fn test_chunking(compression: Option<u8>) {
-        // Configure test
-        let base_port = 3000;
-        let n: usize = 2;
-
-        // Initialize runtime
-        let (executor, mut runtime, _) = deterministic::Executor::default();
-        executor.start(async move {
-            // Create peers
-            let mut peers = Vec::new();
-            for i in 0..n {
-                peers.push(Ed25519::from_seed(i as u64));
-            }
-            let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
-
-            // Create random message
-            let mut msg = vec![0u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
-            runtime.fill(&mut msg[..]);
-
-            // Create networks
-            let mut waiters = Vec::new();
-            for (i, peer) in peers.iter().enumerate() {
-                // Derive port
-                let port = base_port + i as u16;
-
-                // Create bootstrappers
-                let mut bootstrappers = Vec::new();
-                if i > 0 {
-                    bootstrappers.push((
-                        addresses[0].clone(),
-                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
-                    ));
-                }
-
-                // Create network
-                let signer = peer.clone();
-                let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-                let config = Config::test(
-                    signer.clone(),
-                    registry,
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-                    bootstrappers,
-                    1_024 * 1_024, // 1MB
-                );
-                let (mut network, mut oracle) = Network::new(runtime.clone(), config);
-
-                // Register peers
-                oracle.register(0, addresses.clone()).await;
-
-                // Register basic application
-                let (mut sender, mut receiver) = network.register(
-                    0,
-                    Quota::per_second(NonZeroU32::new(10).unwrap()),
-                    5 * ONE_MEGABYTE,
-                    DEFAULT_MESSAGE_BACKLOG,
-                    compression,
-                );
-
-                // Wait to connect to all peers, and then send messages to everyone
-                runtime.spawn("network", network.run());
-
-                // Send/Recieve messages
-                let msg = Bytes::from(msg.clone());
-                let msg_sender = addresses[0].clone();
-                let msg_recipient = addresses[1].clone();
-                let peer_handler = runtime.spawn("agent", {
-                    let runtime = runtime.clone();
-                    async move {
-                        if i == 0 {
-                            // Loop until success
-                            let recipient = Recipients::One(msg_recipient);
-                            loop {
-                                if sender
-                                    .send(recipient.clone(), msg.clone(), true)
-                                    .await
-                                    .unwrap()
-                                    .len()
-                                    == 1
-                                {
-                                    break;
-                                }
-
-                                // Sleep and try again (avoid busy loop)
-                                runtime.sleep(Duration::from_millis(100)).await;
-                            }
-                        } else {
-                            // Ensure message equals sender identity
-                            let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender, msg_sender);
-
-                            // Ensure message equals sent message
-                            assert_eq!(message.len(), msg.len());
-                            for (i, (&byte1, &byte2)) in message.iter().zip(msg.iter()).enumerate()
-                            {
-                                assert_eq!(byte1, byte2, "byte {} mismatch", i);
-                            }
-                        }
-                    }
-                });
-
-                // Add to waiters
-                waiters.push(peer_handler);
-            }
-
-            // Wait for waiters to finish (receiver before sender)
-            for waiter in waiters.into_iter().rev() {
-                waiter.await.unwrap();
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_chunking_no_compression() {
-        test_chunking(None);
-    }
-
-    #[test_traced]
-    fn test_chunking_compression() {
-        test_chunking(Some(3));
-    }
-
     fn test_message_too_large(compression: Option<u8>) {
         // Configure test
         let base_port = 3000;
@@ -717,7 +582,6 @@ mod tests {
             let (mut sender, _) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                ONE_MEGABYTE,
                 DEFAULT_MESSAGE_BACKLOG,
                 compression,
             );
