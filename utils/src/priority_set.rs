@@ -69,6 +69,17 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
         self.keys.get(item).cloned()
     }
 
+    /// Remove an item from the set.
+    pub fn remove(&mut self, item: &I) {
+        let Some(entry) = self.keys.remove(item).map(|priority| Entry {
+            item: item.clone(),
+            priority,
+        }) else {
+            return;
+        };
+        self.entries.remove(&entry);
+    }
+
     /// Remove all previously inserted items not included in `keep`
     /// and add any items not yet seen with a priority of `initial`.
     pub fn reconcile(&mut self, keep: &[I], initial: P) {
@@ -92,7 +103,7 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
         }
     }
 
-    /// Iterate over all items in priority order.
+    /// Returns an iterator over all items in the set in priority-ascending order.
     pub fn iter(&self) -> impl Iterator<Item = (&I, &P)> {
         self.entries
             .iter()
@@ -106,7 +117,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn test_put_and_iter() {
+    fn test_put_remove_and_iter() {
         let mut pq = PrioritySet::new();
 
         let key1 = "key1";
@@ -119,6 +130,12 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(*entries[0].0, key2);
         assert_eq!(*entries[1].0, key1);
+
+        pq.remove(&key1);
+
+        let entries: Vec<_> = pq.iter().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(*entries[0].0, key2);
     }
 
     #[test]
@@ -128,7 +145,10 @@ mod tests {
         let key = "key";
 
         pq.put(key, Duration::from_secs(10));
+        assert_eq!(pq.get(&key).unwrap(), Duration::from_secs(10));
+
         pq.put(key, Duration::from_secs(5));
+        assert_eq!(pq.get(&key).unwrap(), Duration::from_secs(5));
 
         let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 1);

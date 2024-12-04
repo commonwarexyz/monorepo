@@ -8,7 +8,7 @@ use governor::{
     RateLimiter,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     time::{Duration, SystemTime},
 };
 
@@ -47,8 +47,8 @@ pub struct Requester<E: Clock + GClock, C: Scheme> {
     excluded: HashSet<PublicKey>,
 
     id: ID,
-    requests: HashMap<ID, (PublicKey, SystemTime, SystemTime)>,
-    deadlines: BTreeMap<SystemTime, BTreeSet<ID>>,
+    requests: HashMap<ID, (PublicKey, SystemTime)>,
+    deadlines: PrioritySet<ID, SystemTime>,
 }
 
 impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
@@ -67,7 +67,7 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
 
             id: 0,
             requests: HashMap::new(),
-            deadlines: BTreeMap::new(),
+            deadlines: PrioritySet::new(),
         }
     }
 
@@ -110,10 +110,9 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
 
             // Record request issuance time
             let now = self.runtime.current();
+            self.requests.insert(id, (participant.clone(), now));
             let deadline = now.checked_add(self.timeout).expect("time overflowed");
-            self.requests
-                .insert(id, (participant.clone(), now, deadline));
-            self.deadlines.entry(deadline).or_default().insert(id);
+            self.deadlines.put(id, deadline);
             return Some((participant.clone(), id));
         }
         None
@@ -154,25 +153,17 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
         self.participants.put(participant.clone(), performance);
     }
 
-    /// Drop an outstanding request (returning the participant and start time if exists).
+    /// Drop an outstanding request (returning the participant and start time, if exists).
     pub fn cancel(&mut self, id: ID) -> Option<(PublicKey, SystemTime)> {
-        let (participant, start, deadline) = self.requests.remove(&id)?;
-        let ids = self
-            .deadlines
-            .get_mut(&deadline)
-            .expect("deadline not found");
-        ids.remove(&id);
-        if ids.is_empty() {
-            self.deadlines.remove(&deadline);
-        }
+        let (participant, start) = self.requests.remove(&id)?;
+        self.deadlines.remove(&id);
         Some((participant, start))
     }
 
-    /// Get the next outstanding deadline and ID.
-    pub fn next(&self) -> Option<(SystemTime, ID)> {
-        let (deadline, ids) = self.deadlines.first_key_value()?;
-        let id = *ids.first().unwrap();
-        Some((*deadline, id))
+    /// Get the next outstanding ID and deadline.
+    pub fn next(&self) -> Option<(ID, SystemTime)> {
+        let (id, deadline) = self.deadlines.iter().next()?;
+        Some((*id, *deadline))
     }
 }
 
@@ -220,7 +211,7 @@ mod tests {
             assert_eq!(participant, other);
 
             // Check deadline
-            let (deadline, id) = requester.next().expect("failed to get deadline");
+            let (id, deadline) = requester.next().expect("failed to get deadline");
             assert_eq!(id, 0);
             assert_eq!(deadline, current + timeout);
 
