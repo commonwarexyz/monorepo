@@ -149,10 +149,7 @@ impl<
             self.dial_peers(&mut tracker, &mut supervisor).await;
 
             // Sleep for a random amount of time up to the dial frequency
-            let wait = Duration::from_millis(
-                self.runtime
-                    .gen_range(0..self.dial_frequency.as_millis() as u64),
-            );
+            let wait = self.runtime.gen_range(Duration::default()..self.dial_frequency);
             self.runtime.sleep(wait).await;
         }
     }

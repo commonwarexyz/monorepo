@@ -32,7 +32,7 @@ impl Info {
             }
             self.iter += 1;
             self.seq = 0;
-            return Ok(())
+            return Ok(());
         }
         self.seq += 1;
         Ok(())
@@ -116,13 +116,13 @@ mod tests {
         ni.inc().unwrap();
         assert_eq!(ni.seq, 1);
         assert_eq!(ni.iter, ITER);
-        assert_eq!(ni.dialer, true);
+        assert!(ni.dialer);
 
         // Increment again
         ni.inc().unwrap();
         assert_eq!(ni.seq, 2);
         assert_eq!(ni.iter, ITER);
-        assert_eq!(ni.dialer, true);
+        assert!(ni.dialer);
     }
 
     #[test]

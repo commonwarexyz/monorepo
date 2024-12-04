@@ -7,7 +7,7 @@ use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::{hex, union};
+use commonware_utils::{hex, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
@@ -20,7 +20,7 @@ use rand::{
     prelude::{IteratorRandom, SliceRandom},
     Rng,
 };
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
@@ -161,17 +161,13 @@ pub struct Actor<E: Spawner + Rng + GClock, C: Scheme> {
 impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
     pub fn new(runtime: E, mut cfg: Config<C>) -> (Self, Mailbox<E>, Oracle<E>) {
         // Construct IP signature
-        let current_time = runtime
-            .current()
-            .duration_since(UNIX_EPOCH)
-            .expect("failed to get current time")
-            .as_secs();
-        let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, current_time);
+        let timestamp = runtime.current().epoch_millis();
+        let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, timestamp);
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
         let ip_signature = cfg.crypto.sign(&ip_namespace, &payload_bytes);
         let ip_signature = wire::Peer {
             socket: socket_bytes,
-            timestamp: current_time,
+            timestamp,
             signature: Some(wire::Signature {
                 public_key: cfg.crypto.public_key(),
                 signature: ip_signature,
@@ -432,13 +428,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             }
 
             // If any timestamp is too far into the future, disconnect from the peer
-            let current_time = self
-                .runtime
-                .current()
-                .duration_since(UNIX_EPOCH)
-                .expect("failed to get current time")
-                .as_secs();
-            if peer.timestamp > current_time + self.synchrony_bound.as_secs() {
+            if Duration::from_millis(peer.timestamp) > self.runtime.current().epoch() + self.synchrony_bound {
                 return Err(Error::InvalidSignature);
             }
 
