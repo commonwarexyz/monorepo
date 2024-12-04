@@ -3,7 +3,7 @@
 use sha2::{Digest, Sha256};
 
 mod time;
-pub use time::{DurationExt, SystemTimeExt};
+pub use time::SystemTimeExt;
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {

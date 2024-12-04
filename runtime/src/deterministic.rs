@@ -30,7 +30,7 @@ use crate::{
     Handle,
     Signal,
 };
-use commonware_utils::hex;
+use commonware_utils::{hex, SystemTimeExt as _};
 use futures::{
     channel::mpsc,
     task::{waker_ref, ArcWake},
@@ -647,7 +647,7 @@ impl crate::Runner for Runner {
                 current = *time;
             }
             trace!(
-                now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                now = current.epoch_millis(),
                 "time advanced",
             );
 
@@ -669,7 +669,7 @@ impl crate::Runner for Runner {
                         current = *time;
                     }
                     trace!(
-                        now = current.duration_since(UNIX_EPOCH).unwrap().as_millis(),
+                        now = current.epoch_millis(),
                         "time skipped",
                     );
                 }

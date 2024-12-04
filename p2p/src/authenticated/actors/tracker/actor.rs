@@ -7,7 +7,7 @@ use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::{hex, union, DurationExt as _, SystemTimeExt as _};
+use commonware_utils::{hex, union, SystemTimeExt as _};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
@@ -428,8 +428,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             }
 
             // If any timestamp is too far into the future, disconnect from the peer
-            let current_time = self.runtime.current().epoch_millis();
-            if peer.timestamp > current_time + self.synchrony_bound.as_millis_u64() {
+            if Duration::from_millis(peer.timestamp) > self.runtime.current().epoch() + self.synchrony_bound {
                 return Err(Error::InvalidSignature);
             }
 
