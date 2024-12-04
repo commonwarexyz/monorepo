@@ -116,8 +116,8 @@ impl crate::Receiver for Receiver {
 
         // If compression is enabled, decompress the message before returning.
         if self.compression {
-            let buf = decompress(&message, self.max_size)
-                .map_err(|_| Error::DecompressionFailed)?;
+            let buf =
+                decompress(&message, self.max_size).map_err(|_| Error::DecompressionFailed)?;
             message = buf.into();
         }
 
@@ -151,11 +151,7 @@ impl Channels {
         compression: Option<u8>,
     ) -> (Sender, Receiver) {
         let (sender, receiver) = mpsc::channel(backlog);
-        if self
-            .receivers
-            .insert(channel, (rate, sender))
-            .is_some()
-        {
+        if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {}", channel);
         }
         (

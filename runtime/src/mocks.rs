@@ -1,10 +1,6 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{
-    Error,
-    Sink as SinkTrait,
-    Stream as StreamTrait,
-};
+use crate::{Error, Sink as SinkTrait, Stream as StreamTrait};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use std::{
@@ -31,12 +27,13 @@ impl Channel {
             waiter: None,
         }));
         (
-            Sink { channel: channel.clone() },
+            Sink {
+                channel: channel.clone(),
+            },
             Stream { channel },
         )
     }
 }
-
 
 /// A mock sink that implements the Sink trait.
 pub struct Sink {
@@ -52,7 +49,11 @@ impl SinkTrait for Sink {
             // If there is a waiter and the buffer is large enough,
             // return the waiter (while clearing the waiter field).
             // Otherwise, return early.
-            if channel.waiter.as_ref().map_or(false, |(requested, _)| *requested <= channel.buffer.len()) {
+            if channel
+                .waiter
+                .as_ref()
+                .map_or(false, |(requested, _)| *requested <= channel.buffer.len())
+            {
                 let (requested, os_send) = channel.waiter.take().unwrap();
                 let data: Vec<u8> = channel.buffer.drain(0..requested).collect();
                 (os_send, Bytes::from(data))
@@ -62,8 +63,7 @@ impl SinkTrait for Sink {
         };
 
         // Resolve the waiter.
-        os_send.send(data)
-            .map_err(|_| Error::SendFailed)?;
+        os_send.send(data).map_err(|_| Error::SendFailed)?;
         Ok(())
     }
 }
@@ -94,8 +94,7 @@ impl StreamTrait for Stream {
         };
 
         // Wait for the waiter to be resolved.
-        let data = os_recv.await
-            .map_err(|_| Error::RecvFailed)?;
+        let data = os_recv.await.map_err(|_| Error::RecvFailed)?;
         buf.copy_from_slice(&data);
         Ok(())
     }
@@ -104,20 +103,10 @@ impl StreamTrait for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        Clock,
-        deterministic::Executor,
-        Runner,
-    };
+    use crate::{deterministic::Executor, Clock, Runner};
     use commonware_macros::select;
-    use futures::{
-        executor::block_on,
-        join,
-    };
-    use std::{
-        thread::sleep,
-        time::Duration,
-    };
+    use futures::{executor::block_on, join};
+    use std::{thread::sleep, time::Duration};
 
     #[test]
     fn test_send_recv() {
@@ -163,13 +152,10 @@ mod tests {
         let mut buf = vec![0; data.len()];
 
         block_on(async {
-            futures::try_join!(
-                stream.recv(&mut buf),
-                async {
-                    sleep(Duration::from_millis(10_000));
-                    sink.send(data).await
-                },
-            )
+            futures::try_join!(stream.recv(&mut buf), async {
+                sleep(Duration::from_millis(10_000));
+                sink.send(data).await
+            },)
             .unwrap();
         });
 
@@ -185,13 +171,10 @@ mod tests {
         // the recv function should return an error.
         executor.start(async move {
             let mut buf = vec![0; 5];
-            let (v, _) = join!(
-                stream.recv(&mut buf),
-                async {
-                    // Take the waiter and drop it.
-                    sink.channel.lock().unwrap().waiter.take();
-                },
-            );
+            let (v, _) = join!(stream.recv(&mut buf), async {
+                // Take the waiter and drop it.
+                sink.channel.lock().unwrap().waiter.take();
+            },);
             assert_eq!(v, Err(Error::RecvFailed));
         });
     }

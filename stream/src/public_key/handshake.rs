@@ -1,8 +1,4 @@
-use super::{
-    utils::codec::recv_frame,
-    Error,
-    x25519,
-};
+use super::{utils::codec::recv_frame, x25519, Error};
 use crate::public_key::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
@@ -61,8 +57,7 @@ impl Handshake {
         msg: Bytes,
     ) -> Result<Self, Error> {
         // Parse handshake message
-        let handshake = wire::Handshake::decode(msg)
-            .map_err(Error::UnableToDecode)?;
+        let handshake = wire::Handshake::decode(msg).map_err(Error::UnableToDecode)?;
 
         // Verify that ephemeral public key is valid
         let ephemeral_public_key = x25519::decode_public_key(&handshake.ephemeral_public_key)
@@ -185,11 +180,7 @@ mod tests {
     use super::*;
     use crate::public_key::utils::codec::send_frame;
     use commonware_cryptography::{Ed25519, Scheme};
-    use commonware_runtime::{
-        deterministic::Executor,
-        mocks,
-        Runner,
-    };
+    use commonware_runtime::{deterministic::Executor, mocks, Runner};
     use x25519_dalek::PublicKey;
 
     const TEST_NAMESPACE: &[u8] = b"test_namespace";
@@ -213,7 +204,8 @@ mod tests {
                 epoch_millis,
                 recipient.public_key(),
                 ephemeral_public_key,
-            ).unwrap();
+            )
+            .unwrap();
 
             // Decode the handshake message
             let handshake = wire::Handshake::decode(handshake_bytes.clone())
@@ -287,7 +279,9 @@ mod tests {
 
             // Send message over stream
             runtime.spawn("stream_sender", async move {
-                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE).await.unwrap();
+                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
+                    .await
+                    .unwrap();
             });
 
             // Call the verify function
@@ -336,7 +330,9 @@ mod tests {
 
             // Send message over stream
             runtime.spawn("stream_sender", async move {
-                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE).await.unwrap();
+                send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
+                    .await
+                    .unwrap();
             });
 
             // Call the verify function
@@ -369,7 +365,9 @@ mod tests {
 
             // Send invalid data over stream
             runtime.spawn("stream_sender", async move {
-                send_frame(&mut stream_sender, b"mock data", ONE_MEGABYTE).await.unwrap();
+                send_frame(&mut stream_sender, b"mock data", ONE_MEGABYTE)
+                    .await
+                    .unwrap();
             });
 
             // Call the verify function
@@ -420,7 +418,9 @@ mod tests {
                         ephemeral_public_key,
                     )
                     .unwrap();
-                    send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE).await.unwrap();
+                    send_frame(&mut stream_sender, &handshake_bytes, ONE_MEGABYTE)
+                        .await
+                        .unwrap();
                 }
             });
 
@@ -461,8 +461,8 @@ mod tests {
             .unwrap();
 
             // Tamper with the handshake to make the signature invalid
-            let mut handshake = wire::Handshake::decode(handshake)
-                .expect("failed to decode handshake");
+            let mut handshake =
+                wire::Handshake::decode(handshake).expect("failed to decode handshake");
             let (public_key, signature) = match handshake.signature {
                 Some(wire::Signature {
                     public_key,
@@ -508,8 +508,8 @@ mod tests {
             .unwrap();
 
             // Tamper with the handshake to make the signature invalid
-            let mut handshake = wire::Handshake::decode(handshake)
-                .expect("failed to decode handshake");
+            let mut handshake =
+                wire::Handshake::decode(handshake).expect("failed to decode handshake");
             let mut ephemeral_public_key = handshake.ephemeral_public_key.to_vec();
             ephemeral_public_key.truncate(28);
             handshake.ephemeral_public_key = ephemeral_public_key.into();
@@ -545,8 +545,8 @@ mod tests {
             .unwrap();
 
             // Tamper with the handshake to make the signature invalid
-            let mut handshake = wire::Handshake::decode(handshake)
-                .expect("failed to decode handshake");
+            let mut handshake =
+                wire::Handshake::decode(handshake).expect("failed to decode handshake");
             let (public_key, signature) = match handshake.signature {
                 Some(wire::Signature {
                     public_key,
@@ -592,7 +592,8 @@ mod tests {
                 0, // timestamp
                 recipient_public_key,
                 ephemeral_public_key,
-            ).unwrap();
+            )
+            .unwrap();
 
             // Time starts at 0 in deterministic executor.
             // Sleep for the exact timeout duration.
@@ -606,7 +607,8 @@ mod tests {
                 synchrony_bound,
                 timeout_duration,
                 handshake.clone(),
-            ).unwrap(); // no error
+            )
+            .unwrap(); // no error
 
             // Timeout by waiting 1 more millisecond.
             runtime.sleep(Duration::from_millis(1)).await;

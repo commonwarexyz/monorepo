@@ -128,7 +128,9 @@ impl Actor {
                                     sent.push(recipient.clone());
                                 } else {
                                     self.messages_dropped
-                                        .get_or_create(&metrics::Message::new_data(recipient, channel))
+                                        .get_or_create(&metrics::Message::new_data(
+                                            recipient, channel,
+                                        ))
                                         .inc();
                                 }
                             }
