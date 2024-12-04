@@ -70,7 +70,9 @@ pub enum Error {
 /// Interface that any task scheduler must implement to start
 /// running tasks.
 pub trait Runner {
-    /// Start running a root task.
+    /// Run some task to completion.
+    ///
+    /// Any spawned tasks
     fn start<F>(self, f: F) -> F::Output
     where
         F: Future + Send + 'static,

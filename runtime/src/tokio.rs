@@ -216,7 +216,7 @@ impl Default for Config {
 pub struct Executor {
     cfg: Config,
     metrics: Arc<Metrics>,
-    runtime: Runtime,
+    runtime: Arc<Mutex<Option<Runtime>>>,
     fs: AsyncMutex<()>,
     signaler: Mutex<Signaler>,
     signal: Signal,
@@ -226,16 +226,11 @@ impl Executor {
     /// Initialize a new `tokio` runtime with the given number of threads.
     pub fn init(cfg: Config) -> (Runner, Context) {
         let metrics = Arc::new(Metrics::init(cfg.registry.clone()));
-        let runtime = Builder::new_multi_thread()
-            .worker_threads(cfg.threads)
-            .enable_all()
-            .build()
-            .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Self {
             cfg,
             metrics,
-            runtime,
+            runtime: Arc::new(Mutex::new(None)),
             fs: AsyncMutex::new(()),
             signaler: Mutex::new(signaler),
             signal,
@@ -267,7 +262,22 @@ impl crate::Runner for Runner {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.executor.runtime.block_on(f)
+        // Set runtime
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(self.executor.cfg.threads)
+            .enable_all()
+            .build()
+            .expect("failed to create Tokio runtime");
+        self.executor.runtime.lock().unwrap().replace(runtime);
+
+        // TODO: kill outstanding tasks when complete
+        // TODOL: don't allow tasks to be spawned until after we start root task?
+        let result = self.executor.runtime.block_on(f);
+
+        // Shutdown runtime
+        let runtime = self.executor.runtime.lock().unwrap().take().unwrap();
+        runtime.shutdown_background();
+        result
     }
 }
 
@@ -289,6 +299,7 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        // Setup Work
         let label = PREFIX
             .try_with(|prefix| format!("{}_{}", prefix, label))
             .unwrap_or_else(|_| label.to_string());
@@ -306,7 +317,17 @@ impl crate::Spawner for Context {
             .get_or_create(&work)
             .clone();
         let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
-        self.executor.runtime.spawn(f);
+
+        // Get runtime (or panic if not set)
+        let runtime = self
+            .executor
+            .runtime
+            .lock()
+            .unwrap()
+            .expect("runtime not set");
+
+        // Spawn work
+        runtime.spawn(f);
         handle
     }
 
