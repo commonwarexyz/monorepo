@@ -1,13 +1,16 @@
+//! Utility functions for `std::time::Duration`.
+
 use std::time::Duration;
 
 /// Extension trait to add methods to `Duration`
-pub trait Utils {
+pub trait DurationExt {
     /// Convert the duration to milliseconds as a `u64`.
+    ///
     /// Saturates at `u64::MAX`.
     fn as_millis_u64(&self) -> u64;
 }
 
-impl Utils for Duration {
+impl DurationExt for Duration {
     fn as_millis_u64(&self) -> u64 {
         self.as_millis().min(u64::MAX as u128) as u64
     }

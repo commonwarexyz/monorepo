@@ -16,7 +16,13 @@ pub mod mocks;
 pub mod tokio;
 
 mod utils;
-pub use utils::{reschedule, Handle, Signal, Signaler};
+pub use utils::{
+    epoch,
+    reschedule,
+    Handle,
+    Signal,
+    Signaler,
+};
 
 use std::{
     future::Future,
@@ -117,14 +123,6 @@ pub trait Spawner: Clone + Send + Sync + 'static {
 pub trait Clock: Clone + Send + Sync + 'static {
     /// Returns the current time.
     fn current(&self) -> SystemTime;
-
-    /// Returns the UNIX epoch time.
-    /// Panics if the system clock is set to before the Unix epoch.
-    fn epoch(&self) -> Duration {
-        self.current()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("failed to get epoch time")
-    }
 
     /// Sleep for the given duration.
     fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;

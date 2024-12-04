@@ -53,7 +53,7 @@
 //! ```protobuf
 //! message Peer {
 //!     bytes socket = 1;
-//!     uint64 timestamp_ms = 2;
+//!     uint64 timestamp = 2;
 //!     Signature signature = 3;
 //! }
 //! ```

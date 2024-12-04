@@ -20,7 +20,7 @@ pub struct Signature {
 pub fn wire_peer_payload(peer: &Peer) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&peer.socket);
-    payload.extend_from_slice(&peer.timestamp_ms.to_be_bytes());
+    payload.extend_from_slice(&peer.timestamp.to_be_bytes());
     payload
 }
 

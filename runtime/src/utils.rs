@@ -1,6 +1,6 @@
 //! Utility functions for interacting with any runtime.
 
-use crate::Error;
+use crate::{Clock, Error};
 #[cfg(test)]
 use crate::{Runner, Spawner};
 #[cfg(test)]
@@ -19,8 +19,16 @@ use std::{
     pin::Pin,
     sync::{Arc, Once},
     task::{Context, Poll},
+    time::{Duration, SystemTime},
 };
 use tracing::error;
+
+/// Returns the duration since the Unix epoch.
+pub fn epoch<C: Clock>(clock: &C) -> Duration {
+    clock.current()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("failed to get epoch time")
+}
 
 /// Yield control back to the runtime.
 pub async fn reschedule() {
@@ -214,7 +222,7 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 ///                      sig = &mut signal => {
 ///                          println!("Received signal: {}", sig.unwrap());
 ///                          break;
-///                      },   
+///                      },
 ///                      _ = context.sleep(Duration::from_secs(1)) => {},
 ///                 };
 ///             }

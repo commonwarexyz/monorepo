@@ -28,7 +28,7 @@
 //! message Handshake {
 //!     bytes recipient_public_key = 1;
 //!     bytes ephemeral_public_key = 2;
-//!     uint64 timestamp_ms = 3;
+//!     uint64 timestamp = 3;
 //!     Signature signature = 4;
 //! }
 //! ```

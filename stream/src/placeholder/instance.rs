@@ -17,8 +17,8 @@ use chacha20poly1305::{
 };
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
-use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::duration::Utils as _;
+use commonware_runtime::{epoch, Clock, Sink, Spawner, Stream};
+use commonware_utils::DurationExt as _;
 use rand::{CryptoRng, Rng};
 
 // When encrypting data, an encryption tag is appended to the ciphertext.
@@ -49,11 +49,11 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
-        let timestamp_ms = runtime.epoch().as_millis_u64();
+        let timestamp = epoch(&runtime).as_millis_u64();
         let msg = create_handshake(
             &mut config.crypto,
             &config.namespace,
-            timestamp_ms,
+            timestamp,
             peer.clone(),
             ephemeral,
         )?;
@@ -118,11 +118,11 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
-        let timestamp_ms = runtime.epoch().as_millis_u64();
+        let timestamp = epoch(&runtime).as_millis_u64();
         let msg = create_handshake(
             &mut config.crypto,
             &config.namespace,
-            timestamp_ms,
+            timestamp,
             handshake.peer_public_key.clone(),
             ephemeral,
         )?;

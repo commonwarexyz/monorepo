@@ -7,8 +7,8 @@ use crate::placeholder::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
-use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::{union, duration::Utils as _};
+use commonware_runtime::{epoch, Clock, Sink, Spawner, Stream};
+use commonware_utils::{union, DurationExt as _};
 use prost::Message;
 use std::time::{Duration, SystemTime};
 
@@ -21,7 +21,7 @@ fn suffix_namespace(namespace: &[u8]) -> Vec<u8> {
 pub fn create_handshake<C: Scheme>(
     crypto: &mut C,
     namespace: &[u8],
-    timestamp_ms: u64,
+    timestamp: u64,
     recipient_public_key: PublicKey,
     ephemeral_public_key: x25519_dalek::PublicKey,
 ) -> Result<Bytes, Error> {
@@ -29,14 +29,14 @@ pub fn create_handshake<C: Scheme>(
     let mut payload = Vec::new();
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key.as_bytes());
-    payload.extend_from_slice(&timestamp_ms.to_be_bytes());
+    payload.extend_from_slice(&timestamp.to_be_bytes());
     let signature = crypto.sign(&suffix_namespace(namespace), &payload);
 
     // Send handshake
     Ok(wire::Handshake {
         recipient_public_key,
         ephemeral_public_key: x25519::encode_public_key(ephemeral_public_key),
-        timestamp_ms,
+        timestamp,
         signature: Some(wire::Signature {
             public_key: crypto.public_key(),
             signature,
@@ -88,11 +88,11 @@ impl Handshake {
         // unlike the peer identity) and/or from blocking a peer from connecting
         // to others (if an adversary recovered a handshake message could open a
         // connection to a peer first, peers only maintain one connection per peer).
-        let current_time_ms = runtime.epoch().as_millis_u64();
-        if max_handshake_age.as_millis_u64().saturating_add(handshake.timestamp_ms) < current_time_ms {
+        let current_time = epoch(&runtime).as_millis_u64();
+        if max_handshake_age.as_millis_u64().saturating_add(handshake.timestamp) < current_time {
             return Err(Error::InvalidTimestampOld);
         }
-        if handshake.timestamp_ms > synchrony_bound.as_millis_u64().saturating_add(current_time_ms) {
+        if handshake.timestamp > synchrony_bound.as_millis_u64().saturating_add(current_time) {
             return Err(Error::InvalidTimestampFuture);
         }
 
@@ -107,7 +107,7 @@ impl Handshake {
         let mut payload = Vec::new();
         payload.extend_from_slice(&our_public_key);
         payload.extend_from_slice(&handshake.ephemeral_public_key);
-        payload.extend_from_slice(&handshake.timestamp_ms.to_be_bytes());
+        payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
 
         // Verify signature
         if !C::verify(
@@ -205,11 +205,11 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Create handshake message
-            let current_time_ms = runtime.epoch().as_millis_u64();
+            let current_time = epoch(&runtime).as_millis_u64();
             let handshake_bytes = create_handshake(
                 &mut sender,
                 TEST_NAMESPACE,
-                current_time_ms,
+                current_time,
                 recipient.public_key(),
                 ephemeral_public_key,
             ).unwrap();
@@ -221,8 +221,8 @@ mod tests {
             // Verify the timestamp
             let synchrony_bound = Duration::from_secs(5);
             let max_handshake_age = Duration::from_secs(5);
-            assert!(handshake.timestamp_ms <= current_time_ms + synchrony_bound.as_millis_u64());
-            assert!(handshake.timestamp_ms + max_handshake_age.as_millis_u64() >= current_time_ms);
+            assert!(handshake.timestamp <= current_time + synchrony_bound.as_millis_u64());
+            assert!(handshake.timestamp + max_handshake_age.as_millis_u64() >= current_time);
 
             // Verify the signature
             assert_eq!(handshake.recipient_public_key, recipient.public_key());
@@ -233,7 +233,7 @@ mod tests {
             let mut payload = Vec::new();
             payload.extend_from_slice(&handshake.recipient_public_key);
             payload.extend_from_slice(&handshake.ephemeral_public_key);
-            payload.extend_from_slice(&handshake.timestamp_ms.to_be_bytes());
+            payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
 
             // Verify signature
             assert!(Ed25519::verify(
@@ -272,7 +272,7 @@ mod tests {
             let handshake_bytes = create_handshake(
                 &mut sender,
                 TEST_NAMESPACE,
-                0, // timestamp_ms
+                0, // timestamp
                 recipient.public_key(),
                 ephemeral_public_key,
             )
@@ -321,7 +321,7 @@ mod tests {
             let handshake_bytes = create_handshake(
                 &mut sender,
                 TEST_NAMESPACE,
-                0, // timestamp_ms
+                0, // timestamp
                 Ed25519::from_seed(1).public_key(),
                 ephemeral_public_key,
             )
@@ -408,11 +408,11 @@ mod tests {
                 let recipient = recipient.clone();
                 async move {
                     runtime.sleep(Duration::from_secs(10)).await;
-                    let timestamp_ms = runtime.epoch().as_millis_u64();
+                    let timestamp = epoch(&runtime).as_millis_u64();
                     let handshake_bytes = create_handshake(
                         &mut sender,
                         TEST_NAMESPACE,
-                        timestamp_ms,
+                        timestamp,
                         recipient.public_key(),
                         ephemeral_public_key,
                     )
@@ -451,7 +451,7 @@ mod tests {
             let handshake = create_handshake(
                 &mut crypto,
                 TEST_NAMESPACE,
-                0, // timestamp_ms
+                0, // timestamp
                 recipient_public_key,
                 ephemeral_public_key,
             )
@@ -498,7 +498,7 @@ mod tests {
             let handshake = create_handshake(
                 &mut crypto,
                 TEST_NAMESPACE,
-                0, // timestamp_ms
+                0, // timestamp
                 recipient_public_key,
                 ephemeral_public_key,
             )
@@ -535,7 +535,7 @@ mod tests {
             let handshake = create_handshake(
                 &mut crypto,
                 TEST_NAMESPACE,
-                0, // timestamp_ms
+                0, // timestamp
                 recipient_public_key,
                 ephemeral_public_key,
             )
@@ -586,7 +586,7 @@ mod tests {
             let handshake = create_handshake(
                 &mut crypto,
                 TEST_NAMESPACE,
-                0, // timestamp_ms
+                0, // timestamp
                 recipient_public_key,
                 ephemeral_public_key,
             ).unwrap();
