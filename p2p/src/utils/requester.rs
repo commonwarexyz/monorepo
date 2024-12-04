@@ -1,3 +1,5 @@
+//! Make concurrent requests to peers limited by rate and prioritized by performance.
+
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::PriorityQueue;
