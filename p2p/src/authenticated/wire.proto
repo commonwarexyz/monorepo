@@ -6,7 +6,7 @@ message Message {
     oneof payload {
         BitVec bit_vec = 1;
         Peers peers = 2;
-        Chunk chunk = 3;
+        Data data = 3;
     }
 }
 
@@ -36,17 +36,11 @@ message Peers {
     repeated Peer peers = 1;
 }
 
-// Chunk is one of potentially many parts of a message
-// sent by a peer.
-//
-// If there is more than one part, the recipient will combine
-// all parts into a single message.
-message Chunk {
+// Data is an arbitrary message sent between peers.
+message Data {
     uint32 channel = 1;
-    uint32 part = 2;
-    uint32 total_parts = 3;
-    bytes content = 4;
-} 
+    bytes message = 2;
+}
 
 // Signature is an arbitrary public key and signature over
 // either a Handshake or Peer message.
