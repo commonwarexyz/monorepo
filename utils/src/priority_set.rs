@@ -3,12 +3,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
 #[derive(Eq, PartialEq, Clone)]
-struct Entry<I: Ord + Hash + Clone, V: Ord + Clone> {
+struct Entry<I: Ord + Hash + Clone, V: Ord + Copy> {
     item: I,
     value: V,
 }
 
-impl<I: Ord + Hash + Clone, V: Ord + Clone> Ord for Entry<I, V> {
+impl<I: Ord + Hash + Clone, V: Ord + Copy> Ord for Entry<I, V> {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.value.cmp(&other.value) {
             Ordering::Equal => self.item.cmp(&other.item),
@@ -17,7 +17,7 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> Ord for Entry<I, V> {
     }
 }
 
-impl<I: Ord + Hash + Clone, V: Ord + Clone> PartialOrd for Entry<I, V> {
+impl<I: Ord + Hash + Clone, V: Ord + Copy> PartialOrd for Entry<I, V> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -25,12 +25,12 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PartialOrd for Entry<I, V> {
 
 /// A set that offers fast, priority-ordered iteration over
 /// its elements.
-pub struct PrioritySet<I: Ord + Hash + Clone, V: Ord + Clone> {
+pub struct PrioritySet<I: Ord + Hash + Clone, V: Ord + Copy> {
     entries: BTreeSet<Entry<I, V>>,
     keys: HashMap<I, V>,
 }
 
-impl<I: Ord + Hash + Clone, V: Ord + Clone> PrioritySet<I, V> {
+impl<I: Ord + Hash + Clone, V: Ord + Copy> PrioritySet<I, V> {
     /// Create a new `PrioritySet`.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
@@ -42,19 +42,24 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PrioritySet<I, V> {
 
     /// Insert an item with a value, overwriting the previous value if it exists.
     pub fn put(&mut self, item: I, value: V) {
-        // Remove old entry if it exists
-        if let Some(old_value) = self.keys.remove(&item) {
+        // Remove old entry, if it exists
+        let entry = if let Some(old_value) = self.keys.remove(&item) {
             // Remove the item from the old value's set
-            let old_entry = Entry {
+            let mut old_entry = Entry {
                 item: item.clone(),
                 value: old_value,
             };
             self.entries.remove(&old_entry);
-        }
 
-        // Insert the item into the new value's set
-        self.keys.insert(item.clone(), value.clone());
-        let entry = Entry { item, value };
+            // We reuse the entry to avoid another item clone
+            old_entry.value = value;
+            old_entry
+        } else {
+            Entry { item, value }
+        };
+
+        // Insert the entry
+        self.keys.insert(entry.item.clone(), entry.value);
         self.entries.insert(entry);
     }
 
@@ -82,7 +87,7 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PrioritySet<I, V> {
 
         // Add any items not yet removed with the initial value
         for item in retained {
-            self.put(item.clone(), initial.clone());
+            self.put(item.clone(), initial);
         }
     }
 
