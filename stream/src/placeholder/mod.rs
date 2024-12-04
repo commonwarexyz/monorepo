@@ -157,10 +157,8 @@ pub enum Error {
     StreamClosed,
     #[error("cipher creation failed")]
     CipherCreationFailed,
-    #[error("peer nonce overflow")]
-    PeerNonceOverflow,
-    #[error("our nonce overflow")]
-    OurNonceOverflow,
+    #[error("nonce overflow")]
+    NonceOverflow,
     #[error("encryption failed")]
     EncryptionFailed,
     #[error("decryption failed")]
