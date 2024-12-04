@@ -64,8 +64,8 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
         }
     }
 
-    /// Update the participants that can handle requests.
-    pub fn update(&mut self, participants: &[PublicKey]) {
+    /// Indicate which participants can be sent requests.
+    pub fn retain(&mut self, participants: &[PublicKey]) {
         self.participants
             .retain(participants, self.initial.as_millis());
         self.rate_limiter.shrink_to_fit();
