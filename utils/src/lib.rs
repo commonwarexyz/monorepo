@@ -2,8 +2,8 @@
 
 use sha2::{Digest, Sha256};
 
-mod duration;
-pub use duration::DurationExt;
+mod time;
+pub use time::{DurationExt, SystemTimeExt};
 
 /// Converts bytes to a hexadecimal string.
 pub fn hex(bytes: &[u8]) -> String {

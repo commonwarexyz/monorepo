@@ -17,7 +17,6 @@ pub mod tokio;
 
 mod utils;
 pub use utils::{
-    epoch,
     reschedule,
     Handle,
     Signal,

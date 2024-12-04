@@ -1,6 +1,7 @@
 use super::{Config, Error};
 use bytes::{BufMut, Bytes};
-use commonware_runtime::{epoch, Blob, Clock, Storage};
+use commonware_runtime::{Blob, Clock, Storage};
+use commonware_utils::SystemTimeExt as _;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::{
     collections::BTreeMap,
@@ -198,7 +199,7 @@ impl<B: Blob, E: Clock + Storage<B>> Metadata<B, E> {
     pub async fn sync(&mut self) -> Result<(), Error> {
         // Compute next timestamp
         let past_timestamp = &self.blobs[self.cursor].1;
-        let mut next_timestamp = epoch(&self.runtime).as_nanos();
+        let mut next_timestamp = self.runtime.current().epoch().as_nanos();
         if next_timestamp <= *past_timestamp {
             // While it is possible that extremely high-frequency updates to `Metadata` (more than
             // one update per nanosecond) could cause an eventual overflow of the timestamp, this

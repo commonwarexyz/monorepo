@@ -7,8 +7,8 @@ use crate::placeholder::wire;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
-use commonware_runtime::{epoch, Clock, Sink, Spawner, Stream};
-use commonware_utils::{union, DurationExt as _};
+use commonware_runtime::{Clock, Sink, Spawner, Stream};
+use commonware_utils::{union, SystemTimeExt as _, DurationExt as _};
 use prost::Message;
 use std::time::{Duration, SystemTime};
 
@@ -88,7 +88,7 @@ impl Handshake {
         // unlike the peer identity) and/or from blocking a peer from connecting
         // to others (if an adversary recovered a handshake message could open a
         // connection to a peer first, peers only maintain one connection per peer).
-        let current_time = epoch(&runtime).as_millis_u64();
+        let current_time = runtime.current().epoch_millis();
         if max_handshake_age.as_millis_u64().saturating_add(handshake.timestamp) < current_time {
             return Err(Error::InvalidTimestampOld);
         }
@@ -205,7 +205,7 @@ mod tests {
             let ephemeral_public_key = PublicKey::from([3u8; 32]);
 
             // Create handshake message
-            let current_time = epoch(&runtime).as_millis_u64();
+            let current_time = runtime.current().epoch_millis();
             let handshake_bytes = create_handshake(
                 &mut sender,
                 TEST_NAMESPACE,
@@ -408,7 +408,7 @@ mod tests {
                 let recipient = recipient.clone();
                 async move {
                     runtime.sleep(Duration::from_secs(10)).await;
-                    let timestamp = epoch(&runtime).as_millis_u64();
+                    let timestamp = runtime.current().epoch_millis();
                     let handshake_bytes = create_handshake(
                         &mut sender,
                         TEST_NAMESPACE,
