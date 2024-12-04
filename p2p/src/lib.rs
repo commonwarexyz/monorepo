@@ -12,7 +12,7 @@ use std::fmt::Debug;
 use std::future::Future;
 
 pub mod authenticated;
-pub mod request_manager;
+pub mod requester;
 pub mod simulated;
 
 /// Tuple representing a message received from a given public key.
