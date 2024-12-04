@@ -65,9 +65,9 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
     }
 
     /// Indicate which participants can be sent requests.
-    pub fn retain(&mut self, participants: &[PublicKey]) {
+    pub fn reconcile(&mut self, participants: &[PublicKey]) {
         self.participants
-            .retain(participants, self.initial.as_millis());
+            .reconcile(participants, self.initial.as_millis());
         self.rate_limiter.shrink_to_fit();
     }
 
@@ -209,7 +209,7 @@ mod tests {
 
             // Initialize requester
             let other = Ed25519::from_seed(1).public_key();
-            requester.retain(&[me, other.clone()]);
+            requester.reconcile(&[me, other.clone()]);
 
             // Get request
             let current = runtime.current();
@@ -293,7 +293,7 @@ mod tests {
             // Initialize requester
             let other1 = Ed25519::from_seed(1).public_key();
             let other2 = Ed25519::from_seed(2).public_key();
-            requester.retain(&[me.clone(), other1.clone(), other2.clone()]);
+            requester.reconcile(&[me.clone(), other1.clone(), other2.clone()]);
 
             // Get request
             let (participant, id) = requester.request().expect("failed to get participant");
@@ -330,7 +330,7 @@ mod tests {
 
             // Add another participant
             let other3 = Ed25519::from_seed(3).public_key();
-            requester.retain(&[me, other1.clone(), other2.clone(), other3.clone()]);
+            requester.reconcile(&[me, other1.clone(), other2.clone(), other3.clone()]);
 
             // Get request (new should be prioritized because lower default time)
             let (participant, id) = requester.request().expect("failed to get participant");

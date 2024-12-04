@@ -64,7 +64,7 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PrioritySet<I, V> {
 
     /// Remove all previously inserted items not included in `keep`
     /// and add any items not yet seen with a priority of `initial`.
-    pub fn retain(&mut self, keep: &[I], initial: V) {
+    pub fn reconcile(&mut self, keep: &[I], initial: V) {
         // Remove items not in keep
         let mut retained: HashSet<_> = keep.iter().collect();
         self.keys.retain(|item, value| {
@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn test_retain() {
+    fn test_reconcile() {
         let mut pq = PrioritySet::new();
 
         let key1 = "key1";
@@ -138,7 +138,7 @@ mod tests {
         pq.put(key1, Duration::from_secs(10));
         pq.put(key2, Duration::from_secs(5));
 
-        pq.retain(&[key1, key3], Duration::from_secs(2));
+        pq.reconcile(&[key1, key3], Duration::from_secs(2));
 
         let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 2);
