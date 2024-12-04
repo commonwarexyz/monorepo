@@ -30,7 +30,7 @@ use crate::{
     Handle,
     Signal,
 };
-use commonware_utils::{hex, SystemTimeExt as _};
+use commonware_utils::{hex, SystemTimeExt};
 use futures::{
     channel::mpsc,
     task::{waker_ref, ArcWake},

@@ -7,7 +7,7 @@ use crate::authenticated::{ip, metrics, wire};
 use bitvec::prelude::*;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::{Clock, Spawner};
-use commonware_utils::{hex, union, SystemTimeExt as _};
+use commonware_utils::{hex, union, SystemTimeExt};
 use futures::{channel::mpsc, StreamExt};
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,

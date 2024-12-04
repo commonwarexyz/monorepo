@@ -163,8 +163,8 @@ pub enum Error {
     EncryptionFailed,
     #[error("decryption failed")]
     DecryptionFailed,
-    #[error("invalid timestamp: too old")]
-    InvalidTimestampOld,
-    #[error("invalid timestamp: too far in the future")]
-    InvalidTimestampFuture,
+    #[error("timestamp too old: {0}")]
+    InvalidTimestampOld(u64),
+    #[error("timestamp too future: {0}")]
+    InvalidTimestampFuture(u64),
 }

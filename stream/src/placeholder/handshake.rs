@@ -8,7 +8,7 @@ use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::{union, SystemTimeExt as _};
+use commonware_utils::{union, SystemTimeExt};
 use prost::Message;
 use std::time::{Duration, SystemTime};
 
@@ -88,13 +88,13 @@ impl Handshake {
         // unlike the peer identity) and/or from blocking a peer from connecting
         // to others (if an adversary recovered a handshake message could open a
         // connection to a peer first, peers only maintain one connection per peer).
-        let current_epoch = runtime.current().epoch();
-        let handshake_epoch = Duration::from_millis(handshake.timestamp);
-        if handshake_epoch + max_handshake_age < current_epoch {
-            return Err(Error::InvalidTimestampOld);
+        let current_timestamp = runtime.current().epoch();
+        let handshake_timestamp = Duration::from_millis(handshake.timestamp);
+        if handshake_timestamp + max_handshake_age < current_timestamp {
+            return Err(Error::InvalidTimestampOld(handshake.timestamp));
         }
-        if handshake_epoch > current_epoch + synchrony_bound {
-            return Err(Error::InvalidTimestampFuture);
+        if handshake_timestamp > current_timestamp + synchrony_bound {
+            return Err(Error::InvalidTimestampFuture(handshake.timestamp));
         }
 
         // Get signature from peer
@@ -222,10 +222,10 @@ mod tests {
             // Verify the timestamp
             let synchrony_bound = Duration::from_secs(5);
             let max_handshake_age = Duration::from_secs(5);
-            let handsake_epoch = Duration::from_millis(handshake.timestamp);
-            let current_epoch = Duration::from_millis(epoch_millis);
-            assert!(handsake_epoch <= current_epoch + synchrony_bound);
-            assert!(handsake_epoch + max_handshake_age >= current_epoch);
+            let handshake_timestamp = Duration::from_millis(handshake.timestamp);
+            let current_timestamp = Duration::from_millis(epoch_millis);
+            assert!(handshake_timestamp <= current_timestamp + synchrony_bound);
+            assert!(handshake_timestamp + max_handshake_age >= current_timestamp);
 
             // Verify the signature
             assert_eq!(handshake.recipient_public_key, recipient.public_key());
@@ -620,7 +620,7 @@ mod tests {
                 timeout_duration,
                 handshake,
             );
-            assert!(matches!(result, Err(Error::InvalidTimestampOld)));
+            assert!(matches!(result, Err(Error::InvalidTimestampOld(t)) if t == 0));
         });
     }
 
@@ -673,7 +673,7 @@ mod tests {
                 timeout_duration,
                 handshake_late,
             );
-            assert!(matches!(result, Err(Error::InvalidTimestampFuture)));
+            assert!(matches!(result, Err(Error::InvalidTimestampFuture(t)) if t == SYNCHRONY_BOUND_MILLIS + 1));
         });
     }
 
