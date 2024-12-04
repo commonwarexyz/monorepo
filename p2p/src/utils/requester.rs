@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::Clock;
-use commonware_utils::PriorityQueue;
+use commonware_utils::PrioritySet;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -36,7 +36,7 @@ pub struct Requester<E: Clock + GClock, C: Scheme> {
 
     rate_limiter:
         RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
-    participants: PriorityQueue<PublicKey, u128>,
+    participants: PrioritySet<PublicKey, u128>,
     excluded: HashSet<PublicKey>,
 
     id: ID,
@@ -55,7 +55,7 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
             timeout: config.timeout,
 
             rate_limiter,
-            participants: PriorityQueue::new(),
+            participants: PrioritySet::new(),
             excluded: HashSet::new(),
 
             id: 0,

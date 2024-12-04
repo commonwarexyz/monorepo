@@ -23,15 +23,15 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PartialOrd for Entry<I, V> {
     }
 }
 
-/// A generic priority queue that enforces item uniqueness and optimizes for
-/// fast priority-ordered iteration rather than memory usage.
-pub struct PriorityQueue<I: Ord + Hash + Clone, V: Ord + Clone> {
+/// A set that offers fast, priority-ordered iteration over
+/// its elements.
+pub struct PrioritySet<I: Ord + Hash + Clone, V: Ord + Clone> {
     entries: BTreeSet<Entry<I, V>>,
     keys: HashMap<I, V>,
 }
 
-impl<I: Ord + Hash + Clone, V: Ord + Clone> PriorityQueue<I, V> {
-    /// Create a new priority queue.
+impl<I: Ord + Hash + Clone, V: Ord + Clone> PrioritySet<I, V> {
+    /// Create a new `PrioritySet`.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -57,13 +57,13 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PriorityQueue<I, V> {
         self.entries.insert(entry);
     }
 
-    /// Get the value of an item.
+    /// Get the current priority of an item.
     pub fn get(&self, item: &I) -> Option<V> {
         self.keys.get(item).cloned()
     }
 
     /// Remove all previously inserted items not included in `keep`
-    /// and add any items not yet seen with a value of `initial`.
+    /// and add any items not yet seen with a priority of `initial`.
     pub fn retain(&mut self, keep: &[I], initial: V) {
         // Remove items not in keep
         let mut retained: HashSet<_> = keep.iter().collect();
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn test_put_and_iter() {
-        let mut pq = PriorityQueue::new();
+        let mut pq = PrioritySet::new();
 
         let key1 = "key1";
         let key2 = "key2";
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_update() {
-        let mut pq = PriorityQueue::new();
+        let mut pq = PrioritySet::new();
 
         let key = "key";
 
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_retain() {
-        let mut pq = PriorityQueue::new();
+        let mut pq = PrioritySet::new();
 
         let key1 = "key1";
         let key2 = "key2";
