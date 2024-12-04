@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
 /// An entry in the `PrioritySet`.
-#[derive(Eq, PartialEq, Clone)]
+#[derive(Eq, PartialEq)]
 struct Entry<I: Ord + Hash + Clone, P: Ord + Copy> {
     item: I,
     priority: P,
