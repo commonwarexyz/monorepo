@@ -1,4 +1,4 @@
-//! Communicate with a peer over an encrypted connection.
+//! Communicate with an authenticated peer over an encrypted connection.
 //!
 //! Encrypted communication with a peer, identified by a developer-specified
 //! cryptographic identity (i.e. BLS, ed25519, etc.).

@@ -1,3 +1,3 @@
-//! [Placeholder description]
+//! Exchange messages over arbitrary transport.
 
-pub mod placeholder;
+pub mod public_key;
