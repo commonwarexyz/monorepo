@@ -214,7 +214,7 @@ pub type Signal = Shared<oneshot::Receiver<i32>>;
 ///                      sig = &mut signal => {
 ///                          println!("Received signal: {}", sig.unwrap());
 ///                          break;
-///                      },
+///                      },   
 ///                      _ = context.sleep(Duration::from_secs(1)) => {},
 ///                 };
 ///             }

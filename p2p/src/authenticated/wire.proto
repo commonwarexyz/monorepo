@@ -39,13 +39,7 @@ message Peers {
 // Data is an arbitrary message sent between peers.
 message Data {
     uint32 channel = 1;
-<<<<<<< HEAD
     bytes message = 2;
-=======
-    uint32 part = 2;
-    uint32 total_parts = 3;
-    bytes content = 4;
->>>>>>> eb525f6 (move utility functions to runtime/utils; fix p2p as well)
 }
 
 // Signature is an arbitrary public key and signature over

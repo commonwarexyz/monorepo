@@ -16,12 +16,7 @@ pub mod mocks;
 pub mod tokio;
 
 mod utils;
-pub use utils::{
-    reschedule,
-    Handle,
-    Signal,
-    Signaler,
-};
+pub use utils::{reschedule, Handle, Signal, Signaler};
 
 use std::{
     future::Future,
