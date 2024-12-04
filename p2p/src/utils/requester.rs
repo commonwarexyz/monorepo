@@ -266,4 +266,76 @@ mod tests {
             assert_eq!(requester.next(), None);
         });
     }
+
+    #[test]
+    fn test_requester_multiple() {
+        // Instantiate runtime
+        let (executor, runtime, _auditor) = Executor::seeded(0);
+        executor.start(async move {
+            // Create requester
+            let scheme = Ed25519::from_seed(0);
+            let me = scheme.public_key();
+            let timeout = Duration::from_secs(5);
+            let config = Config {
+                crypto: scheme,
+                rate_limit: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                initial: Duration::from_millis(100),
+                timeout,
+            };
+            let mut requester = Requester::new(runtime.clone(), config);
+
+            // Request before any participants
+            assert_eq!(requester.request(), None);
+
+            // Ensure we aren't waiting
+            assert_eq!(requester.next(), None);
+
+            // Initialize requester
+            let other1 = Ed25519::from_seed(1).public_key();
+            let other2 = Ed25519::from_seed(2).public_key();
+            requester.retain(&[me.clone(), other1.clone(), other2.clone()]);
+
+            // Get request
+            let (participant, id) = requester.request().expect("failed to get participant");
+            assert_eq!(id, 0);
+            if participant == other2 {
+                requester.timeout(id);
+            } else {
+                panic!("unexpected participant");
+            }
+
+            // Get request
+            let (participant, id) = requester.request().expect("failed to get participant");
+            assert_eq!(id, 1);
+            if participant == other1 {
+                runtime.sleep(Duration::from_millis(10)).await;
+                requester.resolved(id);
+            } else {
+                panic!("unexpected participant");
+            }
+
+            // Try to make another request (would exceed rate limit and can't do self)
+            assert_eq!(requester.request(), None);
+
+            // Wait for rate limit to reset
+            runtime.sleep(Duration::from_secs(1)).await;
+
+            // Get request
+            let (participant, id) = requester.request().expect("failed to get participant");
+            assert_eq!(participant, other1);
+            assert_eq!(id, 2);
+
+            // Cancel request
+            requester.cancel(id);
+
+            // Add another participant
+            let other3 = Ed25519::from_seed(3).public_key();
+            requester.retain(&[me, other1.clone(), other2.clone(), other3.clone()]);
+
+            // Get request (new should be prioritized because lower default time)
+            let (participant, id) = requester.request().expect("failed to get participant");
+            assert_eq!(participant, other3);
+            assert_eq!(id, 3);
+        });
+    }
 }
