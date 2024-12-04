@@ -57,10 +57,12 @@ mod tests {
 
         // Rounds nanoseconds down
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1) + Duration::from_nanos(999_999);
-        assert_eq!(time.epoch_millis(), 1_999);
+        assert_eq!(time.epoch_millis(), 1_000);
 
         // Saturates at u64::MAX
-        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(u64::MAX);
+        let time = SystemTime::UNIX_EPOCH + Duration::from_millis(u64::MAX);
+        assert_eq!(time.epoch_millis(), u64::MAX);
+        let time = time + Duration::from_millis(1);
         assert_eq!(time.epoch_millis(), u64::MAX);
     }
 
