@@ -122,7 +122,7 @@ mod tests {
         ni.inc().unwrap();
         assert_eq!(ni.seq, 2);
         assert_eq!(ni.iter, ITER);
-        assert!(ni.dialer);
+        assert_eq!(ni.dialer, true);
     }
 
     #[test]
