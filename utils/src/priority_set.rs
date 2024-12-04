@@ -68,18 +68,17 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PrioritySet<I, V> {
     pub fn reconcile(&mut self, keep: &[I], initial: V) {
         // Remove items not in keep
         let mut retained: HashSet<_> = keep.iter().collect();
-        self.keys.retain(|item, value| {
-            if retained.remove(item) {
-                true
-            } else {
-                let entry = Entry {
-                    item: item.clone(),
-                    value: value.clone(),
-                };
-                self.entries.remove(&entry);
-                false
-            }
-        });
+        let to_remove = self
+            .keys
+            .keys()
+            .filter(|item| !retained.remove(*item))
+            .cloned()
+            .collect::<Vec<_>>();
+        for item in to_remove {
+            let value = self.keys.remove(&item).unwrap();
+            let entry = Entry { item, value };
+            self.entries.remove(&entry);
+        }
 
         // Add any items not yet removed with the initial value
         for item in retained {
