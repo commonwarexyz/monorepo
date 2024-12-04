@@ -2,15 +2,16 @@ use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
+/// An entry in the `PrioritySet`.
 #[derive(Eq, PartialEq, Clone)]
-struct Entry<I: Ord + Hash + Clone, V: Ord + Copy> {
+struct Entry<I: Ord + Hash + Clone, P: Ord + Copy> {
     item: I,
-    value: V,
+    priority: P,
 }
 
-impl<I: Ord + Hash + Clone, V: Ord + Copy> Ord for Entry<I, V> {
+impl<I: Ord + Hash + Clone, P: Ord + Copy> Ord for Entry<I, P> {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.value.cmp(&other.value) {
+        match self.priority.cmp(&other.priority) {
             Ordering::Equal => self.item.cmp(&other.item),
             other => other,
         }
@@ -25,12 +26,12 @@ impl<I: Ord + Hash + Clone, V: Ord + Copy> PartialOrd for Entry<I, V> {
 
 /// A set that offers fast, priority-ordered iteration over
 /// its elements.
-pub struct PrioritySet<I: Ord + Hash + Clone, V: Ord + Copy> {
-    entries: BTreeSet<Entry<I, V>>,
-    keys: HashMap<I, V>,
+pub struct PrioritySet<I: Ord + Hash + Clone, P: Ord + Copy> {
+    entries: BTreeSet<Entry<I, P>>,
+    keys: HashMap<I, P>,
 }
 
-impl<I: Ord + Hash + Clone, V: Ord + Copy> PrioritySet<I, V> {
+impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
     /// Create a new `PrioritySet`.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
@@ -40,37 +41,37 @@ impl<I: Ord + Hash + Clone, V: Ord + Copy> PrioritySet<I, V> {
         }
     }
 
-    /// Insert an item with a value, overwriting the previous value if it exists.
-    pub fn put(&mut self, item: I, value: V) {
+    /// Insert an item with a priority, overwriting the previous priority if it exists.
+    pub fn put(&mut self, item: I, priority: P) {
         // Remove old entry, if it exists
-        let entry = if let Some(old_value) = self.keys.remove(&item) {
-            // Remove the item from the old value's set
+        let entry = if let Some(old_priority) = self.keys.remove(&item) {
+            // Remove the item from the old priority's set
             let mut old_entry = Entry {
                 item: item.clone(),
-                value: old_value,
+                priority: old_priority,
             };
             self.entries.remove(&old_entry);
 
             // We reuse the entry to avoid another item clone
-            old_entry.value = value;
+            old_entry.priority = priority;
             old_entry
         } else {
-            Entry { item, value }
+            Entry { item, priority }
         };
 
         // Insert the entry
-        self.keys.insert(entry.item.clone(), entry.value);
+        self.keys.insert(entry.item.clone(), entry.priority);
         self.entries.insert(entry);
     }
 
     /// Get the current priority of an item.
-    pub fn get(&self, item: &I) -> Option<V> {
+    pub fn get(&self, item: &I) -> Option<P> {
         self.keys.get(item).cloned()
     }
 
     /// Remove all previously inserted items not included in `keep`
     /// and add any items not yet seen with a priority of `initial`.
-    pub fn reconcile(&mut self, keep: &[I], initial: V) {
+    pub fn reconcile(&mut self, keep: &[I], initial: P) {
         // Remove items not in keep
         let mut retained: HashSet<_> = keep.iter().collect();
         let to_remove = self
@@ -80,20 +81,22 @@ impl<I: Ord + Hash + Clone, V: Ord + Copy> PrioritySet<I, V> {
             .cloned()
             .collect::<Vec<_>>();
         for item in to_remove {
-            let value = self.keys.remove(&item).unwrap();
-            let entry = Entry { item, value };
+            let priority = self.keys.remove(&item).unwrap();
+            let entry = Entry { item, priority };
             self.entries.remove(&entry);
         }
 
-        // Add any items not yet removed with the initial value
+        // Add any items not yet removed with the initial priority
         for item in retained {
             self.put(item.clone(), initial);
         }
     }
 
     /// Iterate over all items in priority order.
-    pub fn iter(&self) -> impl Iterator<Item = (&I, &V)> {
-        self.entries.iter().map(|entry| (&entry.item, &entry.value))
+    pub fn iter(&self) -> impl Iterator<Item = (&I, &P)> {
+        self.entries
+            .iter()
+            .map(|entry| (&entry.item, &entry.priority))
     }
 }
 
