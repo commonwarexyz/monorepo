@@ -42,8 +42,8 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PrioritySet<I, V> {
 
     /// Insert an item with a value, overwriting the previous value if it exists.
     pub fn put(&mut self, item: I, value: V) {
-        // Check if the item already exists
-        if let Some(old_value) = self.keys.insert(item.clone(), value.clone()) {
+        // Remove old entry if it exists
+        if let Some(old_value) = self.keys.remove(&item) {
             // Remove the item from the old value's set
             let old_entry = Entry {
                 item: item.clone(),
@@ -53,6 +53,7 @@ impl<I: Ord + Hash + Clone, V: Ord + Clone> PrioritySet<I, V> {
         }
 
         // Insert the item into the new value's set
+        self.keys.insert(item.clone(), value.clone());
         let entry = Entry { item, value };
         self.entries.insert(entry);
     }
