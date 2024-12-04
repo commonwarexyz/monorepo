@@ -1,9 +1,5 @@
 use super::{
-    handshake::{
-        create_handshake,
-        Handshake,
-        IncomingHandshake,
-    },
+    handshake::{create_handshake, Handshake, IncomingHandshake},
     utils::{
         codec::{recv_frame, send_frame},
         nonce,
@@ -191,7 +187,8 @@ impl<Si: Sink> Sender<Si> {
             &mut self.sink,
             &msg,
             self.max_message_size + ENCRYPTION_TAG_LENGTH,
-        ).await?;
+        )
+        .await?;
         Ok(())
     }
 }
@@ -210,7 +207,8 @@ impl<St: Stream> Receiver<St> {
         let msg = recv_frame(
             &mut self.stream,
             self.max_message_size + ENCRYPTION_TAG_LENGTH,
-        ).await?;
+        )
+        .await?;
 
         // Decrypt data
         let msg = self
@@ -226,11 +224,7 @@ impl<St: Stream> Receiver<St> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_runtime::{
-        deterministic::Executor,
-        mocks,
-        Runner,
-    };
+    use commonware_runtime::{deterministic::Executor, mocks, Runner};
 
     #[test]
     fn test_decryption_failure() {
@@ -246,7 +240,9 @@ mod tests {
             };
 
             // Send invalid ciphertext
-            send_frame(&mut sink, b"invalid data", receiver.max_message_size).await.unwrap();
+            send_frame(&mut sink, b"invalid data", receiver.max_message_size)
+                .await
+                .unwrap();
 
             let result = receiver.receive().await;
             assert!(matches!(result, Err(Error::DecryptionFailed)));

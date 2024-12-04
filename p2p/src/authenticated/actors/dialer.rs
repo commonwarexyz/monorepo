@@ -6,10 +6,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use commonware_stream::public_key::{
-    Config as ConnectionConfig,
-    Instance,
-};
+use commonware_stream::public_key::{Config as ConnectionConfig, Instance};
 use commonware_utils::hex;
 use governor::{
     clock::Clock as GClock,
@@ -149,7 +146,9 @@ impl<
             self.dial_peers(&mut tracker, &mut supervisor).await;
 
             // Sleep for a random amount of time up to the dial frequency
-            let wait = self.runtime.gen_range(Duration::default()..self.dial_frequency);
+            let wait = self
+                .runtime
+                .gen_range(Duration::default()..self.dial_frequency);
             self.runtime.sleep(wait).await;
         }
     }

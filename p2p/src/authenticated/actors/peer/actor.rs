@@ -1,9 +1,5 @@
 use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::{
-    actors::tracker,
-    channels::Channels,
-    metrics, wire,
-};
+use crate::authenticated::{actors::tracker, channels::Channels, metrics, wire};
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
@@ -68,19 +64,15 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         data: wire::Data,
         sent_messages: &Family<metrics::Message, Counter>,
     ) -> Result<(), Error> {
-        trace!(
-            peer = hex(peer),
-            "sending data",
-        );
+        trace!(peer = hex(peer), "sending data",);
 
         // Send data
         let channel = data.channel;
         let msg = wire::Message {
             payload: Some(wire::message::Payload::Data(data)),
-        }.encode_to_vec();
-        sender.send(&msg)
-            .await
-            .map_err(Error::SendFailed)?;
+        }
+        .encode_to_vec();
+        sender.send(&msg).await.map_err(Error::SendFailed)?;
         sent_messages
             .get_or_create(&metrics::Message::new_data(peer, channel))
             .inc();
@@ -195,8 +187,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                         .receive()
                         .await
                         .map_err(Error::ReceiveFailed)?;
-                    let msg = wire::Message::decode(msg)
-                        .map_err(Error::DecodeFailed)?;
+                    let msg = wire::Message::decode(msg).map_err(Error::DecodeFailed)?;
                     match msg.payload {
                         Some(wire::message::Payload::BitVec(bit_vec)) => {
                             self.received_messages
@@ -255,7 +246,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 Ok(_) => {}
                                 Err(negative) => {
                                     self.rate_limited
-                                        .get_or_create(&metrics::Message::new_data(&peer, data.channel))
+                                        .get_or_create(&metrics::Message::new_data(
+                                            &peer,
+                                            data.channel,
+                                        ))
                                         .inc();
                                     let wait = negative.wait_time_from(runtime.now());
                                     runtime.sleep(wait).await;

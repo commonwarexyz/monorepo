@@ -428,7 +428,9 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             }
 
             // If any timestamp is too far into the future, disconnect from the peer
-            if Duration::from_millis(peer.timestamp) > self.runtime.current().epoch() + self.synchrony_bound {
+            if Duration::from_millis(peer.timestamp)
+                > self.runtime.current().epoch() + self.synchrony_bound
+            {
                 return Err(Error::InvalidSignature);
             }
 
