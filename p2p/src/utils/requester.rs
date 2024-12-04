@@ -165,3 +165,77 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
         Some((*deadline, id))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::Ed25519;
+    use commonware_runtime::deterministic::Executor;
+    use commonware_runtime::Runner;
+    use governor::Quota;
+    use std::num::NonZeroU32;
+    use std::time::Duration;
+
+    #[test]
+    fn test_requester_resolved() {
+        // Instantiate runtime
+        let (executor, runtime, _auditor) = Executor::seeded(0);
+        executor.start(async move {
+            // Create requester
+            let scheme = Ed25519::from_seed(0);
+            let me = scheme.public_key();
+            let timeout = Duration::from_secs(5);
+            let config = Config {
+                crypto: scheme,
+                rate_limit: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                initial: Duration::from_millis(100),
+                timeout,
+            };
+            let mut requester = Requester::new(runtime.clone(), config);
+
+            // Request before any participants
+            assert_eq!(requester.request(), None);
+
+            // Ensure we aren't waiting
+            assert_eq!(requester.next(), None);
+
+            // Initialize requester
+            let other = Ed25519::from_seed(1).public_key();
+            requester.retain(&[me, other.clone()]);
+
+            // Get request
+            let current = runtime.current();
+            let (participant, id) = requester.request().expect("failed to get participant");
+            assert_eq!(id, 0);
+            assert_eq!(participant, other);
+
+            // Check deadline
+            let (deadline, id) = requester.next().expect("failed to get deadline");
+            assert_eq!(id, 0);
+            assert_eq!(deadline, current + timeout);
+
+            // Try to make another request (would exceed rate limit and can't do self)
+            assert_eq!(requester.request(), None);
+
+            // Simulate processing time
+            runtime.sleep(Duration::from_millis(10)).await;
+
+            // Mark request as resolved
+            requester.resolved(id);
+
+            // Ensure no more requests
+            assert_eq!(requester.request(), None);
+
+            // Ensure can't make another request
+            assert_eq!(requester.request(), None);
+
+            // Wait for rate limit to reset
+            runtime.sleep(Duration::from_secs(1)).await;
+
+            // Get request
+            let (participant, id) = requester.request().expect("failed to get participant");
+            assert_eq!(participant, other);
+            assert_eq!(id, 1);
+        });
+    }
+}
