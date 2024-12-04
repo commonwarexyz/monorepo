@@ -10,8 +10,14 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+/// Unique identifier for a request.
+///
+/// Once u64 requests have been made, the ID wraps around (resetting to zero).
+/// As long as there are less than u64 requests outstanding, this should not be
+/// an issue.
 pub type ID = u64;
 
+/// Configuration for `Requester`.
 pub struct Config<C: Scheme> {
     pub crypto: C,
     pub rate_limit: Quota,
@@ -19,6 +25,7 @@ pub struct Config<C: Scheme> {
     pub timeout: Duration,
 }
 
+/// Send rate-limited requests to peers prioritized by performance.
 pub struct Requester<E: Clock + GClock, C: Scheme> {
     runtime: E,
     crypto: C,

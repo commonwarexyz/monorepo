@@ -12,8 +12,8 @@ use std::fmt::Debug;
 use std::future::Future;
 
 pub mod authenticated;
-pub mod requester;
 pub mod simulated;
+pub mod utils;
 
 /// Tuple representing a message received from a given public key.
 ///
