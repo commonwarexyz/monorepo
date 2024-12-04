@@ -83,20 +83,6 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
         self.excluded.insert(participant);
     }
 
-    /// Remove an outstanding request.
-    fn remove(&mut self, id: ID) -> Option<(PublicKey, SystemTime)> {
-        let (participant, start, deadline) = self.requests.remove(&id)?;
-        let ids = self
-            .deadlines
-            .get_mut(&deadline)
-            .expect("deadline not found");
-        ids.remove(&id);
-        if ids.is_empty() {
-            self.deadlines.remove(&deadline);
-        }
-        Some((participant, start))
-    }
-
     /// Ask for a participant to handle a request.
     pub fn request(&mut self) -> Option<(PublicKey, ID)> {
         // Look for a participant that can handle request
@@ -136,7 +122,7 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
     /// Resolve an outstanding request.
     pub fn resolved(&mut self, id: ID) {
         // Remove request
-        let Some((participant, start)) = self.remove(id) else {
+        let Some((participant, start)) = self.cancel(id) else {
             return;
         };
 
@@ -156,7 +142,7 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
 
     /// Timeout an outstanding request.
     pub fn timeout(&mut self, id: ID) {
-        let Some((participant, _)) = self.remove(id) else {
+        let Some((participant, _)) = self.cancel(id) else {
             return;
         };
 
@@ -168,9 +154,18 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
         self.participants.put(participant.clone(), performance);
     }
 
-    /// Cancel an outstanding request.
-    pub fn cancel(&mut self, id: ID) {
-        self.remove(id);
+    /// Drop an outstanding request (returning the participant and start time if exists).
+    pub fn cancel(&mut self, id: ID) -> Option<(PublicKey, SystemTime)> {
+        let (participant, start, deadline) = self.requests.remove(&id)?;
+        let ids = self
+            .deadlines
+            .get_mut(&deadline)
+            .expect("deadline not found");
+        ids.remove(&id);
+        if ids.is_empty() {
+            self.deadlines.remove(&deadline);
+        }
+        Some((participant, start))
     }
 
     /// Get the next outstanding deadline and ID.
@@ -267,7 +262,7 @@ mod tests {
             assert_eq!(id, 2);
 
             // Cancel request
-            requester.cancel(id);
+            assert!(requester.cancel(id).is_some());
 
             // Ensure no more requests
             assert_eq!(requester.next(), None);
@@ -333,7 +328,7 @@ mod tests {
             assert_eq!(id, 2);
 
             // Cancel request
-            requester.cancel(id);
+            assert!(requester.cancel(id).is_some());
 
             // Add another participant
             let other3 = Ed25519::from_seed(3).public_key();
