@@ -23,7 +23,7 @@ jobs:
       with:
         rust-version: ${{ steps.rust-version.outputs.rust_version}}
     - name: Lint
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --all-targets --all-features -- -D warnings
     - name: Fmt
       run : cargo fmt --all -- --check
     - name: Check docs
