@@ -47,13 +47,20 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
     initial: Duration,
     timeout: Duration,
 
-    rate_limiter:
-        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
-    participants: PrioritySet<PublicKey, u128>,
+    // Participants to exclude from requests
     excluded: HashSet<PublicKey>,
 
+    // Rate limiter for participants
+    rate_limiter:
+        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
+    // Participants and their performance
+    participants: PrioritySet<PublicKey, u128>,
+
+    // Next ID to use for a request
     id: ID,
+    // Outstanding requests (ID -> (participant, start time))
     requests: HashMap<ID, (PublicKey, SystemTime)>,
+    // Deadlines for outstanding requests (ID -> deadline)
     deadlines: PrioritySet<ID, SystemTime>,
 }
 
@@ -67,9 +74,10 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
             initial: config.initial,
             timeout: config.timeout,
 
+            excluded: HashSet::new(),
+
             rate_limiter,
             participants: PrioritySet::new(),
-            excluded: HashSet::new(),
 
             id: 0,
             requests: HashMap::new(),
