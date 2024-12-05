@@ -782,7 +782,6 @@ mod tests {
             async move {
                 // Add to counter
                 context.spawn("locker", {
-                    let context = context.clone();
                     let counter = counter.clone();
                     async move {
                         loop {
@@ -791,9 +790,8 @@ mod tests {
                                 *counter += 1;
                             }
 
-                            // We keep a reference to context to ensure it doesn't affect whether
-                            // or not the task is dropped.
-                            context.sleep(Duration::from_millis(1)).await;
+                            // We reschedule to ensure the runtime eventually has a chance to exit.
+                            reschedule().await;
                         }
                     }
                 });
@@ -807,8 +805,7 @@ mod tests {
                         }
                     }
 
-                    // We reschedule to ensure the runtime eventually has a chance to execute
-                    // the inner task.
+                    // We reschedule to ensure the runtime eventually has a chance to exit.
                     reschedule().await;
                 }
             }
