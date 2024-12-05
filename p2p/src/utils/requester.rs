@@ -54,7 +54,7 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
     // Rate limiter for participants
     rate_limiter:
         RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
-    // Participants and their performance
+    // Participants and their performance (lower is better)
     participants: PrioritySet<PublicKey, u128>,
 
     // Next ID to use for a request
