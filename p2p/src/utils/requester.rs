@@ -157,9 +157,15 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
         };
 
         // Get elapsed time
-        let Ok(elapsed) = self.runtime.current().duration_since(start) else {
-            return;
-        };
+        //
+        // If we can't compute the elapsed time for some reason (i.e. current time does
+        // not monotonically increase), we should still credit the participant for a
+        // timely response.
+        let elapsed = self
+            .runtime
+            .current()
+            .duration_since(start)
+            .unwrap_or_default();
         let elapsed = elapsed.as_millis();
 
         // Calculate new performance using exponential moving average
