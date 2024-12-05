@@ -150,7 +150,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     }
 
     /// Resolve an outstanding request.
-    pub fn resolved(&mut self, id: ID) {
+    pub fn resolve(&mut self, id: ID) {
         // Remove request
         let Some((participant, start)) = self.cancel(id) else {
             return;
@@ -253,7 +253,7 @@ mod tests {
             runtime.sleep(Duration::from_millis(10)).await;
 
             // Mark request as resolved
-            requester.resolved(id);
+            requester.resolve(id);
 
             // Ensure no more requests
             assert_eq!(requester.request(false), None);
@@ -342,7 +342,7 @@ mod tests {
             assert_eq!(id, 1);
             if participant == other1 {
                 runtime.sleep(Duration::from_millis(10)).await;
-                requester.resolved(id);
+                requester.resolve(id);
             } else {
                 panic!("unexpected participant");
             }
