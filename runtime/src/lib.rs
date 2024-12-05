@@ -782,6 +782,7 @@ mod tests {
             async move {
                 // Add to counter
                 context.spawn("locker", {
+                    let context = context.clone();
                     let counter = counter.clone();
                     async move {
                         loop {
@@ -790,9 +791,9 @@ mod tests {
                                 *counter += 1;
                             }
 
-                            // We reschedule to ensure the runtime eventually has a chance
-                            // to drop the task.
-                            reschedule().await;
+                            // We keep a reference to context to ensure it doesn't affect whether
+                            // or not the task is dropped.
+                            context.sleep(Duration::from_millis(1)).await;
                         }
                     }
                 });
@@ -813,15 +814,18 @@ mod tests {
             }
         });
 
+        // Give time for the runtime to shutdown
+        sleep(Duration::from_millis(100));
+
         // Ensure counter is not being updated
         let initial = *counter.lock().unwrap();
-        for _ in 0..20 {
+        for _ in 0..10 {
             let next = *counter.lock().unwrap();
             assert_eq!(initial, next);
 
             // Assume task can make progress (if alive), in this
             // period of time.
-            sleep(Duration::from_millis(1));
+            sleep(Duration::from_millis(10));
         }
     }
 
