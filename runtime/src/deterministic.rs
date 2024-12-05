@@ -714,13 +714,15 @@ pub struct Context {
 
 impl Context {
     /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
-    /// current runtime and use it to initialize a new instance of the runtime. This is useful for
-    /// performing a deterministic simulation of unclean shutdown (which involves repeatedly halting
-    /// the runtime randomly).
+    /// current runtime and use it to initialize a new instance of the runtime. A recovered runtime
+    /// does not inherit the current runtime's pending tasks, unsynced storage, or network connections.
     ///
-    /// It is only safe to call this method after the runtime has finished (i.e. once `start` returns)
-    /// and only safe to do once. If the runtime has yet to run or is still running, this method will panic.
-    /// If this method is called more than once, it will panic.
+    /// This is useful for performing a deterministic simulation that spans multiple runtime instantiations,
+    /// like simulating unclean shutdown (which involves repeatedly halting the runtime at unexpected intervals).
+    ///
+    /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
+    /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
+    /// If either one of these conditions is violated, this method will panic.
     pub fn recover(self) -> (Runner, Self, Arc<Auditor>) {
         // Ensure we are finished
         if !*self.executor.finished.lock().unwrap() {
@@ -741,7 +743,7 @@ impl Context {
         let metrics = self.executor.metrics.clone();
         let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Executor {
-            // Copied
+            // Copied from the current runtime
             cycle: self.executor.cycle,
             deadline: self.executor.deadline,
             metrics: metrics.clone(),
@@ -750,7 +752,7 @@ impl Context {
             time: Mutex::new(*self.executor.time.lock().unwrap()),
             partitions: Mutex::new(self.executor.partitions.lock().unwrap().clone()),
 
-            // Refreshed
+            // New state for the new runtime
             prefix: Mutex::new(String::new()),
             tasks: Arc::new(Tasks {
                 queue: Mutex::new(Vec::new()),
