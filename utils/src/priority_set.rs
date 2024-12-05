@@ -24,8 +24,8 @@ impl<I: Ord + Hash + Clone, V: Ord + Copy> PartialOrd for Entry<I, V> {
     }
 }
 
-/// A set that offers fast, priority-ordered iteration over
-/// its elements.
+/// A set that offers efficient iteration over
+/// its elements in priority-ascending order.
 pub struct PrioritySet<I: Ord + Hash + Clone, P: Ord + Copy> {
     entries: BTreeSet<Entry<I, P>>,
     keys: HashMap<I, P>,
