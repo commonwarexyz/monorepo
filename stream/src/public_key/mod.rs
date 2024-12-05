@@ -79,20 +79,18 @@
 //! also avoids accidentally reusing a nonce over long-lived connections when setting it to be a small hash (as in XChaCha-Poly1305).
 
 use commonware_cryptography::Scheme;
-use prost::DecodeError;
 use std::time::Duration;
-use thiserror::Error;
 
+mod connection;
 mod handshake;
-mod instance;
 mod utils;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 mod x25519;
 
+pub use connection::{Connection, Sender};
 pub use handshake::IncomingHandshake;
-pub use instance::{Instance, Sender};
 
 /// Configuration for a connection.
 ///
@@ -119,52 +117,4 @@ pub struct Config<C: Scheme> {
 
     /// Timeout for the handshake process.
     pub handshake_timeout: Duration,
-}
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("unexpected message")]
-    UnexpectedMessage,
-    #[error("unable to decode: {0}")]
-    UnableToDecode(DecodeError),
-    #[error("invalid ephemeral public key")]
-    InvalidEphemeralPublicKey,
-    #[error("invalid channel public key")]
-    InvalidChannelPublicKey,
-    #[error("invalid peer public key")]
-    InvalidPeerPublicKey,
-    #[error("handshake not for us")]
-    HandshakeNotForUs,
-    #[error("handshake timeout")]
-    HandshakeTimeout,
-    #[error("missing signature")]
-    MissingSignature,
-    #[error("invalid signature")]
-    InvalidSignature,
-    #[error("wrong peer")]
-    WrongPeer,
-    #[error("recv failed")]
-    RecvFailed,
-    #[error("recv too large: {0} bytes")]
-    RecvTooLarge(usize),
-    #[error("send failed")]
-    SendFailed,
-    #[error("send zero size")]
-    SendZeroSize,
-    #[error("send too large: {0} bytes")]
-    SendTooLarge(usize),
-    #[error("connection closed")]
-    StreamClosed,
-    #[error("cipher creation failed")]
-    CipherCreationFailed,
-    #[error("nonce overflow")]
-    NonceOverflow,
-    #[error("encryption failed")]
-    EncryptionFailed,
-    #[error("decryption failed")]
-    DecryptionFailed,
-    #[error("timestamp too old: {0}")]
-    InvalidTimestampOld(u64),
-    #[error("timestamp too future: {0}")]
-    InvalidTimestampFuture(u64),
 }

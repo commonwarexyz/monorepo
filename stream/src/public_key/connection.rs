@@ -4,8 +4,9 @@ use super::{
         codec::{recv_frame, send_frame},
         nonce,
     },
-    x25519, Config, Error,
+    x25519, Config,
 };
+use crate::Error;
 use bytes::Bytes;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -21,7 +22,7 @@ use rand::{CryptoRng, Rng};
 // This constant represents the size of the encryption tag in bytes.
 const ENCRYPTION_TAG_LENGTH: usize = 16;
 
-pub struct Instance<C: Scheme, Si: Sink, St: Stream> {
+pub struct Connection<C: Scheme, Si: Sink, St: Stream> {
     config: Config<C>,
     dialer: bool,
     sink: Si,
@@ -29,7 +30,7 @@ pub struct Instance<C: Scheme, Si: Sink, St: Stream> {
     cipher: ChaCha20Poly1305,
 }
 
-impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
+impl<C: Scheme, Si: Sink, St: Stream> Connection<C, Si, St> {
     pub async fn upgrade_dialer(
         mut runtime: impl Rng + CryptoRng + Spawner + Clock,
         mut config: Config<C>,
@@ -138,7 +139,7 @@ impl<C: Scheme, Si: Sink, St: Stream> Instance<C, Si, St> {
         let cipher = ChaCha20Poly1305::new_from_slice(shared_secret.as_bytes())
             .map_err(|_| Error::CipherCreationFailed)?;
 
-        Ok(Instance {
+        Ok(Connection {
             config,
             dialer: false,
             sink: handshake.sink,
@@ -173,8 +174,8 @@ pub struct Sender<Si: Sink> {
     nonce: nonce::Info,
 }
 
-impl<Si: Sink> Sender<Si> {
-    pub async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
+impl<Si: Sink> crate::Sender for Sender<Si> {
+    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         // Encrypt data
         let msg = self
             .cipher
@@ -201,8 +202,8 @@ pub struct Receiver<St: Stream> {
     nonce: nonce::Info,
 }
 
-impl<St: Stream> Receiver<St> {
-    pub async fn receive(&mut self) -> Result<Bytes, Error> {
+impl<St: Stream> crate::Receiver for Receiver<St> {
+    async fn receive(&mut self) -> Result<Bytes, Error> {
         // Read data
         let msg = recv_frame(
             &mut self.stream,
@@ -224,6 +225,7 @@ impl<St: Stream> Receiver<St> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Receiver as _, Sender as _};
     use commonware_runtime::{deterministic::Executor, mocks, Runner};
 
     #[test]

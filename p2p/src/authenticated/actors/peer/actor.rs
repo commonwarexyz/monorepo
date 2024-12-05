@@ -3,7 +3,10 @@ use crate::authenticated::{actors::tracker, channels::Channels, metrics, wire};
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
-use commonware_stream::public_key::{Instance, Sender};
+use commonware_stream::{
+    public_key::{Connection, Sender},
+    Receiver as _, Sender as _,
+};
 use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
@@ -83,7 +86,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
     pub async fn run<C: Scheme, Si: Sink, St: Stream>(
         mut self,
         peer: PublicKey,
-        connection: Instance<C, Si, St>,
+        connection: Connection<C, Si, St>,
         mut tracker: tracker::Mailbox<E>,
         channels: Channels,
     ) -> Error {

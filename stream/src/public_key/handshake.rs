@@ -1,5 +1,5 @@
-use super::{utils::codec::recv_frame, x25519, Error};
-use crate::public_key::wire;
+use super::{utils::codec::recv_frame, wire, x25519};
+use crate::Error;
 use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;

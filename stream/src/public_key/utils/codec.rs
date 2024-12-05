@@ -1,4 +1,4 @@
-use super::super::Error;
+use crate::Error;
 use bytes::Bytes;
 use commonware_runtime::{Sink, Stream};
 
