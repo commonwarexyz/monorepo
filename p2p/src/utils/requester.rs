@@ -3,6 +3,7 @@
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_runtime::Clock;
 use commonware_utils::PrioritySet;
+use either::Either;
 use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
@@ -107,13 +108,16 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     /// participant fails.
     pub fn request(&mut self, shuffle: bool) -> Option<(PublicKey, ID)> {
         // Shuffle participants
-        let mut participants = self.participants.iter().collect::<Vec<_>>();
-        if shuffle {
+        let participant_iter = if !shuffle {
+            Either::Left(self.participants.iter())
+        } else {
+            let mut participants = self.participants.iter().collect::<Vec<_>>();
             participants.shuffle(&mut self.runtime);
-        }
+            Either::Right(participants.into_iter())
+        };
 
         // Look for a participant that can handle request
-        for (participant, _) in participants {
+        for (participant, _) in participant_iter {
             // Check if me
             if *participant == self.crypto.public_key() {
                 continue;
