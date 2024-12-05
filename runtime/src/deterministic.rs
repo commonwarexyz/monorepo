@@ -454,7 +454,8 @@ pub struct Executor {
     partitions: Mutex<HashMap<String, Partition>>,
     signaler: Mutex<Signaler>,
     signal: Signal,
-    done: Mutex<bool>,
+    finished: Mutex<bool>,
+    recovered: Mutex<bool>,
 }
 
 impl Executor {
@@ -489,7 +490,8 @@ impl Executor {
             partitions: Mutex::new(HashMap::new()),
             signaler: Mutex::new(signaler),
             signal,
-            done: Mutex::new(false),
+            finished: Mutex::new(false),
+            recovered: Mutex::new(false),
         });
         (
             Runner {
@@ -629,7 +631,7 @@ impl crate::Runner for Runner {
 
                 // Root task completed
                 if task.root {
-                    *self.executor.done.lock().unwrap() = true;
+                    *self.executor.finished.lock().unwrap() = true;
                     return output.lock().unwrap().take().unwrap();
                 }
             }
@@ -711,13 +713,27 @@ pub struct Context {
 }
 
 impl Context {
-    /// Fork the current runtime and preserve deadline, metrics, auditor, rng, and storage.
+    /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
+    /// current runtime and use it to initialize a new instance of the runtime. This is useful for
+    /// performing a deterministic simulation of unclean shutdown (which involves repeatedly halting
+    /// the runtime randomly).
     ///
-    /// TODO: this isn't safe to do during run, only really after start? We can error..
-    pub fn fork(&self) -> (Runner, Self, Arc<Auditor>) {
-        // Ensure we are done
-        if !*self.executor.done.lock().unwrap() {
-            panic!("cannot fork runtime until execution is complete");
+    /// It is only safe to call this method after the runtime has finished (i.e. once `start` returns)
+    /// and only safe to do once. If the runtime has yet to run or is still running, this method will panic.
+    /// If this method is called more than once, it will panic.
+    pub fn recover(self) -> (Runner, Self, Arc<Auditor>) {
+        // Ensure we are finished
+        if !*self.executor.finished.lock().unwrap() {
+            panic!("execution is not finished");
+        }
+
+        // Ensure runtime has not already been recovered
+        {
+            let mut recovered = self.executor.recovered.lock().unwrap();
+            if *recovered {
+                panic!("runtime has already been recovered");
+            }
+            *recovered = true;
         }
 
         // Copy state
@@ -743,7 +759,8 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             signaler: Mutex::new(signaler),
             signal,
-            done: Mutex::new(false),
+            finished: Mutex::new(false),
+            recovered: Mutex::new(false),
         });
         (
             Runner {
