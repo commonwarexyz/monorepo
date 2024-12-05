@@ -441,6 +441,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-stream",
  "commonware-utils",
+ "either",
  "futures",
  "governor",
  "prometheus-client",
