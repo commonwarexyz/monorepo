@@ -738,9 +738,13 @@ impl Context {
             *recovered = true;
         }
 
+        // Prepare metrics
+        let metrics = self.executor.metrics.clone();
+        metrics.open_blobs.set(0);
+        metrics.tasks_running.clear();
+
         // Copy state
         let auditor = self.executor.auditor.clone();
-        let metrics = self.executor.metrics.clone();
         let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Executor {
             // Copied from the current runtime
@@ -1389,7 +1393,7 @@ mod tests {
             cycle: Duration::default(),
             ..Config::default()
         };
-        let (_, _, _) = Executor::init(cfg);
+        Executor::init(cfg);
     }
 
     #[test]
@@ -1405,5 +1409,32 @@ mod tests {
                 .await;
             panic!("root task should not be spawned");
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "execution is not finished")]
+    fn test_recover_before_finish_panics() {
+        // Initialize runtime
+        let (_, context, _) = Executor::default();
+
+        // Attempt to recover before the runtime has finished
+        context.recover();
+    }
+
+    #[test]
+    #[should_panic(expected = "runtime has already been recovered")]
+    fn test_recover_twice_panics() {
+        // Initialize runtime
+        let (executor, context, _) = Executor::default();
+
+        // Finish runtime
+        executor.start(async move {});
+
+        // Recover for the first time
+        let cloned_context = context.clone();
+        context.recover();
+
+        // Attempt to recover again using the same context
+        cloned_context.recover();
     }
 }
