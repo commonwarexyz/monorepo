@@ -107,13 +107,13 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     /// a request is made. This is typically used when a request to the preferred
     /// participant fails.
     pub fn request(&mut self, shuffle: bool) -> Option<(PublicKey, ID)> {
-        // Shuffle participants
-        let participant_iter = if !shuffle {
-            Either::Left(self.participants.iter())
-        } else {
+        // Prepare participant iterator
+        let participant_iter = if shuffle {
             let mut participants = self.participants.iter().collect::<Vec<_>>();
             participants.shuffle(&mut self.runtime);
-            Either::Right(participants.into_iter())
+            Either::Left(participants.into_iter())
+        } else {
+            Either::Right(self.participants.iter())
         };
 
         // Look for a participant that can handle request
