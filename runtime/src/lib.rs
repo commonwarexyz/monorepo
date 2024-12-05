@@ -254,6 +254,7 @@ mod tests {
     use prometheus_client::registry::Registry;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::{Arc, Mutex};
+    use std::thread::sleep;
     use utils::reschedule;
 
     fn test_error_future(runner: impl Runner) {
@@ -768,6 +769,62 @@ mod tests {
         });
     }
 
+    fn test_start_terminates(runner: impl Runner, context: impl Spawner + Clock) {
+        // To verify inner tasks are dropped, we continuously increment a counter
+        // and then verify that counter is no longer incremented after the root task
+        // completes.
+        //
+        // This test is a bit involved, however, it is important to ensure this variant
+        // is satisfied and its worth the complexity.
+        let counter = Arc::new(Mutex::new(0));
+        runner.start({
+            let counter = counter.clone();
+            async move {
+                // Add to counter
+                context.spawn("locker", {
+                    let counter = counter.clone();
+                    async move {
+                        loop {
+                            {
+                                let mut counter = counter.lock().unwrap();
+                                *counter += 1;
+                            }
+
+                            // We reschedule to ensure the runtime eventually has a chance
+                            // to drop the task.
+                            reschedule().await;
+                        }
+                    }
+                });
+
+                // Wait for counter to reach some value
+                loop {
+                    {
+                        let counter = counter.lock().unwrap();
+                        if *counter >= 10 {
+                            break;
+                        }
+                    }
+
+                    // We reschedule to ensure the runtime eventually has a chance to execute
+                    // the inner task.
+                    reschedule().await;
+                }
+            }
+        });
+
+        // Ensure counter is not being updated
+        let initial = *counter.lock().unwrap();
+        for _ in 0..20 {
+            let next = *counter.lock().unwrap();
+            assert_eq!(initial, next);
+
+            // Assume task can make progress (if alive), in this
+            // period of time.
+            sleep(Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn test_deterministic_future() {
         let (runner, _, _) = deterministic::Executor::default();
@@ -883,6 +940,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_start_terminates() {
+        let (executor, runtime, _) = deterministic::Executor::default();
+        test_start_terminates(executor, runtime);
+    }
+
+    #[test]
     fn test_tokio_error_future() {
         let (runner, _) = tokio::Executor::default();
         test_error_future(runner);
@@ -992,5 +1055,11 @@ mod tests {
     fn test_tokio_spawn_after_complete() {
         let (executor, runtime) = tokio::Executor::default();
         test_spawn_after_complete(executor, runtime);
+    }
+
+    #[test]
+    fn test_tokio_start_terminates() {
+        let (executor, runtime) = tokio::Executor::default();
+        test_start_terminates(executor, runtime);
     }
 }
