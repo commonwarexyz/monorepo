@@ -277,8 +277,11 @@ impl crate::Runner for Runner {
         };
 
         // Shutdown the runtime after the task completes
-        let runtime = self.executor.runtime.write().unwrap().take().unwrap();
-        runtime.shutdown_background();
+        //
+        // Dropping the runtime will result in a blocking shutdown of all outstanding
+        // tasks. If we used `.shutdown_background()`, we would not wait for all tasks
+        // to halt (and may leak those resources).
+        let _ = self.executor.runtime.write().unwrap().take().unwrap();
         result
     }
 }

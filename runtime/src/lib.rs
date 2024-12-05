@@ -814,9 +814,6 @@ mod tests {
             }
         });
 
-        // Give time for the runtime to shutdown
-        sleep(Duration::from_millis(100));
-
         // Ensure counter is not being updated
         let initial = *counter.lock().unwrap();
         for _ in 0..10 {
