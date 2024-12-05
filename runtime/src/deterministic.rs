@@ -454,6 +454,7 @@ pub struct Executor {
     partitions: Mutex<HashMap<String, Partition>>,
     signaler: Mutex<Signaler>,
     signal: Signal,
+    done: Mutex<bool>,
 }
 
 impl Executor {
@@ -488,6 +489,7 @@ impl Executor {
             partitions: Mutex::new(HashMap::new()),
             signaler: Mutex::new(signaler),
             signal,
+            done: Mutex::new(false),
         });
         (
             Runner {
@@ -627,6 +629,7 @@ impl crate::Runner for Runner {
 
                 // Root task completed
                 if task.root {
+                    *self.executor.done.lock().unwrap() = true;
                     return output.lock().unwrap().take().unwrap();
                 }
             }
@@ -712,6 +715,12 @@ impl Context {
     ///
     /// TODO: this isn't safe to do during run, only really after start? We can error..
     pub fn fork(&self) -> (Runner, Self, Arc<Auditor>) {
+        // Ensure we are done
+        if !*self.executor.done.lock().unwrap() {
+            panic!("cannot fork runtime until execution is complete");
+        }
+
+        // Copy state
         let auditor = self.executor.auditor.clone();
         let metrics = self.executor.metrics.clone();
         let (signaler, signal) = Signaler::new();
@@ -734,6 +743,7 @@ impl Context {
             sleeping: Mutex::new(BinaryHeap::new()),
             signaler: Mutex::new(signaler),
             signal,
+            done: Mutex::new(false),
         });
         (
             Runner {
