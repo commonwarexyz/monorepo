@@ -78,8 +78,11 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
         self.rate_limiter.shrink_to_fit();
     }
 
-    /// Once a participant is added to skip, it is never removed.
-    pub fn skip(&mut self, participant: PublicKey) {
+    /// Skip a participant for future requests.
+    ///
+    /// Participants added to this list will never be removed (even if dropped
+    /// during `reconcile`, in case they are re-added later).
+    pub fn block(&mut self, participant: PublicKey) {
         self.excluded.insert(participant);
     }
 
@@ -245,7 +248,7 @@ mod tests {
             assert_eq!(requester.request(), None);
 
             // Sleep until reset
-            runtime.sleep(Duration::from_secs(2)).await;
+            runtime.sleep(Duration::from_secs(1)).await;
 
             // Get request
             let (participant, id) = requester.request().expect("failed to get participant");
@@ -257,6 +260,15 @@ mod tests {
 
             // Ensure no more requests
             assert_eq!(requester.next(), None);
+
+            // Sleep until reset
+            runtime.sleep(Duration::from_secs(1)).await;
+
+            // Block participant
+            requester.block(other);
+
+            // Get request
+            assert_eq!(requester.request(), None);
         });
     }
 
