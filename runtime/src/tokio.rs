@@ -38,13 +38,16 @@ use std::{
     io::SeekFrom,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, SystemTime},
 };
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpListener, TcpStream,
+    },
     runtime::{Builder, Runtime},
     sync::Mutex as AsyncMutex,
     task_local,
@@ -216,7 +219,7 @@ impl Default for Config {
 pub struct Executor {
     cfg: Config,
     metrics: Arc<Metrics>,
-    runtime: Arc<Mutex<Option<Runtime>>>,
+    runtime: Arc<RwLock<Option<Runtime>>>,
     fs: AsyncMutex<()>,
     signaler: Mutex<Signaler>,
     signal: Signal,
@@ -226,11 +229,16 @@ impl Executor {
     /// Initialize a new `tokio` runtime with the given number of threads.
     pub fn init(cfg: Config) -> (Runner, Context) {
         let metrics = Arc::new(Metrics::init(cfg.registry.clone()));
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(cfg.threads)
+            .enable_all()
+            .build()
+            .expect("failed to create Tokio runtime");
         let (signaler, signal) = Signaler::new();
         let executor = Arc::new(Self {
             cfg,
             metrics,
-            runtime: Arc::new(Mutex::new(None)),
+            runtime: Arc::new(RwLock::new(Some(runtime))),
             fs: AsyncMutex::new(()),
             signaler: Mutex::new(signaler),
             signal,
@@ -262,20 +270,14 @@ impl crate::Runner for Runner {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        // Set runtime
-        let runtime = Builder::new_multi_thread()
-            .worker_threads(self.executor.cfg.threads)
-            .enable_all()
-            .build()
-            .expect("failed to create Tokio runtime");
-        self.executor.runtime.lock().unwrap().replace(runtime);
+        // Run the provided task
+        let result = {
+            let runtime = self.executor.runtime.read().unwrap();
+            runtime.as_ref().unwrap().block_on(f)
+        };
 
-        // TODO: kill outstanding tasks when complete
-        // TODOL: don't allow tasks to be spawned until after we start root task?
-        let result = self.executor.runtime.block_on(f);
-
-        // Shutdown runtime
-        let runtime = self.executor.runtime.lock().unwrap().take().unwrap();
+        // Shutdown the runtime after the task completes
+        let runtime = self.executor.runtime.write().unwrap().take().unwrap();
         runtime.shutdown_background();
         result
     }
@@ -318,16 +320,11 @@ impl crate::Spawner for Context {
             .clone();
         let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
 
-        // Get runtime (or panic if not set)
-        let runtime = self
-            .executor
-            .runtime
-            .lock()
-            .unwrap()
-            .expect("runtime not set");
-
-        // Spawn work
-        runtime.spawn(f);
+        // Spawn work (if runtime is active)
+        let runtime = self.executor.runtime.read().unwrap();
+        if let Some(runtime) = runtime.as_ref() {
+            runtime.spawn(f);
+        }
         handle
     }
 
