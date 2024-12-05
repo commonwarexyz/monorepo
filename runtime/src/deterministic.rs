@@ -53,7 +53,11 @@ use tracing::trace;
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
+/// Label for root task created during `Runner::start`.
 const ROOT_TASK: &str = "root";
+
+/// Map of names to blob contents.
+pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
@@ -703,6 +707,47 @@ pub struct Context {
     networking: Arc<Networking>,
 }
 
+impl Context {
+    /// Fork the current runtime and preserve deadline, metrics, auditor, rng, and storage.
+    ///
+    /// TODO: this isn't safe to do during run, only really after start? We can error..
+    pub fn fork(&self) -> (Runner, Self, Arc<Auditor>) {
+        let auditor = self.executor.auditor.clone();
+        let metrics = self.executor.metrics.clone();
+        let (signaler, signal) = Signaler::new();
+        let executor = Arc::new(Executor {
+            // Copied
+            cycle: self.executor.cycle,
+            deadline: self.executor.deadline,
+            metrics: metrics.clone(),
+            auditor: auditor.clone(),
+            rng: Mutex::new(self.executor.rng.lock().unwrap().clone()),
+            time: Mutex::new(*self.executor.time.lock().unwrap()),
+            partitions: Mutex::new(self.executor.partitions.lock().unwrap().clone()),
+
+            // Refreshed
+            prefix: Mutex::new(String::new()),
+            tasks: Arc::new(Tasks {
+                queue: Mutex::new(Vec::new()),
+                counter: Mutex::new(0),
+            }),
+            sleeping: Mutex::new(BinaryHeap::new()),
+            signaler: Mutex::new(signaler),
+            signal,
+        });
+        (
+            Runner {
+                executor: executor.clone(),
+            },
+            Self {
+                executor,
+                networking: Arc::new(Networking::new(metrics, auditor.clone())),
+            },
+            auditor,
+        )
+    }
+}
+
 impl crate::Spawner for Context {
     fn spawn<F, T>(&self, label: &str, f: F) -> Handle<T>
     where
@@ -1041,18 +1086,6 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
-struct Partition {
-    blobs: HashMap<Vec<u8>, Vec<u8>>,
-}
-
-impl Partition {
-    fn new() -> Self {
-        Self {
-            blobs: HashMap::new(),
-        }
-    }
-}
-
 /// Implementation of [`crate::Blob`] for the `deterministic` runtime.
 pub struct Blob {
     executor: Arc<Executor>,
@@ -1095,10 +1128,8 @@ impl crate::Storage<Blob> for Context {
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         self.executor.auditor.open(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
-        let partition_entry = partitions
-            .entry(partition.into())
-            .or_insert_with(Partition::new);
-        let content = partition_entry.blobs.entry(name.into()).or_default();
+        let partition_entry = partitions.entry(partition.into()).or_default();
+        let content = partition_entry.entry(name.into()).or_default();
         Ok(Blob::new(
             self.executor.clone(),
             partition.into(),
@@ -1115,7 +1146,6 @@ impl crate::Storage<Blob> for Context {
                 partitions
                     .get_mut(partition)
                     .ok_or(Error::PartitionMissing(partition.into()))?
-                    .blobs
                     .remove(name)
                     .ok_or(Error::BlobMissing(partition.into(), hex(name)))?;
             }
@@ -1134,8 +1164,8 @@ impl crate::Storage<Blob> for Context {
         let partition = partitions
             .get(partition)
             .ok_or(Error::PartitionMissing(partition.into()))?;
-        let mut results = Vec::with_capacity(partition.blobs.len());
-        for name in partition.blobs.keys() {
+        let mut results = Vec::with_capacity(partition.len());
+        for name in partition.keys() {
             results.push(name.clone());
         }
         results.sort(); // deterministic output
@@ -1213,7 +1243,6 @@ impl crate::Blob for Blob {
             .get_mut(&self.partition)
             .ok_or(Error::PartitionMissing(self.partition.clone()))?;
         let content = partition
-            .blobs
             .get_mut(&self.name)
             .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
         *content = new_content;
