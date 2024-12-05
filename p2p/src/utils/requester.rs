@@ -149,6 +149,15 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
         None
     }
 
+    /// Calculate new priority using exponential moving average.
+    fn update(&mut self, participant: PublicKey, elapsed: Duration) {
+        let Some(past) = self.participants.get(&participant) else {
+            return;
+        };
+        let next = past.saturating_add(elapsed.as_millis()) / 2;
+        self.participants.put(participant.clone(), next);
+    }
+
     /// Resolve an outstanding request.
     pub fn resolve(&mut self, id: ID) {
         // Remove request
@@ -166,28 +175,20 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
             .current()
             .duration_since(start)
             .unwrap_or_default();
-        let elapsed = elapsed.as_millis();
 
-        // Calculate new performance using exponential moving average
-        let Some(past) = self.participants.get(&participant) else {
-            return;
-        };
-        let performance = past.saturating_add(elapsed) / 2;
-        self.participants.put(participant, performance);
+        // Update performance
+        self.update(participant, elapsed);
     }
 
     /// Timeout an outstanding request.
     pub fn timeout(&mut self, id: ID) {
+        // Remove request
         let Some((participant, _)) = self.cancel(id) else {
             return;
         };
 
-        // Calculate new performance using exponential moving average
-        let Some(past) = self.participants.get(&participant) else {
-            return;
-        };
-        let performance = past.saturating_add(self.timeout.as_millis()) / 2;
-        self.participants.put(participant.clone(), performance);
+        // Update performance
+        self.update(participant, self.timeout);
     }
 
     /// Drop an outstanding request (returning the participant and start time, if exists).
