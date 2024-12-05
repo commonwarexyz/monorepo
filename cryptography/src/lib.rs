@@ -25,7 +25,7 @@ pub type PublicKey = Bytes;
 pub type Signature = Bytes;
 
 /// Interface that commonware crates rely on for most cryptographic operations.
-pub trait Scheme: Send + Sync + Clone + 'static {
+pub trait Scheme: Clone + Send + Sync + 'static {
     /// Returns a new instance of the scheme.
     fn new<R: Rng + CryptoRng>(rng: &mut R) -> Self;
 
@@ -93,7 +93,7 @@ pub type Digest = Bytes;
 /// part of a struct that is cloned. In practice, implementations do not actually
 /// clone the hasher state but users should not rely on this behavior and call `reset`
 /// after cloning.
-pub trait Hasher: Clone + Send + 'static {
+pub trait Hasher: Clone + Send + Sync + 'static {
     /// Create a new hasher.
     fn new() -> Self;
 
