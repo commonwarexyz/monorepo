@@ -1298,7 +1298,7 @@ impl Drop for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::run_tasks, Runner, Spawner};
+    use crate::{utils::run_tasks, Blob, Runner, Spawner, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
@@ -1408,6 +1408,76 @@ mod tests {
                 })
                 .await;
             panic!("root task should not be spawned");
+        });
+    }
+
+    #[test]
+    fn test_recover_synced_storage_persists() {
+        // Initialize the first runtime
+        let (executor1, context1, auditor1) = Executor::default();
+        let partition = "test_partition";
+        let name = b"test_blob";
+        let data = b"Hello, world!".to_vec();
+
+        // Run some tasks and sync storage
+        executor1.start({
+            let context = context1.clone();
+            let data = data.clone();
+            async move {
+                let blob = context.open(partition, name).await.unwrap();
+                blob.write_at(&data, 0).await.unwrap();
+                blob.sync().await.unwrap();
+            }
+        });
+        let state1 = auditor1.state();
+
+        // Recover the runtime
+        let (executor2, context2, auditor2) = context1.recover();
+
+        // Verify auditor state is the same
+        let state2 = auditor2.state();
+        assert_eq!(state1, state2);
+
+        // Check that synced storage persists after recovery
+        executor2.start(async move {
+            let blob = context2.open(partition, name).await.unwrap();
+            let len = blob.len().await.unwrap();
+            assert_eq!(len, data.len() as u64);
+            let mut buf = vec![0; len as usize];
+            blob.read_at(&mut buf, 0).await.unwrap();
+            assert_eq!(buf, data);
+        });
+    }
+
+    #[test]
+    fn test_recover_unsynced_storage_does_not_persist() {
+        // Initialize the first runtime
+        let (executor1, context1, _) = Executor::default();
+        let partition = "test_partition";
+        let name = b"test_blob";
+        let data = b"Hello, world!".to_vec();
+
+        // Run some tasks without syncing storage
+        executor1.start({
+            let context = context1.clone();
+            async move {
+                let blob = context.open(partition, name).await.unwrap();
+                blob.write_at(&data, 0).await.unwrap();
+                // Intentionally do not call sync() here
+            }
+        });
+
+        // Recover the runtime
+        let (executor2, context2, _) = context1.recover();
+
+        // Check that unsynced storage does not persist after recovery
+        executor2.start(async move {
+            let blob = context2.open(partition, name).await.unwrap();
+            let len = blob.len().await.unwrap();
+            assert_eq!(
+                len, 0,
+                "Expected blob length to be 0 after recovery without sync"
+            );
         });
     }
 
