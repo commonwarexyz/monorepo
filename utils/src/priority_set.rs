@@ -118,21 +118,33 @@ mod tests {
 
     #[test]
     fn test_put_remove_and_iter() {
+        // Create a new PrioritySet
         let mut pq = PrioritySet::new();
 
+        // Add items with different priorities
         let key1 = "key1";
         let key2 = "key2";
-
         pq.put(key1, Duration::from_secs(10));
         pq.put(key2, Duration::from_secs(5));
 
+        // Verify iteration order
         let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 2);
         assert_eq!(*entries[0].0, key2);
         assert_eq!(*entries[1].0, key1);
 
+        // Remove existing item
         pq.remove(&key1);
 
+        // Verify new iteration order
+        let entries: Vec<_> = pq.iter().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(*entries[0].0, key2);
+
+        // Remove non-existing item
+        pq.remove(&key1);
+
+        // Verify iteration order is still the same
         let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(*entries[0].0, key2);
@@ -140,16 +152,19 @@ mod tests {
 
     #[test]
     fn test_update() {
+        // Create a new PrioritySet
         let mut pq = PrioritySet::new();
 
+        // Add an item with a priority and verify it can be retrieved
         let key = "key";
-
         pq.put(key, Duration::from_secs(10));
         assert_eq!(pq.get(&key).unwrap(), Duration::from_secs(10));
 
+        // Update the priority and verify it has changed
         pq.put(key, Duration::from_secs(5));
         assert_eq!(pq.get(&key).unwrap(), Duration::from_secs(5));
 
+        // Verify updated priority is in the iteration
         let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(*entries[0].1, Duration::from_secs(5));
@@ -157,17 +172,20 @@ mod tests {
 
     #[test]
     fn test_reconcile() {
+        // Create a new PrioritySet
         let mut pq = PrioritySet::new();
 
+        // Add 2 items with different priorities
         let key1 = "key1";
         let key2 = "key2";
-        let key3 = "key3";
-
         pq.put(key1, Duration::from_secs(10));
         pq.put(key2, Duration::from_secs(5));
 
+        // Introduce a new item and remove an existing one
+        let key3 = "key3";
         pq.reconcile(&[key1, key3], Duration::from_secs(2));
 
+        // Verify iteration over only the kept items
         let entries: Vec<_> = pq.iter().collect();
         assert_eq!(entries.len(), 2);
         assert!(entries
