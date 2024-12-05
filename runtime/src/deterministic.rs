@@ -715,7 +715,8 @@ pub struct Context {
 impl Context {
     /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
     /// current runtime and use it to initialize a new instance of the runtime. A recovered runtime
-    /// does not inherit the current runtime's pending tasks, unsynced storage, or network connections.
+    /// does not inherit the current runtime's pending tasks, unsynced storage, network connections, nor
+    /// its shutdown signaler.
     ///
     /// This is useful for performing a deterministic simulation that spans multiple runtime instantiations,
     /// like simulating unclean shutdown (which involves repeatedly halting the runtime at unexpected intervals).
