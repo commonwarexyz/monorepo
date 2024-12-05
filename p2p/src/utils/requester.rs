@@ -7,6 +7,7 @@ use governor::{
     clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore, Quota,
     RateLimiter,
 };
+use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, SystemTime},
@@ -35,7 +36,12 @@ pub struct Config<C: Scheme> {
 }
 
 /// Send rate-limited requests to peers prioritized by performance.
-pub struct Requester<E: Clock + GClock, C: Scheme> {
+///
+/// Requester attempts to saturate the bandwidth (inferred by rate limit)
+/// of the most performant peers (based on our latency observations). To encourage
+/// exploration, set the value of `initial` to less than the expected latency of
+/// performant peers and/or periodically set `shuffle` in `request`.
+pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
     runtime: E,
     crypto: C,
     initial: Duration,
@@ -51,7 +57,7 @@ pub struct Requester<E: Clock + GClock, C: Scheme> {
     deadlines: PrioritySet<ID, SystemTime>,
 }
 
-impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
+impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     /// Create a new requester.
     pub fn new(runtime: E, config: Config<C>) -> Self {
         let rate_limiter = RateLimiter::hashmap_with_clock(config.rate_limit, &runtime);
@@ -87,9 +93,19 @@ impl<E: Clock + GClock, C: Scheme> Requester<E, C> {
     }
 
     /// Ask for a participant to handle a request.
-    pub fn request(&mut self) -> Option<(PublicKey, ID)> {
+    ///
+    /// If `shuffle` is true, the order of participants is shuffled before
+    /// a request is made. This is typically used when a request to the preferred
+    /// participant fails.
+    pub fn request(&mut self, shuffle: bool) -> Option<(PublicKey, ID)> {
+        // Shuffle participants
+        let mut participants = self.participants.iter().collect::<Vec<_>>();
+        if shuffle {
+            participants.shuffle(&mut self.runtime);
+        }
+
         // Look for a participant that can handle request
-        for (participant, _) in self.participants.iter() {
+        for (participant, _) in participants {
             // Check if me
             if *participant == self.crypto.public_key() {
                 continue;
@@ -198,7 +214,7 @@ mod tests {
             let mut requester = Requester::new(runtime.clone(), config);
 
             // Request before any participants
-            assert_eq!(requester.request(), None);
+            assert_eq!(requester.request(false), None);
 
             // Ensure we aren't waiting
             assert_eq!(requester.next(), None);
@@ -209,7 +225,7 @@ mod tests {
 
             // Get request
             let current = runtime.current();
-            let (participant, id) = requester.request().expect("failed to get participant");
+            let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(id, 0);
             assert_eq!(participant, other);
 
@@ -219,7 +235,7 @@ mod tests {
             assert_eq!(deadline, current + timeout);
 
             // Try to make another request (would exceed rate limit and can't do self)
-            assert_eq!(requester.request(), None);
+            assert_eq!(requester.request(false), None);
 
             // Simulate processing time
             runtime.sleep(Duration::from_millis(10)).await;
@@ -228,16 +244,16 @@ mod tests {
             requester.resolved(id);
 
             // Ensure no more requests
-            assert_eq!(requester.request(), None);
+            assert_eq!(requester.request(false), None);
 
             // Ensure can't make another request
-            assert_eq!(requester.request(), None);
+            assert_eq!(requester.request(false), None);
 
             // Wait for rate limit to reset
             runtime.sleep(Duration::from_secs(1)).await;
 
             // Get request
-            let (participant, id) = requester.request().expect("failed to get participant");
+            let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(participant, other);
             assert_eq!(id, 1);
 
@@ -245,13 +261,13 @@ mod tests {
             requester.timeout(id);
 
             // Ensure no more requests
-            assert_eq!(requester.request(), None);
+            assert_eq!(requester.request(false), None);
 
             // Sleep until reset
             runtime.sleep(Duration::from_secs(1)).await;
 
             // Get request
-            let (participant, id) = requester.request().expect("failed to get participant");
+            let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(participant, other);
             assert_eq!(id, 2);
 
@@ -268,7 +284,7 @@ mod tests {
             requester.block(other);
 
             // Get request
-            assert_eq!(requester.request(), None);
+            assert_eq!(requester.request(false), None);
         });
     }
 
@@ -290,7 +306,7 @@ mod tests {
             let mut requester = Requester::new(runtime.clone(), config);
 
             // Request before any participants
-            assert_eq!(requester.request(), None);
+            assert_eq!(requester.request(false), None);
 
             // Ensure we aren't waiting
             assert_eq!(requester.next(), None);
@@ -301,7 +317,7 @@ mod tests {
             requester.reconcile(&[me.clone(), other1.clone(), other2.clone()]);
 
             // Get request
-            let (participant, id) = requester.request().expect("failed to get participant");
+            let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(id, 0);
             if participant == other2 {
                 requester.timeout(id);
@@ -310,7 +326,7 @@ mod tests {
             }
 
             // Get request
-            let (participant, id) = requester.request().expect("failed to get participant");
+            let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(id, 1);
             if participant == other1 {
                 runtime.sleep(Duration::from_millis(10)).await;
@@ -320,13 +336,13 @@ mod tests {
             }
 
             // Try to make another request (would exceed rate limit and can't do self)
-            assert_eq!(requester.request(), None);
+            assert_eq!(requester.request(false), None);
 
             // Wait for rate limit to reset
             runtime.sleep(Duration::from_secs(1)).await;
 
             // Get request
-            let (participant, id) = requester.request().expect("failed to get participant");
+            let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(participant, other1);
             assert_eq!(id, 2);
 
@@ -338,9 +354,22 @@ mod tests {
             requester.reconcile(&[me, other1.clone(), other2.clone(), other3.clone()]);
 
             // Get request (new should be prioritized because lower default time)
-            let (participant, id) = requester.request().expect("failed to get participant");
+            let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(participant, other3);
             assert_eq!(id, 3);
+
+            // Wait until eventually get slower participant
+            runtime.sleep(Duration::from_secs(1)).await;
+            loop {
+                // Shuffle participants
+                let (participant, _) = requester.request(true).unwrap();
+                if participant == other2 {
+                    break;
+                }
+
+                // Sleep until reset
+                runtime.sleep(Duration::from_secs(1)).await;
+            }
         });
     }
 }
