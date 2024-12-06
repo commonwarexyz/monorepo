@@ -1,30 +1,30 @@
 use crate::authenticated::actors::tracker;
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_stream::public_key::Connection;
 use futures::{channel::mpsc, SinkExt};
 
-pub enum Message<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
+pub enum Message<E: Spawner + Clock, Si: Sink, St: Stream> {
     Spawn {
         peer: PublicKey,
-        connection: Connection<C, Si, St>,
+        connection: Connection<Si, St>,
         reservation: tracker::Reservation<E>,
     },
 }
 
-pub struct Mailbox<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
-    sender: mpsc::Sender<Message<E, C, Si, St>>,
+pub struct Mailbox<E: Spawner + Clock, Si: Sink, St: Stream> {
+    sender: mpsc::Sender<Message<E, Si, St>>,
 }
 
-impl<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> Mailbox<E, C, Si, St> {
-    pub fn new(sender: mpsc::Sender<Message<E, C, Si, St>>) -> Self {
+impl<E: Spawner + Clock, Si: Sink, St: Stream> Mailbox<E, Si, St> {
+    pub fn new(sender: mpsc::Sender<Message<E, Si, St>>) -> Self {
         Self { sender }
     }
 
     pub async fn spawn(
         &mut self,
         peer: PublicKey,
-        connection: Connection<C, Si, St>,
+        connection: Connection<Si, St>,
         reservation: tracker::Reservation<E>,
     ) {
         self.sender
@@ -38,7 +38,7 @@ impl<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> Mailbox<E, C, Si, St> 
     }
 }
 
-impl<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> Clone for Mailbox<E, C, Si, St> {
+impl<E: Spawner + Clock, Si: Sink, St: Stream> Clone for Mailbox<E, Si, St> {
     /// Clone the mailbox.
     ///
     /// We manually implement `clone` because the auto-generated `derive` would

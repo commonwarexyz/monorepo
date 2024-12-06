@@ -6,7 +6,6 @@ use crate::authenticated::{
     actors::{peer, router, tracker},
     metrics,
 };
-use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
@@ -16,7 +15,7 @@ use rand::{CryptoRng, Rng};
 use std::time::Duration;
 use tracing::{debug, info};
 
-pub struct Actor<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
+pub struct Actor<E: Spawner + Clock, Si: Sink, St: Stream> {
     runtime: E,
 
     mailbox_size: usize,
@@ -24,21 +23,17 @@ pub struct Actor<E: Spawner + Clock, C: Scheme, Si: Sink, St: Stream> {
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
 
-    receiver: mpsc::Receiver<Message<E, C, Si, St>>,
+    receiver: mpsc::Receiver<Message<E, Si, St>>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
     rate_limited: Family<metrics::Message, Counter>,
 }
 
-impl<
-        E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng,
-        C: Scheme,
-        Si: Sink,
-        St: Stream,
-    > Actor<E, C, Si, St>
+impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng, Si: Sink, St: Stream>
+    Actor<E, Si, St>
 {
-    pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, C, Si, St>) {
+    pub fn new(runtime: E, cfg: Config) -> (Self, Mailbox<E, Si, St>) {
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         let rate_limited = Family::<metrics::Message, Counter>::default();

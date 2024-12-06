@@ -1,6 +1,6 @@
 use super::{Config, Error, Mailbox, Message, Relay};
 use crate::authenticated::{actors::tracker, channels::Channels, metrics, wire};
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
 use commonware_stream::{
@@ -83,10 +83,10 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         Ok(())
     }
 
-    pub async fn run<C: Scheme, Si: Sink, St: Stream>(
+    pub async fn run<Si: Sink, St: Stream>(
         mut self,
         peer: PublicKey,
-        connection: Connection<C, Si, St>,
+        connection: Connection<Si, St>,
         mut tracker: tracker::Mailbox<E>,
         channels: Channels,
     ) -> Error {
