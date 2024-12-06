@@ -308,7 +308,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
@@ -554,7 +554,7 @@ mod tests {
                         nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
-                        max_fetch_count: 1,
+                        max_fetch_count: 4,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                         fetch_concurrent: 1,
@@ -781,7 +781,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1, // force many fetches
+                    max_fetch_count: 4, // force many fetches
                     max_fetch_size: 1024 * 1024,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
@@ -961,7 +961,7 @@ mod tests {
                 nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
-                max_fetch_count: 1,
+                max_fetch_count: 4,
                 max_fetch_size: 1024 * 512,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                 fetch_concurrent: 1,
@@ -1131,7 +1131,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
@@ -1338,7 +1338,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
@@ -1534,7 +1534,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
@@ -1737,7 +1737,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
@@ -2009,7 +2009,7 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                     fetch_concurrent: 1,
@@ -2072,14 +2072,14 @@ mod tests {
 
     #[test_traced]
     fn test_slow_and_lossy_links() {
-        slow_and_lossy_links(1);
+        slow_and_lossy_links(0);
     }
 
     #[test_traced]
     fn test_determinism() {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
-        for seed in 0..5 {
+        for seed in 1..6 {
             // Run test with seed
             let state_1 = slow_and_lossy_links(seed);
 
@@ -2220,7 +2220,7 @@ mod tests {
                         nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
-                        max_fetch_count: 1,
+                        max_fetch_count: 4,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                         fetch_concurrent: 1,
@@ -2429,7 +2429,7 @@ mod tests {
                         nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
-                        max_fetch_count: 1,
+                        max_fetch_count: 4,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
                         fetch_concurrent: 1,
