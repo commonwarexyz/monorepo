@@ -38,13 +38,16 @@ use std::{
     io::SeekFrom,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, SystemTime},
 };
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
+    net::{
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+        TcpListener, TcpStream,
+    },
     runtime::{Builder, Runtime},
     sync::Mutex as AsyncMutex,
     task_local,
@@ -216,7 +219,7 @@ impl Default for Config {
 pub struct Executor {
     cfg: Config,
     metrics: Arc<Metrics>,
-    runtime: Runtime,
+    runtime: Arc<RwLock<Option<Runtime>>>,
     fs: AsyncMutex<()>,
     signaler: Mutex<Signaler>,
     signal: Signal,
@@ -235,7 +238,7 @@ impl Executor {
         let executor = Arc::new(Self {
             cfg,
             metrics,
-            runtime,
+            runtime: Arc::new(RwLock::new(Some(runtime))),
             fs: AsyncMutex::new(()),
             signaler: Mutex::new(signaler),
             signal,
@@ -267,7 +270,19 @@ impl crate::Runner for Runner {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.executor.runtime.block_on(f)
+        // Run the provided task
+        let result = {
+            let runtime = self.executor.runtime.read().unwrap();
+            runtime.as_ref().unwrap().block_on(f)
+        };
+
+        // Shutdown the runtime after the task completes
+        //
+        // Dropping the runtime will result in a blocking shutdown of all outstanding
+        // tasks. If we used `.shutdown_background()`, we would not wait for all tasks
+        // to halt (and may leak those resources).
+        let _ = self.executor.runtime.write().unwrap().take().unwrap();
+        result
     }
 }
 
@@ -289,6 +304,7 @@ impl crate::Spawner for Context {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        // Setup Work
         let label = PREFIX
             .try_with(|prefix| format!("{}_{}", prefix, label))
             .unwrap_or_else(|_| label.to_string());
@@ -306,7 +322,12 @@ impl crate::Spawner for Context {
             .get_or_create(&work)
             .clone();
         let (f, handle) = Handle::init(f, gauge, self.executor.cfg.catch_panics);
-        self.executor.runtime.spawn(f);
+
+        // Spawn work (if runtime is active)
+        let runtime = self.executor.runtime.read().unwrap();
+        if let Some(runtime) = runtime.as_ref() {
+            runtime.spawn(f);
+        }
         handle
     }
 
