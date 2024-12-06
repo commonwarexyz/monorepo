@@ -3,7 +3,7 @@
 use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use commonware_stream::public_key::{Config as ConnectionConfig, IncomingHandshake, Instance};
+use commonware_stream::public_key::{Config as ConnectionConfig, Connection, IncomingHandshake};
 use commonware_utils::hex;
 use governor::{
     clock::ReasonablyRealtime,
@@ -131,7 +131,7 @@ impl<
         };
 
         // Perform handshake
-        let stream = match Instance::upgrade_listener(runtime, connection, handshake).await {
+        let stream = match Connection::upgrade_listener(runtime, connection, handshake).await {
             Ok(connection) => connection,
             Err(e) => {
                 debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");

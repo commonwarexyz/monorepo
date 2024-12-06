@@ -6,7 +6,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use commonware_stream::public_key::{Config as ConnectionConfig, Instance};
+use commonware_stream::public_key::{Config as ConnectionConfig, Connection};
 use commonware_utils::hex;
 use governor::{
     clock::Clock as GClock,
@@ -117,16 +117,21 @@ impl<
                     );
 
                     // Upgrade connection
-                    let instance =
-                        match Instance::upgrade_dialer(runtime, config, sink, stream, peer.clone())
-                            .await
-                        {
-                            Ok(instance) => instance,
-                            Err(e) => {
-                                debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
-                                return;
-                            }
-                        };
+                    let instance = match Connection::upgrade_dialer(
+                        runtime,
+                        config,
+                        sink,
+                        stream,
+                        peer.clone(),
+                    )
+                    .await
+                    {
+                        Ok(instance) => instance,
+                        Err(e) => {
+                            debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
+                            return;
+                        }
+                    };
                     debug!(peer = hex(&peer), "upgraded connection");
 
                     // Start peer to handle messages

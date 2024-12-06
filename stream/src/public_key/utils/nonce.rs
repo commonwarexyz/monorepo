@@ -1,4 +1,4 @@
-use crate::public_key::Error;
+use crate::Error;
 use chacha20poly1305::Nonce;
 
 /// A struct that holds the nonce information.

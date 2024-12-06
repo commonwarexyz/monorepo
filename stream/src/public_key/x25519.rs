@@ -1,4 +1,4 @@
-use super::Error;
+use crate::Error;
 use bytes::Bytes;
 use rand::{CryptoRng, Rng};
 use x25519_dalek::{EphemeralSecret, PublicKey};
