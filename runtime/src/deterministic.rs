@@ -1475,10 +1475,7 @@ mod tests {
         executor2.start(async move {
             let blob = context2.open(partition, name).await.unwrap();
             let len = blob.len().await.unwrap();
-            assert_eq!(
-                len, 0,
-                "Expected blob length to be 0 after recovery without sync"
-            );
+            assert_eq!(len, 0);
         });
     }
 
