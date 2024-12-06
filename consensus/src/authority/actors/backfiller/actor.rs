@@ -215,7 +215,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
             // Try to send
             if sender
-                .send(Recipients::One(recipient.clone()), msg.clone(), false)
+                .send(Recipients::One(recipient.clone()), msg, false)
                 .await
                 .unwrap()
                 .is_empty()
@@ -227,7 +227,12 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             }
 
             // Exit if sent
-            debug!(peer = hex(&recipient), "sent request");
+            debug!(
+                peer = hex(&recipient),
+                ?notarizations,
+                ?nullifications,
+                "sent request"
+            );
             break;
         }
     }
@@ -368,7 +373,9 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     match payload {
                         wire::backfiller::Payload::Request(request) => {
                             let mut populated_bytes = 0;
+                            let mut notarization_views_found = Vec::new();
                             let mut notarizations_found = Vec::new();
+                            let mut nullification_views_found = Vec::new();
                             let mut nullifications_found = Vec::new();
 
                             // Populate notarizations first
@@ -382,6 +389,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                         break;
                                     }
                                     populated_bytes += size;
+                                    notarization_views_found.push(view);
                                     notarizations_found.push(notarization.clone());
                                     self.served_notarizations.inc();
                                 }
@@ -398,13 +406,14 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                         break;
                                     }
                                     populated_bytes += size;
+                                    nullification_views_found.push(view);
                                     nullifications_found.push(nullification.clone());
                                     self.served_nullifications.inc();
                                 }
                             }
 
                             // Send response
-                            debug!(notarizations_found = notarizations_found.len(), nullifications_found = nullifications_found.len(), sender = hex(&s), "sending response");
+                            debug!(sender = hex(&s), ?notarization_views_found, ?nullification_views_found,  "sending response");
                             let response = wire::Backfiller {
                                 id: msg.id,
                                 payload: Some(wire::backfiller::Payload::Response(wire::Response {
@@ -492,7 +501,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     "request successful",
                                 );
                             } else {
-                                debug!(sender = hex(&s), "request not useful");
+                                debug!(sender = hex(&s), "response not useful");
                             }
 
                             // If still work to do, send another request

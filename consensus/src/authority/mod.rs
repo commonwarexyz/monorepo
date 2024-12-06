@@ -1892,7 +1892,7 @@ mod tests {
         });
     }
 
-    fn test_slow_and_lossy_links(seed: u64) -> String {
+    fn slow_and_lossy_links(seed: u64) -> String {
         // Create runtime
         let n = 5;
         let required_containers = 50;
@@ -2071,13 +2071,20 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_slow_and_lossy_links() {
+        slow_and_lossy_links(1);
+    }
+
+    #[test_traced]
     fn test_determinism() {
+        // We use slow and lossy links as the deterministic test
+        // because it is the most complex test.
         for seed in 0..5 {
             // Run test with seed
-            let state_1 = test_slow_and_lossy_links(seed);
+            let state_1 = slow_and_lossy_links(seed);
 
             // Run test again with same seed
-            let state_2 = test_slow_and_lossy_links(seed);
+            let state_2 = slow_and_lossy_links(seed);
 
             // Ensure states are equal
             assert_eq!(state_1, state_2);
