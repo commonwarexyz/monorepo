@@ -154,6 +154,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             return;
         }
 
+        // TODO: Select notarizations by ascending height rather than preferring all notarizations or all nullifications
+
         // Select best notarization and nullifications requests
         let (notarizations, nullifications) = match source {
             Source::All => {

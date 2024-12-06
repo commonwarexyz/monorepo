@@ -39,6 +39,9 @@ impl<
     > Engine<B, E, C, H, A, S>
 {
     pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, S>) -> Self {
+        // Ensure configuration is valid
+        cfg.assert();
+
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
             runtime.clone(),
