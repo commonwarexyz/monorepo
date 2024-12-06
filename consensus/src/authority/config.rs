@@ -38,7 +38,7 @@ pub struct Config<
     pub fetch_timeout: Duration,
 
     /// Maximum number of containers to request/respond with in a single fetch.
-    pub max_fetch_count: u64,
+    pub max_fetch_count: usize,
 
     /// Maximum number of bytes to respond with in a single fetch.
     pub max_fetch_size: usize,

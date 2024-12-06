@@ -1,6 +1,5 @@
 use super::{
     ingress::{Mailbox, Message},
-    priority_queue::PriorityQueue,
     Config,
 };
 use crate::{
@@ -15,34 +14,27 @@ use crate::{
 use bytes::Bytes;
 use commonware_cryptography::{Hasher, PublicKey, Scheme};
 use commonware_macros::select;
-use commonware_p2p::{Receiver, Recipients, Sender};
+use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
 use futures::{channel::mpsc, future::Either, StreamExt};
-use governor::{
-    clock::Clock as GClock, middleware::NoOpMiddleware, state::keyed::HashMapStateStore,
-    RateLimiter,
-};
+use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prost::Message as _;
 use rand::Rng;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 use tracing::{debug, warn};
 
-/// Request to a peer that started at a given time and expires at another time.
-type Request = (PublicKey, SystemTime, SystemTime);
-
 /// Unfilled dependencies and the set of peers we've already requested from (since
 /// all outstanding items were resolved).
-type Outstanding = (BTreeSet<View>, BTreeSet<View>, HashSet<PublicKey>, Request);
+type Outstanding = (BTreeSet<View>, BTreeSet<View>, PublicKey, requester::ID);
 
 pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     runtime: E,
-    crypto: C,
     supervisor: S,
     _hasher: PhantomData<H>,
 
@@ -51,18 +43,14 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<In
 
     notarizations: BTreeMap<View, wire::Notarization>,
     nullifications: BTreeMap<View, wire::Nullification>,
+    activity_timeout: u64,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
-    activity_timeout: u64,
     fetch_timeout: Duration,
-    max_fetch_count: u64,
+    max_fetch_count: usize,
     max_fetch_size: usize,
-    fetch_rate_limiter:
-        RateLimiter<PublicKey, HashMapStateStore<PublicKey>, E, NoOpMiddleware<E::Instant>>,
-    fetch_performance: PriorityQueue,
-
-    incorrect: HashSet<PublicKey>,
+    requester: requester::Requester<E, C>,
 
     outstanding_notarizations: Gauge,
     outstanding_nullifications: Gauge,
@@ -72,10 +60,14 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<In
 
 impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> Actor<E, C, H, S> {
     pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
-        // Initialize rate limiter with the max allowed fetch rate. This ensures we don't exceed the
-        // inbound rate limit on any peer we are communicating with (which would halt their processing
-        // of all our messages).
-        let fetch_rate_limiter = RateLimiter::hashmap_with_clock(cfg.fetch_rate_per_peer, &runtime);
+        // Initialize requester
+        let config = requester::Config {
+            crypto: cfg.crypto.clone(),
+            rate_limit: cfg.fetch_rate_per_peer,
+            initial: cfg.fetch_timeout / 2,
+            timeout: cfg.fetch_timeout,
+        };
+        let requester = requester::Requester::new(runtime.clone(), config);
 
         // Initialize metrics
         let outstanding_notarizations = Gauge::default();
@@ -111,7 +103,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         (
             Self {
                 runtime,
-                crypto: cfg.crypto,
                 supervisor: cfg.supervisor,
                 _hasher: PhantomData,
 
@@ -120,17 +111,14 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
                 notarizations: BTreeMap::new(),
                 nullifications: BTreeMap::new(),
+                activity_timeout: cfg.activity_timeout,
 
                 mailbox_receiver: receiver,
 
-                activity_timeout: cfg.activity_timeout,
                 fetch_timeout: cfg.fetch_timeout,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
-                fetch_rate_limiter,
-                fetch_performance: PriorityQueue::new(),
-
-                incorrect: HashSet::new(),
+                requester,
 
                 outstanding_notarizations,
                 outstanding_nullifications,
@@ -143,96 +131,59 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
     async fn send(
         &mut self,
-        msg: Bytes,
-        sent: &mut HashSet<PublicKey>,
-        sender: &mut impl Sender,
-    ) -> Request {
-        // Loop until we find a recipient
-        loop {
-            let iter = self.fetch_performance.iter();
-            for next in iter {
-                // Check if self
-                if next.public_key == self.crypto.public_key() {
-                    continue;
-                }
-
-                // Check if peer is invalid
-                if self.incorrect.contains(&next.public_key) {
-                    debug!(
-                        peer = hex(&next.public_key),
-                        "skipping request because peer is incorrect"
-                    );
-                    continue;
-                }
-
-                // Check if already sent this request
-                if sent.contains(&next.public_key) {
-                    debug!(
-                        peer = hex(&next.public_key),
-                        "skipping request because already sent"
-                    );
-                    continue;
-                }
-
-                // Check if rate limit is exceeded
-                let validator = &next.public_key;
-                if self.fetch_rate_limiter.check_key(validator).is_err() {
-                    debug!(
-                        peer = hex(validator),
-                        "skipping request because rate limited"
-                    );
-                    continue;
-                }
-
-                // Send message
-                if sender
-                    .send(Recipients::One(validator.clone()), msg.clone(), false)
-                    .await
-                    .unwrap()
-                    .is_empty()
-                {
-                    // Try again
-                    debug!(peer = hex(validator), "failed to send request");
-                    continue;
-                }
-                debug!(peer = hex(validator), "sent request");
-                sent.insert(validator.clone());
-                let start = self.runtime.current();
-                let deadline = start + self.fetch_timeout;
-
-                // Minimize footprint of rate limiter
-                self.fetch_rate_limiter.shrink_to_fit();
-                return (validator.clone(), start, deadline);
-            }
-
-            // Avoid busy looping when disconnected
-            warn!("failed to send request to any validator");
-            self.runtime.sleep(self.fetch_timeout).await;
-
-            // Clear sent
-            sent.clear();
-        }
-    }
-
-    async fn send_request(
-        &mut self,
         notarizations: &BTreeSet<View>,
         nullifications: &BTreeSet<View>,
-        sent: &mut HashSet<PublicKey>,
+        shuffle: bool,
         sender: &mut impl Sender,
-    ) -> Request {
+    ) -> (PublicKey, requester::ID) {
+        // Select best notarization and nullifications requests
+        let notarizations = notarizations
+            .iter()
+            .take(self.max_fetch_count)
+            .cloned()
+            .collect::<Vec<_>>();
+        let remaining = self.max_fetch_count - notarizations.len();
+        let nullifications = nullifications
+            .iter()
+            .take(remaining)
+            .cloned()
+            .collect::<Vec<_>>();
+
         // Create new message
-        let msg = wire::Backfiller {
+        let msg: Bytes = wire::Backfiller {
             payload: Some(wire::backfiller::Payload::Request(wire::Request {
-                notarizations: notarizations.iter().cloned().collect(),
-                nullifications: nullifications.iter().cloned().collect(),
+                notarizations,
+                nullifications,
             })),
         }
         .encode_to_vec()
         .into();
 
-        // Send message
-        self.send(msg, sent, sender).await
+        // Select next recipient
+        loop {
+            // Get next best
+            let Some((recipient, request)) = self.requester.request(shuffle) else {
+                warn!("failed to send request to any validator");
+                self.runtime.sleep(self.fetch_timeout).await;
+                continue;
+            };
+
+            // Try to send
+            if sender
+                .send(Recipients::One(recipient.clone()), msg.clone(), false)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                // Try again
+                debug!(peer = hex(&recipient), "failed to send request");
+                continue;
+            }
+
+            // Exit if sent
+            debug!(peer = hex(&recipient), "sent request");
+            break (recipient, request);
+        }
     }
 
     pub async fn run(
@@ -247,12 +198,13 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         let mut outstanding: Option<Outstanding> = None;
         loop {
             // Set timeout for next request
-            let timeout = if let Some((notarizations, nullifications, _, status)) = &outstanding {
+            let timeout = if let Some((notarizations, nullifications, _, _)) = &outstanding {
                 self.outstanding_notarizations
                     .set(notarizations.len() as i64);
                 self.outstanding_nullifications
                     .set(nullifications.len() as i64);
-                Either::Left(self.runtime.sleep_until(status.2))
+                let (_, timeout) = self.requester.next().expect("no requests");
+                Either::Left(self.runtime.sleep_until(timeout))
             } else {
                 self.outstanding_notarizations.set(0);
                 self.outstanding_nullifications.set(0);
@@ -263,12 +215,12 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             select! {
                 _ = timeout => {
                     // Penalize requester for timeout
-                    let (notarizations, nullifications, mut sent, status) = outstanding.take().unwrap();
-                    self.fetch_performance.put(status.0, self.fetch_timeout);
+                    let (notarizations, nullifications, _,request) = outstanding.take().unwrap();
+                    self.requester.timeout(request);
 
                     // Send message
-                    let status = self.send_request(&notarizations, &nullifications, &mut sent,  &mut sender).await;
-                    outstanding = Some((notarizations, nullifications, sent, status));
+                    let (recipient, request) = self.send(&notarizations, &nullifications, true, &mut sender).await;
+                    outstanding = Some((notarizations, nullifications, recipient, request));
                     continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
@@ -280,18 +232,17 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                         Message::Fetch { notarizations, nullifications } => {
                             // If request already exists, just add to it
                             if outstanding.is_some() {
-                                let (existing_notarizations, existing_nullifications, _, _) = outstanding.as_mut().unwrap();
+                                let (existing_notarizations, existing_nullifications, _,_) = outstanding.as_mut().unwrap();
                                 existing_notarizations.extend(notarizations);
                                 existing_nullifications.extend(nullifications);
                                 continue;
                             }
 
                             // If request does not exist, create it
-                            let mut sent = HashSet::new();
                             let notarizations = notarizations.into_iter().collect();
                             let nullifications = nullifications.into_iter().collect();
-                            let status = self.send_request(&notarizations, &nullifications, &mut sent, &mut sender).await;
-                            outstanding = Some((notarizations, nullifications, sent, status));
+                            let (recipient, request) = self.send(&notarizations, &nullifications, false, &mut sender).await;
+                            outstanding = Some((notarizations, nullifications, recipient, request));
                         }
                         Message::Notarized { notarization } => {
                             // Update current view
@@ -304,7 +255,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
                             // Update stored validators
                             let validators = self.supervisor.participants(view).unwrap();
-                            self.fetch_performance.retain(self.fetch_timeout, validators);
+                            self.requester.reconcile(validators);
 
                             // If waiting for this notarization, remove it
                             if let Some((notarizations, _, _, _)) = &mut outstanding {
@@ -325,7 +276,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
                             // Update stored validators
                             let validators = self.supervisor.participants(view).unwrap();
-                            self.fetch_performance.retain(self.fetch_timeout, validators);
+                            self.requester.reconcile(validators);
 
                             // If waiting for this nullification, remove it
                             if let Some((_, nullifications, _, _)) = &mut outstanding {
@@ -404,7 +355,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     if populated_bytes + size > self.max_fetch_size {
                                         break;
                                     }
-                                    if notarizations_found.len() + 1 > self.max_fetch_count as usize {
+                                    if notarizations_found.len() + 1 > self.max_fetch_count {
                                         break;
                                     }
                                     populated_bytes += size;
@@ -420,7 +371,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     if populated_bytes + size > self.max_fetch_size {
                                         break;
                                     }
-                                    if notarizations_found.len() + nullifications_found.len() + 1 > self.max_fetch_count as usize {
+                                    if notarizations_found.len() + nullifications_found.len() + 1 > self.max_fetch_count {
                                         break;
                                     }
                                     populated_bytes += size;
@@ -446,23 +397,24 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                         },
                         wire::backfiller::Payload::Response(response) => {
                             // If we weren't waiting for anything, ignore
-                            let received = self.runtime.current();
-                            let (notarizations, nullifications, status) = match &mut outstanding {
-                                Some((notarizations, nullifications, _, status)) => {
-                                    if s != status.0 {
+                            let (notarizations, nullifications, request) = match &mut outstanding {
+                                Some((notarizations, nullifications, recipient, request)) => {
+                                    if s != *recipient {
                                         debug!(sender = hex(&s), "received unexpected response");
                                         continue;
                                     }
                                     if response.notarizations.is_empty() && response.nullifications.is_empty() {
+                                        // Drop empty response
                                         debug!(sender = hex(&s), "received empty response");
+                                        self.requester.cancel(*request);
 
                                         // Pick new recipient
-                                        let (notarizations, nullifications, mut sent, _) = outstanding.take().unwrap();
-                                        let status = self.send_request(&notarizations, &nullifications, &mut sent, &mut sender).await;
-                                        outstanding = Some((notarizations, nullifications, sent, status));
+                                        let (notarizations, nullifications, _, _) = outstanding.take().unwrap();
+                                        let (recipient, request) = self.send(&notarizations, &nullifications, true, &mut sender).await;
+                                        outstanding = Some((notarizations, nullifications, recipient, request));
                                         continue;
                                     }
-                                    (notarizations, nullifications, status)
+                                    (notarizations, nullifications, request)
                                 },
                                 None => {
                                     warn!(sender = hex(&s), "received unexpected response");
@@ -471,14 +423,16 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             };
 
                             // Ensure response isn't too big
-                            if response.notarizations.len() + response.nullifications.len() > self.max_fetch_count as usize {
+                            if response.notarizations.len() + response.nullifications.len() > self.max_fetch_count {
+                                // Block responder
                                 warn!(sender = hex(&s), "response too large");
-                                self.incorrect.insert(s);
+                                self.requester.block(s);
+                                self.requester.cancel(*request);
 
                                 // Pick new recipient
-                                let (notarizations, nullifications, mut sent, _) = outstanding.take().unwrap();
-                                let status = self.send_request(&notarizations, &nullifications, &mut sent, &mut sender).await;
-                                outstanding = Some((notarizations, nullifications, sent, status));
+                                let (notarizations, nullifications, _, _) = outstanding.take().unwrap();
+                                let (recipient, request)= self.send(&notarizations, &nullifications, true, &mut sender).await;
+                                outstanding = Some((notarizations, nullifications, recipient, request));
                                 continue;
                             }
 
@@ -490,8 +444,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     Some(proposal) => proposal.view,
                                     None => {
                                         warn!(sender = hex(&s), "missing proposal");
-                                        self.incorrect.insert(s.clone());
-                                        break;
+                                        self.requester.block(s.clone());
+                                        continue;
                                     },
                                 };
                                 if !notarizations.contains(&view) {
@@ -500,8 +454,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 }
                                 if !verify_notarization::<S,C>(&self.supervisor, &self.notarize_namespace, &notarization) {
                                     warn!(view, sender = hex(&s), "invalid notarization");
-                                    self.incorrect.insert(s.clone());
-                                    break;
+                                    self.requester.block(s.clone());
+                                    continue;
                                 }
                                 notarizations.remove(&view);
                                 self.notarizations.insert(view, notarization.clone());
@@ -518,8 +472,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 }
                                 if !verify_nullification::<S,C>(&self.supervisor, &self.nullify_namespace, &nullification) {
                                     warn!(view, sender = hex(&s), "invalid nullification");
-                                    self.incorrect.insert(s.clone());
-                                    break;
+                                    self.requester.block(s.clone());
+                                    continue;
                                 }
                                 nullifications.remove(&view);
                                 self.nullifications.insert(view, nullification.clone());
@@ -529,14 +483,16 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
                             // Update performance
                             if !notarizations_found.is_empty() || !nullifications_found.is_empty() {
-                                let duration = received.duration_since(status.1).unwrap();
-                                self.fetch_performance.put(s.clone(), duration);
+                                self.requester.resolve(*request);
                                 debug!(
                                     notarizations_found = ?notarizations_found.into_iter().collect::<Vec<_>>(),
                                     nullifications_found = ?nullifications_found.into_iter().collect::<Vec<_>>(),
                                     sender = hex(&s),
                                     "request successful",
                                 );
+                            } else {
+                                self.requester.cancel(*request);
+                                debug!(sender = hex(&s), "request unsuccessful");
                             }
 
                             // If still work to do, send another request
@@ -544,9 +500,9 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 outstanding = None;
                                 continue;
                             }
-                            let (notarizations, nullifications, mut sent, _) = outstanding.take().unwrap();
-                            let status = self.send_request(&notarizations, &nullifications, &mut sent, &mut sender).await;
-                            outstanding = Some((notarizations, nullifications, sent, status));
+                            let (notarizations, nullifications, _, _) = outstanding.take().unwrap();
+                            let (recipient, request)= self.send(&notarizations, &nullifications,false, &mut sender).await;
+                            outstanding = Some((notarizations, nullifications, recipient, request));
                         },
                     }
                 },
