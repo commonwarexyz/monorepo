@@ -6,7 +6,7 @@ use crate::authenticated::{
 };
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use commonware_stream::public_key::{Config as ConnectionConfig, Connection};
+use commonware_stream::public_key::{Config as StreamConfig, Connection};
 use commonware_utils::hex;
 use governor::{
     clock::Clock as GClock,
@@ -24,7 +24,7 @@ use tracing::debug;
 
 pub struct Config<C: Scheme> {
     pub registry: Arc<Mutex<Registry>>,
-    pub connection: ConnectionConfig<C>,
+    pub stream_cfg: StreamConfig<C>,
     pub dial_frequency: Duration,
     pub dial_rate: Quota,
 }
@@ -38,7 +38,7 @@ pub struct Actor<
 > {
     runtime: E,
 
-    connection: ConnectionConfig<C>,
+    stream_cfg: StreamConfig<C>,
     dial_frequency: Duration,
 
     dial_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
@@ -70,7 +70,7 @@ impl<
         }
         Self {
             runtime: runtime.clone(),
-            connection: cfg.connection,
+            stream_cfg: cfg.stream_cfg,
             dial_frequency: cfg.dial_frequency,
             dial_limiter: RateLimiter::direct_with_clock(cfg.dial_rate, &runtime),
             dial_attempts,
@@ -83,7 +83,7 @@ impl<
     async fn dial_peers(
         &self,
         tracker: &mut tracker::Mailbox<E>,
-        supervisor: &mut spawner::Mailbox<E, C, Si, St>,
+        supervisor: &mut spawner::Mailbox<E, Si, St>,
     ) {
         for (peer, address, reservation) in tracker.dialable().await {
             // Check if we have hit rate limit for dialing and if so, skip (we don't
@@ -99,7 +99,7 @@ impl<
             // Spawn dialer to connect to peer
             self.runtime.spawn("dialer", {
                 let runtime = self.runtime.clone();
-                let config = self.connection.clone();
+                let config = self.stream_cfg.clone();
                 let mut supervisor = supervisor.clone();
                 async move {
                     // Attempt to dial peer
@@ -144,7 +144,7 @@ impl<
     pub async fn run(
         mut self,
         mut tracker: tracker::Mailbox<E>,
-        mut supervisor: spawner::Mailbox<E, C, Si, St>,
+        mut supervisor: spawner::Mailbox<E, Si, St>,
     ) {
         loop {
             // Attempt to dial peers we know about

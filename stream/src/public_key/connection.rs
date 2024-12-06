@@ -22,16 +22,16 @@ use rand::{CryptoRng, Rng};
 // This constant represents the size of the encryption tag in bytes.
 const ENCRYPTION_TAG_LENGTH: usize = 16;
 
-pub struct Connection<C: Scheme, Si: Sink, St: Stream> {
-    config: Config<C>,
+pub struct Connection<Si: Sink, St: Stream> {
     dialer: bool,
     sink: Si,
     stream: St,
     cipher: ChaCha20Poly1305,
+    max_message_size: usize,
 }
 
-impl<C: Scheme, Si: Sink, St: Stream> Connection<C, Si, St> {
-    pub async fn upgrade_dialer(
+impl<Si: Sink, St: Stream> Connection<Si, St> {
+    pub async fn upgrade_dialer<C: Scheme>(
         mut runtime: impl Rng + CryptoRng + Spawner + Clock,
         mut config: Config<C>,
         mut sink: Si,
@@ -97,15 +97,15 @@ impl<C: Scheme, Si: Sink, St: Stream> Connection<C, Si, St> {
 
         // We keep track of dialer to determine who adds a bit to their nonce (to prevent reuse)
         Ok(Self {
-            config,
             dialer: true,
             sink,
             stream,
             cipher,
+            max_message_size: config.max_message_size,
         })
     }
 
-    pub async fn upgrade_listener(
+    pub async fn upgrade_listener<C: Scheme>(
         mut runtime: impl Rng + CryptoRng + Spawner + Clock,
         mut config: Config<C>,
         mut handshake: IncomingHandshake<Si, St>,
@@ -140,11 +140,11 @@ impl<C: Scheme, Si: Sink, St: Stream> Connection<C, Si, St> {
             .map_err(|_| Error::CipherCreationFailed)?;
 
         Ok(Connection {
-            config,
             dialer: false,
             sink: handshake.sink,
             stream: handshake.stream,
             cipher,
+            max_message_size: config.max_message_size,
         })
     }
 
@@ -153,13 +153,13 @@ impl<C: Scheme, Si: Sink, St: Stream> Connection<C, Si, St> {
             Sender {
                 cipher: self.cipher.clone(),
                 sink: self.sink,
-                max_message_size: self.config.max_message_size,
+                max_message_size: self.max_message_size,
                 nonce: nonce::Info::new(self.dialer),
             },
             Receiver {
                 cipher: self.cipher,
                 stream: self.stream,
-                max_message_size: self.config.max_message_size,
+                max_message_size: self.max_message_size,
                 nonce: nonce::Info::new(!self.dialer),
             },
         )
