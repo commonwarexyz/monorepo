@@ -412,16 +412,6 @@ impl Tasks {
     }
 }
 
-/// Seed for random number generation.
-#[derive(Clone)]
-pub enum Seed {
-    Number(u64),
-    Sampler(Arc<Mutex<StdRng>>),
-}
-
-/// Map of names to blobs.
-pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
-
 /// Configuration for the `deterministic` runtime.
 #[derive(Clone)]
 pub struct Config {
@@ -429,7 +419,7 @@ pub struct Config {
     pub registry: Arc<Mutex<Registry>>,
 
     /// Seed for the random number generator.
-    pub seed: Seed,
+    pub seed: u64,
 
     /// The cycle duration determines how much time is advanced after each iteration of the event
     /// loop. This is useful to prevent starvation if some task never yields.
@@ -437,18 +427,15 @@ pub struct Config {
 
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     pub timeout: Option<Duration>,
-
-    pub storage: Option<Arc<Mutex<HashMap<String, Partition>>>>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             registry: Arc::new(Mutex::new(Registry::default())),
-            seed: Seed::Number(42),
+            seed: 42,
             cycle: Duration::from_millis(1),
             timeout: None,
-            storage: None,
         }
     }
 }
@@ -459,12 +446,12 @@ pub struct Executor {
     deadline: Option<SystemTime>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
-    rng: Arc<Mutex<StdRng>>,
+    rng: Mutex<StdRng>,
     prefix: Mutex<String>,
     time: Mutex<SystemTime>,
     tasks: Arc<Tasks>,
     sleeping: Mutex<BinaryHeap<Alarm>>,
-    partitions: Arc<Mutex<HashMap<String, Partition>>>,
+    partitions: Mutex<HashMap<String, Partition>>,
     signaler: Mutex<Signaler>,
     signal: Signal,
     finished: Mutex<bool>,
@@ -479,18 +466,6 @@ impl Executor {
             panic!("cycle duration must be non-zero when timeout is set");
         }
 
-        // Ensure storage exists
-        let partitions = match cfg.storage {
-            Some(storage) => storage,
-            None => Arc::new(Mutex::new(HashMap::new())),
-        };
-
-        // Ensure rng exists
-        let rng = match cfg.seed {
-            Seed::Number(seed) => Arc::new(Mutex::new(StdRng::seed_from_u64(seed))),
-            Seed::Sampler(rng) => rng,
-        };
-
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(cfg.registry));
         let auditor = Arc::new(Auditor::new());
@@ -504,7 +479,7 @@ impl Executor {
             deadline,
             metrics: metrics.clone(),
             auditor: auditor.clone(),
-            rng,
+            rng: Mutex::new(StdRng::seed_from_u64(cfg.seed)),
             prefix: Mutex::new(String::new()),
             time: Mutex::new(start_time),
             tasks: Arc::new(Tasks {
@@ -512,7 +487,7 @@ impl Executor {
                 counter: Mutex::new(0),
             }),
             sleeping: Mutex::new(BinaryHeap::new()),
-            partitions,
+            partitions: Mutex::new(HashMap::new()),
             signaler: Mutex::new(signaler),
             signal,
             finished: Mutex::new(false),
@@ -534,7 +509,7 @@ impl Executor {
     /// and the provided seed.
     pub fn seeded(seed: u64) -> (Runner, Context, Arc<Auditor>) {
         let cfg = Config {
-            seed: Seed::Number(seed),
+            seed,
             ..Config::default()
         };
         Self::init(cfg)

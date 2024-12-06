@@ -174,7 +174,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network};
     use commonware_runtime::{
-        deterministic::{self, Executor, Seed},
+        deterministic::{self, Executor},
         Clock, Runner, Spawner,
     };
     use commonware_storage::journal::{self, Journal};
@@ -184,7 +184,7 @@ mod tests {
     use governor::Quota;
     use prometheus_client::registry::Registry;
     use prover::Prover;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::NonZeroU32,
@@ -430,33 +430,25 @@ mod tests {
     fn test_unclean_shutdown() {
         // Create runtime
         let n = 5;
-        let seed = 42;
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
 
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-        let rng = Arc::new(Mutex::new(StdRng::seed_from_u64(seed)));
-        let storage = Arc::new(Mutex::new(HashMap::new()));
         let notarized = Arc::new(Mutex::new(HashMap::new()));
         let finalized = Arc::new(Mutex::new(HashMap::new()));
         let completed = Arc::new(Mutex::new(HashSet::new()));
+        let (mut executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         while completed.lock().unwrap().len() != n as usize {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
-            let rng = rng.clone();
             let notarized = notarized.clone();
             let finalized = finalized.clone();
             let completed = completed.clone();
-            let cfg = deterministic::Config {
-                seed: Seed::Sampler(rng.clone()), // allows us to reuse same sampler (from original seed) across restarts
-                timeout: Some(Duration::from_secs(30)),
-                storage: Some(storage.clone()),
-                ..Default::default()
-            };
-            let (executor, mut runtime, _) = Executor::init(cfg);
-            executor.start(async move {
+            executor.start({
+                let mut runtime = runtime.clone();
+                async move {
                 // Create simulated network
                 let (network, mut oracle) = Network::new(
                     runtime.clone(),
@@ -659,7 +651,10 @@ mod tests {
                     debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
                     *shutdowns += 1;
                 }
-            });
+            }});
+
+            // Recover runtime
+            (executor, runtime, _) = runtime.recover();
         }
     }
 
@@ -1896,7 +1891,7 @@ mod tests {
         let activity_timeout = 10;
         let namespace = Bytes::from("consensus");
         let cfg = deterministic::Config {
-            seed: Seed::Number(seed),
+            seed,
             timeout: Some(Duration::from_secs(3_000)),
             ..deterministic::Config::default()
         };
