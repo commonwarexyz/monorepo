@@ -214,6 +214,12 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
         let (id, deadline) = self.deadlines.iter().next()?;
         Some((*id, *deadline))
     }
+
+    /// Get the number of outstanding requests.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.requests.len()
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +251,7 @@ mod tests {
 
             // Request before any participants
             assert_eq!(requester.request(false), None);
+            assert_eq!(requester.len(), 0);
 
             // Ensure we aren't waiting
             assert_eq!(requester.next(), None);
@@ -266,6 +273,7 @@ mod tests {
             let (id, deadline) = requester.next().expect("failed to get deadline");
             assert_eq!(id, 0);
             assert_eq!(deadline, current + timeout);
+            assert_eq!(requester.len(), 1);
 
             // Try to make another request (would exceed rate limit and can't do self)
             assert_eq!(requester.request(false), None);
@@ -318,6 +326,7 @@ mod tests {
 
             // Ensure no more requests
             assert_eq!(requester.next(), None);
+            assert_eq!(requester.len(), 0);
 
             // Sleep until reset
             runtime.sleep(Duration::from_secs(1)).await;

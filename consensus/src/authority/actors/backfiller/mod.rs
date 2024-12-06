@@ -25,4 +25,5 @@ pub struct Config<C: Scheme, S: Supervisor> {
     pub max_fetch_count: usize,
     pub max_fetch_size: usize,
     pub fetch_rate_per_peer: Quota,
+    pub fetch_concurrent: usize,
 }

@@ -46,5 +46,8 @@ pub struct Config<
     /// Maximum rate of fetch requests per peer (to prevent rate limiting).
     pub fetch_rate_per_peer: Quota,
 
+    /// Number of concurrent fetch requests to make.
+    pub fetch_concurrent: usize,
+
     pub replay_concurrency: usize,
 }

@@ -311,6 +311,7 @@ mod tests {
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -556,6 +557,7 @@ mod tests {
                         max_fetch_count: 1,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
                     let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -782,6 +784,7 @@ mod tests {
                     max_fetch_count: 1, // force many fetches
                     max_fetch_size: 1024 * 1024,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -961,6 +964,7 @@ mod tests {
                 max_fetch_count: 1,
                 max_fetch_size: 1024 * 512,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                fetch_concurrent: 1,
                 replay_concurrency: 1,
             };
             let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -1130,6 +1134,7 @@ mod tests {
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -1336,6 +1341,7 @@ mod tests {
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -1531,6 +1537,7 @@ mod tests {
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -1733,6 +1740,7 @@ mod tests {
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -2004,6 +2012,7 @@ mod tests {
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -2207,6 +2216,7 @@ mod tests {
                         max_fetch_count: 1,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
                     let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -2415,6 +2425,7 @@ mod tests {
                         max_fetch_count: 1,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
                     let engine = Engine::new(runtime.clone(), journal, cfg);
