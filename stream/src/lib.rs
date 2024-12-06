@@ -1,26 +1,11 @@
-//! Connection
+//! Exchange messages over arbitrary transport.
 
-use commonware_cryptography::Scheme;
+pub mod public_key;
+
+use bytes::Bytes;
 use prost::DecodeError;
-use std::time::Duration;
+use std::future::Future;
 use thiserror::Error;
-
-mod handshake;
-mod instance;
-mod utils;
-mod x25519;
-
-pub use handshake::IncomingHandshake;
-pub use instance::{Instance, Sender};
-
-#[derive(Clone)]
-pub struct Config<C: Scheme> {
-    pub crypto: C,
-    pub max_message_size: usize,
-    pub synchrony_bound: Duration,
-    pub max_handshake_age: Duration,
-    pub handshake_timeout: Duration,
-}
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -44,22 +29,40 @@ pub enum Error {
     InvalidSignature,
     #[error("wrong peer")]
     WrongPeer,
-    #[error("read failed")]
-    ReadFailed,
+    #[error("recv failed")]
+    RecvFailed,
+    #[error("recv too large: {0} bytes")]
+    RecvTooLarge(usize),
     #[error("send failed")]
     SendFailed,
+    #[error("send zero size")]
+    SendZeroSize,
+    #[error("send too large: {0} bytes")]
+    SendTooLarge(usize),
     #[error("connection closed")]
     StreamClosed,
     #[error("cipher creation failed")]
     CipherCreationFailed,
-    #[error("peer nonce overflow")]
-    PeerNonceOverflow,
-    #[error("our nonce overflow")]
-    OurNonceOverflow,
+    #[error("nonce overflow")]
+    NonceOverflow,
     #[error("encryption failed")]
     EncryptionFailed,
     #[error("decryption failed")]
     DecryptionFailed,
-    #[error("invalid timestamp")]
-    InvalidTimestamp,
+    #[error("timestamp too old: {0}")]
+    InvalidTimestampOld(u64),
+    #[error("timestamp too future: {0}")]
+    InvalidTimestampFuture(u64),
+}
+
+/// A trait for sending messages.
+pub trait Sender: Sync + Send + 'static {
+    /// Send a message to the stream.
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+/// A trait for receiving messages.
+pub trait Receiver: Sync + Send + 'static {
+    /// Receive a message from the stream.
+    fn receive(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send;
 }

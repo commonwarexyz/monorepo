@@ -2,11 +2,11 @@
 
 use crate::authenticated::{
     actors::{spawner, tracker},
-    connection::{self, Instance},
     metrics,
 };
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
+use commonware_stream::public_key::{Config as ConnectionConfig, Connection};
 use commonware_utils::hex;
 use governor::{
     clock::Clock as GClock,
@@ -24,7 +24,7 @@ use tracing::debug;
 
 pub struct Config<C: Scheme> {
     pub registry: Arc<Mutex<Registry>>,
-    pub connection: connection::Config<C>,
+    pub connection: ConnectionConfig<C>,
     pub dial_frequency: Duration,
     pub dial_rate: Quota,
 }
@@ -38,7 +38,7 @@ pub struct Actor<
 > {
     runtime: E,
 
-    connection: connection::Config<C>,
+    connection: ConnectionConfig<C>,
     dial_frequency: Duration,
 
     dial_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
@@ -117,16 +117,21 @@ impl<
                     );
 
                     // Upgrade connection
-                    let instance =
-                        match Instance::upgrade_dialer(runtime, config, sink, stream, peer.clone())
-                            .await
-                        {
-                            Ok(instance) => instance,
-                            Err(e) => {
-                                debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
-                                return;
-                            }
-                        };
+                    let instance = match Connection::upgrade_dialer(
+                        runtime,
+                        config,
+                        sink,
+                        stream,
+                        peer.clone(),
+                    )
+                    .await
+                    {
+                        Ok(instance) => instance,
+                        Err(e) => {
+                            debug!(peer=hex(&peer), error = ?e, "failed to upgrade connection");
+                            return;
+                        }
+                    };
                     debug!(peer = hex(&peer), "upgraded connection");
 
                     // Start peer to handle messages
@@ -146,10 +151,9 @@ impl<
             self.dial_peers(&mut tracker, &mut supervisor).await;
 
             // Sleep for a random amount of time up to the dial frequency
-            let wait = Duration::from_millis(
-                self.runtime
-                    .gen_range(0..self.dial_frequency.as_millis() as u64),
-            );
+            let wait = self
+                .runtime
+                .gen_range(Duration::default()..self.dial_frequency);
             self.runtime.sleep(wait).await;
         }
     }

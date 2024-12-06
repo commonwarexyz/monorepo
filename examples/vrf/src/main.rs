@@ -97,6 +97,9 @@ use std::{
 use std::{str::FromStr, time::Duration};
 use tracing::info;
 
+// Unique namespace to avoid message replay attacks.
+const APPLICATION_NAMESPACE: &[u8] = b"commonware-vrf";
+
 fn main() {
     // Initialize runtime
     let runtime_cfg = tokio::Config::default();
@@ -206,12 +209,14 @@ fn main() {
     }
 
     // Configure network
+    const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MB
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
+        APPLICATION_NAMESPACE,
         Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        runtime_cfg.max_message_size,
+        MAX_MESSAGE_SIZE,
     );
 
     // Start runtime
@@ -246,6 +251,8 @@ fn main() {
         info!(threshold, max_reveals, "inferred threshold");
 
         // Check if I am the arbiter
+        const DEFAULT_MESSAGE_BACKLOG: usize = 256;
+        const COMPRESSION_LEVEL: Option<u8> = Some(3);
         if let Some(arbiter) = matches.get_one::<u64>("arbiter") {
             // Create contributor
             let rogue = matches.get_flag("rogue");
@@ -254,9 +261,8 @@ fn main() {
             let (contributor_sender, contributor_receiver) = network.register(
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                1024 * 1024, // 1 MB max message size
-                256,         // 256 messages in flight
-                Some(3),
+                DEFAULT_MESSAGE_BACKLOG,
+                COMPRESSION_LEVEL,
             );
             let arbiter = Ed25519::from_seed(*arbiter).public_key();
             let (contributor, requests) = handlers::Contributor::new(
@@ -277,8 +283,7 @@ fn main() {
             let (vrf_sender, vrf_receiver) = network.register(
                 handlers::VRF_CHANNEL,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                1024 * 1024, // 1 MB max message size
-                256,         // 256 messages in flight
+                DEFAULT_MESSAGE_BACKLOG,
                 None,
             );
             let signer = handlers::Vrf::new(
@@ -293,9 +298,8 @@ fn main() {
             let (arbiter_sender, arbiter_receiver) = network.register(
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                1024 * 1024, // 1 MB max message size
-                256,         // 256 messages in flight
-                Some(3),
+                DEFAULT_MESSAGE_BACKLOG,
+                COMPRESSION_LEVEL,
             );
             let arbiter = handlers::Arbiter::new(
                 runtime.clone(),

@@ -1,92 +1,18 @@
 //! Communicate with a fixed set of authenticated peers over encrypted connections.
 //!
-//! `authenticated` provides encrypted, multiplexed communication between fully-connected peers
-//! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.). Unlike
-//! most p2p crates, `authenticated` implements its own encrypted transport layer (no TLS) that
-//! exclusively uses said cryptographic identities to authenticate incoming connections (dropping
-//! any that aren't explicitly authorized). Peer discovery occurs automatically using ordered bit
-//! vectors (sorted by authorized cryptographic identities) to efficiently communicate knowledge
-//! of dialable peers.
+//! `authenticated` provides multiplexed communication between fully-connected peers
+//! identified by a developer-specified cryptographic identity (i.e. BLS, ed25519, etc.).
+//! Peer discovery occurs automatically using ordered bit vectors (sorted by authorized
+//! cryptographic identities) to efficiently communicate knowledge of dialable peers.
 //!
 //! # Features
 //!
-//! * Simple Handshakes (No TLS, No X.509 Certificates, No Protocol Negotiation)
-//! * ChaCha20-Poly1305 Stream Encryption
 //! * Configurable Cryptography Scheme for Peer Identities (BLS, ed25519, etc.)
 //! * Automatic Peer Discovery Using Bit Vectors (Used as Ping/Pongs)
 //! * Multiplexing With Configurable Rate Limiting Per Channel and Send Prioritization
 //! * Optional Message Compression (using `zstd`)
-//! * Emebdded Message Chunking
 //!
 //! # Design
-//!
-//! ## Handshake
-//!
-//! When establishing a connection with a peer, a simple handshake is performed between
-//! peers to authenticate each other and to establish a shared secret for connection encryption (explained below).
-//! This simple handshake is done in lieu of using TLS, Noise, WireGuard, etc. because it supports
-//! the usage of arbitrary cryptographic schemes, there is no protocol negotation (only one way to connect),
-//! because it only takes a few hundred lines of code to implement (not having any features is a feature
-//! in safety-critical code), and because it can be simulated deterministically.
-//!
-//! In any handshake, the dialer is the party that attempts to connect to some known address/identity (public key)
-//! and the recipient of this connection is the dialee. Upon forming a TCP connection, the dialer sends a signed
-//! handshake message to the dialee.
-//!
-//! ```protobuf
-//! message Handshake {
-//!     bytes recipient_public_key = 1;
-//!     bytes ephemeral_public_key = 2;
-//!     uint64 timestamp = 3;
-//!     Signature signature = 4;
-//! }
-//! ```
-//!
-//! The dialee verifies the public keys are well-formatted, the timestamp is valid (not too old/not too far in the future),
-//! and that the signature is valid. If all these checks pass, the dialee checks to see if it is already connected or dialing
-//! this peer. If it is, it drops the connection. If it isn't, it sends back its own signed handshake message (same as above)
-//! and considers the connection established.
-//!
-//! Upon receiving the dialee's handshake message, the dialer verifies the same data as the dialee and additionally verifies
-//! that the public key returned matches what they expected at the address. If all these checks pass, the dialer considers the
-//! connection established. If not, the dialer drops the connection.
-//!
-//! To better protect against malicious peers that create and/or accept connections but do not participate in handshakes,
-//! a configurable deadline is enforced for any handshake to be completed. This allows for the underlying runtime to maintain
-//! a standard read/write timeout for connections without making it easier for malicious peers to keep useless connections open.
-//!
-//! ## Encryption
-//!
-//! During the handshake (described above), a shared x25519 secret is established using a Diffie-Hellman Key Exchange. This
-//! x25519 secret is then used to create a ChaCha20-Poly1305 cipher for encrypting all messages exchanged between
-//! any two peers (including peer discovery messages).
-//!
-//! ChaCha20-Poly1305 nonces (12 bytes) are constructed such that the first bit indicates whether the sender is a dialer (1) or
-//! dialee (0). The rest of the first byte (next 7 bits) and next byte (all 8 bits) are unused (set to 0). The next 2 bytes
-//! are a `u16` iterator and the final 8 bytes are a `u64` sequence number. When the sequence reaches `u64::MAX`, the iterator
-//! is incremented and the sequence is reset to 0. This technique provides each sender with a channel duration of `2^80` frames
-//! (and automatically terminates when this number of frames has been sent). In the blockchain context, validators often maintain
-//! long-lived connections with each other and avoiding connection re-establishment (to reset iterator/sequence with a new cipher)
-//! is desirable.
-//!
-//! ```text
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! | D | U |It(u16)|         Sequence(u64)         |
-//! +---+---+---+---+---+---+---+---+---+---+---+---+
-//!
-//! D = Dialer/Dialee, U = Unused, It = Iterator
-//! ```
-//!
-//! _We use a combination of `u64` (sequence) and `u16` (iterator) instead of implementing `u80/u88` because
-//! CPUs provide native support for `u64` operations (which will always be faster than an implementation of a
-//! "wrapping add" over arbitrary bytes). With this technique, almost all operations (other than iterator
-//! increments every `2^64` frames) are just a basic `u64` increment._
-//!
-//! This simple coordination prevents nonce reuse (which would allow for messages to be decrypted) and saves a small amount of
-//! bandwidth (no need to send the nonce alongside the encrypted message). This "pedantic" construction of the nonce
-//! also avoids accidentally reusing a nonce over long-lived connections when setting it to be a small hash (as in XChaCha-Poly1305).
 //!
 //! ## Discovery
 //!
@@ -142,25 +68,18 @@
 //! This allows peers that have a more up-to-date version of the peer set to connect, exchange application-level information, and for
 //! the said peer to potentially learn of an updated peer set (of which it is part)._
 //!
-//! ## Chunking
+//! ## Messages
 //!
-//! To support arbitarily large messages (while maintaing a small frame size), this crate automatically chunks messages
-//! that exceed the frame size (the frame size is configurable). A connection will be blocked until all chunks of a given
-//! message are sent. It is possible for a sender to prioritize messages over others but not to be interleaved with an
-//! ongoing multi-chunk message.
+//! Messages are sent using the Data message type. This message type is used to send arbitrary bytes to a given channel.
+//! The message must be smaller (in bytes) than the configured maximum message size. If the message is larger, an error will be returned.
+//! It is possible for a sender to prioritize messages over others.
 //!
 //! ```protobuf
-//! message Chunk {
+//! message Data {
 //!     uint32 channel = 1;
-//!     uint32 part = 2;
-//!     uint32 total_parts = 3;
-//!     bytes content = 4;
-//! }  
+//!     bytes message = 2;
+//! }
 //! ```
-//!
-//! To minimize the number of chunks sent and to ensure each chunk is full (otherwise someone could send us a million chunks
-//! each 1 byte), content is compressed (if enabled) before chunking rather than after. As a result, the configuration
-//! chosen for frame size has no impact on compression efficiency.
 //!
 //! # Example
 //!
@@ -177,6 +96,9 @@
 //! // Configure runtime
 //! let runtime_cfg = tokio::Config::default();
 //! let (executor, runtime) = Executor::init(runtime_cfg.clone());
+//!
+//! // Configure prometheus registry
+//! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
 //!
 //! // Generate identity
 //! //
@@ -196,16 +118,22 @@
 //! // In production, it is likely that the address of bootstrappers will be some public address.
 //! let bootstrappers = vec![(peer1.clone(), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3001))];
 //!
+//! // Configure namespace
+//! //
+//! // In production, use a unique application namespace to prevent cryptographic replay attacks.
+//! let application_namespace = b"my-app-namespace";
+//!
 //! // Configure network
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
-//! let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
+//! const MAX_MESSAGE_SIZE: usize = 1_024; // 1KB
 //! let p2p_cfg = authenticated::Config::aggressive(
 //!     signer.clone(),
+//!     application_namespace,
 //!     registry,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000),
 //!     bootstrappers,
-//!     runtime_cfg.max_message_size,
+//!     MAX_MESSAGE_SIZE,
 //! );
 //!
 //! // Start runtime
@@ -220,12 +148,13 @@
 //!     oracle.register(0, vec![signer.public_key(), peer1, peer2, peer3]);
 //!
 //!     // Register some channel
+//!     const MAX_MESSAGE_BACKLOG: usize = 128;
+//!     const COMPRESSION_LEVEL: Option<u8> = Some(3);
 //!     let (sender, receiver) = network.register(
 //!         0,
 //!         Quota::per_second(NonZeroU32::new(1).unwrap()),
-//!         1024, // max message size
-//!         128, // max backlog
-//!         Some(3), // compression level
+//!         MAX_MESSAGE_BACKLOG,
+//!         COMPRESSION_LEVEL,
 //!     );
 //!
 //!     // Run network
@@ -241,7 +170,6 @@
 mod actors;
 mod channels;
 mod config;
-mod connection;
 mod ip;
 mod metrics;
 mod network;
@@ -273,7 +201,6 @@ pub use network::Network;
 mod tests {
     use super::*;
     use crate::{Receiver, Recipients, Sender};
-    use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -296,6 +223,8 @@ mod tests {
         Some,
         One,
     }
+
+    const DEFAULT_MESSAGE_BACKLOG: usize = 128;
 
     /// Test connectivity between `n` peers.
     ///
@@ -349,8 +278,7 @@ mod tests {
             let (mut sender, mut receiver) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(5).unwrap()), // Ensure we hit the rate limit
-                1_024,
-                128,
+                DEFAULT_MESSAGE_BACKLOG,
                 None,
             );
 
@@ -465,21 +393,21 @@ mod tests {
 
     fn run_deterministic_test(seed: u64, mode: Mode) {
         // Configure test
-        let max_message_size = 1_024 * 1_024; // 1MB
-        let n = 25;
-        let base_port = 3000;
+        const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
+        const NUM_PEERS: usize = 25;
+        const BASE_PORT: u16 = 3000;
 
         // Run first instance
         let (executor, runtime, auditor) = deterministic::Executor::seeded(seed);
         executor.start(async move {
-            run_network(runtime, max_message_size, base_port, n, mode).await;
+            run_network(runtime, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
         });
         let state = auditor.state();
 
         // Compare result to second instance
         let (executor, runtime, auditor) = deterministic::Executor::seeded(seed);
         executor.start(async move {
-            run_network(runtime, max_message_size, base_port, n, mode).await;
+            run_network(runtime, MAX_MESSAGE_SIZE, BASE_PORT, NUM_PEERS, mode).await;
         });
         assert_eq!(state, auditor.state());
     }
@@ -510,7 +438,10 @@ mod tests {
         let cfg = tokio::Config::default();
         let (executor, runtime) = tokio::Executor::init(cfg.clone());
         executor.start(async move {
-            run_network(runtime, cfg.max_message_size, 3000, 10, Mode::One).await;
+            const MAX_MESSAGE_SIZE: usize = 1_024 * 1_024; // 1MB
+            let base_port = 3000;
+            let n = 10;
+            run_network(runtime, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
         });
     }
 
@@ -570,8 +501,7 @@ mod tests {
                 let (mut sender, mut receiver) = network.register(
                     0,
                     Quota::per_second(NonZeroU32::new(10).unwrap()),
-                    1_024 * 1_024, // 1MB
-                    128,
+                    DEFAULT_MESSAGE_BACKLOG,
                     None,
                 );
 
@@ -618,127 +548,6 @@ mod tests {
         });
     }
 
-    fn test_chunking(compression: Option<u8>) {
-        // Configure test
-        let base_port = 3000;
-        let n: usize = 2;
-
-        // Initialize runtime
-        let (executor, mut runtime, _) = deterministic::Executor::default();
-        executor.start(async move {
-            // Create peers
-            let mut peers = Vec::new();
-            for i in 0..n {
-                peers.push(Ed25519::from_seed(i as u64));
-            }
-            let addresses = peers.iter().map(|p| p.public_key()).collect::<Vec<_>>();
-
-            // Create random message
-            let mut msg = vec![0u8; 2 * 1024 * 1024]; // 2MB (greater than frame capacity)
-            runtime.fill(&mut msg[..]);
-
-            // Create networks
-            let mut waiters = Vec::new();
-            for (i, peer) in peers.iter().enumerate() {
-                // Derive port
-                let port = base_port + i as u16;
-
-                // Create bootstrappers
-                let mut bootstrappers = Vec::new();
-                if i > 0 {
-                    bootstrappers.push((
-                        addresses[0].clone(),
-                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
-                    ));
-                }
-
-                // Create network
-                let signer = peer.clone();
-                let registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
-                let config = Config::test(
-                    signer.clone(),
-                    registry,
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-                    bootstrappers,
-                    1_024 * 1_024, // 1MB
-                );
-                let (mut network, mut oracle) = Network::new(runtime.clone(), config);
-
-                // Register peers
-                oracle.register(0, addresses.clone()).await;
-
-                // Register basic application
-                let (mut sender, mut receiver) = network.register(
-                    0,
-                    Quota::per_second(NonZeroU32::new(10).unwrap()),
-                    5 * 1_024 * 1_024, // 5MB
-                    128,
-                    compression,
-                );
-
-                // Wait to connect to all peers, and then send messages to everyone
-                runtime.spawn("network", network.run());
-
-                // Send/Recieve messages
-                let msg = Bytes::from(msg.clone());
-                let msg_sender = addresses[0].clone();
-                let msg_recipient = addresses[1].clone();
-                let peer_handler = runtime.spawn("agent", {
-                    let runtime = runtime.clone();
-                    async move {
-                        if i == 0 {
-                            // Loop until success
-                            let recipient = Recipients::One(msg_recipient);
-                            loop {
-                                if sender
-                                    .send(recipient.clone(), msg.clone(), true)
-                                    .await
-                                    .unwrap()
-                                    .len()
-                                    == 1
-                                {
-                                    break;
-                                }
-
-                                // Sleep and try again (avoid busy loop)
-                                runtime.sleep(Duration::from_millis(100)).await;
-                            }
-                        } else {
-                            // Ensure message equals sender identity
-                            let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(sender, msg_sender);
-
-                            // Ensure message equals sent message
-                            assert_eq!(message.len(), msg.len());
-                            for (i, (&byte1, &byte2)) in message.iter().zip(msg.iter()).enumerate()
-                            {
-                                assert_eq!(byte1, byte2, "byte {} mismatch", i);
-                            }
-                        }
-                    }
-                });
-
-                // Add to waiters
-                waiters.push(peer_handler);
-            }
-
-            // Wait for waiters to finish (receiver before sender)
-            for waiter in waiters.into_iter().rev() {
-                waiter.await.unwrap();
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_chunking_no_compression() {
-        test_chunking(None);
-    }
-
-    #[test_traced]
-    fn test_chunking_compression() {
-        test_chunking(Some(3));
-    }
-
     fn test_message_too_large(compression: Option<u8>) {
         // Configure test
         let base_port = 3000;
@@ -773,8 +582,7 @@ mod tests {
             let (mut sender, _) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
-                1_024 * 1_024, // 1MB
-                128,
+                DEFAULT_MESSAGE_BACKLOG,
                 compression,
             );
 

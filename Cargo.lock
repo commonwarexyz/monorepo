@@ -460,11 +460,12 @@ version = "0.0.23"
 dependencies = [
  "bitvec",
  "bytes",
- "chacha20poly1305",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
+ "commonware-stream",
  "commonware-utils",
+ "either",
  "futures",
  "governor",
  "prometheus-client",
@@ -472,11 +473,9 @@ dependencies = [
  "prost-build",
  "rand",
  "rand_distr",
- "sha2 0.10.8",
  "thiserror",
  "tracing",
  "tracing-subscriber",
- "x25519-dalek",
  "zstd",
 ]
 
@@ -494,7 +493,6 @@ dependencies = [
  "sha2 0.10.8",
  "thiserror",
  "tokio",
- "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -518,6 +516,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zstd",
+]
+
+[[package]]
+name = "commonware-stream"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "chacha20poly1305",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "prost",
+ "prost-build",
+ "rand",
+ "thiserror",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -2092,19 +2108,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.72",
-]
-
-[[package]]
-name = "tokio-util"
-version = "0.7.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61e7c3654c13bcd040d4a03abee2c75b1d14a37b423cf5a813ceae1cc903ec6a"
-dependencies = [
- "bytes",
- "futures-core",
- "futures-sink",
- "pin-project-lite",
- "tokio",
 ]
 
 [[package]]

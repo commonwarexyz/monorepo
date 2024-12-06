@@ -1,8 +1,9 @@
 //! Peer
 
-use crate::authenticated::{connection, metrics};
+use crate::authenticated::metrics;
 use governor::Quota;
 use prometheus_client::metrics::{counter::Counter, family::Family};
+use prost::DecodeError;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -28,21 +29,17 @@ pub enum Error {
     #[error("peer killed: {0}")]
     PeerKilled(String),
     #[error("send failed: {0}")]
-    SendFailed(connection::Error),
+    SendFailed(commonware_stream::Error),
     #[error("peer disconnected")]
     PeerDisconnected,
     #[error("receive failed: {0}")]
-    ReceiveFailed(connection::Error),
-    #[error("unexpected handshake message")]
-    UnexpectedHandshake,
+    ReceiveFailed(commonware_stream::Error),
+    #[error("decode failed: {0}")]
+    DecodeFailed(DecodeError),
     #[error("unexpected failure: {0}")]
     UnexpectedFailure(commonware_runtime::Error),
     #[error("message dropped")]
     MessageDropped,
-    #[error("message too large: {0}")]
-    MessageTooLarge(usize),
-    #[error("invalid chunk")]
-    InvalidChunk,
     #[error("invalid channel")]
     InvalidChannel,
     #[error("channel closed: {0}")]

@@ -356,7 +356,6 @@ pub mod tests {
             assert_eq!(res.degree(), larger.degree());
         }
 
-
         #[test]
         fn interpolation(degree in 0..100u32, num_evals in 0..100u32) {
             let poly = new(degree);

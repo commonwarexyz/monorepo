@@ -15,13 +15,16 @@ pub type Bootstrapper = (PublicKey, SocketAddr);
 ///
 /// # Warning
 /// It is recommended to synchronize this configuration across peers in the network (with the
-/// exection of `crypto`, `registry`, `address`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
-/// If this is not sycnhronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
+/// exception of `crypto`, `registry`, `listen`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
+/// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
 /// and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
 pub struct Config<C: Scheme> {
     /// Cryptographic primitives.
     pub crypto: C,
+
+    /// Prefix for all signed messages to avoid replay attacks.
+    pub namespace: Vec<u8>,
 
     /// Registry for prometheus metrics.
     pub registry: Arc<Mutex<Registry>>,
@@ -40,7 +43,8 @@ pub struct Config<C: Scheme> {
 
     /// Maximum size allowed for messages over any connection.
     ///
-    /// Messages larger than this size will be chunked.
+    /// The actual size of the network message will be higher due to overhead from the protocol;
+    /// this includes additional metadata, protobuf encoding of the bytes, and cryptographic signatures.
     pub max_message_size: usize,
 
     /// Message backlog allowed for internal actors.
@@ -106,6 +110,7 @@ impl<C: Scheme> Config<C> {
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
         crypto: C,
+        namespace: &[u8],
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
@@ -113,6 +118,7 @@ impl<C: Scheme> Config<C> {
     ) -> Self {
         Self {
             crypto,
+            namespace: namespace.to_vec(),
             registry,
             listen,
             dialable: listen,
@@ -143,6 +149,7 @@ impl<C: Scheme> Config<C> {
     /// It is not recommended to use this configuration in production.
     pub fn aggressive(
         crypto: C,
+        namespace: &[u8],
         registry: Arc<Mutex<Registry>>,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper>,
@@ -150,6 +157,7 @@ impl<C: Scheme> Config<C> {
     ) -> Self {
         Self {
             crypto,
+            namespace: namespace.to_vec(),
             registry,
             listen,
             dialable: listen,
@@ -183,6 +191,7 @@ impl<C: Scheme> Config<C> {
     ) -> Self {
         Self {
             crypto,
+            namespace: b"test_namespace".to_vec(),
             registry,
             listen,
             dialable: listen,

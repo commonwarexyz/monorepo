@@ -1,11 +1,9 @@
 //! Listener
 
-use crate::authenticated::{
-    actors::{spawner, tracker},
-    connection::{self, IncomingHandshake, Instance},
-};
+use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
+use commonware_stream::public_key::{Config as ConnectionConfig, Connection, IncomingHandshake};
 use commonware_utils::hex;
 use governor::{
     clock::ReasonablyRealtime,
@@ -26,7 +24,7 @@ use tracing::debug;
 pub struct Config<C: Scheme> {
     pub registry: Arc<Mutex<Registry>>,
     pub address: SocketAddr,
-    pub connection: connection::Config<C>,
+    pub connection: ConnectionConfig<C>,
     pub allowed_incoming_connectioned_rate: Quota,
 }
 
@@ -40,7 +38,7 @@ pub struct Actor<
     runtime: E,
 
     address: SocketAddr,
-    connection: connection::Config<C>,
+    connection: ConnectionConfig<C>,
     rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
 
     handshakes_rate_limited: Counter,
@@ -90,7 +88,7 @@ impl<
 
     async fn handshake(
         runtime: E,
-        connection: connection::Config<C>,
+        connection: ConnectionConfig<C>,
         sink: Si,
         stream: St,
         mut tracker: tracker::Mailbox<E>,
@@ -103,6 +101,8 @@ impl<
         let handshake = match IncomingHandshake::verify(
             runtime.clone(),
             &connection.crypto,
+            &connection.namespace,
+            connection.max_message_size,
             connection.synchrony_bound,
             connection.max_handshake_age,
             connection.handshake_timeout,
@@ -131,7 +131,7 @@ impl<
         };
 
         // Perform handshake
-        let stream = match Instance::upgrade_listener(runtime, connection, handshake).await {
+        let stream = match Connection::upgrade_listener(runtime, connection, handshake).await {
             Ok(connection) => connection,
             Err(e) => {
                 debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");

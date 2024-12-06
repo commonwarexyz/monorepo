@@ -18,7 +18,6 @@ pub mod tokio;
 mod utils;
 pub use utils::{reschedule, Handle, Signal, Signaler};
 
-use bytes::Bytes;
 use std::{
     future::Future,
     net::SocketAddr,
@@ -42,6 +41,10 @@ pub enum Error {
     WriteFailed,
     #[error("read failed")]
     ReadFailed,
+    #[error("send failed")]
+    SendFailed,
+    #[error("recv failed")]
+    RecvFailed,
     #[error("partition creation failed: {0}")]
     PartitionCreationFailed(String),
     #[error("partition missing: {0}")]
@@ -151,14 +154,16 @@ where
 /// Interface that any runtime must implement to send
 /// messages over a network connection.
 pub trait Sink: Sync + Send + 'static {
-    /// Send a message.
-    fn send(&mut self, msg: Bytes) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Send a message to the sink.
+    fn send(&mut self, msg: &[u8]) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface that any runtime must implement to receive
 /// messages over a network connection.
 pub trait Stream: Sync + Send + 'static {
-    fn recv(&mut self) -> impl Future<Output = Result<Bytes, Error>> + Send;
+    /// Receive a message from the stream, storing it in the given buffer.
+    /// Reads exactly the number of bytes that fit in the buffer.
+    fn recv(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// Interface to interact with storage.

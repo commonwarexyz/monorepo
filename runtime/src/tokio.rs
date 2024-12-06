@@ -24,12 +24,7 @@
 //! ```
 
 use crate::{utils::Signaler, Clock, Error, Handle, Signal};
-use bytes::Bytes;
 use commonware_utils::{from_hex, hex};
-use futures::{
-    stream::{SplitSink, SplitStream},
-    SinkExt, StreamExt,
-};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     encoding::EncodeLabelSet,
@@ -49,13 +44,12 @@ use std::{
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{tcp::OwnedReadHalf, tcp::OwnedWriteHalf, TcpListener, TcpStream},
     runtime::{Builder, Runtime},
     sync::Mutex as AsyncMutex,
     task_local,
     time::timeout,
 };
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::warn;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -171,18 +165,6 @@ pub struct Config {
     /// Whether or not to catch panics.
     pub catch_panics: bool,
 
-    /// Maximum size used for all messages sent over the wire.
-    ///
-    /// We use this to prevent malicious peers from sending us large messages
-    /// that would consume all of our memory.
-    ///
-    /// If this value is not synchronized across all connected peers,
-    /// chunks will be parsed incorrectly (any non-terminal chunk must be of ~this
-    /// size).
-    ///
-    /// Users of this runtime can chunk messages of this size to send over the wire.
-    pub max_message_size: usize,
-
     /// Duration after which to close the connection if no message is read.
     pub read_timeout: Duration,
 
@@ -221,7 +203,6 @@ impl Default for Config {
             registry: Arc::new(Mutex::new(Registry::default())),
             threads: 2,
             catch_panics: true,
-            max_message_size: 1024 * 1024, // 1 MB
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             tcp_nodelay: None,
@@ -368,13 +349,6 @@ impl GClock for Context {
 
 impl ReasonablyRealtime for Context {}
 
-pub fn codec(max_frame_len: usize) -> LengthDelimitedCodec {
-    LengthDelimitedCodec::builder()
-        .length_field_type::<u32>()
-        .max_frame_length(max_frame_len)
-        .new_codec()
-}
-
 impl crate::Network<Listener, Sink, Stream> for Context {
     async fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         TcpListener::bind(socket)
@@ -400,10 +374,9 @@ impl crate::Network<Listener, Sink, Stream> for Context {
             }
         }
 
-        // Create a new framed stream
+        // Return the sink and stream
         let context = self.clone();
-        let framed = Framed::new(stream, codec(self.executor.cfg.max_message_size));
-        let (sink, stream) = framed.split();
+        let (stream, sink) = stream.into_split();
         Ok((
             Sink {
                 context: context.clone(),
@@ -432,9 +405,10 @@ impl crate::Listener<Sink, Stream> for Listener {
                 warn!(?err, "failed to set TCP_NODELAY");
             }
         }
-        let framed = Framed::new(stream, codec(self.context.executor.cfg.max_message_size));
-        let (sink, stream) = framed.split();
+
+        // Return the sink and stream
         let context = self.context.clone();
+        let (stream, sink) = stream.into_split();
         Ok((
             addr,
             Sink {
@@ -449,16 +423,19 @@ impl crate::Listener<Sink, Stream> for Listener {
 /// Implementation of [`crate::Sink`] for the `tokio` runtime.
 pub struct Sink {
     context: Context,
-    sink: SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>,
+    sink: OwnedWriteHalf,
 }
 
 impl crate::Sink for Sink {
-    async fn send(&mut self, msg: Bytes) -> Result<(), Error> {
+    async fn send(&mut self, msg: &[u8]) -> Result<(), Error> {
         let len = msg.len();
-        timeout(self.context.executor.cfg.write_timeout, self.sink.send(msg))
-            .await
-            .map_err(|_| Error::WriteFailed)?
-            .map_err(|_| Error::WriteFailed)?;
+        timeout(
+            self.context.executor.cfg.write_timeout,
+            self.sink.write_all(msg),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::SendFailed)?;
         self.context
             .executor
             .metrics
@@ -471,22 +448,28 @@ impl crate::Sink for Sink {
 /// Implementation of [`crate::Stream`] for the `tokio` runtime.
 pub struct Stream {
     context: Context,
-    stream: SplitStream<Framed<TcpStream, LengthDelimitedCodec>>,
+    stream: OwnedReadHalf,
 }
 
 impl crate::Stream for Stream {
-    async fn recv(&mut self) -> Result<Bytes, Error> {
-        let result = timeout(self.context.executor.cfg.read_timeout, self.stream.next())
-            .await
-            .map_err(|_| Error::ReadFailed)?
-            .ok_or(Error::Closed)?
-            .map_err(|_| Error::ReadFailed)?;
+    async fn recv(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+        // Wait for the stream to be readable
+        timeout(
+            self.context.executor.cfg.read_timeout,
+            self.stream.read_exact(buf),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::RecvFailed)?;
+
+        // Record metrics
         self.context
             .executor
             .metrics
             .inbound_bandwidth
-            .inc_by(result.len() as u64);
-        Ok(result.freeze())
+            .inc_by(buf.len() as u64);
+
+        Ok(())
     }
 }
 
@@ -734,63 +717,5 @@ impl crate::Blob for Blob {
 impl Drop for Blob {
     fn drop(&mut self) {
         self.metrics.open_blobs.dec();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::utils::run_tasks;
-    use crate::Runner;
-    use std::io::Cursor;
-
-    #[test]
-    fn test_runs_tasks() {
-        let (executor, runtime) = Executor::default();
-        run_tasks(10, executor, runtime);
-    }
-
-    #[test]
-    fn test_codec_invalid_frame_len() {
-        // Initialize runtime
-        let (runner, _) = Executor::default();
-        runner.start(async move {
-            // Create a stream
-            let max_frame_len = 10;
-            let codec = codec(max_frame_len);
-            let mut framed = Framed::new(Cursor::new(Vec::new()), codec);
-
-            // Create a message larger than the max_frame_len
-            let message = vec![0; max_frame_len + 1];
-            let message = Bytes::from(message);
-
-            // Encode the message
-            let result = framed.send(message).await;
-
-            // Ensure that encoding fails due to exceeding max_frame_len
-            assert!(result.is_err());
-        });
-    }
-
-    #[test]
-    fn test_codec_valid_frame_len() {
-        // Initialize runtime
-        let (runner, _) = Executor::default();
-        runner.start(async move {
-            // Create a stream
-            let max_frame_len = 10;
-            let codec = codec(max_frame_len);
-            let mut framed = Framed::new(Cursor::new(Vec::new()), codec);
-
-            // Create a message larger than the max_frame_len
-            let message = vec![0; max_frame_len];
-            let message = Bytes::from(message);
-
-            // Encode the message
-            let result = framed.send(message).await;
-
-            // Ensure that encoding fails due to exceeding max_frame_len
-            assert!(result.is_ok());
-        });
     }
 }

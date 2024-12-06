@@ -8,7 +8,7 @@
 //! checking the value of `p2p_connections` in the "Metrics Panel" in the right corner of the window. This metric should
 //! be equal to `count(friends)- 1` (you don't connect to yourself).
 //!
-//! # Synchonized Friends
+//! # Synchronized Friends
 //!
 //! `commonware-p2p::authenticated` requires all friends to have the same set of friends for friend discovery to work
 //! correctly. If you do not synchronize friends, you may be able to form connections between specific friends but may
@@ -68,6 +68,9 @@ use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tracing::info;
+
+// Unique namespace to avoid message replay attacks.
+const APPLICATION_NAMESPACE: &[u8] = b"commonware-chat";
 
 #[doc(hidden)]
 fn main() {
@@ -153,13 +156,15 @@ fn main() {
     }
 
     // Configure network
+    const MAX_MESSAGE_SIZE: usize = 1024; // 1 KB
     let p2p_registry = Arc::new(Mutex::new(Registry::with_prefix("p2p")));
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
+        APPLICATION_NAMESPACE,
         p2p_registry.clone(),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        runtime_cfg.max_message_size,
+        MAX_MESSAGE_SIZE,
     );
 
     // Start runtime
@@ -174,12 +179,13 @@ fn main() {
         oracle.register(0, recipients).await;
 
         // Initialize chat
+        const MAX_MESSAGE_BACKLOG: usize = 128;
+        const COMPRESSION_LEVEL: Option<u8> = Some(3);
         let (chat_sender, chat_receiver) = network.register(
             handler::CHANNEL,
             Quota::per_second(NonZeroU32::new(128).unwrap()),
-            1024, // 1 KB max message size
-            128,  // 128 messages inflight
-            Some(3),
+            MAX_MESSAGE_BACKLOG,
+            COMPRESSION_LEVEL,
         );
 
         // Start network

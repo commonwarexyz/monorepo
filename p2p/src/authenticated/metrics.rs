@@ -21,17 +21,10 @@ pub struct Message {
 }
 
 impl Message {
-    const HANDSHAKE_TYPE: i32 = -1;
-    const BIT_VEC_TYPE: i32 = -2;
-    const PEERS_TYPE: i32 = -3;
+    const BIT_VEC_TYPE: i32 = -1;
+    const PEERS_TYPE: i32 = -2;
     const UNKNOWN_TYPE: i32 = i32::MIN;
 
-    pub fn new_handshake(peer: &PublicKey) -> Self {
-        Self {
-            peer: hex(peer),
-            message: Self::HANDSHAKE_TYPE,
-        }
-    }
     pub fn new_bit_vec(peer: &PublicKey) -> Self {
         Self {
             peer: hex(peer),
@@ -44,7 +37,7 @@ impl Message {
             message: Self::PEERS_TYPE,
         }
     }
-    pub fn new_chunk(peer: &PublicKey, channel: Channel) -> Self {
+    pub fn new_data(peer: &PublicKey, channel: Channel) -> Self {
         Self {
             peer: hex(peer),
             message: channel as i32,

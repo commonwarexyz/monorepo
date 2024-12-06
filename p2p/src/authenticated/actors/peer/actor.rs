@@ -1,20 +1,19 @@
-use super::{ingress::Data, Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::{
-    actors::tracker,
-    channels::Channels,
-    connection::{Instance, Sender},
-    metrics, wire,
-};
-use bytes::BytesMut;
+use super::{Config, Error, Mailbox, Message, Relay};
+use crate::authenticated::{actors::tracker, channels::Channels, metrics, wire};
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
+use commonware_stream::{
+    public_key::{Connection, Sender},
+    Receiver as _, Sender as _,
+};
 use commonware_utils::hex;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use governor::{clock::ReasonablyRealtime, Quota, RateLimiter};
 use prometheus_client::metrics::{counter::Counter, family::Family};
+use prost::Message as _;
 use rand::{CryptoRng, Rng};
-use std::{cmp::min, collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, trace};
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
@@ -26,8 +25,8 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
 
     mailbox: Mailbox,
     control: mpsc::Receiver<Message>,
-    high: mpsc::Receiver<Data>,
-    low: mpsc::Receiver<Data>,
+    high: mpsc::Receiver<wire::Data>,
+    low: mpsc::Receiver<wire::Data>,
 
     sent_messages: Family<metrics::Message, Counter>,
     received_messages: Family<metrics::Message, Counter>,
@@ -63,81 +62,47 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
     }
 
     async fn send_content<Si: Sink>(
-        max_size: usize,
-        max_content_size: usize,
         sender: &mut Sender<Si>,
         peer: &PublicKey,
-        data: Data,
+        data: wire::Data,
         sent_messages: &Family<metrics::Message, Counter>,
     ) -> Result<(), Error> {
-        // Ensure message is not too large
-        let message_len = data.message.len();
-        if message_len > max_size {
-            return Err(Error::MessageTooLarge(message_len));
-        }
+        trace!(peer = hex(peer), "sending data",);
 
-        // Compute required parts
-        let mut total_parts = message_len / max_content_size;
-        if message_len % max_content_size != 0 {
-            total_parts += 1;
-        }
-        if total_parts > u32::MAX as usize {
-            // Should never happen
-            return Err(Error::MessageTooLarge(message_len));
-        }
-
-        // Chunk data
-        let mut part = 0;
+        // Send data
         let channel = data.channel;
-        while part < total_parts {
-            let start = part * max_content_size;
-            let end = min((part + 1) * max_content_size, message_len);
-            let content = data.message.slice(start..end);
-            let msg = wire::Message {
-                payload: Some(wire::message::Payload::Chunk({
-                    wire::Chunk {
-                        channel,
-                        part: part as u32,
-                        total_parts: total_parts as u32,
-                        content,
-                    }
-                })),
-            };
-            trace!(
-                part = part,
-                total_parts = total_parts - 1,
-                peer = hex(peer),
-                "sending chunk",
-            );
-            sender.send(msg).await.map_err(Error::SendFailed)?;
-            sent_messages
-                .get_or_create(&metrics::Message::new_chunk(peer, channel))
-                .inc();
-            part += 1;
+        let msg = wire::Message {
+            payload: Some(wire::message::Payload::Data(data)),
         }
+        .encode_to_vec();
+        sender.send(&msg).await.map_err(Error::SendFailed)?;
+        sent_messages
+            .get_or_create(&metrics::Message::new_data(peer, channel))
+            .inc();
+
         Ok(())
     }
 
     pub async fn run<C: Scheme, Si: Sink, St: Stream>(
         mut self,
         peer: PublicKey,
-        connection: Instance<C, Si, St>,
+        connection: Connection<C, Si, St>,
         mut tracker: tracker::Mailbox<E>,
         channels: Channels,
     ) -> Error {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
-        for (channel, (rate, max_size, sender)) in channels.collect() {
+        for (channel, (rate, sender)) in channels.collect() {
             let rate_limiter = RateLimiter::direct_with_clock(rate, &self.runtime);
-            rate_limits.insert(channel, (rate_limiter, max_size));
+            rate_limits.insert(channel, rate_limiter);
             senders.insert(channel, sender);
         }
         let rate_limits = Arc::new(rate_limits);
 
         // Send/Receive messages from the peer
-        let (max_content_size, mut conn_sender, mut conn_receiver) = connection.split();
-        let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender",{
+        let (mut conn_sender, mut conn_receiver) = connection.split();
+        let mut send_handler: Handle<Result<(), Error>> = self.runtime.spawn("sender", {
             let runtime = self.runtime.clone();
             let mut tracker = tracker.clone();
             let peer = peer.clone();
@@ -161,17 +126,23 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                             };
                             match msg {
                                 Message::BitVec { bit_vec } => {
-                                    conn_sender.send(wire::Message{
+                                    let msg = wire::Message{
                                         payload: Some(wire::message::Payload::BitVec(bit_vec)),
-                                    }).await.map_err(Error::SendFailed)?;
+                                    }.encode_to_vec();
+                                    conn_sender.send(&msg)
+                                        .await
+                                        .map_err(Error::SendFailed)?;
                                     self.sent_messages
                                         .get_or_create(&metrics::Message::new_bit_vec(&peer))
                                         .inc();
                                 }
                                 Message::Peers { peers: msg } => {
-                                    conn_sender.send(wire::Message{
+                                    let msg = wire::Message{
                                         payload: Some(wire::message::Payload::Peers(msg)),
-                                    }).await.map_err(Error::SendFailed)?;
+                                    }.encode_to_vec();
+                                    conn_sender.send(&msg)
+                                        .await
+                                        .map_err(Error::SendFailed)?;
                                     self.sent_messages
                                         .get_or_create(&metrics::Message::new_peers(&peer))
                                         .inc();
@@ -190,8 +161,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                             if entry.is_none() {
                                 return Err(Error::InvalidChannel);
                             }
-                            let (_, max_size) = entry.unwrap();
-                            Self::send_content(*max_size, max_content_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
+                            Self::send_content(&mut conn_sender, &peer, msg, &self.sent_messages).await?;
                         },
                         msg_low = self.low.next() => {
                             let msg = match msg_low {
@@ -202,8 +172,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                             if entry.is_none() {
                                 return Err(Error::InvalidChannel);
                             }
-                            let (_, max_size) = entry.unwrap();
-                            Self::send_content(*max_size, max_content_size, &mut conn_sender, &peer, msg, &self.sent_messages).await?;
+                            Self::send_content(&mut conn_sender, &peer, msg, &self.sent_messages).await?;
                         }
                     }
                 }
@@ -217,12 +186,12 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                 let peers_rate_limiter =
                     RateLimiter::direct_with_clock(self.allowed_peers_rate, &runtime);
                 loop {
-                    match conn_receiver
+                    let msg = conn_receiver
                         .receive()
                         .await
-                        .map_err(Error::ReceiveFailed)?
-                        .payload
-                    {
+                        .map_err(Error::ReceiveFailed)?;
+                    let msg = wire::Message::decode(msg).map_err(Error::DecodeFailed)?;
+                    match msg.payload {
                         Some(wire::message::Payload::BitVec(bit_vec)) => {
                             self.received_messages
                                 .get_or_create(&metrics::Message::new_bit_vec(&peer))
@@ -263,26 +232,26 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                             // Send peers to tracker
                             tracker.peers(peers, self.mailbox.clone()).await;
                         }
-                        Some(wire::message::Payload::Chunk(chunk)) => {
+                        Some(wire::message::Payload::Data(data)) => {
                             self.received_messages
-                                .get_or_create(&metrics::Message::new_chunk(&peer, chunk.channel))
+                                .get_or_create(&metrics::Message::new_data(&peer, data.channel))
                                 .inc();
 
                             // Ensure peer is not spamming us with content messages
-                            let entry = rate_limits.get(&chunk.channel);
+                            let entry = rate_limits.get(&data.channel);
                             if entry.is_none() {
                                 // We permit unknown messages to be received in case peers
                                 // are on a newer version than us
                                 continue;
                             }
-                            let (rate_limiter, max_size) = entry.unwrap();
+                            let rate_limiter = entry.unwrap();
                             match rate_limiter.check() {
                                 Ok(_) => {}
                                 Err(negative) => {
                                     self.rate_limited
-                                        .get_or_create(&metrics::Message::new_chunk(
+                                        .get_or_create(&metrics::Message::new_data(
                                             &peer,
-                                            chunk.channel,
+                                            data.channel,
                                         ))
                                         .inc();
                                     let wait = negative.wait_time_from(runtime.now());
@@ -290,76 +259,18 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 }
                             }
 
-                            // Ensure messasge is not too large
-                            let chunk_len = chunk.content.len();
-                            if chunk_len > *max_size {
-                                return Err(Error::MessageTooLarge(chunk_len));
-                            }
-
-                            // Gather all chunks
-                            let mut message = BytesMut::from(&chunk.content[..]);
-                            let total_parts = chunk.total_parts;
-                            if total_parts > 1 {
-                                // Ensure first part is the max size
-                                if chunk_len != max_content_size {
-                                    return Err(Error::InvalidChunk);
-                                }
-
-                                // Read chunk messages until we have all parts
-                                let channel = chunk.channel;
-                                let mut next_part = chunk.part + 1;
-                                while next_part < total_parts {
-                                    let chunk = match conn_receiver
-                                        .receive()
-                                        .await
-                                        .map_err(Error::ReceiveFailed)?
-                                        .payload
-                                    {
-                                        Some(wire::message::Payload::Chunk(chunk)) => chunk,
-                                        _ => return Err(Error::InvalidChunk),
-                                    };
-                                    if chunk.channel != channel {
-                                        return Err(Error::InvalidChunk);
-                                    }
-                                    if chunk.total_parts != total_parts {
-                                        return Err(Error::InvalidChunk);
-                                    }
-                                    if chunk.part != next_part {
-                                        return Err(Error::InvalidChunk);
-                                    }
-                                    let chunk_len = chunk.content.len();
-                                    if chunk.part != total_parts - 1
-                                        && chunk_len != max_content_size
-                                    {
-                                        return Err(Error::InvalidChunk);
-                                    }
-                                    let new_len = message.len() + chunk_len;
-                                    if new_len > *max_size {
-                                        return Err(Error::MessageTooLarge(new_len));
-                                    }
-                                    message.extend_from_slice(&chunk.content);
-                                    next_part += 1;
-                                }
-                            }
-
                             // Send message to client
                             //
                             // If the channel handler is closed, we log an error but don't
                             // close the peer (as other channels may still be open).
-                            let sender = senders.get_mut(&chunk.channel).unwrap();
+                            let sender = senders.get_mut(&data.channel).unwrap();
                             if let Err(e) = sender
-                                .send((peer.clone(), message.freeze()))
+                                .send((peer.clone(), data.message))
                                 .await
-                                .map_err(|_| Error::ChannelClosed(chunk.channel))
+                                .map_err(|_| Error::ChannelClosed(data.channel))
                             {
                                 debug!(err=?e, "failed to send message to client");
                             }
-                        }
-                        Some(wire::message::Payload::Handshake(_)) => {
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_handshake(&peer))
-                                .inc();
-                            return Err(Error::UnexpectedHandshake);
                         }
                         _ => {
                             self.received_messages
