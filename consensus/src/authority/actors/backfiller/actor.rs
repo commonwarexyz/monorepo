@@ -30,11 +30,13 @@ use std::{
 };
 use tracing::{debug, warn};
 
+/// Source to use when generating a new request.
 enum Source<'a> {
-    All,
+    Required,
     New(&'a Vec<u64>, &'a Vec<u64>),
 }
 
+/// Entry in the required set.
 #[derive(Eq, PartialEq)]
 struct Entry {
     notarization: bool,
@@ -158,7 +160,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         // exist). We should try to fetch both before trying to fetch the next view, or we may never ask for an existing
         // notarization or nullification.
         let (notarizations, nullifications) = match source {
-            Source::All => {
+            Source::Required => {
                 let mut notarizations = Vec::new();
                 let mut nullifications = Vec::new();
                 for entry in self.required.iter() {
@@ -180,11 +182,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     .cloned()
                     .collect::<Vec<_>>();
                 let remaining = self.max_fetch_count - notarizations.len();
-                let nullifications = nullifications
-                    .iter()
-                    .take(remaining)
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let nullifications = nullifications.iter().take(remaining).cloned().collect();
                 (notarizations, nullifications)
             }
         };
@@ -267,7 +265,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     self.requester.timeout(request);
 
                     // Send message
-                    self.send(Source::All, true, &mut sender).await;
+                    self.send(Source::Required, true, &mut sender).await;
                     continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
@@ -443,7 +441,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 self.requester.block(s);
 
                                 // Pick new recipient
-                                self.send(Source::All, true, &mut sender).await;
+                                self.send(Source::Required, true, &mut sender).await;
                                 continue;
                             }
 
@@ -508,7 +506,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             }
 
                             // If still work to do, send another request
-                            self.send(Source::All, false, &mut sender).await;
+                            self.send(Source::Required, false, &mut sender).await;
                         },
                     }
                 },
