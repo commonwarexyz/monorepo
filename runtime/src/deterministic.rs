@@ -53,7 +53,11 @@ use tracing::trace;
 /// Range of ephemeral ports assigned to dialers.
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
+/// Label for root task created during `Runner::start`.
 const ROOT_TASK: &str = "root";
+
+/// Map of names to blob contents.
+pub type Partition = HashMap<Vec<u8>, Vec<u8>>;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct Work {
@@ -450,6 +454,8 @@ pub struct Executor {
     partitions: Mutex<HashMap<String, Partition>>,
     signaler: Mutex<Signaler>,
     signal: Signal,
+    finished: Mutex<bool>,
+    recovered: Mutex<bool>,
 }
 
 impl Executor {
@@ -484,6 +490,8 @@ impl Executor {
             partitions: Mutex::new(HashMap::new()),
             signaler: Mutex::new(signaler),
             signal,
+            finished: Mutex::new(false),
+            recovered: Mutex::new(false),
         });
         (
             Runner {
@@ -623,6 +631,7 @@ impl crate::Runner for Runner {
 
                 // Root task completed
                 if task.root {
+                    *self.executor.finished.lock().unwrap() = true;
                     return output.lock().unwrap().take().unwrap();
                 }
             }
@@ -701,6 +710,76 @@ impl crate::Runner for Runner {
 pub struct Context {
     executor: Arc<Executor>,
     networking: Arc<Networking>,
+}
+
+impl Context {
+    /// Recover the inner state (deadline, metrics, auditor, rng, synced storage, etc.) from the
+    /// current runtime and use it to initialize a new instance of the runtime. A recovered runtime
+    /// does not inherit the current runtime's pending tasks, unsynced storage, network connections, nor
+    /// its shutdown signaler.
+    ///
+    /// This is useful for performing a deterministic simulation that spans multiple runtime instantiations,
+    /// like simulating unclean shutdown (which involves repeatedly halting the runtime at unexpected intervals).
+    ///
+    /// It is only permitted to call this method after the runtime has finished (i.e. once `start` returns)
+    /// and only permitted to do once (otherwise multiple recovered runtimes will share the same inner state).
+    /// If either one of these conditions is violated, this method will panic.
+    pub fn recover(self) -> (Runner, Self, Arc<Auditor>) {
+        // Ensure we are finished
+        if !*self.executor.finished.lock().unwrap() {
+            panic!("execution is not finished");
+        }
+
+        // Ensure runtime has not already been recovered
+        {
+            let mut recovered = self.executor.recovered.lock().unwrap();
+            if *recovered {
+                panic!("runtime has already been recovered");
+            }
+            *recovered = true;
+        }
+
+        // Prepare metrics
+        let metrics = self.executor.metrics.clone();
+        metrics.open_blobs.set(0);
+        metrics.tasks_running.clear();
+
+        // Copy state
+        let auditor = self.executor.auditor.clone();
+        let (signaler, signal) = Signaler::new();
+        let executor = Arc::new(Executor {
+            // Copied from the current runtime
+            cycle: self.executor.cycle,
+            deadline: self.executor.deadline,
+            metrics: metrics.clone(),
+            auditor: auditor.clone(),
+            rng: Mutex::new(self.executor.rng.lock().unwrap().clone()),
+            time: Mutex::new(*self.executor.time.lock().unwrap()),
+            partitions: Mutex::new(self.executor.partitions.lock().unwrap().clone()),
+
+            // New state for the new runtime
+            prefix: Mutex::new(String::new()),
+            tasks: Arc::new(Tasks {
+                queue: Mutex::new(Vec::new()),
+                counter: Mutex::new(0),
+            }),
+            sleeping: Mutex::new(BinaryHeap::new()),
+            signaler: Mutex::new(signaler),
+            signal,
+            finished: Mutex::new(false),
+            recovered: Mutex::new(false),
+        });
+        (
+            Runner {
+                executor: executor.clone(),
+            },
+            Self {
+                executor,
+                networking: Arc::new(Networking::new(metrics, auditor.clone())),
+            },
+            auditor,
+        )
+    }
 }
 
 impl crate::Spawner for Context {
@@ -1041,18 +1120,6 @@ impl RngCore for Context {
 
 impl CryptoRng for Context {}
 
-struct Partition {
-    blobs: HashMap<Vec<u8>, Vec<u8>>,
-}
-
-impl Partition {
-    fn new() -> Self {
-        Self {
-            blobs: HashMap::new(),
-        }
-    }
-}
-
 /// Implementation of [`crate::Blob`] for the `deterministic` runtime.
 pub struct Blob {
     executor: Arc<Executor>,
@@ -1095,10 +1162,8 @@ impl crate::Storage<Blob> for Context {
     async fn open(&self, partition: &str, name: &[u8]) -> Result<Blob, Error> {
         self.executor.auditor.open(partition, name);
         let mut partitions = self.executor.partitions.lock().unwrap();
-        let partition_entry = partitions
-            .entry(partition.into())
-            .or_insert_with(Partition::new);
-        let content = partition_entry.blobs.entry(name.into()).or_default();
+        let partition_entry = partitions.entry(partition.into()).or_default();
+        let content = partition_entry.entry(name.into()).or_default();
         Ok(Blob::new(
             self.executor.clone(),
             partition.into(),
@@ -1115,7 +1180,6 @@ impl crate::Storage<Blob> for Context {
                 partitions
                     .get_mut(partition)
                     .ok_or(Error::PartitionMissing(partition.into()))?
-                    .blobs
                     .remove(name)
                     .ok_or(Error::BlobMissing(partition.into(), hex(name)))?;
             }
@@ -1134,8 +1198,8 @@ impl crate::Storage<Blob> for Context {
         let partition = partitions
             .get(partition)
             .ok_or(Error::PartitionMissing(partition.into()))?;
-        let mut results = Vec::with_capacity(partition.blobs.len());
-        for name in partition.blobs.keys() {
+        let mut results = Vec::with_capacity(partition.len());
+        for name in partition.keys() {
             results.push(name.clone());
         }
         results.sort(); // deterministic output
@@ -1213,7 +1277,6 @@ impl crate::Blob for Blob {
             .get_mut(&self.partition)
             .ok_or(Error::PartitionMissing(self.partition.clone()))?;
         let content = partition
-            .blobs
             .get_mut(&self.name)
             .ok_or(Error::BlobMissing(self.partition.clone(), hex(&self.name)))?;
         *content = new_content;
@@ -1236,7 +1299,7 @@ impl Drop for Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::run_tasks, Runner, Spawner};
+    use crate::{utils::run_tasks, Blob, Runner, Spawner, Storage};
     use commonware_macros::test_traced;
     use futures::task::noop_waker;
 
@@ -1331,7 +1394,7 @@ mod tests {
             cycle: Duration::default(),
             ..Config::default()
         };
-        let (_, _, _) = Executor::init(cfg);
+        Executor::init(cfg);
     }
 
     #[test]
@@ -1347,5 +1410,99 @@ mod tests {
                 .await;
             panic!("root task should not be spawned");
         });
+    }
+
+    #[test]
+    fn test_recover_synced_storage_persists() {
+        // Initialize the first runtime
+        let (executor1, context1, auditor1) = Executor::default();
+        let partition = "test_partition";
+        let name = b"test_blob";
+        let data = b"Hello, world!".to_vec();
+
+        // Run some tasks and sync storage
+        executor1.start({
+            let context = context1.clone();
+            let data = data.clone();
+            async move {
+                let blob = context.open(partition, name).await.unwrap();
+                blob.write_at(&data, 0).await.unwrap();
+                blob.sync().await.unwrap();
+            }
+        });
+        let state1 = auditor1.state();
+
+        // Recover the runtime
+        let (executor2, context2, auditor2) = context1.recover();
+
+        // Verify auditor state is the same
+        let state2 = auditor2.state();
+        assert_eq!(state1, state2);
+
+        // Check that synced storage persists after recovery
+        executor2.start(async move {
+            let blob = context2.open(partition, name).await.unwrap();
+            let len = blob.len().await.unwrap();
+            assert_eq!(len, data.len() as u64);
+            let mut buf = vec![0; len as usize];
+            blob.read_at(&mut buf, 0).await.unwrap();
+            assert_eq!(buf, data);
+        });
+    }
+
+    #[test]
+    fn test_recover_unsynced_storage_does_not_persist() {
+        // Initialize the first runtime
+        let (executor1, context1, _) = Executor::default();
+        let partition = "test_partition";
+        let name = b"test_blob";
+        let data = b"Hello, world!".to_vec();
+
+        // Run some tasks without syncing storage
+        executor1.start({
+            let context = context1.clone();
+            async move {
+                let blob = context.open(partition, name).await.unwrap();
+                blob.write_at(&data, 0).await.unwrap();
+                // Intentionally do not call sync() here
+            }
+        });
+
+        // Recover the runtime
+        let (executor2, context2, _) = context1.recover();
+
+        // Check that unsynced storage does not persist after recovery
+        executor2.start(async move {
+            let blob = context2.open(partition, name).await.unwrap();
+            let len = blob.len().await.unwrap();
+            assert_eq!(len, 0);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "execution is not finished")]
+    fn test_recover_before_finish_panics() {
+        // Initialize runtime
+        let (_, context, _) = Executor::default();
+
+        // Attempt to recover before the runtime has finished
+        context.recover();
+    }
+
+    #[test]
+    #[should_panic(expected = "runtime has already been recovered")]
+    fn test_recover_twice_panics() {
+        // Initialize runtime
+        let (executor, context, _) = Executor::default();
+
+        // Finish runtime
+        executor.start(async move {});
+
+        // Recover for the first time
+        let cloned_context = context.clone();
+        context.recover();
+
+        // Attempt to recover again using the same context
+        cloned_context.recover();
     }
 }
