@@ -12,7 +12,7 @@ use crate::{
     Supervisor,
 };
 use bytes::Bytes;
-use commonware_cryptography::{Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Hasher, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
@@ -31,7 +31,7 @@ use tracing::{debug, warn};
 
 /// Unfilled dependencies and the set of peers we've already requested from (since
 /// all outstanding items were resolved).
-type Outstanding = (BTreeSet<View>, BTreeSet<View>, PublicKey, requester::ID);
+type Outstanding = (BTreeSet<View>, BTreeSet<View>);
 
 pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     runtime: E,
@@ -135,7 +135,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         nullifications: &BTreeSet<View>,
         shuffle: bool,
         sender: &mut impl Sender,
-    ) -> (PublicKey, requester::ID) {
+    ) {
         // Select best notarization and nullifications requests
         let notarizations = notarizations
             .iter()
@@ -149,16 +149,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             .cloned()
             .collect::<Vec<_>>();
 
-        // Create new message
-        let msg: Bytes = wire::Backfiller {
-            payload: Some(wire::backfiller::Payload::Request(wire::Request {
-                notarizations,
-                nullifications,
-            })),
-        }
-        .encode_to_vec()
-        .into();
-
         // Select next recipient
         loop {
             // Get next best
@@ -168,6 +158,17 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 continue;
             };
 
+            // Create new message
+            let msg: Bytes = wire::Backfiller {
+                id: request,
+                payload: Some(wire::backfiller::Payload::Request(wire::Request {
+                    notarizations: notarizations.clone(),
+                    nullifications: nullifications.clone(),
+                })),
+            }
+            .encode_to_vec()
+            .into();
+
             // Try to send
             if sender
                 .send(Recipients::One(recipient.clone()), msg.clone(), false)
@@ -176,13 +177,14 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 .is_empty()
             {
                 // Try again
+                self.requester.cancel(request);
                 debug!(peer = hex(&recipient), "failed to send request");
                 continue;
             }
 
             // Exit if sent
             debug!(peer = hex(&recipient), "sent request");
-            break (recipient, request);
+            break;
         }
     }
 
@@ -198,29 +200,31 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         let mut outstanding: Option<Outstanding> = None;
         loop {
             // Set timeout for next request
-            let timeout = if let Some((notarizations, nullifications, _, _)) = &outstanding {
-                self.outstanding_notarizations
-                    .set(notarizations.len() as i64);
-                self.outstanding_nullifications
-                    .set(nullifications.len() as i64);
-                let (_, timeout) = self.requester.next().expect("no requests");
-                Either::Left(self.runtime.sleep_until(timeout))
+            let (request, timeout) = if let Some((request, timeout)) = self.requester.next() {
+                if let Some((notarizations, nullifications)) = outstanding.as_ref() {
+                    self.outstanding_notarizations
+                        .set(notarizations.len() as i64);
+                    self.outstanding_nullifications
+                        .set(nullifications.len() as i64);
+                }
+                (request, Either::Left(self.runtime.sleep_until(timeout)))
             } else {
                 self.outstanding_notarizations.set(0);
                 self.outstanding_nullifications.set(0);
-                Either::Right(futures::future::pending())
+                (0, Either::Right(futures::future::pending()))
             };
 
             // Wait for an event
             select! {
                 _ = timeout => {
                     // Penalize requester for timeout
-                    let (notarizations, nullifications, _,request) = outstanding.take().unwrap();
+                    let (notarizations, nullifications) = outstanding.take().unwrap();
+                    let request = self.requester.cancel(request).expect("request not found");
                     self.requester.timeout(request);
 
                     // Send message
-                    let (recipient, request) = self.send(&notarizations, &nullifications, true, &mut sender).await;
-                    outstanding = Some((notarizations, nullifications, recipient, request));
+                    self.send(&notarizations, &nullifications, true, &mut sender).await;
+                    outstanding = Some((notarizations, nullifications));
                     continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
@@ -232,7 +236,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                         Message::Fetch { notarizations, nullifications } => {
                             // If request already exists, just add to it
                             if outstanding.is_some() {
-                                let (existing_notarizations, existing_nullifications, _,_) = outstanding.as_mut().unwrap();
+                                let (existing_notarizations, existing_nullifications) = outstanding.as_mut().unwrap();
                                 existing_notarizations.extend(notarizations);
                                 existing_nullifications.extend(nullifications);
                                 continue;
@@ -241,8 +245,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             // If request does not exist, create it
                             let notarizations = notarizations.into_iter().collect();
                             let nullifications = nullifications.into_iter().collect();
-                            let (recipient, request) = self.send(&notarizations, &nullifications, false, &mut sender).await;
-                            outstanding = Some((notarizations, nullifications, recipient, request));
+                            self.send(&notarizations, &nullifications, false, &mut sender).await;
+                            outstanding = Some((notarizations, nullifications));
                         }
                         Message::Notarized { notarization } => {
                             // Update current view
@@ -258,7 +262,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             self.requester.reconcile(validators);
 
                             // If waiting for this notarization, remove it
-                            if let Some((notarizations, _, _, _)) = &mut outstanding {
+                            if let Some((notarizations, _)) = &mut outstanding {
                                 notarizations.remove(&view);
                             }
 
@@ -279,7 +283,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             self.requester.reconcile(validators);
 
                             // If waiting for this nullification, remove it
-                            if let Some((_, nullifications, _, _)) = &mut outstanding {
+                            if let Some((_, nullifications)) = &mut outstanding {
                                 nullifications.remove(&view);
                             }
 
@@ -298,7 +302,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             }
 
                             // Remove outstanding
-                            if let Some((notarizations, nullifications, _, _)) = &mut outstanding {
+                            if let Some((notarizations, nullifications)) = &mut outstanding {
                                 notarizations.retain(|v| *v >= view);
                                 nullifications.retain(|v| *v >= view);
                             }
@@ -319,7 +323,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     }
 
                     // Check if outstanding request is no longer required
-                    if let Some((notarizations, nullifications, _, _)) = &outstanding {
+                    if let Some((notarizations, nullifications)) = &outstanding {
                         if notarizations.is_empty() && nullifications.is_empty() {
                             debug!("outstanding request no longer required");
                             outstanding = None;
@@ -383,6 +387,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             // Send response
                             debug!(notarizations_found = notarizations_found.len(), nullifications_found = nullifications_found.len(), sender = hex(&s), "sending response");
                             let response = wire::Backfiller {
+                                id: msg.id,
                                 payload: Some(wire::backfiller::Payload::Response(wire::Response {
                                     notarizations: notarizations_found,
                                     nullifications: nullifications_found,
@@ -396,28 +401,17 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 .unwrap();
                         },
                         wire::backfiller::Payload::Response(response) => {
-                            // If we weren't waiting for anything, ignore
-                            let (notarizations, nullifications, request) = match &mut outstanding {
-                                Some((notarizations, nullifications, recipient, request)) => {
-                                    if s != *recipient {
-                                        debug!(sender = hex(&s), "received unexpected response");
-                                        continue;
-                                    }
-                                    if response.notarizations.is_empty() && response.nullifications.is_empty() {
-                                        // Drop empty response
-                                        debug!(sender = hex(&s), "received empty response");
-                                        self.requester.cancel(*request);
+                            // Ensure we were waiting for this response
+                            let Some(request) = self.requester.handle(&s, msg.id) else {
+                                debug!(sender = hex(&s), "unexpected message");
+                                continue;
+                            };
 
-                                        // Pick new recipient
-                                        let (notarizations, nullifications, _, _) = outstanding.take().unwrap();
-                                        let (recipient, request) = self.send(&notarizations, &nullifications, true, &mut sender).await;
-                                        outstanding = Some((notarizations, nullifications, recipient, request));
-                                        continue;
-                                    }
-                                    (notarizations, nullifications, request)
-                                },
+                            // Ensure we still have outstanding requests
+                            let (notarizations, nullifications) = match outstanding.as_mut() {
+                                Some((notarizations, nullifications)) => (notarizations, nullifications),
                                 None => {
-                                    warn!(sender = hex(&s), "received unexpected response");
+                                    debug!(sender = hex(&s), "unnecessary response");
                                     continue;
                                 },
                             };
@@ -427,12 +421,10 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 // Block responder
                                 warn!(sender = hex(&s), "response too large");
                                 self.requester.block(s);
-                                self.requester.cancel(*request);
 
                                 // Pick new recipient
-                                let (notarizations, nullifications, _, _) = outstanding.take().unwrap();
-                                let (recipient, request)= self.send(&notarizations, &nullifications, true, &mut sender).await;
-                                outstanding = Some((notarizations, nullifications, recipient, request));
+                                let (notarizations, nullifications) = outstanding.as_ref().unwrap();
+                                self.send(notarizations, nullifications, true, &mut sender).await;
                                 continue;
                             }
 
@@ -483,7 +475,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
                             // Update performance
                             if !notarizations_found.is_empty() || !nullifications_found.is_empty() {
-                                self.requester.resolve(*request);
+                                self.requester.resolve(request);
                                 debug!(
                                     notarizations_found = ?notarizations_found.into_iter().collect::<Vec<_>>(),
                                     nullifications_found = ?nullifications_found.into_iter().collect::<Vec<_>>(),
@@ -491,7 +483,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     "request successful",
                                 );
                             } else {
-                                self.requester.cancel(*request);
                                 debug!(sender = hex(&s), "request unsuccessful");
                             }
 
@@ -500,9 +491,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 outstanding = None;
                                 continue;
                             }
-                            let (notarizations, nullifications, _, _) = outstanding.take().unwrap();
-                            let (recipient, request)= self.send(&notarizations, &nullifications,false, &mut sender).await;
-                            outstanding = Some((notarizations, nullifications, recipient, request));
+                            let (notarizations, nullifications) = outstanding.as_ref().unwrap();
+                            self.send(notarizations, nullifications,false, &mut sender).await;
                         },
                     }
                 },
