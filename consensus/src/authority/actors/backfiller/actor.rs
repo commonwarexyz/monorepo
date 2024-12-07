@@ -26,7 +26,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
 
@@ -52,6 +52,43 @@ impl PartialOrd for Entry {
     }
 }
 
+/// Tracks the contents of inflight requests to avoid duplicate work.
+struct Inflight {
+    all: BTreeSet<Entry>,
+    requests: BTreeMap<requester::ID, Vec<Entry>>,
+}
+
+impl Inflight {
+    fn new() -> Self {
+        Self {
+            all: BTreeSet::new(),
+            requests: BTreeMap::new(),
+        }
+    }
+
+    /// Check if the entry is already inflight.
+    fn contains(&self, entry: &Entry) -> bool {
+        self.all.contains(entry)
+    }
+
+    /// Add a new request to the inflight set.
+    fn add(&mut self, request: requester::ID, entries: Vec<Entry>) {
+        for entry in entries.iter() {
+            self.all.insert(entry.clone());
+        }
+        self.requests.insert(request, entries);
+    }
+
+    /// Clear a request from the inflight set.
+    fn clear(&mut self, request: requester::ID) {
+        if let Some(entries) = self.requests.remove(&request) {
+            for entry in entries {
+                self.all.remove(&entry);
+            }
+        }
+    }
+}
+
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     runtime: E,
@@ -66,8 +103,8 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<In
     activity_timeout: u64,
 
     required: BTreeSet<Entry>,
-    inflight: BTreeSet<Entry>,
-    inflight_by_request: BTreeMap<requester::ID, Vec<Entry>>,
+    inflight: Inflight,
+    retry: Option<SystemTime>,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -128,8 +165,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 activity_timeout: cfg.activity_timeout,
 
                 required: BTreeSet::new(),
-                inflight: BTreeSet::new(),
-                inflight_by_request: BTreeMap::new(),
+                inflight: Inflight::new(),
+                retry: None,
 
                 mailbox_receiver: receiver,
 
@@ -149,8 +186,10 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
     async fn send(&mut self, shuffle: bool, sender: &mut impl Sender) {
+        // Clear retry
+        self.retry = None;
+
         // We try to send as many requests as possible at the same time for unfulfilled notarizations and nullifications.
-        let mut sent = false;
         loop {
             // If we have too many requests outstanding, return
             if self.requester.len() >= self.fetch_concurrent {
@@ -170,7 +209,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 if self.inflight.contains(entry) {
                     continue;
                 }
-                self.inflight.insert(entry.clone());
                 inflight.push(entry.clone());
 
                 // Add to inflight
@@ -193,19 +231,19 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             loop {
                 // Get next best
                 let Some((recipient, request)) = self.requester.request(shuffle) else {
-                    // If we are rate limited and already sent at least one request, return
-                    if sent {
-                        return;
-                    }
-
-                    // If we have not yet sent a request and have outstanding items, wait
+                    // If we have outstanding items but there are no recipients available, set
+                    // a deadline to retry and return.
                     //
-                    // If we aren't connected to any peers and have outstanding items, we
-                    // will wait indefinitely to send the next request rather than eventually
-                    // returning.
+                    // We return instead of waiting to continue serving requests and in case we
+                    // learn of new notarizations or nullifications in the meantime.
                     warn!("failed to send request to any validator");
-                    self.runtime.sleep(self.fetch_timeout).await;
-                    continue;
+                    let deadline = self
+                        .runtime
+                        .current()
+                        .checked_add(self.fetch_timeout)
+                        .expect("time overflowed");
+                    self.retry = Some(deadline);
+                    return;
                 };
 
                 // Create new message
@@ -234,24 +272,14 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 }
 
                 // Exit if sent
-                self.inflight_by_request.insert(request, inflight);
+                self.inflight.add(request, inflight);
                 debug!(
                     peer = hex(&recipient),
                     ?notarizations,
                     ?nullifications,
                     "sent request"
                 );
-                sent = true;
                 break;
-            }
-        }
-    }
-
-    /// Clear entries for a given request.
-    fn clear_inflight(&mut self, request: requester::ID) {
-        if let Some(inflight) = self.inflight_by_request.remove(&request) {
-            for entry in inflight {
-                self.inflight.remove(&entry);
             }
         }
     }
@@ -270,6 +298,12 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             self.unfulfilled.set(self.required.len() as i64);
             self.outstanding.set(self.requester.len() as i64);
 
+            // Set timeout for retry
+            let retry = match self.retry {
+                Some(retry) => Either::Left(self.runtime.sleep_until(retry)),
+                None => Either::Right(futures::future::pending()),
+            };
+
             // Set timeout for next request
             let (request, timeout) = if let Some((request, timeout)) = self.requester.next() {
                 (request, Either::Left(self.runtime.sleep_until(timeout)))
@@ -279,15 +313,18 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
             // Wait for an event
             select! {
+                _ = retry => {
+                    // Retry sending after rate limiting
+                    self.send(false, &mut sender).await;
+                },
                 _ = timeout => {
                     // Penalize peer for timeout
                     let request = self.requester.cancel(request).expect("request not found");
-                    self.clear_inflight(request.id);
+                    self.inflight.clear(request.id);
                     self.requester.timeout(request);
 
                     // Send message
                     self.send(true, &mut sender).await;
-                    continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
                     let msg = match mailbox {
@@ -455,7 +492,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 debug!(sender = hex(&s), "unexpected message");
                                 continue;
                             };
-                            self.clear_inflight(request.id);
+                            self.inflight.clear(request.id);
 
                             // Ensure response isn't too big
                             if response.notarizations.len() + response.nullifications.len() > self.max_fetch_count {
