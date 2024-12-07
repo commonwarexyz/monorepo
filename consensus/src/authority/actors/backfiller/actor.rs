@@ -275,7 +275,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             // Wait for an event
             select! {
                 _ = timeout => {
-                    // Penalize requester for timeout
+                    // Penalize peer for timeout
                     let request = self.requester.cancel(request).expect("request not found");
                     self.clear_inflight(request.id);
                     self.requester.timeout(request);
