@@ -377,14 +377,18 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             let mut nullification_views_found = Vec::new();
                             let mut nullifications_found = Vec::new();
 
+                            // Ensure too many notarizations/nullifications aren't requested
+                            if request.notarizations.len() + request.nullifications.len() > self.max_fetch_count {
+                                warn!(sender = hex(&s), "request too large");
+                                self.requester.block(s.clone());
+                                continue;
+                            }
+
                             // Populate notarizations first
                             for view in request.notarizations {
                                 if let Some(notarization) = self.notarizations.get(&view) {
                                     let size = notarization.encoded_len();
                                     if populated_bytes + size > self.max_fetch_size {
-                                        break;
-                                    }
-                                    if notarizations_found.len() + 1 > self.max_fetch_count {
                                         break;
                                     }
                                     populated_bytes += size;
@@ -399,9 +403,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 if let Some(nullification) = self.nullifications.get(&view) {
                                     let size = nullification.encoded_len();
                                     if populated_bytes + size > self.max_fetch_size {
-                                        break;
-                                    }
-                                    if notarizations_found.len() + nullifications_found.len() + 1 > self.max_fetch_count {
                                         break;
                                     }
                                     populated_bytes += size;
