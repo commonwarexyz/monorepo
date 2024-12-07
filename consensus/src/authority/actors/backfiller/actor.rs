@@ -11,7 +11,6 @@ use crate::{
     },
     Supervisor,
 };
-use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
@@ -228,6 +227,15 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             }
 
             // Select next recipient
+            let notarization_count = notarizations.len();
+            let nullification_count = nullifications.len();
+            let mut msg = wire::Backfiller {
+                id: 0, // set once we have a request ID
+                payload: Some(wire::backfiller::Payload::Request(wire::Request {
+                    notarizations,
+                    nullifications,
+                })),
+            };
             loop {
                 // Get next best
                 let Some((recipient, request)) = self.requester.request(shuffle) else {
@@ -247,19 +255,12 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 };
 
                 // Create new message
-                let msg: Bytes = wire::Backfiller {
-                    id: request,
-                    payload: Some(wire::backfiller::Payload::Request(wire::Request {
-                        notarizations: notarizations.clone(),
-                        nullifications: nullifications.clone(),
-                    })),
-                }
-                .encode_to_vec()
-                .into();
+                msg.id = request;
+                let encoded = msg.encode_to_vec().into();
 
                 // Try to send
                 if sender
-                    .send(Recipients::One(recipient.clone()), msg, false)
+                    .send(Recipients::One(recipient.clone()), encoded, false)
                     .await
                     .unwrap()
                     .is_empty()
@@ -275,9 +276,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 self.inflight.add(request, inflight);
                 debug!(
                     peer = hex(&recipient),
-                    ?notarizations,
-                    ?nullifications,
-                    "sent request"
+                    notarization_count, nullification_count, "sent request"
                 );
                 break;
             }
@@ -430,9 +429,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     match payload {
                         wire::backfiller::Payload::Request(request) => {
                             let mut populated_bytes = 0;
-                            let mut notarization_views_found = Vec::new();
                             let mut notarizations_found = Vec::new();
-                            let mut nullification_views_found = Vec::new();
                             let mut nullifications_found = Vec::new();
 
                             // Ensure too many notarizations/nullifications aren't requested
@@ -450,7 +447,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                         break;
                                     }
                                     populated_bytes += size;
-                                    notarization_views_found.push(view);
                                     notarizations_found.push(notarization.clone());
                                     self.served.inc();
                                 }
@@ -464,14 +460,13 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                         break;
                                     }
                                     populated_bytes += size;
-                                    nullification_views_found.push(view);
                                     nullifications_found.push(nullification.clone());
                                     self.served.inc();
                                 }
                             }
 
                             // Send response
-                            debug!(sender = hex(&s), ?notarization_views_found, ?nullification_views_found,  "sending response");
+                            debug!(sender = hex(&s), notarization_count = notarizations_found.len(), nullification_count = nullifications_found.len(),  "sending response");
                             let response = wire::Backfiller {
                                 id: msg.id,
                                 payload: Some(wire::backfiller::Payload::Response(wire::Response {
@@ -557,10 +552,10 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             if !notarizations_found.is_empty() || !nullifications_found.is_empty() {
                                 self.requester.resolve(request);
                                 debug!(
-                                    notarizations_found = ?notarizations_found.into_iter().collect::<Vec<_>>(),
-                                    nullifications_found = ?nullifications_found.into_iter().collect::<Vec<_>>(),
                                     sender = hex(&s),
-                                    "request successful",
+                                    notarization_count = notarizations_found.len(),
+                                    nullification_count = ?nullifications_found.len(),
+                                    "response useful",
                                 );
                             } else {
                                 // We don't reward a peer for sending us a response that doesn't help us
