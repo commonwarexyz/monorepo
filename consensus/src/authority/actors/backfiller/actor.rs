@@ -231,6 +231,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         }
     }
 
+    /// Clear entries for a given request.
     fn clear_inflight(&mut self, request: requester::ID) {
         if let Some(inflight) = self.inflight_by_request.remove(&request) {
             for entry in inflight {
