@@ -149,85 +149,96 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
     /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
     async fn send(&mut self, shuffle: bool, sender: &mut impl Sender) {
-        // If we have too many requests outstanding, return
-        if self.requester.len() >= self.fetch_concurrent {
-            return;
-        }
-
-        // Select notarizations by ascending height rather than preferring all notarizations or all nullifications
-        //
-        // It is possible we may have requested notarizations and nullifications for the same view (and only one may
-        // exist). We should try to fetch both before trying to fetch the next view, or we may never ask for an existing
-        // notarization or nullification.
-        let mut notarizations = Vec::new();
-        let mut nullifications = Vec::new();
-        let mut inflight = Vec::new();
-        for entry in self.required.iter() {
-            // Check if we already have a request outstanding for this
-            if self.inflight.contains(entry) {
-                continue;
+        // We try to send as many requests as possible at the same time for unfulfilled notarizations and nullifications.
+        let mut sent = false;
+        loop {
+            // If we have too many requests outstanding, return
+            if self.requester.len() >= self.fetch_concurrent {
+                return;
             }
-            self.inflight.insert(entry.clone());
-            inflight.push(entry.clone());
 
-            // Add to inflight
-            if entry.notarization {
-                notarizations.push(entry.view);
-            } else {
-                nullifications.push(entry.view);
+            // Select notarizations by ascending height rather than preferring all notarizations or all nullifications
+            //
+            // It is possible we may have requested notarizations and nullifications for the same view (and only one may
+            // exist). We should try to fetch both before trying to fetch the next view, or we may never ask for an existing
+            // notarization or nullification.
+            let mut notarizations = Vec::new();
+            let mut nullifications = Vec::new();
+            let mut inflight = Vec::new();
+            for entry in self.required.iter() {
+                // Check if we already have a request outstanding for this
+                if self.inflight.contains(entry) {
+                    continue;
+                }
+                self.inflight.insert(entry.clone());
+                inflight.push(entry.clone());
+
+                // Add to inflight
+                if entry.notarization {
+                    notarizations.push(entry.view);
+                } else {
+                    nullifications.push(entry.view);
+                }
+                if notarizations.len() + nullifications.len() >= self.max_fetch_count {
+                    break;
+                }
             }
-            if notarizations.len() + nullifications.len() >= self.max_fetch_count {
+
+            // If nothing to do, return
+            if notarizations.is_empty() && nullifications.is_empty() {
+                return;
+            }
+
+            // Select next recipient
+            loop {
+                // Get next best
+                let Some((recipient, request)) = self.requester.request(shuffle) else {
+                    // If we are rate limited and already sent at least one request, return
+                    if sent {
+                        return;
+                    }
+
+                    // If we have not yet sent a request and have outstanding items, wait
+                    warn!("failed to send request to any validator");
+                    self.runtime.sleep(self.fetch_timeout).await;
+                    continue;
+                };
+
+                // Create new message
+                let msg: Bytes = wire::Backfiller {
+                    id: request,
+                    payload: Some(wire::backfiller::Payload::Request(wire::Request {
+                        notarizations: notarizations.clone(),
+                        nullifications: nullifications.clone(),
+                    })),
+                }
+                .encode_to_vec()
+                .into();
+
+                // Try to send
+                if sender
+                    .send(Recipients::One(recipient.clone()), msg, false)
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
+                    // Try again
+                    self.requester.cancel(request);
+                    debug!(peer = hex(&recipient), "failed to send request");
+                    continue;
+                }
+
+                // Exit if sent
+                self.inflight_by_request.insert(request, inflight);
+                debug!(
+                    peer = hex(&recipient),
+                    ?notarizations,
+                    ?nullifications,
+                    "sent request"
+                );
+                sent = true;
                 break;
             }
-        }
-
-        // If nothing to do, return
-        if notarizations.is_empty() && nullifications.is_empty() {
-            return;
-        }
-
-        // Select next recipient
-        loop {
-            // Get next best
-            let Some((recipient, request)) = self.requester.request(shuffle) else {
-                warn!("failed to send request to any validator");
-                self.runtime.sleep(self.fetch_timeout).await;
-                continue;
-            };
-
-            // Create new message
-            let msg: Bytes = wire::Backfiller {
-                id: request,
-                payload: Some(wire::backfiller::Payload::Request(wire::Request {
-                    notarizations: notarizations.clone(),
-                    nullifications: nullifications.clone(),
-                })),
-            }
-            .encode_to_vec()
-            .into();
-
-            // Try to send
-            if sender
-                .send(Recipients::One(recipient.clone()), msg, false)
-                .await
-                .unwrap()
-                .is_empty()
-            {
-                // Try again
-                self.requester.cancel(request);
-                debug!(peer = hex(&recipient), "failed to send request");
-                continue;
-            }
-
-            // Exit if sent
-            self.inflight_by_request.insert(request, inflight);
-            debug!(
-                peer = hex(&recipient),
-                ?notarizations,
-                ?nullifications,
-                "sent request"
-            );
-            break;
         }
     }
 
