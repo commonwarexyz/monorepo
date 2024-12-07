@@ -58,9 +58,10 @@ message Finalization {
 }
 
 message Backfiller {
+    uint64 id = 1;
     oneof payload {
-        Request request = 1;
-        Response response = 2;
+        Request request = 2;
+        Response response = 3;
     }
 }
 

@@ -39,6 +39,9 @@ impl<
     > Engine<B, E, C, H, A, S>
 {
     pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, S>) -> Self {
+        // Ensure configuration is valid
+        cfg.assert();
+
         // Create voter
         let (voter, voter_mailbox) = voter::Actor::new(
             runtime.clone(),
@@ -70,6 +73,7 @@ impl<
                 namespace: cfg.namespace,
                 activity_timeout: cfg.activity_timeout,
                 fetch_timeout: cfg.fetch_timeout,
+                fetch_concurrent: cfg.fetch_concurrent,
                 max_fetch_count: cfg.max_fetch_count,
                 max_fetch_size: cfg.max_fetch_size,
                 fetch_rate_per_peer: cfg.fetch_rate_per_peer,

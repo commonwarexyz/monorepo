@@ -308,9 +308,10 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -553,9 +554,10 @@ mod tests {
                         nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
-                        max_fetch_count: 1,
+                        max_fetch_count: 4,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
                     let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -779,9 +781,10 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1, // force many fetches
+                    max_fetch_count: 4, // force many fetches
                     max_fetch_size: 1024 * 1024,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -958,9 +961,10 @@ mod tests {
                 nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
-                max_fetch_count: 1,
+                max_fetch_count: 4,
                 max_fetch_size: 1024 * 512,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                fetch_concurrent: 1,
                 replay_concurrency: 1,
             };
             let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -1127,9 +1131,10 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -1333,9 +1338,10 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -1528,9 +1534,10 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -1730,9 +1737,10 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -1884,7 +1892,7 @@ mod tests {
         });
     }
 
-    fn test_slow_and_lossy_links(seed: u64) -> String {
+    fn slow_and_lossy_links(seed: u64) -> String {
         // Create runtime
         let n = 5;
         let required_containers = 50;
@@ -2001,9 +2009,10 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 1,
+                    max_fetch_count: 4,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -2062,13 +2071,20 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_slow_and_lossy_links() {
+        slow_and_lossy_links(0);
+    }
+
+    #[test_traced]
     fn test_determinism() {
-        for seed in 0..5 {
+        // We use slow and lossy links as the deterministic test
+        // because it is the most complex test.
+        for seed in 1..6 {
             // Run test with seed
-            let state_1 = test_slow_and_lossy_links(seed);
+            let state_1 = slow_and_lossy_links(seed);
 
             // Run test again with same seed
-            let state_2 = test_slow_and_lossy_links(seed);
+            let state_2 = slow_and_lossy_links(seed);
 
             // Ensure states are equal
             assert_eq!(state_1, state_2);
@@ -2204,9 +2220,10 @@ mod tests {
                         nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
-                        max_fetch_count: 1,
+                        max_fetch_count: 4,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
                     let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -2412,9 +2429,10 @@ mod tests {
                         nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
-                        max_fetch_count: 1,
+                        max_fetch_count: 4,
                         max_fetch_size: 1024 * 512,
                         fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
+                        fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
                     let engine = Engine::new(runtime.clone(), journal, cfg);

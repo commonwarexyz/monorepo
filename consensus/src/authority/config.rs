@@ -38,7 +38,7 @@ pub struct Config<
     pub fetch_timeout: Duration,
 
     /// Maximum number of containers to request/respond with in a single fetch.
-    pub max_fetch_count: u64,
+    pub max_fetch_count: usize,
 
     /// Maximum number of bytes to respond with in a single fetch.
     pub max_fetch_size: usize,
@@ -46,5 +46,26 @@ pub struct Config<
     /// Maximum rate of fetch requests per peer (to prevent rate limiting).
     pub fetch_rate_per_peer: Quota,
 
+    /// Number of concurrent fetch requests to make.
+    pub fetch_concurrent: usize,
+
     pub replay_concurrency: usize,
+}
+
+impl<C: Scheme, H: Hasher, A: Automaton<Context = Context>, S: Supervisor<Index = View>>
+    Config<C, H, A, S>
+{
+    /// Assert enforces that all configuration values are valid.
+    pub fn assert(&self) {
+        assert!(self.leader_timeout > Duration::default());
+        assert!(self.notarization_timeout > Duration::default());
+        assert!(self.nullify_retry > Duration::default());
+        assert!(self.activity_timeout > 0);
+        assert!(self.fetch_timeout > Duration::default());
+        // Must be > 1 to support filling unknown dependencies (may not know if notarization or nullification is needed).
+        assert!(self.max_fetch_count > 1);
+        assert!(self.max_fetch_size > 0);
+        assert!(self.fetch_concurrent > 0);
+        assert!(self.replay_concurrency > 0);
+    }
 }

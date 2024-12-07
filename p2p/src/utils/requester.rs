@@ -65,6 +65,13 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
     deadlines: PrioritySet<ID, SystemTime>,
 }
 
+/// Request corresponding to an ID.
+pub struct Request {
+    pub id: ID,
+    participant: PublicKey,
+    start: SystemTime,
+}
+
 impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     /// Create a new requester.
     pub fn new(runtime: E, config: Config<C>) -> Self {
@@ -158,13 +165,23 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
         self.participants.put(participant.clone(), next);
     }
 
-    /// Resolve an outstanding request.
-    pub fn resolve(&mut self, id: ID) {
-        // Remove request
-        let Some((participant, start)) = self.cancel(id) else {
-            return;
-        };
+    /// Handle a request by ID.
+    ///
+    /// If the request was outstanding, a `Request` is returned that can
+    /// either be resolved or timed out.
+    pub fn handle(&mut self, participant: &PublicKey, id: ID) -> Option<Request> {
+        // Confirm ID exists and is for the participant
+        let (expected, _) = self.requests.get(&id)?;
+        if expected != participant {
+            return None;
+        }
 
+        // If expected, remove
+        self.cancel(id)
+    }
+
+    /// Resolve an outstanding request.
+    pub fn resolve(&mut self, request: Request) {
         // Get elapsed time
         //
         // If we can't compute the elapsed time for some reason (i.e. current time does
@@ -173,35 +190,40 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
         let elapsed = self
             .runtime
             .current()
-            .duration_since(start)
+            .duration_since(request.start)
             .unwrap_or_default();
 
         // Update performance
-        self.update(participant, elapsed);
+        self.update(request.participant, elapsed);
     }
 
     /// Timeout an outstanding request.
-    pub fn timeout(&mut self, id: ID) {
-        // Remove request
-        let Some((participant, _)) = self.cancel(id) else {
-            return;
-        };
-
+    pub fn timeout(&mut self, request: Request) {
         // Update performance
-        self.update(participant, self.timeout);
+        self.update(request.participant, self.timeout);
     }
 
     /// Drop an outstanding request (returning the participant and start time, if exists).
-    pub fn cancel(&mut self, id: ID) -> Option<(PublicKey, SystemTime)> {
+    pub fn cancel(&mut self, id: ID) -> Option<Request> {
         let (participant, start) = self.requests.remove(&id)?;
         self.deadlines.remove(&id);
-        Some((participant, start))
+        Some(Request {
+            id,
+            participant,
+            start,
+        })
     }
 
     /// Get the next outstanding ID and deadline.
     pub fn next(&self) -> Option<(ID, SystemTime)> {
         let (id, deadline) = self.deadlines.iter().next()?;
         Some((*id, *deadline))
+    }
+
+    /// Get the number of outstanding requests.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.requests.len()
     }
 }
 
@@ -234,13 +256,17 @@ mod tests {
 
             // Request before any participants
             assert_eq!(requester.request(false), None);
+            assert_eq!(requester.len(), 0);
 
             // Ensure we aren't waiting
             assert_eq!(requester.next(), None);
 
+            // Handle non-existent request
+            assert!(requester.handle(&me, 0).is_none());
+
             // Initialize requester
             let other = Ed25519::from_seed(1).public_key();
-            requester.reconcile(&[me, other.clone()]);
+            requester.reconcile(&[me.clone(), other.clone()]);
 
             // Get request
             let current = runtime.current();
@@ -252,6 +278,7 @@ mod tests {
             let (id, deadline) = requester.next().expect("failed to get deadline");
             assert_eq!(id, 0);
             assert_eq!(deadline, current + timeout);
+            assert_eq!(requester.len(), 1);
 
             // Try to make another request (would exceed rate limit and can't do self)
             assert_eq!(requester.request(false), None);
@@ -259,8 +286,15 @@ mod tests {
             // Simulate processing time
             runtime.sleep(Duration::from_millis(10)).await;
 
+            // Mark request as resolved with wrong participant
+            assert!(requester.handle(&me, id).is_none());
+
             // Mark request as resolved
-            requester.resolve(id);
+            let request = requester
+                .handle(&participant, id)
+                .expect("failed to get request");
+            assert_eq!(request.id, id);
+            requester.resolve(request);
 
             // Ensure no more requests
             assert_eq!(requester.request(false), None);
@@ -277,7 +311,10 @@ mod tests {
             assert_eq!(id, 1);
 
             // Timeout request
-            requester.timeout(id);
+            let request = requester
+                .handle(&participant, id)
+                .expect("failed to get request");
+            requester.timeout(request);
 
             // Ensure no more requests
             assert_eq!(requester.request(false), None);
@@ -295,6 +332,7 @@ mod tests {
 
             // Ensure no more requests
             assert_eq!(requester.next(), None);
+            assert_eq!(requester.len(), 0);
 
             // Sleep until reset
             runtime.sleep(Duration::from_secs(1)).await;
@@ -339,7 +377,10 @@ mod tests {
             let (participant, id) = requester.request(false).expect("failed to get participant");
             assert_eq!(id, 0);
             if participant == other2 {
-                requester.timeout(id);
+                let request = requester
+                    .handle(&participant, id)
+                    .expect("failed to get request");
+                requester.timeout(request);
             } else {
                 panic!("unexpected participant");
             }
@@ -349,7 +390,10 @@ mod tests {
             assert_eq!(id, 1);
             if participant == other1 {
                 runtime.sleep(Duration::from_millis(10)).await;
-                requester.resolve(id);
+                let request = requester
+                    .handle(&participant, id)
+                    .expect("failed to get request");
+                requester.resolve(request);
             } else {
                 panic!("unexpected participant");
             }
