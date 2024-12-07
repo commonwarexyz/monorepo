@@ -199,6 +199,10 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     }
 
                     // If we have not yet sent a request and have outstanding items, wait
+                    //
+                    // If we aren't connected to any peers and have outstanding items, we
+                    // will wait indefinitely to send the next request rather than eventually
+                    // returning.
                     warn!("failed to send request to any validator");
                     self.runtime.sleep(self.fetch_timeout).await;
                     continue;
@@ -222,8 +226,9 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     .unwrap()
                     .is_empty()
                 {
-                    // Try again
-                    self.requester.cancel(request);
+                    // Try again (treating past request as timeout)
+                    let request = self.requester.cancel(request).unwrap();
+                    self.requester.timeout(request);
                     debug!(peer = hex(&recipient), "failed to send request");
                     continue;
                 }
@@ -520,6 +525,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     "request successful",
                                 );
                             } else {
+                                // We don't reward a peer for sending us a response that doesn't help us
                                 debug!(sender = hex(&s), "response not useful");
                             }
 
