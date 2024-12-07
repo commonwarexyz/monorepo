@@ -516,6 +516,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             }
 
                             // Update performance
+                            let mut shuffle = false;
                             if !notarizations_found.is_empty() || !nullifications_found.is_empty() {
                                 self.requester.resolve(request);
                                 debug!(
@@ -526,11 +527,12 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 );
                             } else {
                                 // We don't reward a peer for sending us a response that doesn't help us
+                                shuffle = true;
                                 debug!(sender = hex(&s), "response not useful");
                             }
 
                             // If still work to do, send another request
-                            self.send(false, &mut sender).await;
+                            self.send(shuffle, &mut sender).await;
                         },
                     }
                 },
