@@ -30,14 +30,8 @@ use std::{
 };
 use tracing::{debug, warn};
 
-/// Source to use when generating a new request.
-enum Source<'a> {
-    Required,
-    New(&'a Vec<u64>, &'a Vec<u64>),
-}
-
 /// Entry in the required set.
-#[derive(Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 struct Entry {
     notarization: bool,
     view: View,
@@ -58,6 +52,7 @@ impl PartialOrd for Entry {
     }
 }
 
+/// Requests are made concurrently to multiple peers.
 pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     runtime: E,
     supervisor: S,
@@ -71,6 +66,8 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<In
     activity_timeout: u64,
 
     required: BTreeSet<Entry>,
+    inflight: BTreeSet<Entry>,
+    inflight_by_request: BTreeMap<requester::ID, Vec<Entry>>,
 
     mailbox_receiver: mpsc::Receiver<Message>,
 
@@ -131,6 +128,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 activity_timeout: cfg.activity_timeout,
 
                 required: BTreeSet::new(),
+                inflight: BTreeSet::new(),
+                inflight_by_request: BTreeMap::new(),
 
                 mailbox_receiver: receiver,
 
@@ -148,8 +147,9 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         )
     }
 
-    async fn send(&mut self, source: Source<'_>, shuffle: bool, sender: &mut impl Sender) {
-        // If too many concurrent requests, do nothing
+    /// Concurrent indicates whether we should send a new request (only if we see a request for the first time)
+    async fn send(&mut self, shuffle: bool, sender: &mut impl Sender) {
+        // If we have too many requests outstanding, return
         if self.requester.len() >= self.fetch_concurrent {
             return;
         }
@@ -159,33 +159,27 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         // It is possible we may have requested notarizations and nullifications for the same view (and only one may
         // exist). We should try to fetch both before trying to fetch the next view, or we may never ask for an existing
         // notarization or nullification.
-        let (notarizations, nullifications) = match source {
-            Source::Required => {
-                let mut notarizations = Vec::new();
-                let mut nullifications = Vec::new();
-                for entry in self.required.iter() {
-                    if entry.notarization {
-                        notarizations.push(entry.view);
-                    } else {
-                        nullifications.push(entry.view);
-                    }
-                    if notarizations.len() + nullifications.len() >= self.max_fetch_count {
-                        break;
-                    }
-                }
-                (notarizations, nullifications)
+        let mut notarizations = Vec::new();
+        let mut nullifications = Vec::new();
+        let mut inflight = Vec::new();
+        for entry in self.required.iter() {
+            // Check if we already have a request outstanding for this
+            if self.inflight.contains(entry) {
+                continue;
             }
-            Source::New(notarizations, nullifications) => {
-                let notarizations = notarizations
-                    .iter()
-                    .take(self.max_fetch_count)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let remaining = self.max_fetch_count - notarizations.len();
-                let nullifications = nullifications.iter().take(remaining).cloned().collect();
-                (notarizations, nullifications)
+            self.inflight.insert(entry.clone());
+            inflight.push(entry.clone());
+
+            // Add to inflight
+            if entry.notarization {
+                notarizations.push(entry.view);
+            } else {
+                nullifications.push(entry.view);
             }
-        };
+            if notarizations.len() + nullifications.len() >= self.max_fetch_count {
+                break;
+            }
+        }
 
         // If nothing to do, return
         if notarizations.is_empty() && nullifications.is_empty() {
@@ -226,6 +220,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             }
 
             // Exit if sent
+            self.inflight_by_request.insert(request, inflight);
             debug!(
                 peer = hex(&recipient),
                 ?notarizations,
@@ -233,6 +228,14 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 "sent request"
             );
             break;
+        }
+    }
+
+    fn clear_inflight(&mut self, request: requester::ID) {
+        if let Some(inflight) = self.inflight_by_request.remove(&request) {
+            for entry in inflight {
+                self.inflight.remove(&entry);
+            }
         }
     }
 
@@ -262,10 +265,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 _ = timeout => {
                     // Penalize requester for timeout
                     let request = self.requester.cancel(request).expect("request not found");
+                    self.clear_inflight(request.id);
                     self.requester.timeout(request);
 
                     // Send message
-                    self.send(Source::Required, true, &mut sender).await;
+                    self.send(true, &mut sender).await;
                     continue;
                 },
                 mailbox = self.mailbox_receiver.next() => {
@@ -275,9 +279,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     };
                     match msg {
                         Message::Fetch { notarizations, nullifications } => {
-                            // Optimistically Fetch new notarizations and nullifications as soon as possible
-                            self.send(Source::New(&notarizations, &nullifications), false, &mut sender).await;
-
                             // Add to all outstanding required
                             for view in notarizations {
                                 self.required.insert(Entry { notarization: true, view });
@@ -285,6 +286,9 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             for view in nullifications {
                                 self.required.insert(Entry { notarization: false, view });
                             }
+
+                            // Trigger fetch of new notarizations and nullifications as soon as possible
+                            self.send(false, &mut sender).await;
                         }
                         Message::Notarized { notarization } => {
                             // Update current view
@@ -434,6 +438,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 debug!(sender = hex(&s), "unexpected message");
                                 continue;
                             };
+                            self.clear_inflight(request.id);
 
                             // Ensure response isn't too big
                             if response.notarizations.len() + response.nullifications.len() > self.max_fetch_count {
@@ -442,7 +447,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 self.requester.block(s);
 
                                 // Pick new recipient
-                                self.send(Source::Required, true, &mut sender).await;
+                                self.send(true, &mut sender).await;
                                 continue;
                             }
 
@@ -507,7 +512,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             }
 
                             // If still work to do, send another request
-                            self.send(Source::Required, false, &mut sender).await;
+                            self.send(false, &mut sender).await;
                         },
                     }
                 },

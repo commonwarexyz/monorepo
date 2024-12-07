@@ -67,6 +67,7 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
 
 /// Request corresponding to an ID.
 pub struct Request {
+    pub id: ID,
     participant: PublicKey,
     start: SystemTime,
 }
@@ -206,7 +207,11 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     pub fn cancel(&mut self, id: ID) -> Option<Request> {
         let (participant, start) = self.requests.remove(&id)?;
         self.deadlines.remove(&id);
-        Some(Request { participant, start })
+        Some(Request {
+            id,
+            participant,
+            start,
+        })
     }
 
     /// Get the next outstanding ID and deadline.
@@ -288,6 +293,7 @@ mod tests {
             let request = requester
                 .handle(&participant, id)
                 .expect("failed to get request");
+            assert_eq!(request.id, id);
             requester.resolve(request);
 
             // Ensure no more requests
