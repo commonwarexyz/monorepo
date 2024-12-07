@@ -3,7 +3,7 @@
 use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use commonware_stream::public_key::{Config as ConnectionConfig, Connection, IncomingHandshake};
+use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingHandshake};
 use commonware_utils::hex;
 use governor::{
     clock::ReasonablyRealtime,
@@ -24,7 +24,7 @@ use tracing::debug;
 pub struct Config<C: Scheme> {
     pub registry: Arc<Mutex<Registry>>,
     pub address: SocketAddr,
-    pub connection: ConnectionConfig<C>,
+    pub stream_cfg: StreamConfig<C>,
     pub allowed_incoming_connectioned_rate: Quota,
 }
 
@@ -38,7 +38,7 @@ pub struct Actor<
     runtime: E,
 
     address: SocketAddr,
-    connection: ConnectionConfig<C>,
+    stream_cfg: StreamConfig<C>,
     rate_limiter: RateLimiter<NotKeyed, InMemoryState, E, NoOpMiddleware<E::Instant>>,
 
     handshakes_rate_limited: Counter,
@@ -72,7 +72,7 @@ impl<
             runtime: runtime.clone(),
 
             address: cfg.address,
-            connection: cfg.connection,
+            stream_cfg: cfg.stream_cfg,
             rate_limiter: RateLimiter::direct_with_clock(
                 cfg.allowed_incoming_connectioned_rate,
                 &runtime,
@@ -88,11 +88,11 @@ impl<
 
     async fn handshake(
         runtime: E,
-        connection: ConnectionConfig<C>,
+        stream_cfg: StreamConfig<C>,
         sink: Si,
         stream: St,
         mut tracker: tracker::Mailbox<E>,
-        mut supervisor: spawner::Mailbox<E, C, Si, St>,
+        mut supervisor: spawner::Mailbox<E, Si, St>,
     ) {
         // Wait for the peer to send us their public key
         //
@@ -100,12 +100,12 @@ impl<
         // to ensure an adversary can't force us to hold many pending connections open.
         let handshake = match IncomingHandshake::verify(
             runtime.clone(),
-            &connection.crypto,
-            &connection.namespace,
-            connection.max_message_size,
-            connection.synchrony_bound,
-            connection.max_handshake_age,
-            connection.handshake_timeout,
+            &stream_cfg.crypto,
+            &stream_cfg.namespace,
+            stream_cfg.max_message_size,
+            stream_cfg.synchrony_bound,
+            stream_cfg.max_handshake_age,
+            stream_cfg.handshake_timeout,
             sink,
             stream,
         )
@@ -131,7 +131,7 @@ impl<
         };
 
         // Perform handshake
-        let stream = match Connection::upgrade_listener(runtime, connection, handshake).await {
+        let stream = match Connection::upgrade_listener(runtime, stream_cfg, handshake).await {
             Ok(connection) => connection,
             Err(e) => {
                 debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");
@@ -144,11 +144,7 @@ impl<
         supervisor.spawn(peer, stream, reservation).await;
     }
 
-    pub async fn run(
-        self,
-        tracker: tracker::Mailbox<E>,
-        supervisor: spawner::Mailbox<E, C, Si, St>,
-    ) {
+    pub async fn run(self, tracker: tracker::Mailbox<E>, supervisor: spawner::Mailbox<E, Si, St>) {
         // Start listening for incoming connections
         let mut listener = self
             .runtime
@@ -183,7 +179,7 @@ impl<
                 "handshaker",
                 Self::handshake(
                     self.runtime.clone(),
-                    self.connection.clone(),
+                    self.stream_cfg.clone(),
                     sink,
                     stream,
                     tracker.clone(),

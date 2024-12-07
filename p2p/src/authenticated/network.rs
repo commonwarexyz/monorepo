@@ -162,7 +162,7 @@ impl<
         );
 
         // Start listener
-        let connection = public_key::Config {
+        let stream_cfg = public_key::Config {
             crypto: self.cfg.crypto,
             namespace: self.cfg.namespace,
             max_message_size: self.cfg.max_message_size + PROTOBUF_OVERHEAD,
@@ -175,7 +175,7 @@ impl<
             listener::Config {
                 registry: self.cfg.registry.clone(),
                 address: self.cfg.listen,
-                connection: connection.clone(),
+                stream_cfg: stream_cfg.clone(),
                 allowed_incoming_connectioned_rate: self.cfg.allowed_incoming_connection_rate,
             },
         );
@@ -189,7 +189,7 @@ impl<
             self.runtime.clone(),
             dialer::Config {
                 registry: self.cfg.registry,
-                connection,
+                stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
                 dial_rate: self.cfg.dial_rate,
             },

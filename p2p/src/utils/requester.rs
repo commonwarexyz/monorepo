@@ -65,10 +65,20 @@ pub struct Requester<E: Clock + GClock + Rng, C: Scheme> {
     deadlines: PrioritySet<ID, SystemTime>,
 }
 
-/// Request corresponding to an ID.
+/// Request responded from handling an ID.
+///
+/// When handling a request, the requester will remove the request and return
+/// this struct in case we want to `resolve` or `timeout` the request. This approach
+/// makes it impossible to forget to remove a handled request if it doesn't warrant
+/// updating the performance of the participant.
 pub struct Request {
+    /// Unique identifier for the request.
     pub id: ID,
+
+    /// Participant that handled the request.
     participant: PublicKey,
+
+    /// Time the request was issued.
     start: SystemTime,
 }
 
@@ -141,8 +151,6 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
             }
 
             // Compute ID
-            //
-            // As long as we don't have u64 requests outstanding, this is ok.
             let id = self.id;
             self.id = self.id.wrapping_add(1);
 
@@ -156,7 +164,7 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
         None
     }
 
-    /// Calculate new priority using exponential moving average.
+    /// Calculate a participant's new priority using exponential moving average.
     fn update(&mut self, participant: PublicKey, elapsed: Duration) {
         let Some(past) = self.participants.get(&participant) else {
             return;
@@ -165,7 +173,19 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
         self.participants.put(participant.clone(), next);
     }
 
-    /// Handle a request by ID.
+    /// Drop an outstanding request regardless of who it was intended for.
+    pub fn cancel(&mut self, id: ID) -> Option<Request> {
+        let (participant, start) = self.requests.remove(&id)?;
+        self.deadlines.remove(&id);
+        Some(Request {
+            id,
+            participant,
+            start,
+        })
+    }
+
+    /// Handle a request by ID, ensuring the provided `participant` was
+    /// associated with said ID.
     ///
     /// If the request was outstanding, a `Request` is returned that can
     /// either be resolved or timed out.
@@ -201,17 +221,6 @@ impl<E: Clock + GClock + Rng, C: Scheme> Requester<E, C> {
     pub fn timeout(&mut self, request: Request) {
         // Update performance
         self.update(request.participant, self.timeout);
-    }
-
-    /// Drop an outstanding request (returning the participant and start time, if exists).
-    pub fn cancel(&mut self, id: ID) -> Option<Request> {
-        let (participant, start) = self.requests.remove(&id)?;
-        self.deadlines.remove(&id);
-        Some(Request {
-            id,
-            participant,
-            start,
-        })
     }
 
     /// Get the next outstanding ID and deadline.
