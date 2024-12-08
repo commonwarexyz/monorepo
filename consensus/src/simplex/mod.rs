@@ -66,7 +66,7 @@
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
-//! * Set timer for leader proposal `t_l` and advance `t_a`
+//! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
 //!     * If leader `l` has not been active (no votes) in last `r` views, set `t_l` to 0.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
@@ -100,50 +100,17 @@
 //! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
 //!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
 //!
-//! ## Adapting Simplex to Real-World: Syncing, Restarts, and Dropped Messages
+//! ### Deviations from Simplex Consensus
 //!
-//! * Distinct Leader timeout (in addition to notarization timeout)
-//!     * Skip leader timeout/notarization timeout if we haven't seen a participant vote in some number of views
-//! * Don't assume that all notarizations are sent with each proposal
-//! * Backfill containers from notarizing peers rather than passing along with notarization message
-//! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)/no dedicated
-//!   "sync" phase
-//! * Send indices of public keys rather than public keys themselves
-//! * Only multicast proposal `c` in `v` on transition to `v+1  to peers that haven't already voted for `c`
-//! * Only multicast dependent notarizations (notarization for `c_parent` and null notarizations between `c_parent` and `c`) for `v` to peers that
-//!   didn't vote for `c`
-//!
-//!
-//! # What is a good fit?
-//!
-//! * Desire fast block times (as fast as possible): No message relay through leader
-//!     * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
-//!       more votes) -> means there is no wait at the end of a view to collect more votes/finalizes
-//! * Proposals are small (include references to application data rather than application data itself): Each notarization may require each party to re-broadcast the proposal
-//! * Small to medium number of validators (< 500): All messages are broadcast
-//! * Strong robustness against Byzantine leaders? (still can trigger later than desired start to verification) but can't force a fetch
-//!     * Saves at least 1 RTT (and more if first recipient doesn't have/is byzantine)
-//!     * Minimal ability to impact performance in next view (still can timeout current view)
-//!     * No requirement for consecutive honest leaders to commit
-//!
-//! # Tradeoff: Bandwidth Efficiency or Robustness
-//!
-//! * This is the difference between broadcasting a proposal to the next leader if they didn't vote for the block and waiting for them
-//!   to fetch the block themselves.
-//!
-//! # Performance Degradation
-//!
-//! * Ever-growing unfinalized tip: processing views are cached in-memory
-//!     * Particularly bad if composed of null notarizations
-//!
-//! Crazy Idea: What if there is no proposal and the vote/notarization contains all info (only ever include a hash of the proposal)? Would this undermine
-//! an application's ability to build a useful product (as wouldn't know contents of block until an arbitrary point in the future, potentially after asked to produce
-//! a new block/may also not know parent yet)?
-//! * Could leave to the builder to decide whether to wait to produce a block until they've seen finalized parent or not. Would anyone ever want not? Could also
-//!   leave constructing/disseminating the block to the builder. We agree on hashes, you can do whatever you want to get to that point?
-//! * TL;DR: Agreement isn't Dissemination -> Tension: Agreement is most reliable with all-to-all broadcast but dissemnination is definitely not most efficient that way
-//! * Verify returns as soon as get the proposal rather than immediately if don't have it. This will ensure that consensus messages that get to participant before payload
-//!   won't just immediately be dropped?
+//! * Fetch missing notarizations/nullifications as needed rather than assuming each proposal contains
+//!   a set of all notarizations/nullifications for all historical blocks.
+//! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
+//!   either a "block" or a "dummy block", respectively.
+//! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
+//! * Skip "leader timeout" and "notarization timeout" if a designated leader hasn't participated in
+//!   some number of views (again to trigger early view transition for an unresponsive leader).
+//! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
+//!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
 mod actors;
 mod config;
