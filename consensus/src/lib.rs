@@ -10,7 +10,7 @@ use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::oneshot;
 use std::future::Future;
 
-pub mod authority;
+pub mod simplex;
 
 /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
 /// and verifying payloads proposed by other participants.

@@ -1,5 +1,5 @@
 use super::relay::Relay;
-use crate::{authority::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
+use crate::{simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;

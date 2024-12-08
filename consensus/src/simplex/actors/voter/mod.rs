@@ -1,8 +1,8 @@
 mod actor;
 mod ingress;
 
-use crate::authority::Context;
-use crate::{authority::View, Automaton, Supervisor};
+use crate::simplex::Context;
+use crate::{simplex::View, Automaton, Supervisor};
 use crate::{Committer, Relay};
 pub use actor::Actor;
 use commonware_cryptography::{Hasher, Scheme};
