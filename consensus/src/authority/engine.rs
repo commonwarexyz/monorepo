@@ -1,5 +1,5 @@
 use super::{
-    actors::{backfiller, voter},
+    actors::{resolver, voter},
     config::Config,
     Context, View,
 };
@@ -25,8 +25,8 @@ pub struct Engine<
 
     voter: voter::Actor<B, E, C, H, A, S>,
     voter_mailbox: voter::Mailbox,
-    backfiller: backfiller::Actor<E, C, H, S>,
-    backfiller_mailbox: backfiller::Mailbox,
+    backfiller: resolver::Actor<E, C, H, S>,
+    backfiller_mailbox: resolver::Mailbox,
 }
 
 impl<
@@ -63,9 +63,9 @@ impl<
         );
 
         // Create backfiller
-        let (backfiller, backfiller_mailbox) = backfiller::Actor::new(
+        let (backfiller, backfiller_mailbox) = resolver::Actor::new(
             runtime.clone(),
-            backfiller::Config {
+            resolver::Config {
                 crypto: cfg.crypto,
                 supervisor: cfg.supervisor,
                 registry: cfg.registry,

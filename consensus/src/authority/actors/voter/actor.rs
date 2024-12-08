@@ -1,7 +1,7 @@
 use super::{Config, Mailbox, Message};
 use crate::{
     authority::{
-        actors::backfiller,
+        actors::resolver,
         encoder::{
             finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
             proposal_message,
@@ -612,7 +612,7 @@ impl<
 
     async fn propose(
         &mut self,
-        backfiller: &mut backfiller::Mailbox,
+        backfiller: &mut resolver::Mailbox,
     ) -> Option<(Context, oneshot::Receiver<Digest>)> {
         // Check if we are leader
         {
@@ -1617,7 +1617,7 @@ impl<
 
     async fn notify(
         &mut self,
-        backfiller: &mut backfiller::Mailbox,
+        backfiller: &mut resolver::Mailbox,
         sender: &mut impl Sender,
         view: u64,
     ) {
@@ -1849,7 +1849,7 @@ impl<
 
     pub async fn run(
         mut self,
-        mut backfiller: backfiller::Mailbox,
+        mut backfiller: resolver::Mailbox,
         mut sender: impl Sender,
         mut receiver: impl Receiver,
     ) {

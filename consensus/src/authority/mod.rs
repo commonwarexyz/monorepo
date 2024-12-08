@@ -30,6 +30,7 @@
 //! All reads are done in-memory. Data is flushed to a WAL.
 //!
 //! # Design
+//!
 //! ```txt
 //! +---------------+           +---------+            +++++++++++++++
 //! |               |<----------+         +----------->+             +
