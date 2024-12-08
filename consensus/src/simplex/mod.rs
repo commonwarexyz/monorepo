@@ -1,11 +1,11 @@
-//! Optimistically responsive Proof-of-Authority (PoA) consensus implementation.
+//! Simple and fast agreement inspired by Simplex Consensus.
 //!
-//! `Authority` is an implementation of optimistically responsive consensus designed to work
-//! with
-//! PoA Consensus useful for running a DKG (round-robin leader selection, update participants with config).
+//! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides
+//! a simple and fast agreement protocol that strives to provide both best-in-class view latency
+//! (i.e. block time) and finalization latency. To achieve this, `simplex` rotates views prior
+//! to finalization and employs multicast for all messages.
 //!
-//! All decisions made to minimize container time and finalization latency without sacrificing
-//! the ability to attribute uptime and faults.
+//! # Features
 //!
 //! # Externalizable Uptime and Faults
 //!
