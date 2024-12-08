@@ -1,13 +1,16 @@
-//! TBD
+//! Order opaque messages in a Byzantine environment.
 //!
-//! Focused on linear consensus protocols that can support concurrent proposals via `broadcast`.
-
-pub mod authority;
+//! # Status
+//!
+//! `commonware-consensus` is **ALPHA** software and is not yet recommended for production use. Developers should
+//! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::oneshot;
 use std::future::Future;
+
+pub mod authority;
 
 /// Automaton is the interface for the consensus engine to inform of progress.
 ///
