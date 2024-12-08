@@ -135,7 +135,13 @@ pub type View = u64;
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
 pub struct Context {
+    /// Current view of consensus.
     pub view: View,
+
+    /// Parent the payload is built on.
+    ///
+    /// Payloads from views between the current view and the parent view can never be
+    /// directly finalized (must exist some nullification).
     pub parent: (View, Digest),
 }
 
