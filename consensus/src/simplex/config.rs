@@ -45,6 +45,9 @@ pub struct Config<
     /// Prefix for all signed messages to prevent replay attacks.
     pub namespace: Vec<u8>,
 
+    /// Number of views to replay concurrently during startup.
+    pub replay_concurrency: usize,
+
     /// Amount of time to wait for a leader to propose a payload
     /// in a view.
     pub leader_timeout: Duration,
@@ -61,23 +64,22 @@ pub struct Config<
     /// activity derived from validator messages.
     pub activity_timeout: View,
 
-    /// Timeout to wait for a peer to respond to a fetch request.
+    /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
-    /// Maximum number of containers to request/respond with in a single fetch.
+    /// Maximum number of notarizations/nullifications to request/respond with at once.
     pub max_fetch_count: usize,
 
-    /// Maximum number of bytes to respond with in a single fetch.
+    /// Maximum number of bytes to respond with at once.
     pub max_fetch_size: usize,
 
-    /// Maximum rate of fetch requests per peer (to prevent rate limiting).
+    /// Maximum rate of requests to send to a given peer.
+    ///
+    /// Inbound rate limiting is handled by `commonware-p2p`.
     pub fetch_rate_per_peer: Quota,
 
-    /// Number of concurrent fetch requests to make.
+    /// Number of concurrent requests to make at once.
     pub fetch_concurrent: usize,
-
-    /// Number of views to replay concurrently during startup.
-    pub replay_concurrency: usize,
 }
 
 impl<
