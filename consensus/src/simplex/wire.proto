@@ -1,0 +1,76 @@
+syntax = "proto3";
+package wire;
+
+message Voter {
+    oneof payload {
+        Notarize notarize = 1;
+        Notarization notarization = 2;
+        Nullify nullify = 3;
+        Nullification nullification = 4;
+        Finalize finalize = 5;
+        Finalization finalization = 6;
+    }
+}
+
+// To ensure all participants stay informed, Container is included in all vote messages.
+message Proposal {
+    uint64 view = 1;
+    uint64 parent = 2;
+    bytes payload = 3; // Digest
+}
+
+message Signature {
+    uint32 public_key = 1;
+    bytes signature = 2;
+}
+
+// A vote from the leader for a view is also treated as a proposal
+// for that view.
+message Notarize {
+    Proposal proposal = 1;
+    Signature signature = 2;
+}
+
+message Notarization {
+    Proposal proposal = 1;
+    repeated Signature signatures = 2;
+}
+
+// Nullify is used to indicate that a view should be nullified (skipped).
+message Nullify {
+    uint64 view = 1;
+    Signature signature = 2;
+}
+
+message Nullification {
+    uint64 view = 1;
+    repeated Signature signatures = 2;
+}
+
+message Finalize {
+    Proposal proposal = 1;
+    Signature signature = 2;
+}
+
+message Finalization {
+    Proposal proposal = 1;
+    repeated Signature signatures = 2;
+}
+
+message Backfiller {
+    uint64 id = 1;
+    oneof payload {
+        Request request = 2;
+        Response response = 3;
+    }
+}
+
+message Request {
+    repeated uint64 notarizations = 1;
+    repeated uint64 nullifications = 2;
+}
+
+message Response {
+    repeated Notarization notarizations = 1;
+    repeated Nullification nullifications = 2;
+}
