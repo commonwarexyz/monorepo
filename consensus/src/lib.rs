@@ -80,6 +80,19 @@ pub trait Committer: Clone + Send + 'static {
 pub type Activity = u8;
 
 /// Supervisor is the interface responsible for managing which participants are active at a given time.
+///
+/// ## Synchronization
+///
+/// It is up to the user to ensure changes in this list are synchronized across nodes in the network
+/// at a given `Index`. If care is not taken to do this, consensus could halt (as different participants
+/// may have a different view of who is active at a given time).
+///
+/// The simplest way to avoid this complexity is to use a consensus implementation that reaches finalization
+/// on application data before transitioning to a new `Index` (i.e. [Tendermint](https://arxiv.org/abs/1807.04938)).
+///
+/// Implementations that do not work this way (like `simplex`) must introduce some synchrony bound for changes
+/// (where it is assumed all participants have finalized some previous set change by some point) or "sync points"
+/// (i.e. epochs) where participants agree that some finalization occurred at some point in the past.
 pub trait Supervisor: Clone + Send + 'static {
     /// Index is the type used to indicate the in-progress consensus decision.
     type Index;
@@ -92,15 +105,6 @@ pub trait Supervisor: Clone + Send + 'static {
 
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.
-    ///
-    /// It is up to the user to ensure changes in this list are synchronized across nodes in the network
-    /// at a given `Index`. If care is not taken to do this, consensus could halt (as different participants
-    /// may have a different view of who is active at a given time). The simplest way to avoid this complexity
-    /// is to use a consensus implementation that reaches finalization on application data before transitioning
-    /// to a new `Index` (i.e. [Tendermint](https://arxiv.org/abs/1807.04938)). Implementations that do not work
-    /// this way (like `simplex`) must introduce some synchrony bound for changes (where it is assumed all participants
-    /// have finalized some previous set change by some point) or "sync points" (i.e. epochs) where participants
-    /// agree that some finalization occurred at some point in the past.
     fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
 
     // Indicate whether some candidate is a participant at the given view.
