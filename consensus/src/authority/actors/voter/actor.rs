@@ -1685,7 +1685,7 @@ impl<
             }
             let proof = Prover::<C, H>::serialize_aggregation(proposal, signatures);
             self.committer
-                .notarized(
+                .prepared(
                     proof,
                     notarization.proposal.as_ref().unwrap().payload.clone(),
                 )

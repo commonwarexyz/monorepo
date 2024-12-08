@@ -99,7 +99,7 @@ impl Re for Mailbox {
 }
 
 impl Co for Mailbox {
-    async fn notarized(&mut self, proof: Proof, payload: Digest) {
+    async fn prepared(&mut self, proof: Proof, payload: Digest) {
         self.sender
             .send(Message::Notarized { proof, payload })
             .await
