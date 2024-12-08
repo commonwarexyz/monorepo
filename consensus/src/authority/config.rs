@@ -57,17 +57,45 @@ impl<C: Scheme, H: Hasher, A: Automaton<Context = Context>, S: Supervisor<Index 
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {
-        assert!(self.leader_timeout > Duration::default());
-        assert!(self.notarization_timeout > Duration::default());
-        assert!(self.nullify_retry > Duration::default());
-        assert!(self.activity_timeout > 0);
-        assert!(self.fetch_timeout > Duration::default());
+        assert!(
+            self.leader_timeout > Duration::default(),
+            "leader timeout must be greater than zero"
+        );
+        assert!(
+            self.notarization_timeout > Duration::default(),
+            "notarization timeout must be greater than zero"
+        );
+        assert!(
+            self.leader_timeout <= self.notarization_timeout,
+            "leader timeout must be less than or equal to notarization timeout"
+        );
+        assert!(
+            self.nullify_retry > Duration::default(),
+            "nullify retry broadcast must be greater than zero"
+        );
+        assert!(
+            self.activity_timeout > 0,
+            "activity timeout must be greater than zero"
+        );
+        assert!(
+            self.fetch_timeout > Duration::default(),
+            "fetch timeout must be greater than zero"
+        );
         assert!(
             self.max_fetch_count > 0,
             "it must be possible to fetch at least one container per request"
         );
-        assert!(self.max_fetch_size > 0);
-        assert!(self.fetch_concurrent > 0);
-        assert!(self.replay_concurrency > 0);
+        assert!(
+            self.max_fetch_size > 0,
+            "it must be possible to fetch at least one byte"
+        );
+        assert!(
+            self.fetch_concurrent > 0,
+            "it must be possible to fetch from at least one peer at a time"
+        );
+        assert!(
+            self.replay_concurrency > 0,
+            "it must be possible to replay at least one view at a time"
+        );
     }
 }
