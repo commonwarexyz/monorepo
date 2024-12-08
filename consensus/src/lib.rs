@@ -1,36 +1,33 @@
-//! TBD
+//! Order opaque messages in a Byzantine environment.
 //!
-//! Focused on linear consensus protocols that can support concurrent proposals via `broadcast`.
-
-pub mod authority;
+//! # Status
+//!
+//! `commonware-consensus` is **ALPHA** software and is not yet recommended for production use. Developers should
+//! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::oneshot;
 use std::future::Future;
 
-/// Automaton is the interface for the consensus engine to inform of progress.
-///
-/// While an automaton may be logically instantiated as a single entity, it may be
-/// cloned by multiple sub-components of a consensus engine to, among other things,
-/// broadcast and verify payloads.
+pub mod simplex;
+
+/// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
+/// and verifying payloads proposed by other participants.
 pub trait Automaton: Clone + Send + 'static {
+    /// Context is metadata provided by the consensus engine to associated with a given payload.
+    ///
+    /// This often includes things like the proposer, view number, the height, or the epoch.
     type Context;
 
-    /// Initialize the application with the genesis container.
+    /// Payload used to initialize the consensus engine.
     fn genesis(&mut self) -> impl Future<Output = Digest> + Send;
 
     /// Generate a new payload for the given context.
     ///
-    /// If it is possible to generate a payload, the `Automaton` should call `Mailbox::proposed`.
-    ///
-    /// Payload should stand alone and not require any additional context to be verified from the wire.
-    ///
-    /// TODO: if parent payload digest is provided in propose, we no longer need to actually have
-    /// the parent to build on it (useful if already notarized). This is really nice for chains
-    /// that store the "tip" of some subprocess in the block rather than the chain content itself. It is
-    /// ultimately still up to the "Automaton" to decide how to handle this (the linking to parent digests
-    /// could be some sort of tree that requires much more prior knowledge).
+    /// If it is possible to generate a payload, the Digest should be returned over the provided
+    /// channel. If it is not possible to generate a payload, the channel can be dropped. If construction
+    /// takes too long, the consensus engine may drop the provided proposal.
     fn propose(
         &mut self,
         context: Self::Context,
@@ -38,23 +35,8 @@ pub trait Automaton: Clone + Send + 'static {
 
     /// Verify the payload is valid.
     ///
-    /// If `Mailbox::verified` is called with this payload, the consensus will vote to support
-    /// the payload.
-    ///
-    /// If the payload has not been received or describes an invalid payload, the consensus
-    /// instance should not be notified using `Mailbox::verified`.
-    ///
-    /// TODO: if we really want to go crazy, we should not verify and just try to agree here and just
-    /// ask for hashes that can be reconciled later? Output of threshold signature for a given agreement
-    /// is then useless? TL;DR my job is to agree on a single digest at a given view, nothing else.
-    /// -> Can do lagging threshold signatures over verified state at a given height?
-    ///
-    /// "Stop doing so much, don't be a hero."
-    ///
-    /// This approach would allow you to just "push what you know" into a log and then handle any issues
-    /// with it after the fact.
-    ///
-    /// Can concurrently sync from multiple heights by using multiple notarizations (historical)
+    /// If it is possible to verify the payload, a boolean should be returned indicating whether
+    /// the payload is valid. If it is not possible to verify the payload, the channel can be dropped.
     fn verify(
         &mut self,
         context: Self::Context,
@@ -62,73 +44,72 @@ pub trait Automaton: Clone + Send + 'static {
     ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 }
 
-/// Indication that a digest should be disseminated to other participants.
+/// Relay is the interface responsible for broadcasting payloads to the network.
+///
+/// The consensus engine is only aware of a payload's digest, not its contents. It is up
+/// to the relay to efficiently broadcast the full payload to other participants.
 pub trait Relay: Clone + Send + 'static {
-    /// Called once consensus locks on a proposal. At this point the application can
-    /// broadcast the raw contents to the network with the given consensus header (which
-    /// references the payload).
+    /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
+    /// it isn't dropped).
     ///
-    /// It is up to the developer to efficiently handle broadcast/backfill to/from the rest of the network.
-    ///
-    /// TODO: how to know what digests might be useful? If it is just opaque bytes, its difficult
-    /// to optimistically cache when listening to messages from peers. Could just keep latest proposal digest
-    /// per peer sent to us (and answer any verification requests with that digest...how would we do more complex
-    /// broadcast).
+    /// Other participants may not begin voting on a proposal until they have the full contents,
+    /// so timely delivery often yields better performance.
     fn broadcast(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
 }
 
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
+/// Committer is the interface responsible for handling notifications of payload status.
 pub trait Committer: Clone + Send + 'static {
-    /// Event that the container has been prepared (indicating some progress towards finalization
-    /// but not guaranteeing it will occur).
+    /// Event that a payload has made some progress towards finalization but is not yet finalized.
     ///
-    /// No guarantee will send prepared event for all heights.
+    /// This is often used to provide an early ("best guess") confirmation to users.
     fn prepared(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
 
-    /// Event that the container has been finalized.
+    /// Event indicating the container has been finalized.
     fn finalized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
 }
 
-/// Faults are specified by the underlying primitive and can be interpreted if desired (not
-/// interpreting just means all faults would be treated equally).
+/// Activity is specified by the underlying consensus implementation and can be interpreted if desired.
 ///
-/// Various consensus implementations may want to reward participation in different ways. For example,
+/// Examples of activity would be "vote", "finalize", or "fault". Various consensus implementations may
+/// want to reward (or penalize) participation in different ways and in different places. For example,
 /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
 /// both equally may better align incentives with desired behavior.
 pub type Activity = u8;
 
-// TODO: should supervisor be managed by consensus? Other than PoA, the consensus usually keeps track of (and updates)
-// who is participating, not some external service. If we did this, we could also remove clone from Application?
-//
-// Rationale not to: application needs to interpret the "reporting" of activity in some way to determine uptime/penalties
-// and it isn't clear how this could be sent back to the consensus application?
+/// Supervisor is the interface responsible for managing which participants are active at a given time.
+///
+/// ## Synchronization
+///
+/// It is up to the user to ensure changes in this list are synchronized across nodes in the network
+/// at a given `Index`. If care is not taken to do this, consensus could halt (as different participants
+/// may have a different view of who is active at a given time).
+///
+/// The simplest way to avoid this complexity is to use a consensus implementation that reaches finalization
+/// on application data before transitioning to a new `Index` (i.e. [Tendermint](https://arxiv.org/abs/1807.04938)).
+///
+/// Implementations that do not work this way (like `simplex`) must introduce some synchrony bound for changes
+/// (where it is assumed all participants have finalized some previous set change by some point) or "sync points"
+/// (i.e. epochs) where participants agree that some finalization occurred at some point in the past.
 pub trait Supervisor: Clone + Send + 'static {
+    /// Index is the type used to indicate the in-progress consensus decision.
     type Index;
+
+    /// Seed is a consensus artifact to use as randomness for leader selection.
     type Seed;
 
-    /// Get the leader at a given index for the provided seed (sourced from consensus).
+    /// Return the leader at a given index for the provided seed.
     fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
 
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.
-    ///
-    /// It is up to the developer to ensure changes to this list are synchronized across nodes in the network
-    /// at a given view. If care is not taken to do this, the chain could fork/halt. If using an underlying
-    /// consensus implementation that does not require finalization of a height before producing a container
-    /// at the next height (asynchronous finalization), a synchrony bound should be enforced around
-    /// changes to the set (i.e. participant joining in view 10 should only become active in view 20, where
-    /// we assume all other participants have finalized view 10).
     fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
 
-    // Indicate whether a PublicKey is a participant at the given view.
+    // Indicate whether some candidate is a participant at the given view.
     fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
 
-    /// Report a contribution to the application that can be externally proven.
-    ///
-    /// To get more information about the contribution, the proof can be decoded.
-    ///
-    /// The consensus instance may report a duplicate contribution.
+    /// Report some activity observed by the consensus implementation.
     fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
 }

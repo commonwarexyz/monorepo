@@ -1,5 +1,5 @@
 use crate::{
-    authority::{
+    simplex::{
         prover::Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },

@@ -1,4 +1,4 @@
-use crate::authority::{wire, View};
+use crate::simplex::{wire, View};
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {

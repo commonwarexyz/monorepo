@@ -1,35 +1,29 @@
-//! Authority
+//! Simple and fast BFT agreement inspired by Simplex Consensus.
 //!
-//! PoA Consensus useful for running a DKG (round-robin leader selection, update participants with config).
+//! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides
+//! simple and fast BFT agreement that seeks to minimize view latency (i.e. block time)
+//! and to provide optimal finalization latency in a partially synchronous setting.
 //!
-//! All decisions made to minimize container time and finalization latency without sacrificing
-//! the ability to attribute uptime and faults.
+//! # Features
 //!
-//! # Externalizable Uptime and Faults
-//!
-//! Instead of handling uptime and fault tracking internally, the application is notified of all
-//! activity and can incorportate such information as needed (into the payload or otherwise).
-//!
-//! # Sync
-//!
-//! Wait for container notarization at tip (2f+1), fetch heights backwards (don't
-//! need to backfill views).
-//!
-//! # Async Handling
-//!
-//! All application interaction occurs asynchronously, meaning that the engine can continue processing messages
-//! while a payload is being built or verified (usually takes hundreds of milliseconds).
-//!
-//! # Dedicated Processing for Consensus Messages
-//!
-//! All peer interaction related to consensus is strictly prioritized over any other messages (i.e. helping new
-//! peers sync to the network).
-//!
-//! # No Disk Reads During Consensus Handling
-//!
-//! All reads are done in-memory. Data is flushed to a WAL.
+//! * Wicked Fast Block Times (2 Network Hops)
+//! * Optimal Finalization Latency (3 Network Hops)
+//! * Externalized Uptime and Fault Proofs
+//! * Decoupled Block Broadcast and Sync
+//! * Flexible Block Format
 //!
 //! # Design
+//!
+//! ## Architecture
+//!
+//! All logic is split into two components: the `Voter` and the `Resolver` (and the user of `simplex`
+//! provides `Application`). The `Voter` is responsible for participating in the latest view and the
+//! `Resolver` is responsible for fetching artifacts from previous views required to verify proposed
+//! blocks in the latest view.
+//!
+//! To provide great performance, all interactions between `Voter`, `Resolver`, and `Application` are
+//! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
+//! `Application` verifies a proposed block or the `Resolver` verifies a notarization.
 //!
 //! ```txt
 //! +---------------+           +---------+            +++++++++++++++
@@ -49,89 +43,76 @@
 //!                            +------------+          +++++++++++++++
 //! ```
 //!
-//! # Specification for View `v`
+//! _Application is usually a single object that implements the `Automaton`, `Relay`, `Committer`,
+//! and `Supervisor` traits._
 //!
-//! _We don't assume that messages are eventually delivered and instead tolerate arbitrary drops._
+//! ## Joining Consensus
+//!
+//! As soon as `2f+1` votes or finalizes are observed for some view `v`, the `Voter` will enter `v+1`.
+//! This means that a new participant joining consensus will immediately jump ahead to the latest view
+//! and begin participating in consensus (assuming it can verify blocks).
+//!
+//! ## Persistence
+//!
+//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
+//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
+//! consensus and messages it generates to a write-ahead log (WAL) implemented by [`Journal`](https://docs.rs/commonware-storage/latest/commonware_storage/journal/index.html).
+//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
+//! on restart (especially in the case of unclean shutdown).
+//!
+//! ## Protocol Description
+//!
+//! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
-//! * Set timer for leader proposal `t_l` and advance `t_a`
+//! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
 //!     * If leader `l` has not been active (no votes) in last `r` views, set `t_l` to 0.
-//! * If leader, propose container `c` for view `v`
-//!   * If can't propose container because missing notarization/nullification for a previous view, fetch it
+//! * If leader `l`, broadcast `notarize(c,v)`
+//!   * If can't propose container in view `v` because missing notarization/nullification for a
+//!     previous view `v_m`, request `v_m`
 //!
-//! Upon receiving first container `c` from `l`:
+//! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
-//! * If we have `c_parent`, have verified `c_parent`, `c_parent` is notarized (either implicitly or explicitly), and we have null notarizations
-//!   for all views between `c_parent` and `c`, then verify `c` and broadcast vote for `c`.
+//! * If the container's parent `c_parent` is notarized at `v_parent` and we have null notarizations for all views
+//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
 //!
-//! Upon receiving `2f+1` votes for `c`:
+//! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Cancel `t_a`
-//! * Broadcast `c` and notarization for `c` (even if we have not verified `c`)
-//! * Notarize `c` at height `h` (and recursively notarize its parents)
-//! * If have not broadcast null vote for view `v`, broadcast finalize for `c`
+//! * Mark `c` as notarized
+//! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
+//! * If have not broadcast `nullify(v)`, broadcast `finalize(c,v)`
 //! * Enter `v+1`
 //!
-//! Upon receiving `2f+1` null votes for `v`:
-//! * Broadcast null notarization for `v`
+//! Upon receiving `2f+1` `nullify(v)`:
+//! * Broadcast `nullification(v)`
+//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
+//!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
+//!       instead.
 //! * Enter `v+1`
-//! * If observe `>= f+1` votes for some proposal `c` in a view, fetch the non-null notarization for `c_parent` and any missing null notarizations
-//!   between `c_parent` and `c`, if `c_parent` is less than last finalized, broadcast finalization instead
 //!
-//! Upon receiving `2f+1` finalizes for `c`:
-//! * Broadcast finalization for `c` (even if we have not verified `c`)
-//! * Finalize `c` at height `h` (and recursively finalize its parents)
+//! Upon receiving `2f+1` `finalize(c,v)`:
+//! * Mark `c` as finalized (and recursively finalize its parents)
+//! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
 //!
 //! Upon `t_l` or `t_a` firing:
-//! * Broadcast null vote for view `v`
-//! * Every `t_r` after null vote that we are still in view `v`:
-//!    * For nodes that have yet to vote null, rebroadcast null vote for view `v` and notarization from `v-1`
+//! * Broadcast `nullify(v)`
+//! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
+//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
 //!
-//! _For efficiency, `c` is `hash(c)` and it is up to an external mechanism to ensure that the contents of `c` are available to all participants._
+//! ### Deviations from Simplex Consensus
 //!
-//! ## Adapting Simplex to Real-World: Syncing, Restarts, and Dropped Messages
-//!
-//! * Distinct Leader timeout (in addition to notarization timeout)
-//!     * Skip leader timeout/notarization timeout if we haven't seen a participant vote in some number of views
-//! * Don't assume that all notarizations are sent with each proposal
-//! * Backfill containers from notarizing peers rather than passing along with notarization message
-//! * Dynamic sync for new nodes (join consensus at tip right away and backfill history + new containers on-the-fly)/no dedicated
-//!   "sync" phase
-//! * Send indices of public keys rather than public keys themselves
-//! * Only multicast proposal `c` in `v` on transition to `v+1  to peers that haven't already voted for `c`
-//! * Only multicast dependent notarizations (notarization for `c_parent` and null notarizations between `c_parent` and `c`) for `v` to peers that
-//!   didn't vote for `c`
-//!
-//! # What is a good fit?
-//!
-//! * Desire fast block times (as fast as possible): No message relay through leader
-//!     * Uptime/Fault tracking (over `n` previous heights instead of waiting for some timeout after notarization for
-//!       more votes) -> means there is no wait at the end of a view to collect more votes/finalizes
-//! * Proposals are small (include references to application data rather than application data itself): Each notarization may require each party to re-broadcast the proposal
-//! * Small to medium number of validators (< 500): All messages are broadcast
-//! * Strong robustness against Byzantine leaders? (still can trigger later than desired start to verification) but can't force a fetch
-//!     * Saves at least 1 RTT (and more if first recipient doesn't have/is byzantine)
-//!     * Minimal ability to impact performance in next view (still can timeout current view)
-//!     * No requirement for consecutive honest leaders to commit
-//!
-//! # Tradeoff: Bandwidth Efficiency or Robustness
-//!
-//! * This is the difference between broadcasting a proposal to the next leader if they didn't vote for the block and waiting for them
-//!   to fetch the block themselves.
-//!
-//! # Performance Degradation
-//!
-//! * Ever-growing unfinalized tip: processing views are cached in-memory
-//!     * Particularly bad if composed of null notarizations
-//!
-//! Crazy Idea: What if there is no proposal and the vote/notarization contains all info (only ever include a hash of the proposal)? Would this undermine
-//! an application's ability to build a useful product (as wouldn't know contents of block until an arbitrary point in the future, potentially after asked to produce
-//! a new block/may also not know parent yet)?
-//! * Could leave to the builder to decide whether to wait to produce a block until they've seen finalized parent or not. Would anyone ever want not? Could also
-//!   leave constructing/disseminating the block to the builder. We agree on hashes, you can do whatever you want to get to that point?
-//! * TL;DR: Agreement isn't Dissemination -> Tension: Agreement is most reliable with all-to-all broadcast but dissemnination is definitely not most efficient that way
-//! * Verify returns as soon as get the proposal rather than immediately if don't have it. This will ensure that consensus messages that get to participant before payload
-//!   won't just immediately be dropped?
+//! * Fetch missing notarizations/nullifications as needed rather than assuming each proposal contains
+//!   a set of all notarizations/nullifications for all historical blocks.
+//! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
+//!   either a "block" or a "dummy block", respectively.
+//! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
+//! * Skip "leader timeout" and "notarization timeout" if a designated leader hasn't participated in
+//!   some number of views (again to trigger early view transition for an unresponsive leader).
+//! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
+//!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
+
+use commonware_cryptography::Digest;
 
 mod actors;
 mod config;
@@ -142,26 +123,33 @@ pub use engine::Engine;
 mod metrics;
 #[cfg(test)]
 mod mocks;
-pub mod prover;
+mod prover;
+pub use prover::Prover;
 mod verifier;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
-use commonware_cryptography::Digest;
-
+/// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
 
-/// Context is a collection of information about the context in which a container is built.
+/// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
 pub struct Context {
+    /// Current view of consensus.
     pub view: View,
+
+    /// Parent the payload is built on.
+    ///
+    /// Payloads from views between the current view and the parent view can never be
+    /// directly finalized (must exist some nullification).
     pub parent: (View, Digest),
 }
 
 use crate::Activity;
 use thiserror::Error;
 
+/// Errors that can occur during consensus.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Network closed")]
@@ -174,16 +162,21 @@ pub enum Error {
     InvalidSignature,
 }
 
-/// Vote for leader is considered a proposal and a vote.
+/// Notarize a payload at a given view.
 ///
-/// Note: it is ok to have both a vote for a proposal and the null
-/// container in the same view.
-///
-/// Note: it is ok to notarize/finalize different proposals in the same view.
+/// ## Clarifications
+/// * Vote for leader is considered a proposal and a vote.
+/// * It is ok to have both a vote for a proposal and the null
+///   container in the same view.
+/// * It is ok to notarize/finalize different proposals in the same view.
 pub const NOTARIZE: Activity = 0;
+/// Finalize a payload at a given view.
 pub const FINALIZE: Activity = 1;
+/// Notarize a payload that conflicts with a previous notarize.
 pub const CONFLICTING_NOTARIZE: Activity = 2;
+/// Finalize a payload that conflicts with a previous finalize.
 pub const CONFLICTING_FINALIZE: Activity = 3;
+/// Nullify and finalize in the same view.
 pub const NULLIFY_AND_FINALIZE: Activity = 4;
 
 #[cfg(test)]

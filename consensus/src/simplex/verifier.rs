@@ -1,6 +1,6 @@
 use super::{wire, View};
 use crate::{
-    authority::encoder::{nullify_message, proposal_message},
+    simplex::encoder::{nullify_message, proposal_message},
     Supervisor,
 };
 use commonware_cryptography::{PublicKey, Scheme};

@@ -1,6 +1,6 @@
 use super::{Config, Mailbox, Message};
 use crate::{
-    authority::{
+    simplex::{
         actors::resolver,
         encoder::{
             finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,

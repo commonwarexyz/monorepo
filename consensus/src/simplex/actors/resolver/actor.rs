@@ -3,7 +3,7 @@ use super::{
     Config,
 };
 use crate::{
-    authority::{
+    simplex::{
         actors::voter,
         encoder::{notarize_namespace, nullify_namespace},
         verifier::{verify_notarization, verify_nullification},
