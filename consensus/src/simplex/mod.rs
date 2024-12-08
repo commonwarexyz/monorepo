@@ -129,9 +129,10 @@ mod wire {
 
 use commonware_cryptography::Digest;
 
+/// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
 
-/// Context is a collection of information about the context in which a container is built.
+/// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
 pub struct Context {
     pub view: View,
@@ -141,6 +142,7 @@ pub struct Context {
 use crate::Activity;
 use thiserror::Error;
 
+/// Errors that can occur during consensus.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Network closed")]
@@ -153,16 +155,21 @@ pub enum Error {
     InvalidSignature,
 }
 
-/// Vote for leader is considered a proposal and a vote.
+/// Notarize a payload at a given view.
 ///
-/// Note: it is ok to have both a vote for a proposal and the null
-/// container in the same view.
-///
-/// Note: it is ok to notarize/finalize different proposals in the same view.
+/// ## Clarifications
+/// * Vote for leader is considered a proposal and a vote.
+/// * It is ok to have both a vote for a proposal and the null
+///   container in the same view.
+/// * It is ok to notarize/finalize different proposals in the same view.
 pub const NOTARIZE: Activity = 0;
+/// Finalize a payload at a given view.
 pub const FINALIZE: Activity = 1;
+/// Notarize a payload that conflicts with a previous notarize.
 pub const CONFLICTING_NOTARIZE: Activity = 2;
+/// Finalize a payload that conflicts with a previous finalize.
 pub const CONFLICTING_FINALIZE: Activity = 3;
+/// Nullify and finalize in the same view.
 pub const NULLIFY_AND_FINALIZE: Activity = 4;
 
 #[cfg(test)]
