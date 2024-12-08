@@ -62,8 +62,10 @@ impl<C: Scheme, H: Hasher, A: Automaton<Context = Context>, S: Supervisor<Index 
         assert!(self.nullify_retry > Duration::default());
         assert!(self.activity_timeout > 0);
         assert!(self.fetch_timeout > Duration::default());
-        // Must be > 1 to support filling unknown dependencies (may not know if notarization or nullification is needed).
-        assert!(self.max_fetch_count > 1);
+        assert!(
+            self.max_fetch_count > 0,
+            "it must be possible to fetch at least one container per request"
+        );
         assert!(self.max_fetch_size > 0);
         assert!(self.fetch_concurrent > 0);
         assert!(self.replay_concurrency > 0);
