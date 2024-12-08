@@ -29,6 +29,25 @@
 //!
 //! All reads are done in-memory. Data is flushed to a WAL.
 //!
+//! # Design
+//! ```txt
+//! +---------------+           +---------+            +++++++++++++++
+//! |               |<----------+         +----------->+             +
+//! |  Application  |           |  Voter  |            +    Peers    +
+//! |               +---------->|         |<-----------+             +
+//! +---------------+           +--+------+            +++++++++++++++
+//!                                |   ^
+//!                                |   |
+//!                                |   |
+//!                                |   |
+//!                                v   |
+//!                            +-------+----+          +++++++++++++++
+//!                            |            +--------->+             +
+//!                            |  Resolver  |          +    Peers    +
+//!                            |            |<---------+             +
+//!                            +------------+          +++++++++++++++
+//! ```
+//!
 //! # Specification for View `v`
 //!
 //! _We don't assume that messages are eventually delivered and instead tolerate arbitrary drops._
