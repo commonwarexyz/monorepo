@@ -14,8 +14,6 @@
 //!
 //! # Design
 //!
-//! ## Protocol Description
-//!
 //! ## Architecture
 //!
 //! All logic is split into two components: the `Voter` and the `Resolver` (and the user of `simplex`
@@ -62,47 +60,45 @@
 //! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
 //! on restart (especially in the case of unclean shutdown).
 //!
+//! ## Protocol Description
 //!
-//!
-//! # Specification for View `v`
-//!
-//! _We don't assume that messages are eventually delivered and instead tolerate arbitrary drops._
+//! ### Specification for View `v`
 //!
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l` and advance `t_a`
 //!     * If leader `l` has not been active (no votes) in last `r` views, set `t_l` to 0.
-//! * If leader, propose container `c` for view `v`
-//!   * If can't propose container because missing notarization/nullification for a previous view, fetch it
+//! * If leader `l`, broadcast `notarize(c,v)`
+//!   * If can't propose container in view `v` because missing notarization/nullification for a
+//!     previous view `v_m`, request `v_m`
 //!
-//! Upon receiving first container `c` from `l`:
+//! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
-//! * If we have `c_parent`, have verified `c_parent`, `c_parent` is notarized (either implicitly or explicitly), and we have null notarizations
-//!   for all views between `c_parent` and `c`, then verify `c` and broadcast vote for `c`.
+//! * If the container's parent `c_parent` is notarized at `v_parent` and we have null notarizations for all views
+//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
 //!
-//! Upon receiving `2f+1` votes for `c`:
+//! Upon receiving `2f+1` `notarize(c,v)`:
 //! * Cancel `t_a`
-//! * Broadcast `c` and notarization for `c` (even if we have not verified `c`)
-//! * Notarize `c` at height `h` (and recursively notarize its parents)
-//! * If have not broadcast null vote for view `v`, broadcast finalize for `c`
+//! * Mark `c` as notarized
+//! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
+//! * If have not broadcast `nullify(v)`, broadcast `finalize(c,v)`
 //! * Enter `v+1`
 //!
-//! Upon receiving `2f+1` null votes for `v`:
-//! * Broadcast null notarization for `v`
+//! Upon receiving `2f+1` `nullify(v)`:
+//! * Broadcast `nullification(v)`
+//!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
+//!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
+//!       instead.
 //! * Enter `v+1`
-//! * If observe `>= f+1` votes for some proposal `c` in a view, fetch the non-null notarization for `c_parent` and any missing null notarizations
-//!   between `c_parent` and `c`, if `c_parent` is less than last finalized, broadcast finalization instead
 //!
-//! Upon receiving `2f+1` finalizes for `c`:
-//! * Broadcast finalization for `c` (even if we have not verified `c`)
-//! * Finalize `c` at height `h` (and recursively finalize its parents)
+//! Upon receiving `2f+1` `finalize(c,v)`:
+//! * Mark `c` as finalized (and recursively finalize its parents)
+//! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
 //!
 //! Upon `t_l` or `t_a` firing:
-//! * Broadcast null vote for view `v`
-//! * Every `t_r` after null vote that we are still in view `v`:
-//!    * For nodes that have yet to vote null, rebroadcast null vote for view `v` and notarization from `v-1`
-//!
-//! _For efficiency, `c` is `hash(c)` and it is up to an external mechanism to ensure that the contents of `c` are available to all participants._
+//! * Broadcast `nullify(v)`
+//! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
+//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
 //!
 //! ## Adapting Simplex to Real-World: Syncing, Restarts, and Dropped Messages
 //!
@@ -116,6 +112,7 @@
 //! * Only multicast proposal `c` in `v` on transition to `v+1  to peers that haven't already voted for `c`
 //! * Only multicast dependent notarizations (notarization for `c_parent` and null notarizations between `c_parent` and `c`) for `v` to peers that
 //!   didn't vote for `c`
+//!
 //!
 //! # What is a good fit?
 //!
