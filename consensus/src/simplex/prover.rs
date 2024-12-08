@@ -1,8 +1,3 @@
-//! Prover module for the authority node.
-//!
-//! We don't use protobuf for proof encoding because we expect external parties
-//! to decode proofs in constrained environments where protobuf may not be implemented.
-
 use super::{
     encoder::{
         finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
@@ -17,6 +12,10 @@ use commonware_utils::hex;
 use std::{collections::HashSet, marker::PhantomData};
 use tracing::debug;
 
+/// Encode and decode proofs of activity.
+///
+/// We don't use protobuf for proof encoding because we expect external parties
+/// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
 pub struct Prover<C: Scheme, H: Hasher> {
     _crypto: PhantomData<C>,
@@ -28,6 +27,7 @@ pub struct Prover<C: Scheme, H: Hasher> {
 }
 
 impl<C: Scheme, H: Hasher> Prover<C, H> {
+    /// Create a new prover with the given signing `namespace`.
     pub fn new(namespace: &[u8]) -> Self {
         Self {
             _crypto: PhantomData,
@@ -39,6 +39,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         }
     }
 
+    /// Serialize a proposal proof.
     pub(crate) fn serialize_proposal(
         proposal: &wire::Proposal,
         public_key: &PublicKey,
@@ -57,6 +58,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         proof.into()
     }
 
+    /// Deserialize a proposal proof.
     fn deserialize_proposal(
         mut proof: Proof,
         check_sig: bool,
@@ -97,6 +99,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((view, parent, payload, public_key))
     }
 
+    /// Serialize an aggregation proof.
     pub(crate) fn serialize_aggregation(
         proposal: &wire::Proposal,
         signatures: Vec<(&PublicKey, &Signature)>,
@@ -122,6 +125,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         proof.into()
     }
 
+    /// Deserialize an aggregation proof.
     fn deserialize_aggregation(
         mut proof: Proof,
         max: u32,
@@ -174,6 +178,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((view, parent, payload, seen.into_iter().collect()))
     }
 
+    /// Deserialize a notarize proof.
     pub fn deserialize_notarize(
         &self,
         proof: Proof,
@@ -182,6 +187,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
+    /// Deserialize a notarization proof.
     pub fn deserialize_notarization(
         &self,
         proof: Proof,
@@ -191,6 +197,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_aggregation(proof, max, check_sigs, &self.notarize_namespace)
     }
 
+    /// Deserialize a finalize proof.
     pub fn deserialize_finalize(
         &self,
         proof: Proof,
@@ -199,6 +206,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_proposal(proof, check_sig, &self.finalize_namespace)
     }
 
+    /// Deserialize a finalization proof.
     pub fn deserialize_finalization(
         &self,
         proof: Proof,
@@ -238,7 +246,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         proof.into()
     }
 
-    pub fn deserialize_conflicting_proposal(
+    fn deserialize_conflicting_proposal(
         mut proof: Proof,
         check_sig: bool,
         namespace: &[u8],
@@ -278,6 +286,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((public_key, view))
     }
 
+    /// Serialize a conflicting notarize proof.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn serialize_conflicting_notarize(
         view: View,
@@ -301,6 +310,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         )
     }
 
+    /// Deserialize a conflicting notarization proof.
     pub fn deserialize_conflicting_notarize(
         &self,
         proof: Proof,
@@ -309,6 +319,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_conflicting_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
+    /// Serialize a conflicting finalize proof.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn serialize_conflicting_finalize(
         view: View,
@@ -332,6 +343,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         )
     }
 
+    /// Deserialize a conflicting finalization proof.
     pub fn deserialize_conflicting_finalize(
         &self,
         proof: Proof,
@@ -340,6 +352,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Self::deserialize_conflicting_proposal(proof, check_sig, &self.finalize_namespace)
     }
 
+    /// Serialize a conflicting nullify and finalize proof.
     pub(crate) fn serialize_nullify_finalize(
         view: View,
         public_key: &PublicKey,
@@ -364,6 +377,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         proof.into()
     }
 
+    /// Deserialize a conflicting nullify and finalize proof.
     pub fn deserialize_nullify_finalize(
         &self,
         mut proof: Proof,

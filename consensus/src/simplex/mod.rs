@@ -123,7 +123,8 @@ pub use engine::Engine;
 mod metrics;
 #[cfg(test)]
 mod mocks;
-pub mod prover;
+mod prover;
+pub use prover::Prover;
 mod verifier;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
