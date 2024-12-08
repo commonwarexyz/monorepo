@@ -26,9 +26,8 @@ pub trait Automaton: Clone + Send + 'static {
     /// Generate a new payload for the given context.
     ///
     /// If it is possible to generate a payload, the Digest should be returned over the provided
-    /// channel. If it is not possible to generate a payload, the channel can be dropped.
-    ///
-    /// If construction takes too long, the consensus engine may drop the provided proposal.
+    /// channel. If it is not possible to generate a payload, the channel can be dropped. If construction
+    /// takes too long, the consensus engine may drop the provided proposal.
     fn propose(
         &mut self,
         context: Self::Context,
@@ -63,54 +62,48 @@ pub type Proof = Bytes;
 
 /// Committer is the interface responsible for handling notifications of payload status.
 pub trait Committer: Clone + Send + 'static {
-    /// Event that the container has been prepared (indicating some progress towards finalization
-    /// but not guaranteeing it will occur).
+    /// Event that a payload has made some progress towards finalization but is not yet finalized.
     ///
-    /// No guarantee will send prepared event for all heights.
+    /// This is often used to provide an early ("best guess") confirmation to users.
     fn prepared(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
 
-    /// Event that the container has been finalized.
+    /// Event indicating the container has been finalized.
     fn finalized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
 }
 
-/// Faults are specified by the underlying primitive and can be interpreted if desired (not
-/// interpreting just means all faults would be treated equally).
+/// Activity is specified by the underlying consensus implementation and can be interpreted if desired.
 ///
-/// Various consensus implementations may want to reward participation in different ways. For example,
+/// Examples of activity would be "vote", "finalize", or "fault". Various consensus implementations may
+/// want to reward (or penalize) participation in different ways and in different places. For example,
 /// validators could be required to send multiple types of messages (i.e. vote and finalize) and rewarding
 /// both equally may better align incentives with desired behavior.
 pub type Activity = u8;
 
-// TODO: should supervisor be managed by consensus? Other than PoA, the consensus usually keeps track of (and updates)
-// who is participating, not some external service. If we did this, we could also remove clone from Application?
-//
-// Rationale not to: application needs to interpret the "reporting" of activity in some way to determine uptime/penalties
-// and it isn't clear how this could be sent back to the consensus application?
+/// Supervisor is the interface responsible for managing which participants are active at a given time.
 pub trait Supervisor: Clone + Send + 'static {
+    /// Index is the type used to indicate the in-progress consensus decision.
     type Index;
+
+    /// Seed is a consensus artifact to use as randomness for leader selection.
     type Seed;
 
-    /// Get the leader at a given index for the provided seed (sourced from consensus).
+    /// Return the leader at a given index for the provided seed.
     fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
 
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.
     ///
     /// It is up to the developer to ensure changes to this list are synchronized across nodes in the network
-    /// at a given view. If care is not taken to do this, the chain could fork/halt. If using an underlying
+    /// at a given `Index`. If care is not taken to do this, the chain could fork/halt. If using an underlying
     /// consensus implementation that does not require finalization of a height before producing a container
     /// at the next height (asynchronous finalization), a synchrony bound should be enforced around
     /// changes to the set (i.e. participant joining in view 10 should only become active in view 20, where
     /// we assume all other participants have finalized view 10).
     fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
 
-    // Indicate whether a PublicKey is a participant at the given view.
+    // Indicate whether some candidate is a participant at the given view.
     fn is_participant(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
 
-    /// Report a contribution to the application that can be externally proven.
-    ///
-    /// To get more information about the contribution, the proof can be decoded.
-    ///
-    /// The consensus instance may report a duplicate contribution.
+    /// Report some activity observed by the consensus implementation.
     fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
 }
