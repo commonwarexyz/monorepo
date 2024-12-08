@@ -112,6 +112,8 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
+use commonware_cryptography::Digest;
+
 mod actors;
 mod config;
 pub use config::Config;
@@ -126,8 +128,6 @@ mod verifier;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
-
-use commonware_cryptography::Digest;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
