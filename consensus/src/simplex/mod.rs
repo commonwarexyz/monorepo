@@ -2416,8 +2416,8 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let engine: mocks::nuller::Nuller<_, _, Sha256, _> =
-                        mocks::nuller::Nuller::new(runtime.clone(), cfg);
+                    let engine: mocks::nuller::Nuller<_, Sha256, _> =
+                        mocks::nuller::Nuller::new(cfg);
                     runtime.spawn("byzantine_engine", async move {
                         engine
                             .run(
@@ -2516,7 +2516,6 @@ mod tests {
             // Check supervisors for correct activity
             let byz = &validators[0];
             let mut count_nullify_and_finalize = 0;
-            let mut count_conflicting_notarize = 0;
             for supervisor in supervisors.iter() {
                 // Ensure only faults for byz
                 {
@@ -2529,9 +2528,6 @@ mod tests {
                                 NULLIFY_AND_FINALIZE => {
                                     count_nullify_and_finalize += 1;
                                 }
-                                CONFLICTING_NOTARIZE => {
-                                    count_conflicting_notarize += 1;
-                                }
                                 _ => panic!("unexpected fault: {:?}", fault),
                             }
                         }
@@ -2539,7 +2535,6 @@ mod tests {
                 }
             }
             assert!(count_nullify_and_finalize > 0);
-            assert!(count_conflicting_notarize > 0);
         });
     }
 }

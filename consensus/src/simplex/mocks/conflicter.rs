@@ -1,3 +1,5 @@
+//! Byzantine participant that sends conflicting notarize/finalize messages.
+
 use crate::{
     simplex::{
         encoder::{finalize_namespace, notarize_namespace, proposal_message},
