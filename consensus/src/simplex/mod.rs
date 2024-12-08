@@ -1,37 +1,31 @@
-//! Simple and fast agreement inspired by Simplex Consensus.
+//! Simple and fast BFT agreement inspired by Simplex Consensus.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides
-//! a simple and fast agreement protocol that strives to provide both best-in-class view latency
-//! (i.e. block time) and finalization latency. To achieve this, `simplex` rotates views prior
-//! to finalization and employs multicast for all messages.
+//! simple and fast BFT agreement that seeks to minimize view latency (i.e. block time)
+//! and to provide optimal finalization latency in a partially synchronous setting.
 //!
 //! # Features
 //!
-//! # Externalizable Uptime and Faults
-//!
-//! Instead of handling uptime and fault tracking internally, the application is notified of all
-//! activity and can incorportate such information as needed (into the payload or otherwise).
-//!
-//! # Sync
-//!
-//! Wait for container notarization at tip (2f+1), fetch heights backwards (don't
-//! need to backfill views).
-//!
-//! # Async Handling
-//!
-//! All application interaction occurs asynchronously, meaning that the engine can continue processing messages
-//! while a payload is being built or verified (usually takes hundreds of milliseconds).
-//!
-//! # Dedicated Processing for Consensus Messages
-//!
-//! All peer interaction related to consensus is strictly prioritized over any other messages (i.e. helping new
-//! peers sync to the network).
-//!
-//! # No Disk Reads During Consensus Handling
-//!
-//! All reads are done in-memory. Data is flushed to a WAL.
+//! * Wicked Fast Block Times (2 Network Hops)
+//! * Optimal Finalization Latency (3 Network Hops)
+//! * Externalized Uptime and Fault Proofs
+//! * Decoupled Block Broadcast and Sync
+//! * Flexible Block Format
 //!
 //! # Design
+//!
+//! ## Protocol Description
+//!
+//! ## Architecture
+//!
+//! All logic is split into two components: the `Voter` and the `Resolver` (and the user of `simplex`
+//! provides `Application`). The `Voter` is responsible for participating in the latest view and the
+//! `Resolver` is responsible for fetching artifacts from previous views required to verify proposed
+//! blocks in the latest view.
+//!
+//! To provide great performance, all interactions between `Voter`, `Resolver`, and `Application` are
+//! non-blocking. This means that, for example, the `Voter` can continue processing messages while the
+//! `Application` verifies a proposed block or the `Resolver` verifies a notarization.
 //!
 //! ```txt
 //! +---------------+           +---------+            +++++++++++++++
@@ -50,6 +44,25 @@
 //!                            |            |<---------+             +
 //!                            +------------+          +++++++++++++++
 //! ```
+//!
+//! _Application is usually a single object that implements the `Automaton`, `Relay`, `Committer`,
+//! and `Supervisor` traits._
+//!
+//! ## Joining Consensus
+//!
+//! As soon as `2f+1` votes or finalizes are observed for some view `v`, the `Voter` will enter `v+1`.
+//! This means that a new participant joining consensus will immediately jump ahead to the latest view
+//! and begin participating in consensus (assuming it can verify blocks).
+//!
+//! ## Persistence
+//!
+//! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
+//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
+//! consensus and messages it generates to a write-ahead log (WAL) implemented by [`Journal`](https://docs.rs/commonware-storage/latest/commonware_storage/journal/index.html).
+//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
+//! on restart (especially in the case of unclean shutdown).
+//!
+//!
 //!
 //! # Specification for View `v`
 //!
