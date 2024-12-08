@@ -1,5 +1,7 @@
-//! Authority
+//! Optimistically responsive Proof-of-Authority (PoA) consensus implementation.
 //!
+//! `Authority` is an implementation of optimistically responsive consensus designed to work
+//! with
 //! PoA Consensus useful for running a DKG (round-robin leader selection, update participants with config).
 //!
 //! All decisions made to minimize container time and finalization latency without sacrificing
