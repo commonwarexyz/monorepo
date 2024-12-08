@@ -12,7 +12,7 @@ use crate::{
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Automaton, Finalizer, Relay, Supervisor,
+    Automaton, Committer, Relay, Supervisor,
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
@@ -416,13 +416,17 @@ pub struct Actor<
     E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
     H: Hasher,
-    A: Automaton<Context = Context> + Relay + Finalizer,
+    A: Automaton<Context = Context>,
+    R: Relay,
+    F: Committer,
     S: Supervisor<Index = View>,
 > {
     runtime: E,
     crypto: C,
     hasher: H,
-    application: A,
+    automaton: A,
+    relay: R,
+    committer: F,
     supervisor: S,
 
     replay_concurrency: usize,
@@ -456,11 +460,17 @@ impl<
         E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context> + Relay + Finalizer,
+        A: Automaton<Context = Context>,
+        R: Relay,
+        F: Committer,
         S: Supervisor<Seed = (), Index = View>,
-    > Actor<B, E, C, H, A, S>
+    > Actor<B, E, C, H, A, R, F, S>
 {
-    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
+    pub fn new(
+        runtime: E,
+        journal: Journal<B, E>,
+        cfg: Config<C, H, A, R, F, S>,
+    ) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -495,7 +505,9 @@ impl<
                 runtime,
                 crypto: cfg.crypto,
                 hasher: cfg.hasher,
-                application: cfg.application,
+                automaton: cfg.automaton,
+                relay: cfg.relay,
+                committer: cfg.committer,
                 supervisor: cfg.supervisor,
 
                 replay_concurrency: cfg.replay_concurrency,
@@ -656,7 +668,7 @@ impl<
             view: self.view,
             parent: (parent_view, parent_payload),
         };
-        Some((context.clone(), self.application.propose(context).await))
+        Some((context.clone(), self.automaton.propose(context).await))
     }
 
     fn timeout_deadline(&mut self) -> SystemTime {
@@ -950,7 +962,7 @@ impl<
         round.proposal = proposal;
         Some((
             context.clone(),
-            self.application.verify(context, payload.clone()).await,
+            self.automaton.verify(context, payload.clone()).await,
         ))
     }
 
@@ -1672,8 +1684,8 @@ impl<
                 signatures.push((public_key, &signature.signature));
             }
             let proof = Prover::<C, H>::serialize_aggregation(proposal, signatures);
-            self.application
-                .notarized(
+            self.committer
+                .prepared(
                     proof,
                     notarization.proposal.as_ref().unwrap().payload.clone(),
                 )
@@ -1827,7 +1839,7 @@ impl<
                 signatures.push((public_key, &signature.signature));
             }
             let proof = Prover::<C, H>::serialize_aggregation(proposal, signatures);
-            self.application
+            self.committer
                 .finalized(
                     proof,
                     finalization.proposal.as_ref().unwrap().payload.clone(),
@@ -1854,7 +1866,7 @@ impl<
         mut receiver: impl Receiver,
     ) {
         // Compute genesis
-        let genesis = self.application.genesis().await;
+        let genesis = self.automaton.genesis().await;
         self.genesis = Some(genesis);
 
         // Add initial view
@@ -2049,7 +2061,7 @@ impl<
                     view = self.view;
 
                     // Notify application of proposal
-                    self.application.broadcast(proposed).await;
+                    self.relay.broadcast(proposed).await;
                 },
                 verified = verify_wait => {
                     // Clear verify waiter

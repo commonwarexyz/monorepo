@@ -3,7 +3,7 @@ use super::{
     config::Config,
     Context, View,
 };
-use crate::{Automaton, Finalizer, Relay, Supervisor};
+use crate::{Automaton, Committer, Relay, Supervisor};
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -18,12 +18,14 @@ pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
     H: Hasher,
-    A: Automaton<Context = Context> + Relay + Finalizer,
+    A: Automaton<Context = Context>,
+    R: Relay,
+    F: Committer,
     S: Supervisor<Seed = (), Index = View>,
 > {
     runtime: E,
 
-    voter: voter::Actor<B, E, C, H, A, S>,
+    voter: voter::Actor<B, E, C, H, A, R, F, S>,
     voter_mailbox: voter::Mailbox,
     backfiller: resolver::Actor<E, C, H, S>,
     backfiller_mailbox: resolver::Mailbox,
@@ -34,11 +36,13 @@ impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context> + Relay + Finalizer,
+        A: Automaton<Context = Context>,
+        R: Relay,
+        F: Committer,
         S: Supervisor<Seed = (), Index = View>,
-    > Engine<B, E, C, H, A, S>
+    > Engine<B, E, C, H, A, R, F, S>
 {
-    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, S>) -> Self {
+    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -49,7 +53,9 @@ impl<
             voter::Config {
                 crypto: cfg.crypto.clone(),
                 hasher: cfg.hasher,
-                application: cfg.application,
+                automaton: cfg.automaton,
+                relay: cfg.relay,
+                committer: cfg.committer,
                 supervisor: cfg.supervisor.clone(),
                 registry: cfg.registry.clone(),
                 mailbox_size: cfg.mailbox_size,

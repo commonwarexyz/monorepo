@@ -80,11 +80,12 @@ pub trait Relay: Clone + Send + 'static {
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
-pub trait Finalizer: Clone + Send + 'static {
-    /// Event that the container has been notarized (seen by `2f+1` participants).
+pub trait Committer: Clone + Send + 'static {
+    /// Event that the container has been prepared (indicating some progress towards finalization
+    /// but not guaranteeing it will occur).
     ///
-    /// No guarantee will send notarized event for all heights.
-    fn notarized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
+    /// No guarantee will send prepared event for all heights.
+    fn prepared(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
 
     /// Event that the container has been finalized.
     fn finalized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;

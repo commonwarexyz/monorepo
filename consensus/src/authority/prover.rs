@@ -11,7 +11,7 @@ use super::{
     wire, View,
 };
 use crate::Proof;
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, BufMut};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme, Signature};
 use commonware_utils::hex;
 use std::{collections::HashSet, marker::PhantomData};
@@ -28,14 +28,14 @@ pub struct Prover<C: Scheme, H: Hasher> {
 }
 
 impl<C: Scheme, H: Hasher> Prover<C, H> {
-    pub fn new(namespace: Bytes) -> Self {
+    pub fn new(namespace: &[u8]) -> Self {
         Self {
             _crypto: PhantomData,
             _hasher: PhantomData,
 
-            notarize_namespace: notarize_namespace(&namespace),
-            nullify_namespace: nullify_namespace(&namespace),
-            finalize_namespace: finalize_namespace(&namespace),
+            notarize_namespace: notarize_namespace(namespace),
+            nullify_namespace: nullify_namespace(namespace),
+            finalize_namespace: finalize_namespace(namespace),
         }
     }
 
