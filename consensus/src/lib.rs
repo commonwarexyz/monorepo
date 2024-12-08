@@ -93,12 +93,14 @@ pub trait Supervisor: Clone + Send + 'static {
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.
     ///
-    /// It is up to the developer to ensure changes to this list are synchronized across nodes in the network
-    /// at a given `Index`. If care is not taken to do this, the chain could fork/halt. If using an underlying
-    /// consensus implementation that does not require finalization of a height before producing a container
-    /// at the next height (asynchronous finalization), a synchrony bound should be enforced around
-    /// changes to the set (i.e. participant joining in view 10 should only become active in view 20, where
-    /// we assume all other participants have finalized view 10).
+    /// It is up to the user to ensure changes in this list are synchronized across nodes in the network
+    /// at a given `Index`. If care is not taken to do this, consensus could halt (as different participants
+    /// may have a different view of who is active at a given time). The simplest way to avoid this complexity
+    /// is to use a consensus implementation that reaches finalization on application data before transitioning
+    /// to a new `Index` (i.e. [Tendermint](https://arxiv.org/abs/1807.04938)). Implementations that do not work
+    /// this way (like `simplex`) must introduce some synchrony bound for changes (where it is assumed all participants
+    /// have finalized some previous set change by some point) or "sync points" (i.e. epochs) where participants
+    /// agree that some finalization occurred at some point in the past.
     fn participants(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
 
     // Indicate whether some candidate is a participant at the given view.
