@@ -189,7 +189,6 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network};
@@ -221,7 +220,7 @@ mod tests {
         let max_exceptions = 4;
         let required_containers = 100;
         let activity_timeout = 10;
-        let namespace = Bytes::from("consensus");
+        let namespace = b"consensus".to_vec();
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
@@ -250,7 +249,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(namespace.clone());
+            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -318,7 +317,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher: hasher.clone(),
-                    application,
+                    automaton: application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
@@ -453,7 +452,7 @@ mod tests {
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
-        let namespace = Bytes::from("consensus");
+        let namespace = b"consensus".to_vec();
 
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
@@ -496,7 +495,7 @@ mod tests {
 
                 // Create engines
                 let hasher = Sha256::default();
-                let prover = Prover::new(namespace.clone());
+                let prover = Prover::new(&namespace);
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -564,7 +563,7 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         hasher: hasher.clone(),
-                        application,
+                        automaton: application,
                         supervisor,
                         registry: Arc::new(Mutex::new(Registry::default())),
                         mailbox_size: 1024,
@@ -686,7 +685,7 @@ mod tests {
         let n = 4;
         let required_containers = 100;
         let activity_timeout = 10;
-        let namespace = Bytes::from("consensus");
+        let namespace = b"consensus".to_vec();
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
             // Create simulated network
@@ -715,7 +714,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(namespace.clone());
+            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -791,7 +790,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     hasher: hasher.clone(),
-                    application,
+                    automaton: application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
@@ -971,7 +970,7 @@ mod tests {
             let cfg = config::Config {
                 crypto: scheme,
                 hasher: hasher.clone(),
-                application,
+                automaton: application,
                 supervisor,
                 registry: Arc::new(Mutex::new(Registry::default())),
                 mailbox_size: 1024,
@@ -1036,7 +1035,7 @@ mod tests {
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
-        let namespace = Bytes::from("consensus");
+        let namespace = b"consensus".to_vec();
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
@@ -1065,7 +1064,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(namespace.clone());
+            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1141,7 +1140,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher: hasher.clone(),
-                    application,
+                    automaton: application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
@@ -1240,7 +1239,7 @@ mod tests {
         let n = 5;
         let required_containers = 50;
         let activity_timeout = 10;
-        let namespace = Bytes::from("consensus");
+        let namespace = b"consensus".to_vec();
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
@@ -1269,7 +1268,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(namespace.clone());
+            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1348,7 +1347,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher: hasher.clone(),
-                    application,
+                    automaton: application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
@@ -1447,7 +1446,7 @@ mod tests {
         let n = 5;
         let required_containers = 100;
         let activity_timeout = 10;
-        let namespace = Bytes::from("consensus");
+        let namespace = b"consensus".to_vec();
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(120));
         executor.start(async move {
             // Create simulated network
@@ -1476,7 +1475,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(namespace.clone());
+            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1544,7 +1543,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     hasher: hasher.clone(),
-                    application,
+                    automaton: application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
@@ -1650,7 +1649,7 @@ mod tests {
         let n = 10;
         let required_containers = 50;
         let activity_timeout = 10;
-        let namespace = Bytes::from("consensus");
+        let namespace = b"consensus".to_vec();
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(900));
         executor.start(async move {
             // Create simulated network
@@ -1679,7 +1678,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(namespace.clone());
+            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1747,7 +1746,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme.clone(),
                     hasher: hasher.clone(),
-                    application,
+                    automaton: application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
@@ -1917,7 +1916,7 @@ mod tests {
         let n = 5;
         let required_containers = 50;
         let activity_timeout = 10;
-        let namespace = Bytes::from("consensus");
+        let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config {
             seed,
             timeout: Some(Duration::from_secs(3_000)),
@@ -1951,7 +1950,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(namespace.clone());
+            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2019,7 +2018,7 @@ mod tests {
                 let cfg = config::Config {
                     crypto: scheme,
                     hasher: hasher.clone(),
-                    application,
+                    automaton: application,
                     supervisor,
                     registry: Arc::new(Mutex::new(Registry::default())),
                     mailbox_size: 1024,
@@ -2117,7 +2116,7 @@ mod tests {
         let n = 4;
         let required_containers = 50;
         let activity_timeout = 10;
-        let namespace = Bytes::from("consensus");
+        let namespace = b"consensus".to_vec();
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
@@ -2146,7 +2145,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(namespace.clone());
+            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2230,7 +2229,7 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         hasher: hasher.clone(),
-                        application,
+                        automaton: application,
                         supervisor,
                         registry: Arc::new(Mutex::new(Registry::default())),
                         mailbox_size: 1024,
@@ -2326,7 +2325,7 @@ mod tests {
         let n = 4;
         let required_containers = 50;
         let activity_timeout = 10;
-        let namespace = Bytes::from("consensus");
+        let namespace = b"consensus".to_vec();
         let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
@@ -2355,7 +2354,7 @@ mod tests {
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(namespace.clone());
+            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2439,7 +2438,7 @@ mod tests {
                     let cfg = config::Config {
                         crypto: scheme,
                         hasher: hasher.clone(),
-                        application,
+                        automaton: application,
                         supervisor,
                         registry: Arc::new(Mutex::new(Registry::default())),
                         mailbox_size: 1024,

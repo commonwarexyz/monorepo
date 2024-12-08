@@ -19,14 +19,14 @@ pub fn nullify_message(nullify: View) -> Bytes {
     nullify.to_be_bytes().to_vec().into()
 }
 
-pub fn notarize_namespace(namespace: &Bytes) -> Vec<u8> {
+pub fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NOTARIZE_SUFFIX)
 }
 
-pub fn nullify_namespace(namespace: &Bytes) -> Vec<u8> {
+pub fn nullify_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, NULLIFY_SUFFIX)
 }
 
-pub fn finalize_namespace(namespace: &Bytes) -> Vec<u8> {
+pub fn finalize_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, FINALIZE_SUFFIX)
 }

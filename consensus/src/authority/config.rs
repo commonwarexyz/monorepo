@@ -1,6 +1,5 @@
 use super::{Context, View};
-use crate::{Automaton, Supervisor};
-use bytes::Bytes;
+use crate::{Automaton, Committer, Relay, Supervisor};
 use commonware_cryptography::{Hasher, Scheme};
 use governor::Quota;
 use prometheus_client::registry::Registry;
@@ -9,25 +8,53 @@ use std::{
     time::Duration,
 };
 
+/// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
     H: Hasher,
     A: Automaton<Context = Context>,
-    S: Supervisor<Index = View>,
+    R: Relay,
+    F: Committer,
+    S: Supervisor<Seed = (), Index = View>,
 > {
+    /// Cryptographic primitives.
     pub crypto: C,
+
+    /// Hashing algorithm.
     pub hasher: H,
-    pub application: A,
+
+    /// Automaton for the consensus engine.
+    pub automaton: A,
+
+    /// Relay for the consensus engine.
+    pub relay: R,
+
+    /// Committer for the consensus engine.
+    pub committer: F,
+
+    /// Supervisor for the consensus engine.
     pub supervisor: S,
 
+    /// Prometheus metrics registry.
     pub registry: Arc<Mutex<Registry>>,
 
+    /// Maximum number of messages to buffer on channels inside the consensus
+    /// engine before blocking.
     pub mailbox_size: usize,
 
-    pub namespace: Bytes,
+    /// Prefix for all signed messages to prevent replay attacks.
+    pub namespace: Vec<u8>,
 
+    /// Amount of time to wait for a leader to propose a payload
+    /// in a view.
     pub leader_timeout: Duration,
+
+    /// Amount of time to wait for a quorum of notarizations in a view
+    /// before attempting to skip the view.
     pub notarization_timeout: Duration,
+
+    /// Amount of time to wait before retrying a nullify broadcast if
+    /// stuck in a view.
     pub nullify_retry: Duration,
 
     /// Number of views behind finalized tip to track
@@ -49,11 +76,18 @@ pub struct Config<
     /// Number of concurrent fetch requests to make.
     pub fetch_concurrent: usize,
 
+    /// Number of views to replay concurrently during startup.
     pub replay_concurrency: usize,
 }
 
-impl<C: Scheme, H: Hasher, A: Automaton<Context = Context>, S: Supervisor<Index = View>>
-    Config<C, H, A, S>
+impl<
+        C: Scheme,
+        H: Hasher,
+        A: Automaton<Context = Context>,
+        R: Relay,
+        F: Committer,
+        S: Supervisor<Seed = (), Index = View>,
+    > Config<C, H, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

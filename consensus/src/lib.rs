@@ -80,7 +80,7 @@ pub trait Relay: Clone + Send + 'static {
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
-pub trait Finalizer: Clone + Send + 'static {
+pub trait Committer: Clone + Send + 'static {
     /// Event that the container has been notarized (seen by `2f+1` participants).
     ///
     /// No guarantee will send notarized event for all heights.

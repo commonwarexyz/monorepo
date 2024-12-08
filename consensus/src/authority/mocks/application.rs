@@ -1,5 +1,5 @@
 use super::relay::Relay;
-use crate::{authority::Context, Automaton as Au, Finalizer as Fi, Proof, Relay as Re};
+use crate::{authority::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
 use commonware_macros::select;
@@ -98,7 +98,7 @@ impl Re for Mailbox {
     }
 }
 
-impl Fi for Mailbox {
+impl Co for Mailbox {
     async fn notarized(&mut self, proof: Proof, payload: Digest) {
         self.sender
             .send(Message::Notarized { proof, payload })

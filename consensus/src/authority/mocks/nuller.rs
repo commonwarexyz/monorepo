@@ -8,7 +8,6 @@ use crate::{
     },
     Supervisor,
 };
-use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
@@ -21,7 +20,7 @@ use tracing::debug;
 pub struct Config<C: Scheme, S: Supervisor<Index = View>> {
     pub crypto: C,
     pub supervisor: S,
-    pub namespace: Bytes,
+    pub namespace: Vec<u8>,
 }
 
 pub struct Nuller<
