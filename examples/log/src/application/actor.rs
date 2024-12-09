@@ -21,16 +21,16 @@ pub struct Application<R: Rng, C: Scheme, H: Hasher> {
 }
 
 impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
-    pub fn new(runtime: R, config: Config<C, H>) -> (Self, Supervisor<C, H>, Mailbox) {
+    pub fn new(runtime: R, config: Config<C, H>) -> (Self, Supervisor, Mailbox) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
                 runtime,
-                prover: config.prover.clone(),
+                prover: config.prover,
                 hasher: config.hasher,
                 mailbox,
             },
-            Supervisor::new(config.prover, config.participants),
+            Supervisor::new(config.participants),
             Mailbox::new(sender),
         )
     }

@@ -1,22 +1,15 @@
-use commonware_consensus::{
-    simplex::{Prover, View, FINALIZE, NOTARIZE},
-    Activity, Proof, Supervisor as Su,
-};
-use commonware_cryptography::{Hasher, PublicKey, Scheme};
-use commonware_utils::hex;
+use commonware_consensus::{simplex::View, Activity, Proof, Supervisor as Su};
+use commonware_cryptography::PublicKey;
 use std::collections::HashMap;
-use tracing::debug;
 
 #[derive(Clone)]
-pub struct Supervisor<C: Scheme, H: Hasher> {
-    prover: Prover<C, H>,
-
+pub struct Supervisor {
     participants: Vec<PublicKey>,
     participants_map: HashMap<PublicKey, u32>,
 }
 
-impl<C: Scheme, H: Hasher> Supervisor<C, H> {
-    pub fn new(prover: Prover<C, H>, mut participants: Vec<PublicKey>) -> Self {
+impl Supervisor {
+    pub fn new(mut participants: Vec<PublicKey>) -> Self {
         // Setup participants
         participants.sort();
         let mut participants_map = HashMap::new();
@@ -26,15 +19,13 @@ impl<C: Scheme, H: Hasher> Supervisor<C, H> {
 
         // Return supervisor
         Self {
-            prover,
-
             participants,
             participants_map,
         }
     }
 }
 
-impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
+impl Su for Supervisor {
     type Index = View;
     type Seed = ();
 
@@ -50,31 +41,8 @@ impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
         self.participants_map.get(candidate).cloned()
     }
 
-    async fn report(&self, activity: Activity, proof: Proof) {
-        match activity {
-            NOTARIZE => {
-                let (view, _, payload, public_key) =
-                    self.prover.deserialize_notarize(proof, false).unwrap();
-                debug!(
-                    view,
-                    sender = hex(&public_key),
-                    payload = hex(&payload),
-                    "received notarize"
-                );
-            }
-            FINALIZE => {
-                let (view, _, payload, public_key) =
-                    self.prover.deserialize_finalize(proof, false).unwrap();
-                debug!(
-                    view,
-                    sender = hex(&public_key),
-                    payload = hex(&payload),
-                    "received finalize"
-                );
-            }
-            unexpected => {
-                panic!("unexpected activity: {}", unexpected);
-            }
-        }
+    async fn report(&self, _: Activity, _: Proof) {
+        // We don't report activity in this example but you would otherwise use
+        // this to collect uptime and fraud proofs.
     }
 }
