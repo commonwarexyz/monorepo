@@ -12,16 +12,11 @@ pub enum Message {
         response: oneshot::Sender<Digest>,
     },
     Propose {
-        context: Context,
         response: oneshot::Sender<Digest>,
     },
     Verify {
-        context: Context,
         payload: Digest,
         response: oneshot::Sender<bool>,
-    },
-    Broadcast {
-        payload: Digest,
     },
     Prepared {
         proof: Proof,
@@ -57,23 +52,23 @@ impl Au for Mailbox {
         receiver.await.expect("Failed to receive genesis")
     }
 
-    async fn propose(&mut self, context: Context) -> oneshot::Receiver<Digest> {
+    async fn propose(&mut self, _: Context) -> oneshot::Receiver<Digest> {
+        // If we linked payloads to their parent, we would include
+        // the parent in the `Context` in the payload.
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Propose { context, response })
+            .send(Message::Propose { response })
             .await
             .expect("Failed to send propose");
         receiver
     }
 
-    async fn verify(&mut self, context: Context, payload: Digest) -> oneshot::Receiver<bool> {
+    async fn verify(&mut self, _: Context, payload: Digest) -> oneshot::Receiver<bool> {
+        // If we linked payloads to their parent, we would verify
+        // the parent included in the payload matches the provided `Context`.
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Verify {
-                context,
-                payload,
-                response,
-            })
+            .send(Message::Verify { payload, response })
             .await
             .expect("Failed to send verify");
         receiver
@@ -81,11 +76,11 @@ impl Au for Mailbox {
 }
 
 impl Re for Mailbox {
-    async fn broadcast(&mut self, payload: Digest) {
-        self.sender
-            .send(Message::Broadcast { payload })
-            .await
-            .expect("Failed to send broadcast");
+    async fn broadcast(&mut self, _: Digest) {
+        // We don't broadcast our raw messages to other peers.
+        //
+        // If we were building an EVM blockchain, for example, we'd
+        // send the block to other peers here.
     }
 }
 

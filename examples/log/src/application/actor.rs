@@ -53,10 +53,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                     let digest = self.hasher.finalize();
                     let _ = response.send(digest);
                 }
-                Message::Propose {
-                    context: _,
-                    response,
-                } => {
+                Message::Propose { response } => {
                     // Generate a random message (secret to us)
                     let mut msg = vec![0; 16];
                     self.runtime.fill(&mut msg[..]);
@@ -69,21 +66,11 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                     // Send digest to consensus
                     let _ = response.send(digest);
                 }
-                Message::Verify {
-                    context: _,
-                    payload,
-                    response,
-                } => {
+                Message::Verify { payload, response } => {
                     // If we linked payloads to their parent, we would verify
                     // the parent included in the payload matches the provided context.
                     let valid = H::validate(&payload);
                     let _ = response.send(valid);
-                }
-                Message::Broadcast { payload: _ } => {
-                    // We don't broadcast our raw messages to other peers.
-                    //
-                    // If we were building an EVM blockchain, for example, we'd
-                    // send the block to other peers here.
                 }
                 Message::Prepared { proof, payload } => {
                     let (view, _, _, _) = self
