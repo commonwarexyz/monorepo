@@ -70,32 +70,58 @@ impl std::io::Write for Writer {
         let json_str = String::from_utf8_lossy(buf);
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
-        // Create log message
+        // Create message
         let level = json["level"].as_str().unwrap();
         let timestamp = json["timestamp"].as_str().unwrap();
         let target = json["target"].as_str().unwrap();
         let msg = json["fields"]["message"].as_str().unwrap();
-        let mut log_message = format!(
-            "[{}|{}] {} => {} (",
-            chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.6fZ")
-                .unwrap()
-                .format("%m/%d %H:%M:%S"),
-            level,
-            target,
-            msg,
-        );
+        match target.contains("commonware_log::application") {
+            true => {
+                let mut progress_message = format!(
+                    "[{}|{}] => {} (",
+                    chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.6fZ")
+                        .unwrap()
+                        .format("%m/%d %H:%M:%S"),
+                    level,
+                    msg,
+                );
 
-        // Add remaining fields
-        Self::add_to_log_message("", &json, &mut log_message);
-        let log_message = format!("{})", log_message.trim_end());
+                // Add remaining fields
+                Self::add_to_log_message("", &json, &mut progress_message);
+                let progress_message = format!("{})", progress_message.trim_end());
 
-        // Cleanup empty logs
-        let log_message = log_message.replace("()", "");
+                // Cleanup empty logs
+                let progress_message = progress_message.replace("()", "");
 
-        // Append log message
-        let mut logs = self.logs.lock().unwrap();
-        logs.push(log_message.trim_end().to_string());
-        Ok(buf.len())
+                // Append progress message
+                let mut progress = self.progress.lock().unwrap();
+                progress.push(progress_message.to_string());
+                Ok(buf.len())
+            }
+            false => {
+                let mut log_message = format!(
+                    "[{}|{}] {} => {} (",
+                    chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.6fZ")
+                        .unwrap()
+                        .format("%m/%d %H:%M:%S"),
+                    level,
+                    target,
+                    msg,
+                );
+
+                // Add remaining fields
+                Self::add_to_log_message("", &json, &mut log_message);
+                let log_message = format!("{})", log_message.trim_end());
+
+                // Cleanup empty logs
+                let log_message = log_message.replace("()", "");
+
+                // Append log message
+                let mut logs = self.logs.lock().unwrap();
+                logs.push(log_message.trim_end().to_string());
+                Ok(buf.len())
+            }
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

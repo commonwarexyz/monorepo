@@ -7,11 +7,11 @@ use super::{
 };
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_utils::hex;
-use futures::{channel::mpsc, SinkExt, StreamExt};
+use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
 use tracing::debug;
 
-const GENESIS: &[u8] = b"genesis";
+const GENESIS: &[u8] = b"commonware is neat";
 
 pub struct Application<R: Rng, C: Scheme, H: Hasher> {
     runtime: R,
@@ -29,6 +29,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                 runtime,
                 hasher: config.hasher,
                 mailbox,
+
                 _phantom_crypto: PhantomData,
             },
             Supervisor::new(config.prover, config.participants),
