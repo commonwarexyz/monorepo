@@ -25,7 +25,7 @@ pub enum Message {
     Broadcast {
         payload: Digest,
     },
-    Notarized {
+    Prepared {
         proof: Proof,
         payload: Digest,
     },
@@ -93,7 +93,7 @@ impl Re for Mailbox {
 impl Co for Mailbox {
     async fn prepared(&mut self, proof: Proof, payload: Digest) {
         self.sender
-            .send(Message::Notarized { proof, payload })
+            .send(Message::Prepared { proof, payload })
             .await
             .expect("Failed to send notarized");
     }
