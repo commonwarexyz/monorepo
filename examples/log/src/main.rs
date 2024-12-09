@@ -6,6 +6,7 @@
 //!   of 10 messages per peer per second on the voter channel.
 
 mod application;
+mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex::{self, Engine, Prover};
@@ -31,7 +32,7 @@ const NAMESPACE: &[u8] = b"_COMMONWARE_LOG";
 fn main() {
     // Parse arguments
     let matches = Command::new("commonware-log")
-        .about("TBD")
+        .about("commit to a hashed message at each height")
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
@@ -52,8 +53,13 @@ fn main() {
         .get_matches();
 
     // Create logger
+    // Create logger
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let writer = gui::Writer::new(logs.clone());
     tracing_subscriber::fmt()
+        .json()
         .with_max_level(tracing::Level::DEBUG)
+        .with_writer(writer)
         .init();
 
     // Configure my identity
