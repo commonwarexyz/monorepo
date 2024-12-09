@@ -36,7 +36,7 @@ fn main() {
     let (executor, runtime) = Executor::init(runtime_cfg.clone());
 
     // Parse arguments
-    let matches = Command::new("commonware-clock")
+    let matches = Command::new("commonware-log")
         .about("TBD")
         .arg(
             Arg::new("bootstrappers")
@@ -54,6 +54,7 @@ fn main() {
                 .value_parser(value_parser!(u64))
                 .help("All participants (arbiter and contributors)"),
         )
+        .arg(Arg::new("storage").long("storage").required(true))
         .get_matches();
 
     // Create logger
@@ -111,11 +112,11 @@ fn main() {
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        union(NAMESPACE, b"_P2P").into(),
+        &union(NAMESPACE, b"_P2P"),
         Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
-        runtime_cfg.max_message_size,
+        1024 * 1024, // 1MB
     );
 
     // Start runtime
@@ -148,18 +149,17 @@ fn main() {
 
         // Start validator
         let hasher = Sha256::default();
-        let application = application::Application::<Context, Ed25519, Sha256>::new(
-            runtime.clone(),
-            hasher.clone(),
-            namespace.clone(),
-            validators,
-        );
+        let cfg = application::Config { hasher };
+        let (application, application_mailbox) =
+            application::Application::new(runtime.clone(), cfg);
         let engine = Engine::new(
             runtime.clone(),
             Config {
                 crypto: signer.clone(),
                 hasher,
-                application,
+                automaton: application_mailbox.clone(),
+                relay: application_mailbox.clone(),
+                committer: application_mailbox,
                 registry: Arc::new(Mutex::new(Registry::default())),
                 namespace: union(NAMESPACE, b"_CONSENSUS").into(),
                 leader_timeout: Duration::from_secs(1),
@@ -171,7 +171,6 @@ fn main() {
                 max_fetch_count: 32,
                 max_fetch_size: 1024 * 512,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-                validators: validators_map,
             },
         );
         runtime.spawn(
