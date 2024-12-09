@@ -1,14 +1,11 @@
 use commonware_consensus::{
     simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re,
 };
-use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::hex;
+use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
+    SinkExt,
 };
-use rand::Rng;
-use tracing::debug;
 
 const GENESIS: &[u8] = b"genesis";
 
@@ -106,64 +103,5 @@ impl Co for Mailbox {
             .send(Message::Finalized { proof, payload })
             .await
             .expect("Failed to send finalized");
-    }
-}
-
-pub struct Config<H: Hasher> {
-    pub hasher: H,
-}
-
-pub struct Application<R: Rng, H: Hasher> {
-    runtime: R,
-    hasher: H,
-    mailbox: mpsc::Receiver<Message>,
-}
-
-impl<R: Rng, H: Hasher> Application<R, H> {
-    pub fn new(runtime: R, config: Config<H>) -> (Self, Mailbox) {
-        let (sender, mailbox) = mpsc::channel(1024);
-        (
-            Self {
-                runtime,
-                hasher: config.hasher,
-                mailbox,
-            },
-            Mailbox::new(sender),
-        )
-    }
-
-    pub async fn run(mut self) {
-        while let Some(message) = self.mailbox.next().await {
-            match message {
-                Message::Genesis { response } => {
-                    self.hasher.update(GENESIS);
-                    let digest = self.hasher.finalize();
-                    let _ = response.send(digest);
-                }
-                Message::Propose { context, response } => {
-                    let msg: [u8; 32] = self.runtime.gen();
-                    self.hasher.update(&msg);
-                    let digest = self.hasher.finalize();
-                    let _ = response.send(digest);
-                }
-                Message::Verify {
-                    context,
-                    payload,
-                    response,
-                } => {
-                    let valid = H::validate(&payload);
-                    let _ = response.send(valid);
-                }
-                Message::Broadcast { payload } => {
-                    // We don't broadcast our raw messages
-                }
-                Message::Notarized { proof, payload } => {
-                    debug!(payload = hex(&payload), "notarized")
-                }
-                Message::Finalized { proof, payload } => {
-                    debug!(payload = hex(&payload), "finalized")
-                }
-            }
-        }
     }
 }

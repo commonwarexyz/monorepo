@@ -6,7 +6,6 @@
 //!   of 10 messages per peer per second on the voter channel.
 
 mod application;
-mod supervisor;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex::{self, Engine, Prover};
@@ -27,7 +26,7 @@ use std::{
 };
 use std::{str::FromStr, time::Duration};
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_LOG_";
+const NAMESPACE: &[u8] = b"_COMMONWARE_LOG";
 
 fn main() {
     // Parse arguments
@@ -49,7 +48,7 @@ fn main() {
                 .value_parser(value_parser!(u64))
                 .help("All participants (arbiter and contributors)"),
         )
-        .arg(Arg::new("storage").long("storage").required(true))
+        .arg(Arg::new("storage-dir").long("storage-dir").required(true))
         .get_matches();
 
     // Create logger
@@ -153,17 +152,16 @@ fn main() {
         // Start validator
         let namespace = union(NAMESPACE, b"_CONSENSUS");
         let hasher = Sha256::default();
-        let (application, application_mailbox) = application::Application::new(
+        let prover: Prover<Ed25519, Sha256> = Prover::new(&namespace);
+        let (application, supervisor, mailbox) = application::Application::new(
             runtime.clone(),
             application::Config {
+                prover,
                 hasher: hasher.clone(),
+                mailbox_size: 1024,
+                participants: validators.clone(),
             },
         );
-        let prover: Prover<Ed25519, Sha256> = Prover::new(&namespace);
-        let supervisor = supervisor::Supervisor::new(supervisor::Config {
-            prover,
-            participants: validators.clone(),
-        });
         let journal = Journal::init(
             runtime.clone(),
             journal::Config {
@@ -179,9 +177,9 @@ fn main() {
             simplex::Config {
                 crypto: signer.clone(),
                 hasher,
-                automaton: application_mailbox.clone(),
-                relay: application_mailbox.clone(),
-                committer: application_mailbox,
+                automaton: mailbox.clone(),
+                relay: mailbox.clone(),
+                committer: mailbox,
                 supervisor,
                 registry: Arc::new(Mutex::new(Registry::default())),
                 namespace,

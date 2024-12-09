@@ -9,36 +9,29 @@ use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
-pub struct Config<C: Scheme, H: Hasher> {
-    pub prover: Prover<C, H>,
-    pub participants: Vec<PublicKey>,
-}
-
-type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
-type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
-
 #[derive(Clone)]
 pub struct Supervisor<C: Scheme, H: Hasher> {
+    prover: Prover<C, H>,
+
     participants: Vec<PublicKey>,
     participants_map: HashMap<PublicKey, u32>,
-
-    prover: Prover<C, H>,
 }
 
 impl<C: Scheme, H: Hasher> Supervisor<C, H> {
-    pub fn new(mut cfg: Config<C, H>) -> Self {
+    pub fn new(prover: Prover<C, H>, mut participants: Vec<PublicKey>) -> Self {
         // Setup participants
-        cfg.participants.sort();
+        participants.sort();
         let mut participants_map = HashMap::new();
-        for (index, validator) in cfg.participants.iter().enumerate() {
+        for (index, validator) in participants.iter().enumerate() {
             participants_map.insert(validator.clone(), index as u32);
         }
 
         // Return supervisor
         Self {
-            participants: cfg.participants,
+            prover,
+
+            participants,
             participants_map,
-            prover: cfg.prover,
         }
     }
 }
