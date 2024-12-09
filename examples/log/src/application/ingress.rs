@@ -7,8 +7,6 @@ use futures::{
     SinkExt,
 };
 
-const GENESIS: &[u8] = b"genesis";
-
 pub enum Message {
     Genesis {
         response: oneshot::Sender<Digest>,

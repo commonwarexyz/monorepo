@@ -1,12 +1,10 @@
 use commonware_consensus::{
-    simplex::{
-        Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
-        NULLIFY_AND_FINALIZE,
-    },
+    simplex::{Prover, View, FINALIZE, NOTARIZE},
     Activity, Proof, Supervisor as Su,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
-use std::collections::{HashMap, HashSet};
+use commonware_cryptography::{Hasher, PublicKey, Scheme};
+use commonware_utils::hex;
+use std::collections::HashMap;
 use tracing::debug;
 
 #[derive(Clone)]
@@ -57,33 +55,22 @@ impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
             NOTARIZE => {
                 let (view, _, payload, public_key) =
                     self.prover.deserialize_notarize(proof, false).unwrap();
-                debug!(view, "notarize");
+                debug!(
+                    view,
+                    sender = hex(&public_key),
+                    payload = hex(&payload),
+                    "received notarize"
+                );
             }
             FINALIZE => {
                 let (view, _, payload, public_key) =
                     self.prover.deserialize_finalize(proof, false).unwrap();
-                debug!(view, "finalize");
-            }
-            CONFLICTING_NOTARIZE => {
-                let (public_key, view) = self
-                    .prover
-                    .deserialize_conflicting_notarize(proof, false)
-                    .unwrap();
-                debug!(view, "conflicting notarize");
-            }
-            CONFLICTING_FINALIZE => {
-                let (public_key, view) = self
-                    .prover
-                    .deserialize_conflicting_finalize(proof, false)
-                    .unwrap();
-                debug!(view, "conflicting finalize");
-            }
-            NULLIFY_AND_FINALIZE => {
-                let (public_key, view) = self
-                    .prover
-                    .deserialize_nullify_finalize(proof, false)
-                    .unwrap();
-                debug!(view, "nullify and finalize");
+                debug!(
+                    view,
+                    sender = hex(&public_key),
+                    payload = hex(&payload),
+                    "received finalize"
+                );
             }
             unexpected => {
                 panic!("unexpected activity: {}", unexpected);

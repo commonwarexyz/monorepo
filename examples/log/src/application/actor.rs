@@ -10,7 +10,7 @@ use commonware_cryptography::{Hasher, Scheme};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
-use tracing::debug;
+use tracing::info;
 
 const GENESIS: &[u8] = b"commonware is neat";
 
@@ -88,14 +88,14 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                         .prover
                         .deserialize_notarization(proof, u32::MAX, false)
                         .unwrap();
-                    debug!(view, payload = hex(&payload), "prepared")
+                    info!(view, payload = hex(&payload), "prepared")
                 }
                 Message::Finalized { proof, payload } => {
                     let (view, _, _, _) = self
                         .prover
                         .deserialize_finalization(proof, u32::MAX, false)
                         .unwrap();
-                    debug!(view, payload = hex(&payload), "finalized")
+                    info!(view, payload = hex(&payload), "finalized")
                 }
             }
         }
