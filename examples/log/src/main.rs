@@ -1,9 +1,46 @@
-//! TBD
+//! Generate secret logs and agree on their hash.
 //!
-//! # Tips
+//! This example demonstrates how to build an application that employs [commonware-consensus::simplex`](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html).
+//! Whenever it is a participants turn to build a block, they randomly generate a 16-byte secret message and send the
+//! hashed message to other participants. Participants use consensus to ensure everyone agrees on the same hash in the same
+//! view.
 //!
-//! * If you want to maximize consensus decisions per second, increase rate limits from the default configuration
-//!   of 10 messages per peer per second on the voter channel.
+//! # Persistence
+//!
+//! All consensus data is persisted to disk in the `storage-dir` directory. If you shutdown (whether unclean or not),
+//! consensus will resume where it left off when you restart.
+//!
+//! # Broadcast and Backfilling
+//!
+//! This example demonstrates how `commonware-consensus` can minimally be used. It purposely avoids introducing
+//! logic to handle broadcasting secret messages and/or backfilling old hashes/messages. Think of this as an exercise
+//! for the reader.
+//!
+//! # Usage (Run at Least 3 to Make Progress)
+//!
+//! ## Participant 0 (Bootstrapper)
+//!
+//! ```sh
+//! cargo run --release -- --me 0@3000 --participants 0,1,2,3 --storage-dir /tmp/log/0
+//! ```
+//!
+//! ## Participant 1
+//!
+//! ```sh
+//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3001 --participants 0,1,2,3 --storage-dir /tmp/log/1
+//! ```
+//!
+//! # Participant 2
+//!
+//! ```sh
+//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participants 0,1,2,3 --storage-dir /tmp/log/2
+//! ```
+//!
+//! # Participant 3
+//!
+//! ```sh
+//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3 --storage-dir /tmp/log/3
+//! ```
 
 mod application;
 mod gui;
@@ -27,12 +64,13 @@ use std::{
 };
 use std::{str::FromStr, time::Duration};
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_LOG";
+/// Unique namespace to avoid message replay attacks.
+const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_LOG";
 
 fn main() {
     // Parse arguments
     let matches = Command::new("commonware-log")
-        .about("commit to a hashed message at each height")
+        .about("generate secret logs and agree on their hash")
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
@@ -117,7 +155,7 @@ fn main() {
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        &union(NAMESPACE, b"_P2P"),
+        &union(APPLICATION_NAMESPACE, b"_P2P"),
         Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
@@ -135,6 +173,9 @@ fn main() {
         oracle.register(0, validators.clone()).await;
 
         // Create validator
+        //
+        // If you want to maximize the number of views per second, increase the rate limit
+        // for this channel.
         let (voter_sender, voter_receiver) = network.register(
             0,
             Quota::per_second(NonZeroU32::new(10).unwrap()),
@@ -148,8 +189,8 @@ fn main() {
             Some(3),
         );
 
-        // Start validator
-        let namespace = union(NAMESPACE, b"_CONSENSUS");
+        // Initialize application
+        let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let hasher = Sha256::default();
         let prover: Prover<Ed25519, Sha256> = Prover::new(&namespace);
         let (application, supervisor, mailbox) = application::Application::new(
@@ -161,6 +202,8 @@ fn main() {
                 participants: validators.clone(),
             },
         );
+
+        // Initialize consensus
         let journal = Journal::init(
             runtime.clone(),
             journal::Config {
@@ -195,6 +238,8 @@ fn main() {
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             },
         );
+
+        // Start consensus
         runtime.spawn("application", application.run());
         runtime.spawn("network", network.run());
         runtime.spawn(
@@ -205,7 +250,7 @@ fn main() {
             ),
         );
 
-        // Wait on GUI
+        // Block on GUI
         gui.run(runtime).await;
     });
 }

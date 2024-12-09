@@ -13,16 +13,16 @@ documentation = "https://docs.rs/commonware-chat"
 [dependencies]
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
-commonware-p2p = { workspace = true } 
+commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
-tracing = { workspace = true } 
+tracing = { workspace = true }
 futures = { workspace = true }
 clap = { workspace = true }
 prometheus-client = { workspace = true }
 governor = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
-chrono = "0.4"
-ratatui = "0.27"
-crossterm = "0.28"
-serde_json = "1"
+chrono = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+serde_json = { workspace = true }

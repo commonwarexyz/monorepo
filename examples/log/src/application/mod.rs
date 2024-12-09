@@ -1,3 +1,5 @@
+//! Log is a simple application that
+
 use commonware_consensus::simplex::Prover;
 use commonware_cryptography::{Hasher, PublicKey, Scheme};
 
