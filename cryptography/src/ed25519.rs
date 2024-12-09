@@ -25,7 +25,7 @@
 //! ```
 
 use crate::{PrivateKey, PublicKey, Scheme, Signature};
-use commonware_utils::union;
+use commonware_utils::union_unique;
 use ed25519_consensus;
 use rand::{CryptoRng, Rng, SeedableRng};
 
@@ -77,7 +77,7 @@ impl Scheme for Ed25519 {
     }
 
     fn sign(&mut self, namespace: &[u8], message: &[u8]) -> Signature {
-        let payload = union(namespace, message);
+        let payload = union_unique(namespace, message);
         self.signer.sign(&payload).to_bytes().to_vec().into()
     }
 
@@ -108,7 +108,7 @@ impl Scheme for Ed25519 {
             Err(_) => return false,
         };
         let signature = ed25519_consensus::Signature::from(signature);
-        let payload = union(namespace, message);
+        let payload = union_unique(namespace, message);
         public_key.verify(&signature, &payload).is_ok()
     }
 
