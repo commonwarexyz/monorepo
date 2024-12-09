@@ -4,15 +4,9 @@ use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::{union, SystemTimeExt};
+use commonware_utils::SystemTimeExt;
 use prost::Message;
 use std::time::{Duration, SystemTime};
-
-const NAMESPACE_SUFFIX_HANDSHAKE: &[u8] = b"_HANDSHAKE";
-
-fn suffix_namespace(namespace: &[u8]) -> Vec<u8> {
-    union(namespace, NAMESPACE_SUFFIX_HANDSHAKE)
-}
 
 pub fn create_handshake<C: Scheme>(
     crypto: &mut C,
@@ -26,7 +20,7 @@ pub fn create_handshake<C: Scheme>(
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key.as_bytes());
     payload.extend_from_slice(&timestamp.to_be_bytes());
-    let signature = crypto.sign(&suffix_namespace(namespace), &payload);
+    let signature = crypto.sign(namespace, &payload);
 
     // Send handshake
     Ok(wire::Handshake {
@@ -106,12 +100,7 @@ impl Handshake {
         payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
 
         // Verify signature
-        if !C::verify(
-            &suffix_namespace(namespace),
-            &payload,
-            &public_key,
-            &signature.signature,
-        ) {
+        if !C::verify(namespace, &payload, &public_key, &signature.signature) {
             return Err(Error::InvalidSignature);
         }
 
@@ -232,7 +221,7 @@ mod tests {
 
             // Verify signature
             assert!(Ed25519::verify(
-                &suffix_namespace(TEST_NAMESPACE),
+                TEST_NAMESPACE,
                 &payload,
                 &sender.public_key(),
                 &handshake.signature.unwrap().signature,
@@ -677,12 +666,5 @@ mod tests {
             );
             assert!(matches!(result, Err(Error::InvalidTimestampFuture(t)) if t == SYNCHRONY_BOUND_MILLIS + 1));
         });
-    }
-
-    #[test]
-    fn test_suffix_namespace() {
-        let namespace = b"test_namespace";
-        let expected = b"test_namespace_HANDSHAKE".to_vec();
-        assert_eq!(suffix_namespace(namespace), expected);
     }
 }
