@@ -1,7 +1,6 @@
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 use commonware_runtime::mocks;
-use commonware_stream::public_key::Connection;
-use commonware_stream::{Receiver as _, Sender as _};
+use commonware_stream::{public_key::Connection, Receiver, Sender};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use futures::executor::block_on;
 
