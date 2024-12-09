@@ -5,7 +5,7 @@ use super::{
     poly::{self, Eval},
     Error,
 };
-use commonware_utils::union;
+use commonware_utils::union_unique;
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::HashSet;
@@ -27,7 +27,7 @@ pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
 /// Signatures produced by this function are deterministic and are safe
 /// to use in a consensus-critical context.
 pub fn sign(private: &group::Private, namespace: &[u8], message: &[u8]) -> group::Signature {
-    let payload = union(namespace, message);
+    let payload = union_unique(namespace, message);
     let mut s = group::Signature::zero();
     s.map(&payload);
     s.mul(private);
@@ -41,7 +41,7 @@ pub fn verify(
     message: &[u8],
     signature: &group::Signature,
 ) -> Result<(), Error> {
-    let payload = union(namespace, message);
+    let payload = union_unique(namespace, message);
     let mut hm = group::Signature::zero();
     hm.map(&payload);
     if !equal(public, signature, &hm) {
@@ -130,7 +130,7 @@ pub fn verify_aggregate(
         messages
             .par_iter()
             .map(|msg| {
-                let payload = union(namespace, msg);
+                let payload = union_unique(namespace, msg);
                 let mut hm = group::Signature::zero();
                 hm.map(&payload);
                 hm
@@ -188,7 +188,7 @@ mod tests {
         let namespace = b"test";
         let sig = sign(&private, namespace, msg);
         verify(&public, namespace, msg, &sig).expect("signature should be valid");
-        let payload = union(namespace, msg);
+        let payload = union_unique(namespace, msg);
         blst_verify(&public, &payload, &sig).expect("signature should be valid");
     }
 
@@ -208,7 +208,7 @@ mod tests {
         let threshold_sig = partial_aggregate(t, partials).unwrap();
         let threshold_pub = poly::public(&public);
         verify(&threshold_pub, namespace, msg, &threshold_sig).expect("signature should be valid");
-        let payload = union(namespace, msg);
+        let payload = union_unique(namespace, msg);
         blst_verify(&threshold_pub, &payload, &threshold_sig).expect("signature should be valid");
     }
 
