@@ -16,7 +16,6 @@ use ratatui::{
 };
 use std::{
     io::stdout,
-    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -140,12 +139,12 @@ impl<'a> MakeWriter<'a> for Writer {
     }
 }
 
-pub struct GUI {
+pub struct Gui {
     progress: Arc<Mutex<Vec<String>>>,
     logs: Arc<Mutex<Vec<String>>>,
 }
 
-impl GUI {
+impl Gui {
     pub fn new() -> Self {
         // Create writer
         let progress = Arc::new(Mutex::new(Vec::new()));

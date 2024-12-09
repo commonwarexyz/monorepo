@@ -53,7 +53,7 @@ fn main() {
         .get_matches();
 
     // Create GUI
-    let gui = gui::GUI::new();
+    let gui = gui::Gui::new();
 
     // Configure my identity
     let me = matches
