@@ -209,7 +209,7 @@ impl Gui {
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints(
-                            [Constraint::Percentage(50), Constraint::Percentage(50)].as_ref(),
+                            [Constraint::Percentage(60), Constraint::Percentage(40)].as_ref(),
                         )
                         .split(f.size());
 
