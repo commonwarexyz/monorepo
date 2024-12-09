@@ -28,8 +28,8 @@ pub struct Engine<
 
     voter: voter::Actor<B, E, C, H, A, R, F, S>,
     voter_mailbox: voter::Mailbox,
-    backfiller: resolver::Actor<E, C, H, S>,
-    backfiller_mailbox: resolver::Mailbox,
+    resolver: resolver::Actor<E, C, H, S>,
+    resolver_mailbox: resolver::Mailbox,
 }
 
 impl<
@@ -70,8 +70,8 @@ impl<
             },
         );
 
-        // Create backfiller
-        let (backfiller, backfiller_mailbox) = resolver::Actor::new(
+        // Create resolver
+        let (resolver, resolver_mailbox) = resolver::Actor::new(
             runtime.clone(),
             resolver::Config {
                 crypto: cfg.crypto,
@@ -94,8 +94,8 @@ impl<
 
             voter,
             voter_mailbox,
-            backfiller,
-            backfiller_mailbox,
+            resolver,
+            resolver_mailbox,
         }
     }
 
@@ -105,21 +105,21 @@ impl<
     pub async fn run(
         self,
         voter_network: (impl Sender, impl Receiver),
-        backfiller_network: (impl Sender, impl Receiver),
+        resolver_network: (impl Sender, impl Receiver),
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
         let mut voter = self.runtime.spawn("voter", async move {
             self.voter
-                .run(self.backfiller_mailbox, voter_sender, voter_receiver)
+                .run(self.resolver_mailbox, voter_sender, voter_receiver)
                 .await;
         });
 
-        // Start the backfiller
-        let (backfiller_sender, backfiller_receiver) = backfiller_network;
-        let mut backfiller = self.runtime.spawn("backfiller", async move {
-            self.backfiller
-                .run(self.voter_mailbox, backfiller_sender, backfiller_receiver)
+        // Start the resolver
+        let (resolver_sender, resolver_receiver) = resolver_network;
+        let mut resolver = self.runtime.spawn("resolver", async move {
+            self.resolver
+                .run(self.voter_mailbox, resolver_sender, resolver_receiver)
                 .await;
         });
 
@@ -127,10 +127,10 @@ impl<
         select! {
             _ = &mut voter => {
                 debug!("voter finished");
-                backfiller.abort();
+                resolver.abort();
             },
-            _ = &mut backfiller => {
-                debug!("backfiller finished");
+            _ = &mut resolver => {
+                debug!("resolver finished");
                 voter.abort();
             },
         }

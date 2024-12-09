@@ -1,14 +1,14 @@
 [package]
-name = "commonware-chat"
+name = "commonware-log"
 edition = "2021"
 publish = true
-version = "0.0.25"
+version = "0.0.1"
 license = "MIT OR Apache-2.0"
-description = "Send encrypted messages to a group of friends using commonware-cryptography and commonware-p2p."
+description = "Generate secret logs and agree on their hash."
 readme = "README.md"
 homepage = "https://commonware.xyz"
-repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/chat"
-documentation = "https://docs.rs/commonware-chat"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/log"
+documentation = "https://docs.rs/commonware-log"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
@@ -16,6 +16,10 @@ commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
+commonware-consensus = { workspace = true }
+commonware-storage = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 clap = { workspace = true }
