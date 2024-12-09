@@ -189,6 +189,17 @@ fn main() {
             Some(3),
         );
 
+        // Initialize storage
+        let journal = Journal::init(
+            runtime.clone(),
+            journal::Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: String::from("log"),
+            },
+        )
+        .await
+        .expect("Failed to initialize journal");
+
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let hasher = Sha256::default();
@@ -204,15 +215,6 @@ fn main() {
         );
 
         // Initialize consensus
-        let journal = Journal::init(
-            runtime.clone(),
-            journal::Config {
-                registry: Arc::new(Mutex::new(Registry::default())),
-                partition: String::from("log"),
-            },
-        )
-        .await
-        .expect("Failed to initialize journal");
         let engine = Engine::new(
             runtime.clone(),
             journal,
