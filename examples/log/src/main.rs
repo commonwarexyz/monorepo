@@ -10,7 +10,7 @@ mod supervisor;
 
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::simplex::{Config, Engine};
+use commonware_consensus::simplex::{Config, Engine, Prover};
 use commonware_cryptography::{Ed25519, Scheme, Sha256};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
@@ -132,28 +132,30 @@ fn main() {
         oracle.register(0, validators.clone()).await;
 
         // Create validator
-        let (resolver_sender, resolver_receiver) = network.register(
+        let (voter_sender, voter_receiver) = network.register(
             0,
             Quota::per_second(NonZeroU32::new(10).unwrap()),
             256, // 256 messages in flight
             Some(3),
         );
-        let (voter_sender, voter_receiver) = network.register(
+        let (resolver_sender, resolver_receiver) = network.register(
             1,
             Quota::per_second(NonZeroU32::new(10).unwrap()),
             256, // 256 messages in flight
             Some(3),
         );
 
-        // Create validator BTree
-        let mut validators_map = BTreeMap::new();
-        validators_map.insert(0, validators.clone());
-
         // Start validator
+        let namespace = union(NAMESPACE, b"_CONSENSUS");
         let hasher = Sha256::default();
         let cfg = application::Config { hasher };
         let (application, application_mailbox) =
             application::Application::new(runtime.clone(), cfg);
+        let prover = Prover::new(&namespace);
+        let supervisor = supervisor::Supervisor::new(supervisor::Config {
+            prover,
+            participants: validators.clone(),
+        });
         let engine = Engine::new(
             runtime.clone(),
             Config {
@@ -162,24 +164,27 @@ fn main() {
                 automaton: application_mailbox.clone(),
                 relay: application_mailbox.clone(),
                 committer: application_mailbox,
+                supervisor,
                 registry: Arc::new(Mutex::new(Registry::default())),
                 namespace: union(NAMESPACE, b"_CONSENSUS").into(),
+                mailbox_size: 1024,
+                replay_concurrency: 1,
                 leader_timeout: Duration::from_secs(1),
                 notarization_timeout: Duration::from_secs(2),
-                null_vote_retry: Duration::from_secs(10),
-                proposal_retry: Duration::from_millis(100),
+                nullify_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: 10,
                 max_fetch_count: 32,
                 max_fetch_size: 1024 * 512,
+                fetch_concurrent: 2,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             },
         );
         runtime.spawn(
             "engine",
             engine.run(
-                (resolver_sender, resolver_receiver),
                 (voter_sender, voter_receiver),
+                (resolver_sender, resolver_receiver),
             ),
         );
 
