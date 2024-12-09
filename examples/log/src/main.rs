@@ -172,7 +172,7 @@ fn main() {
         // the composition of a validator set changes).
         oracle.register(0, validators.clone()).await;
 
-        // Create validator
+        // Register consensus channels
         //
         // If you want to maximize the number of views per second, increase the rate limit
         // for this channel.
