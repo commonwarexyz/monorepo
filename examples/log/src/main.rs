@@ -8,13 +8,12 @@
 mod application;
 mod supervisor;
 
-use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::simplex::{Config, Engine, Prover};
+use commonware_consensus::simplex::{self, Engine, Prover};
 use commonware_cryptography::{Ed25519, Scheme, Sha256};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
-    tokio::{self, Context, Executor},
+    tokio::{self, Executor},
     Runner, Spawner,
 };
 use commonware_storage::journal::{self, Journal};
@@ -154,11 +153,12 @@ fn main() {
         // Start validator
         let namespace = union(NAMESPACE, b"_CONSENSUS");
         let hasher = Sha256::default();
-        let cfg = application::Config {
-            hasher: hasher.clone(),
-        };
-        let (application, application_mailbox) =
-            application::Application::new(runtime.clone(), cfg);
+        let (application, application_mailbox) = application::Application::new(
+            runtime.clone(),
+            application::Config {
+                hasher: hasher.clone(),
+            },
+        );
         let prover: Prover<Ed25519, Sha256> = Prover::new(&namespace);
         let supervisor = supervisor::Supervisor::new(supervisor::Config {
             prover,
@@ -176,7 +176,7 @@ fn main() {
         let engine = Engine::new(
             runtime.clone(),
             journal,
-            Config {
+            simplex::Config {
                 crypto: signer.clone(),
                 hasher,
                 automaton: application_mailbox.clone(),
@@ -198,6 +198,7 @@ fn main() {
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             },
         );
+        runtime.spawn("network", network.run());
         runtime.spawn(
             "engine",
             engine.run(
@@ -205,9 +206,8 @@ fn main() {
                 (resolver_sender, resolver_receiver),
             ),
         );
-        runtime.spawn("application", application.run());
 
-        // Wait on network
-        network.run().await;
+        // Wait on application
+        application.run().await;
     });
 }
