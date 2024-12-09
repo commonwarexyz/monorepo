@@ -241,7 +241,7 @@ impl Gui {
                         .block(
                             Block::default()
                                 .borders(Borders::ALL)
-                                .title("Progress")
+                                .title("Activity")
                                 .border_style(match focused_window {
                                     Focus::Progress => Style::default().fg(Color::Red),
                                     _ => Style::default(),
