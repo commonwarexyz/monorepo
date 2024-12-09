@@ -36,7 +36,6 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
         sink: Si,
         stream: St,
     ) -> Result<Self, Error> {
-        // Verify incoming
         let handshake = IncomingHandshake::verify(
             runtime,
             &config.crypto,
@@ -185,6 +184,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         let cipher = ChaCha20Poly1305::new_from_slice(shared_secret.as_bytes())
             .map_err(|_| Error::CipherCreationFailed)?;
 
+        // Track whether or not we are the dialer to ensure we send correctly formatted nonces.
         Ok(Connection {
             dialer: false,
             sink: handshake.sink,
