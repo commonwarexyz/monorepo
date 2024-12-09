@@ -1,4 +1,5 @@
 use commonware_runtime::Spawner;
+use core::panic;
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
@@ -198,7 +199,7 @@ impl GUI {
                     let progress_text = Text::from(
                         progress
                             .iter()
-                            .map(|progress| Line::raw(progress.clone()))
+                            .map(|p| Line::raw(p.clone()))
                             .collect::<Vec<Line>>(),
                     );
                     let progress_block = Paragraph::new(progress_text)
@@ -224,7 +225,7 @@ impl GUI {
                     }
                     let logs_text = Text::from(
                         logs.iter()
-                            .map(|log| Line::raw(log.clone()))
+                            .map(|l| Line::raw(l.clone()))
                             .collect::<Vec<Line>>(),
                     );
                     let logs_block = Paragraph::new(logs_text)
@@ -246,7 +247,7 @@ impl GUI {
             let event = rx.next().await;
             let event = match event {
                 Some(event) => event,
-                None => break,
+                None => panic!("Failed to receive event"),
             };
             match event {
                 Event::Input(event) => match event.code {

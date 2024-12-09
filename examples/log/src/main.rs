@@ -195,12 +195,7 @@ fn main() {
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             },
         );
-        runtime.spawn("gui", {
-            let runtime = runtime.clone();
-            async move {
-                gui.run(runtime).await;
-            }
-        });
+        runtime.spawn("application", application.run());
         runtime.spawn("network", network.run());
         runtime.spawn(
             "engine",
@@ -210,7 +205,7 @@ fn main() {
             ),
         );
 
-        // Wait on application
-        application.run().await;
+        // Wait on GUI
+        gui.run(runtime).await;
     });
 }
