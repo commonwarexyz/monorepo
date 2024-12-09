@@ -49,7 +49,7 @@ pub struct Handshake {
 
 impl Handshake {
     pub fn verify<E: Clock, C: Scheme>(
-        runtime: E,
+        runtime: &E,
         crypto: &C,
         namespace: &[u8],
         synchrony_bound: Duration,
@@ -133,7 +133,7 @@ pub struct IncomingHandshake<Si: Sink, St: Stream> {
 impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
     #[allow(clippy::too_many_arguments)]
     pub async fn verify<E: Clock + Spawner, C: Scheme>(
-        runtime: E,
+        runtime: &E,
         crypto: &C,
         namespace: &[u8],
         max_message_size: usize,
@@ -240,7 +240,7 @@ mod tests {
 
             // Verify using the handshake struct
             let handshake = Handshake::verify(
-                runtime,
+                &runtime,
                 &recipient,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -286,7 +286,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                runtime,
+                &runtime,
                 &recipient,
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -337,7 +337,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                runtime,
+                &runtime,
                 &Ed25519::from_seed(2),
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -372,7 +372,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                runtime,
+                &runtime,
                 &Ed25519::from_seed(0),
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -426,7 +426,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                runtime,
+                &runtime,
                 &recipient,
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -479,7 +479,7 @@ mod tests {
 
             // Verify the handshake
             let result = Handshake::verify(
-                runtime,
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
@@ -516,7 +516,7 @@ mod tests {
 
             // Verify the handshake
             let result = Handshake::verify(
-                runtime,
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
@@ -563,7 +563,7 @@ mod tests {
 
             // Verify the handshake
             let result = Handshake::verify(
-                runtime,
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
@@ -601,7 +601,7 @@ mod tests {
 
             // Verify the handshake, it should be fine still.
             Handshake::verify(
-                runtime.clone(),
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -615,7 +615,7 @@ mod tests {
 
             // Verify that a timeout error is returned.
             let result = Handshake::verify(
-                runtime,
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -658,7 +658,7 @@ mod tests {
 
             // Verify the okay handshake.
             Handshake::verify(
-                runtime.clone(),
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -668,7 +668,7 @@ mod tests {
 
             // Handshake too far into the future fails.
             let result = Handshake::verify(
-                runtime,
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,

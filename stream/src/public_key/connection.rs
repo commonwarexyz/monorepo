@@ -28,8 +28,8 @@ pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
 }
 
 impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
-    pub async fn new(
-        runtime: impl Rng + CryptoRng + Spawner + Clock,
+    pub async fn new<R: Rng + CryptoRng + Spawner + Clock>(
+        runtime: &R,
         config: Config<C>,
         sink: Si,
         stream: St,
@@ -64,8 +64,8 @@ pub struct Connection<Si: Sink, St: Stream> {
 }
 
 impl<Si: Sink, St: Stream> Connection<Si, St> {
-    pub async fn upgrade_dialer<C: Scheme>(
-        mut runtime: impl Rng + CryptoRng + Spawner + Clock,
+    pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
+        mut runtime: R,
         mut config: Config<C>,
         mut sink: Si,
         mut stream: St,
@@ -110,7 +110,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
         // Verify handshake message from peer
         let handshake = Handshake::verify(
-            runtime,
+            &runtime,
             &config.crypto,
             &config.namespace,
             config.synchrony_bound,
@@ -138,8 +138,8 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         })
     }
 
-    pub async fn upgrade_listener<C: Scheme>(
-        mut runtime: impl Rng + CryptoRng + Spawner + Clock,
+    pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
+        mut runtime: R,
         incoming: IncomingConnection<C, Si, St>,
     ) -> Result<Self, Error> {
         // Generate shared secret
