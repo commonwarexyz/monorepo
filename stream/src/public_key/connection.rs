@@ -22,20 +22,20 @@ use rand::{CryptoRng, Rng};
 // This constant represents the size of the encryption tag in bytes.
 const ENCRYPTION_TAG_LENGTH: usize = 16;
 
-pub struct PartialConnection<C: Scheme, Si: Sink, St: Stream> {
+pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
     config: Config<C>,
-    incoming: IncomingHandshake<Si, St>,
+    handshake: IncomingHandshake<Si, St>,
 }
 
-impl<C: Scheme, Si: Sink, St: Stream> PartialConnection<C, Si, St> {
-    pub async fn verify_listener(
+impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
+    pub async fn new(
         runtime: impl Rng + CryptoRng + Spawner + Clock,
         config: Config<C>,
         sink: Si,
         stream: St,
     ) -> Result<Self, Error> {
         // Verify incoming
-        let incoming = IncomingHandshake::verify(
+        let handshake = IncomingHandshake::verify(
             runtime,
             &config.crypto,
             &config.namespace,
@@ -47,11 +47,11 @@ impl<C: Scheme, Si: Sink, St: Stream> PartialConnection<C, Si, St> {
             stream,
         )
         .await?;
-        Ok(Self { config, incoming })
+        Ok(Self { config, handshake })
     }
 
-    pub fn public_key(&self) -> PublicKey {
-        self.incoming.peer_public_key.clone()
+    pub fn peer(&self) -> PublicKey {
+        self.handshake.peer_public_key.clone()
     }
 }
 
@@ -140,16 +140,14 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
 
     pub async fn upgrade_listener<C: Scheme>(
         mut runtime: impl Rng + CryptoRng + Spawner + Clock,
-        partial: PartialConnection<C, Si, St>,
+        incoming: IncomingConnection<C, Si, St>,
     ) -> Result<Self, Error> {
-        // Deconstruct partial connection
-        let (mut handshake, mut config) = (partial.incoming, partial.config);
-
         // Generate shared secret
         let secret = x25519::new(&mut runtime);
         let ephemeral = x25519_dalek::PublicKey::from(&secret);
 
         // Send handshake
+        let (mut handshake, mut config) = (incoming.handshake, incoming.config);
         let timestamp = runtime.current().epoch_millis();
         let msg = create_handshake(
             &mut config.crypto,

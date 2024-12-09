@@ -82,15 +82,13 @@ use commonware_cryptography::Scheme;
 use std::time::Duration;
 
 mod connection;
+pub use connection::{Connection, IncomingConnection, Sender};
 mod handshake;
 mod utils;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 mod x25519;
-
-pub use connection::{Connection, PartialConnection, Sender};
-pub use handshake::IncomingHandshake;
 
 /// Configuration for a connection.
 ///

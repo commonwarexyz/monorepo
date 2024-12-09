@@ -43,8 +43,8 @@ pub fn create_handshake<C: Scheme>(
 }
 
 pub struct Handshake {
-    pub(super) ephemeral_public_key: x25519_dalek::PublicKey,
-    pub(super) peer_public_key: PublicKey,
+    pub ephemeral_public_key: x25519_dalek::PublicKey,
+    pub peer_public_key: PublicKey,
 }
 
 impl Handshake {
@@ -123,11 +123,11 @@ impl Handshake {
 }
 
 pub struct IncomingHandshake<Si: Sink, St: Stream> {
-    pub(super) sink: Si,
-    pub(super) stream: St,
-    pub(super) deadline: SystemTime,
-    pub(super) ephemeral_public_key: x25519_dalek::PublicKey,
-    pub(super) peer_public_key: PublicKey,
+    pub sink: Si,
+    pub stream: St,
+    pub deadline: SystemTime,
+    pub ephemeral_public_key: x25519_dalek::PublicKey,
+    pub peer_public_key: PublicKey,
 }
 
 impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {

@@ -3,7 +3,7 @@
 use crate::authenticated::actors::{spawner, tracker};
 use commonware_cryptography::Scheme;
 use commonware_runtime::{Clock, Listener, Network, Sink, Spawner, Stream};
-use commonware_stream::public_key::{Config as StreamConfig, Connection, PartialConnection};
+use commonware_stream::public_key::{Config as StreamConfig, Connection, IncomingConnection};
 use commonware_utils::hex;
 use governor::{
     clock::ReasonablyRealtime,
@@ -96,12 +96,10 @@ impl<
     ) {
         // Wait for the peer to send us their public key
         //
-        // PartialConnection limits how long we will wait for the peer to send us their public key
+        // IncomingConnection limits how long we will wait for the peer to send us their public key
         // to ensure an adversary can't force us to hold many pending connections open.
-        let partial =
-            match PartialConnection::verify_listener(runtime.clone(), stream_cfg, sink, stream)
-                .await
-            {
+        let incoming =
+            match IncomingConnection::new(runtime.clone(), stream_cfg, sink, stream).await {
                 Ok(partial) => partial,
                 Err(e) => {
                     debug!(error = ?e, "failed to receive public key");
@@ -112,7 +110,7 @@ impl<
         // Attempt to claim the connection
         //
         // Reserve also checks if the peer is authorized.
-        let peer = partial.public_key();
+        let peer = incoming.peer();
         let reservation = match tracker.reserve(peer.clone()).await {
             Some(reservation) => reservation,
             None => {
@@ -122,7 +120,7 @@ impl<
         };
 
         // Perform handshake
-        let stream = match Connection::upgrade_listener(runtime, partial).await {
+        let stream = match Connection::upgrade_listener(runtime, incoming).await {
             Ok(connection) => connection,
             Err(e) => {
                 debug!(error = ?e, peer=hex(&peer), "failed to upgrade connection");
