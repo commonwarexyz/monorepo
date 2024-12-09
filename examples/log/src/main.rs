@@ -104,7 +104,7 @@ fn main() {
 
     // Configure storage directory
     let storage_directory = matches
-        .get_one::<String>("storage")
+        .get_one::<String>("storage-dir")
         .expect("Please provide storage directory");
 
     // Initialize runtime
@@ -197,7 +197,9 @@ fn main() {
         );
         runtime.spawn("gui", {
             let runtime = runtime.clone();
-            async move { gui.run(runtime) }
+            async move {
+                gui.run(runtime).await;
+            }
         });
         runtime.spawn("network", network.run());
         runtime.spawn(
