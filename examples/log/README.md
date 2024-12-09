@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-clock.svg)](https://crates.io/crates/commonware-log)
 
-TBD
+Generate secret logs and agree on the hash of them at each view.
 
 # Usage
 
