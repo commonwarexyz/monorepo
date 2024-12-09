@@ -52,15 +52,8 @@ fn main() {
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
         .get_matches();
 
-    // Create logger
-    // Create logger
-    let logs = Arc::new(Mutex::new(Vec::new()));
-    let writer = gui::Writer::new(logs.clone());
-    tracing_subscriber::fmt()
-        .json()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_writer(writer)
-        .init();
+    // Create GUI
+    let gui = gui::GUI::new();
 
     // Configure my identity
     let me = matches
@@ -202,6 +195,10 @@ fn main() {
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
             },
         );
+        runtime.spawn("gui", {
+            let runtime = runtime.clone();
+            async move { gui.run(runtime) }
+        });
         runtime.spawn("network", network.run());
         runtime.spawn(
             "engine",

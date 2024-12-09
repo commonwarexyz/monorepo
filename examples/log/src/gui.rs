@@ -134,11 +134,7 @@ impl GUI {
         Self { progress, logs }
     }
 
-    pub async fn run<R: Spawner>(
-        runtime: R,
-        progress: Arc<Mutex<Vec<String>>>,
-        logs: Arc<Mutex<Vec<String>>>,
-    ) {
+    pub async fn run<R: Spawner>(self, runtime: R) {
         // Setup terminal
         enable_raw_mode().unwrap();
         let mut stdout = stdout();
