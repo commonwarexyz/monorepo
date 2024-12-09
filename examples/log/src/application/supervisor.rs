@@ -2,6 +2,7 @@ use commonware_consensus::{simplex::View, Activity, Proof, Supervisor as Su};
 use commonware_cryptography::PublicKey;
 use std::collections::HashMap;
 
+/// Implementation of `commonware-consensus::Supervisor`.
 #[derive(Clone)]
 pub struct Supervisor {
     participants: Vec<PublicKey>,

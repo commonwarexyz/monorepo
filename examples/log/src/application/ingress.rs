@@ -33,6 +33,7 @@ pub enum Message {
     },
 }
 
+/// Mailbox for the application.
 #[derive(Clone)]
 pub struct Mailbox {
     sender: mpsc::Sender<Message>,

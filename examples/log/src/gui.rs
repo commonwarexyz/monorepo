@@ -1,5 +1,9 @@
+//! Logic that drives the terminal UI.
+//!
+//! This code has nothing to do with the application or consensus and was
+//! implemented to make consensus logging easier to follow.
+
 use commonware_runtime::Spawner;
-use core::panic;
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
@@ -34,7 +38,7 @@ enum Event<I> {
     Tick,
 }
 
-/// Appends logs to a provided vector.
+/// Appends logs to provided vectors.
 pub struct Writer {
     progress: Arc<Mutex<Vec<String>>>,
     logs: Arc<Mutex<Vec<String>>>,

@@ -11,8 +11,10 @@ use rand::Rng;
 use std::u32;
 use tracing::info;
 
+/// Genesis message to use during initialization.
 const GENESIS: &[u8] = b"commonware is neat";
 
+/// Application actor.
 pub struct Application<R: Rng, C: Scheme, H: Hasher> {
     runtime: R,
     prover: Prover<C, H>,
@@ -21,6 +23,7 @@ pub struct Application<R: Rng, C: Scheme, H: Hasher> {
 }
 
 impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
+    /// Create a new application actor.
     pub fn new(runtime: R, config: Config<C, H>) -> (Self, Supervisor, Mailbox) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
@@ -35,6 +38,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
         )
     }
 
+    /// Run the application actor.
     pub async fn run(mut self) {
         while let Some(message) = self.mailbox.next().await {
             match message {
