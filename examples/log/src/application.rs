@@ -151,7 +151,8 @@ impl<R: Rng, H: Hasher> Application<R, H> {
                     payload,
                     response,
                 } => {
-                    H::validate(&payload);
+                    let valid = H::validate(&payload);
+                    let _ = response.send(valid);
                 }
                 Message::Broadcast { payload } => {
                     // We don't broadcast our raw messages

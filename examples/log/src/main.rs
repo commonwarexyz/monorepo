@@ -21,10 +21,7 @@ use commonware_storage::journal::{self, Journal};
 use commonware_utils::{hex, union};
 use governor::Quota;
 use prometheus_client::registry::Registry;
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
@@ -34,10 +31,6 @@ use std::{str::FromStr, time::Duration};
 const NAMESPACE: &[u8] = b"_COMMONWARE_LOG_";
 
 fn main() {
-    // Initialize runtime
-    let runtime_cfg = tokio::Config::default();
-    let (executor, runtime) = Executor::init(runtime_cfg.clone());
-
     // Parse arguments
     let matches = Command::new("commonware-log")
         .about("TBD")
@@ -111,6 +104,18 @@ fn main() {
             bootstrapper_identities.push((verifier, bootstrapper_address));
         }
     }
+
+    // Configure storage directory
+    let storage_directory = matches
+        .get_one::<String>("storage")
+        .expect("Please provide storage directory");
+
+    // Initialize runtime
+    let runtime_cfg = tokio::Config {
+        storage_directory: storage_directory.into(),
+        ..Default::default()
+    };
+    let (executor, runtime) = Executor::init(runtime_cfg.clone());
 
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
