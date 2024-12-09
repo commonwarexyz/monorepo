@@ -8,7 +8,6 @@ use commonware_cryptography::{Hasher, Scheme};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
-use std::u32;
 use tracing::info;
 
 /// Genesis message to use during initialization.
