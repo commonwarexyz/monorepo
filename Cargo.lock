@@ -442,6 +442,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-log"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "clap",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "prometheus-client",
+ "rand",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-macros"
 version = "0.0.4"
 dependencies = [

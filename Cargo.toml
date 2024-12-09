@@ -8,12 +8,13 @@ members = [
     "storage",
     "utils",
     "examples/chat",
+    "examples/log",
     "examples/vrf",
 ]
 resolver = "2"
 
 [workspace.dependencies]
-commonware-consensus = { version = "0.0.2", path = "consensus" }
+commonware-consensus = { version = "0.0.1", path = "consensus" }
 commonware-cryptography = { version = "0.0.12", path = "cryptography" }
 commonware-macros = { version = "0.0.4", path = "macros" }
 commonware-p2p = { version = "0.0.23", path = "p2p" }
