@@ -17,6 +17,7 @@ use commonware_runtime::{
     tokio::{self, Context, Executor},
     Runner, Spawner,
 };
+use commonware_storage::journal::{self, Journal};
 use commonware_utils::{hex, union};
 use governor::Quota;
 use prometheus_client::registry::Registry;
@@ -148,16 +149,28 @@ fn main() {
         // Start validator
         let namespace = union(NAMESPACE, b"_CONSENSUS");
         let hasher = Sha256::default();
-        let cfg = application::Config { hasher };
+        let cfg = application::Config {
+            hasher: hasher.clone(),
+        };
         let (application, application_mailbox) =
             application::Application::new(runtime.clone(), cfg);
-        let prover = Prover::new(&namespace);
+        let prover: Prover<Ed25519, Sha256> = Prover::new(&namespace);
         let supervisor = supervisor::Supervisor::new(supervisor::Config {
             prover,
             participants: validators.clone(),
         });
+        let journal = Journal::init(
+            runtime.clone(),
+            journal::Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                partition: String::from("log"),
+            },
+        )
+        .await
+        .expect("Failed to initialize journal");
         let engine = Engine::new(
             runtime.clone(),
+            journal,
             Config {
                 crypto: signer.clone(),
                 hasher,
@@ -166,7 +179,7 @@ fn main() {
                 committer: application_mailbox,
                 supervisor,
                 registry: Arc::new(Mutex::new(Registry::default())),
-                namespace: union(NAMESPACE, b"_CONSENSUS").into(),
+                namespace,
                 mailbox_size: 1024,
                 replay_concurrency: 1,
                 leader_timeout: Duration::from_secs(1),
@@ -187,6 +200,7 @@ fn main() {
                 (resolver_sender, resolver_receiver),
             ),
         );
+        runtime.spawn("application", application.run());
 
         // Wait on network
         network.run().await;
