@@ -89,7 +89,7 @@ mod wire {
 }
 mod x25519;
 
-pub use connection::{Connection, Sender};
+pub use connection::{Connection, PartialConnection, Sender};
 pub use handshake::IncomingHandshake;
 
 /// Configuration for a connection.

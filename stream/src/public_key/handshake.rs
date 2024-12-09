@@ -127,7 +127,7 @@ pub struct IncomingHandshake<Si: Sink, St: Stream> {
     pub(super) stream: St,
     pub(super) deadline: SystemTime,
     pub(super) ephemeral_public_key: x25519_dalek::PublicKey,
-    pub peer_public_key: PublicKey,
+    pub(super) peer_public_key: PublicKey,
 }
 
 impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
