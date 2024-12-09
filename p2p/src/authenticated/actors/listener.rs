@@ -101,7 +101,7 @@ impl<
         let incoming = match IncomingConnection::verify(&runtime, stream_cfg, sink, stream).await {
             Ok(partial) => partial,
             Err(e) => {
-                debug!(error = ?e, "failed to receive public key");
+                debug!(error = ?e, "failed to verify incoming handshake");
                 return;
             }
         };
