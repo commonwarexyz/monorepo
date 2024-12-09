@@ -59,12 +59,15 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                     response,
                 } => {
                     // Generate a random message (secret to us)
-                    let mut msg = vec![0; 128];
+                    let mut msg = vec![0; 16];
                     self.runtime.fill(&mut msg[..]);
 
-                    // Hash the message and send it to consensus
+                    // Hash the message
                     self.hasher.update(&msg);
                     let digest = self.hasher.finalize();
+                    info!(msg = hex(&msg), payload = hex(&digest), "proposed");
+
+                    // Send digest to consensus
                     let _ = response.send(digest);
                 }
                 Message::Verify {

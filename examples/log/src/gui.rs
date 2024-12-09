@@ -224,7 +224,17 @@ impl Gui {
                     let progress_text = Text::from(
                         progress
                             .iter()
-                            .map(|p| Line::raw(p.clone()))
+                            .map(|p| {
+                                if p.contains("proposed") {
+                                    Line::styled(p.clone(), Style::default().fg(Color::Blue))
+                                } else if p.contains("prepared") {
+                                    Line::styled(p.clone(), Style::default().fg(Color::Yellow))
+                                } else if p.contains("finalized") {
+                                    Line::styled(p.clone(), Style::default().fg(Color::Green))
+                                } else {
+                                    Line::raw(p.clone())
+                                }
+                            })
                             .collect::<Vec<Line>>(),
                     );
                     let progress_block = Paragraph::new(progress_text)
