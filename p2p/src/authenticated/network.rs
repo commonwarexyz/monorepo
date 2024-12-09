@@ -31,10 +31,10 @@ use tracing::{debug, info, warn};
 const PROTOBUF_OVERHEAD: usize = 64;
 
 /// Unique suffix for all messages signed by the tracker.
-const TRACKER_SUFFIX: &[u8] = b"_TRACKER_";
+const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
 
 /// Unique suffix for all messages signed in a stream.
-const STREAM_SUFFIX: &[u8] = b"_STREAM_";
+const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
