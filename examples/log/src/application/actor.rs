@@ -1,5 +1,3 @@
-use std::{marker::PhantomData, u32};
-
 use super::{
     ingress::{Mailbox, Message},
     supervisor::Supervisor,
@@ -10,6 +8,7 @@ use commonware_cryptography::{Hasher, Scheme};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
+use std::u32;
 use tracing::info;
 
 const GENESIS: &[u8] = b"commonware is neat";
@@ -19,8 +18,6 @@ pub struct Application<R: Rng, C: Scheme, H: Hasher> {
     prover: Prover<C, H>,
     hasher: H,
     mailbox: mpsc::Receiver<Message>,
-
-    _phantom_crypto: PhantomData<C>,
 }
 
 impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
@@ -32,8 +29,6 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                 prover: config.prover.clone(),
                 hasher: config.hasher,
                 mailbox,
-
-                _phantom_crypto: PhantomData,
             },
             Supervisor::new(config.prover, config.participants),
             Mailbox::new(sender),
