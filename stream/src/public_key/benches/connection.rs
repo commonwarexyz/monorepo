@@ -10,7 +10,7 @@ fn benchmark_sender(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "max_message_size_len={} msg_len={}",
+            "sender: max_message_size_len={} msg_len={}",
             max_message_size,
             msg.len()
         ),
@@ -38,7 +38,7 @@ fn benchmark_receiver(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "max_message_size_len={} msg_len={}",
+            "receiver: max_message_size_len={} msg_len={}",
             max_message_size,
             msg.len()
         ),
