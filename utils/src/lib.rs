@@ -62,22 +62,24 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
     // Get the length of the namespace as varint.
     let mut len = namespace.len() as u64;
+
+    // Even if the namespace is empty, we still need to encode the length with a single zero byte.
     let num_varint_bytes = max(1, (64 - len.leading_zeros() + 6) / 7) as usize;
-    let mut len_encoding = Vec::with_capacity(num_varint_bytes);
-    for i in 0..num_varint_bytes {
+    let mut result = Vec::with_capacity(num_varint_bytes + namespace.len() + msg.len());
+
+    // Encode the length of the namespace.
+    for _ in 0..num_varint_bytes {
         let mut byte = (len & 0b0111_1111) as u8;
         len >>= 7;
-        if i != num_varint_bytes - 1 {
+        if len > 0 {
             byte |= 0b1000_0000;
         }
-        len_encoding.push(byte);
+        result.push(byte);
     }
 
-    let mut concat = Vec::with_capacity(len_encoding.len() + namespace.len() + msg.len());
-    concat.extend_from_slice(&len_encoding);
-    concat.extend_from_slice(namespace);
-    concat.extend_from_slice(msg);
-    concat
+    result.extend_from_slice(namespace);
+    result.extend_from_slice(msg);
+    result
 }
 
 #[cfg(test)]
@@ -177,7 +179,10 @@ mod tests {
         expected.extend_from_slice(&length_encoding);
         expected.extend_from_slice(namespace);
         expected.extend_from_slice(msg);
-        assert_eq!(union_unique(namespace, msg), expected);
+
+        let result = union_unique(namespace, msg);
+        assert_eq!(result, expected);
+        assert_eq!(result.len(), result.capacity());
     }
 
     #[test]
@@ -189,7 +194,10 @@ mod tests {
         let mut expected = Vec::with_capacity(length_encoding.len() + namespace.len() + msg.len());
         expected.extend_from_slice(&length_encoding);
         expected.extend_from_slice(msg);
-        assert_eq!(union_unique(namespace, msg), expected);
+
+        let result = union_unique(namespace, msg);
+        assert_eq!(result, expected);
+        assert_eq!(result.len(), result.capacity());
     }
 
     #[test]
@@ -203,6 +211,9 @@ mod tests {
         expected.extend_from_slice(&length_encoding);
         expected.extend_from_slice(namespace);
         expected.extend_from_slice(msg);
-        assert_eq!(union_unique(namespace, msg), expected);
+
+        let result = union_unique(namespace, msg);
+        assert_eq!(result, expected);
+        assert_eq!(result.len(), result.capacity());
     }
 }
