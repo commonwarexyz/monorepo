@@ -516,6 +516,7 @@ dependencies = [
 name = "commonware-utils"
 version = "0.0.4"
 dependencies = [
+ "prost",
  "sha2 0.10.8",
 ]
 

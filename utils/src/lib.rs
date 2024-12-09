@@ -1,7 +1,7 @@
 //! Leverage common functionality across multiple primitives.
 
+use prost::{encode_length_delimiter, length_delimiter_len};
 use sha2::{Digest, Sha256};
-use std::cmp::max;
 
 mod time;
 pub use time::SystemTimeExt;
@@ -60,23 +60,9 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
-    // Get the length of the namespace as varint.
-    let mut len = namespace.len() as u64;
-
-    // Even if the namespace is empty, we still need to encode the length with a single zero byte.
-    let num_varint_bytes = max(1, (64 - len.leading_zeros() + 6) / 7) as usize;
-    let mut result = Vec::with_capacity(num_varint_bytes + namespace.len() + msg.len());
-
-    // Encode the length of the namespace.
-    for _ in 0..num_varint_bytes {
-        let mut byte = (len & 0b0111_1111) as u8;
-        len >>= 7;
-        if len > 0 {
-            byte |= 0b1000_0000;
-        }
-        result.push(byte);
-    }
-
+    let ld_len = length_delimiter_len(namespace.len());
+    let mut result = Vec::with_capacity(ld_len + namespace.len() + msg.len());
+    encode_length_delimiter(namespace.len(), &mut result).unwrap();
     result.extend_from_slice(namespace);
     result.extend_from_slice(msg);
     result
