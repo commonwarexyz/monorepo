@@ -22,13 +22,16 @@ use rand::{CryptoRng, Rng};
 // This constant represents the size of the encryption tag in bytes.
 const ENCRYPTION_TAG_LENGTH: usize = 16;
 
+/// An incoming connection with a valid peer handshake.
 pub struct IncomingConnection<C: Scheme, Si: Sink, St: Stream> {
     config: Config<C>,
     handshake: IncomingHandshake<Si, St>,
 }
 
 impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
-    pub async fn new<R: Rng + CryptoRng + Spawner + Clock>(
+    /// Verify the handshake from an incoming connection and return
+    /// a connection that can be upgraded (if useful).
+    pub async fn verify<R: Rng + CryptoRng + Spawner + Clock>(
         runtime: &R,
         config: Config<C>,
         sink: Si,
@@ -50,11 +53,13 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
         Ok(Self { config, handshake })
     }
 
+    /// The public key of the peer attempting to connect.
     pub fn peer(&self) -> PublicKey {
         self.handshake.peer_public_key.clone()
     }
 }
 
+/// A fully initialized connection with some peer.
 pub struct Connection<Si: Sink, St: Stream> {
     dialer: bool,
     sink: Si,
@@ -64,6 +69,7 @@ pub struct Connection<Si: Sink, St: Stream> {
 }
 
 impl<Si: Sink, St: Stream> Connection<Si, St> {
+    /// Attempt to upgrade a connection we initiated.
     pub async fn upgrade_dialer<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
         mut runtime: R,
         mut config: Config<C>,
@@ -138,6 +144,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         })
     }
 
+    /// Attempt to upgrade a connection initiated by some peer.
     pub async fn upgrade_listener<R: Rng + CryptoRng + Spawner + Clock, C: Scheme>(
         mut runtime: R,
         incoming: IncomingConnection<C, Si, St>,
@@ -181,6 +188,9 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         })
     }
 
+    /// Split the connection into a `Sender` and `Receiver`.
+    ///
+    /// This pattern is commonly used to concurrently send and receive messages.
     pub fn split(self) -> (Sender<Si>, Receiver<St>) {
         (
             Sender {
@@ -199,6 +209,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
     }
 }
 
+/// The half of a `Connection` that implements `crate::Sender`.
 pub struct Sender<Si: Sink> {
     cipher: ChaCha20Poly1305,
     sink: Si,
@@ -227,6 +238,7 @@ impl<Si: Sink> crate::Sender for Sender<Si> {
     }
 }
 
+/// The half of a `Connection` that implements `crate::Receiver`.
 pub struct Receiver<St: Stream> {
     cipher: ChaCha20Poly1305,
     stream: St,

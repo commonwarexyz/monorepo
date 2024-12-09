@@ -98,7 +98,7 @@ impl<
         //
         // IncomingConnection limits how long we will wait for the peer to send us their public key
         // to ensure an adversary can't force us to hold many pending connections open.
-        let incoming = match IncomingConnection::new(&runtime, stream_cfg, sink, stream).await {
+        let incoming = match IncomingConnection::verify(&runtime, stream_cfg, sink, stream).await {
             Ok(partial) => partial,
             Err(e) => {
                 debug!(error = ?e, "failed to receive public key");

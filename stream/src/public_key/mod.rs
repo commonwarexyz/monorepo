@@ -82,7 +82,7 @@ use commonware_cryptography::Scheme;
 use std::time::Duration;
 
 mod connection;
-pub use connection::{Connection, IncomingConnection, Sender};
+pub use connection::{Connection, IncomingConnection, Receiver, Sender};
 mod handshake;
 mod utils;
 mod wire {
