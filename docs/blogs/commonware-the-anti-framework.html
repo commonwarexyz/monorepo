@@ -14,7 +14,7 @@
     <meta property="og:url" content="https://commonware.xyz/blogs/commonware-the-anti-framework.html" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
-    <meta property="og:image" content="https://commonware.xyz/imgs/commonware-raise.jpeg" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/commonware-primitives.png" />
     <meta property="og:title" content="Commonware: the Anti-Framework" />
     <meta property="og:description" content="Today’s blockchain stack is designed to be a jack of all trades, but master of none." />
     <meta property="article:author" content="https://x.com/_patrickogrady" />
@@ -26,7 +26,7 @@
     <meta property="twitter:url" content="https://commonware.xyz/blogs/commonware-the-anti-framework.html" />
     <meta property="twitter:title" content="Commonware: the Anti-Framework" />
     <meta property="twitter:description" content="Today’s blockchain stack is designed to be a jack of all trades, but master of none." />
-    <meta property="twitter:image" content="https://commonware.xyz/imgs/commonware-raise.jpeg" />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/commonware-primitives.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="@_patrickogrady" />
 
@@ -82,41 +82,76 @@
         <p>Today’s blockchain stack is designed to be a jack of all trades, but master of none.</p>
         <p>Modeled after virtual machines (VM) and kernels, it exposes a balanced interface through a one-size-fits-all framework instead of molding to the needs of any specific application.</p>
         <p>We built a new kind of stack for those spending their time working around this interface rather than leveraging it. With the support of Haun Ventures, Dragonfly Capital, and an experienced group of angels, we are excited to unveil <a href="https://github.com/commonwarexyz/monorepo">Commonware: the Anti-Framework</a>.</p>
-        <p>When I chat with a developer about launching their own onchain application (as a specialized blockchain), the same questions always come up:</p>
-        <ul>
-            <li>
-                <p>Where can I source bias-resistant randomness? <i>(ensure fair and unpredictable outcomes in onchain games)</i></p>
-            </li>
-            <li>
-                <p>Will my application be able to interact with other applications? <i>(transfer tokens between blockchains and gate experiences with external token ownership)</i></p>
-            </li>
-            <li>
-                <p>Can users verify data fetched from an API is correct? <i>(supermajority of validators indicate whether a payment was finalized, not an API provider)</i></p>
-            </li>
-        </ul>
-        <p>Today, we're excited to share how @commonwarexyz is answering these questions with <a href="https://docs.rs/commonware-cryptography">commonware-cryptography</a> (now in ALPHA).</p>
-        <p>commonware-cryptography is an open (Apache-2 and MIT) implementation of BLS12-381 Distributed Key Generation (DKG), Resharing, and Threshold Signatures in Rust. Unlike most implementations, commonware-cryptography does not employ a "board" for share distribution (that requires dealers to broadcast encrypted shares over a public channel). Rather, dealers distribute shares over encrypted connections directly with each recipient and recipients broadcast an acknowledgement when they receive a correct share (no share material included).</p>
-        <p>With an eye towards consensus integration (natively emitting Threshold Signatures during finalization), the commonware-cryptography DKG/Resharing construction identifies disqualified contributors in each round (missing commitment, invalid commitment, invalid share distribution, ignoring reveal requests, etc.) and supports maintaining a threshold of 2f + 1 (of 3f + 1 total contributors) across Reshares (which can be run to introduce/remove contributors and/or proactively on a regular interval to bound the age of shares). You can read more about this construction <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/index.html">here</a>.</p>
-        <p>So, how does this answer any of a developer's questions?</p>
-        <ul>
-            <li>
-                <p><b>Seeds <i>(Randomness)</i>:</b> BLS12-381 Threshold Signatures are deterministic and can be used as a bias-resistant source of randomness. No contributor knows the value of a signature until collecting at least "threshold" partial signatures.</p>
-            </li>
-            <li>
-                <p><b>Links <i>(Connectivity)</i>:</b> With BLS12-381 DKG/Resharing, a group of contributors (like a validator set) maintain a static public key over time (even as participants are added/removed). If this set of contributors signs over a finalized block, anyone can verify that block (or anything provable from its header) is included in the canonical history using the static public key of the group (48 bytes) and a Threshold Signature (96 bytes). A blockchain can support verification of BLS signatures in the execution layer (many already do) and read finalized data from another blockchain without following its consensus or tracking its validator set (as a lite client).</p>
-            </li>
-            <li>
-                <p><b>Views <i>(Access)</i>:</b> "Links" can be extended beyond blockchain execution environments to wallets and explorers to provide trust-minimized access to onchain activity. Like a blockchain, all a user requires to verify that a blockchain included/emitted some data is its static public key (can be hardcoded) and a Threshold Signature over a block (or whatever artifact a developer wants to emit) referencing said data.</p>
-            </li>
-        </ul>
-        <p>To showcase how "Seeds" will work, we implemented a <a href="https://docs.rs/commonware-vrf">Proof-of-Concept Verifiable Random Function (VRF) CLI</a> with a trusted Arbiter (that will be removed after the release of commonware-consensus) and untrusted Contributors:</p>
-        <div class="video-container">
-            <iframe src="https://www.youtube.com/embed/nGIJk4w63F0?si=jy2QGEvsC0WHJUwi" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+        <h2>Outgrowing the Virtual Machine</h2>
+        <p>Increasingly, the best builders spend their time working against the general-purpose abstractions provided by today’s blockchain stacks.</p>
+        <div class="image-container">
+            <img src="../imgs/kernel-vs-blockchain.png" alt="Blockchain stacks are modeled after the kernel">
         </div>
-        <p>Contributors to this VRF connect to each other over commonware-p2p (using ED25519 identities), perform an initial DKG (to generate a static public key), and then perform a proactive refresh every 10 seconds. After a successful DKG and/or Reshare, contributors generate partial signatures over the round number and gossip them to others in the group (again using commonware-p2p). These partial signatures, when aggregated, form a bias-resistant source of randomness that was not knowable to any contributor prior to signing.</p>
-        <p>To demonstrate how malicious contributors are tolerated, the CLI also lets you behave as a "rogue" dealer that generates invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, or a "defiant" dealer that doesn't respond to requests to reveal shares that weren't acknowledged by other contributors.</p>
-        <p>Next up, commonware-consensus!</p>
-        <p><i>To support contributors and developers working with the Commonware Library, we launched a <a href="https://discord.gg/wt5VtKXv5c">Discord</a>. We look forward to seeing you there soon!</i></p>
+        <p>Whether <a href="https://eips.ethereum.org/EIPS/eip-4337">incorporating sidecars and relayers</a> to augment them or <a href="https://github.com/celestiaorg/celestia-core/blob/v0.34.x-celestia/README.md">breaking them altogether with a fork</a>, using these interfaces to transform a crypto app into a great app rapidly veers off the “happy path” with only a few moderate feature requests:</p>
+        <ul>
+            <li>
+                <p>Building an exchange and need to offer dedicated transaction gossip for market makers and power traders?</p>
+            </li>
+            <li>
+                <p>Launching a game and need to order transactions in a certain way to deter manipulation?</p>
+            </li>
+            <li>
+                <p>Generating tons of application data for a social network and want to employ a CDN to distribute data?</p>
+            </li>
+            <li>
+                <p>Shipping payments and need to modify the block format to make it easier for a user to verify their payment went through?</p>
+            </li>
+            <li>
+                <p>Simplifying onchain interactions and need to replace a user’s address with a native username?</p>
+            </li>
+        </ul>
+        <p>Much of what leading developers are building today isn’t unlocked with “more framework,” it is solved with less. Instead of building around more of the same blockspace, they want to ship insightful customizations that make sense for their users (and don’t for yours).</p>
+        <h2>Drop the Framework. Its' Cleaner.</h2>
+        <p><a href="https://commonware.xyz/blogs/introducing-commonware.html">We think</a> blockchain applications should be designed differently. Rather than prioritizing standardization and balanced performance across all applications, specialization should be our guide. We think the best developers can build better blockchain applications when they can pick-and-choose the right primitives for the right functions.</p>
+        <p>Over the last few months, <a href="https://github.com/commonwarexyz/monorepo">we built a new type of “blockchain stack”</a> designed from the ground up for those who aren’t getting what they need from the frameworks available today. This stack has no explicit layers. No specific security assumption. It is <a href="https://usa.visa.com/solutions/crypto/monolithic-vs-modular-blockchain.html">neither monolithic nor modular</a>. There is no hardcoded block format, state layout, definition of finality, mempool policy, execution rules, nor fee metering.</p>
+        <p>What we do provide is an open collection of “state-of-the-art” primitives that, while designed to work well together, can be rearranged, augmented, and even rebuilt (without forking everything). We call this growing collection of primitives “commonware”.</p>
+        <div class="image-container">
+            <img src="../imgs/commonware-primitives.png" alt="Assemble commonware however you want">
+        </div>
+        <p>Just like there are no specific features an application must have, there is no specific set of primitives that must be used to create an application. You can build from scratch or even inject these primitives into an existing blockchain.</p>
+        <h2>
+
+
+            <p>When I chat with a developer about launching their own onchain application (as a specialized blockchain), the same questions always come up:</p>
+            <ul>
+                <li>
+                    <p>Where can I source bias-resistant randomness? <i>(ensure fair and unpredictable outcomes in onchain games)</i></p>
+                </li>
+                <li>
+                    <p>Will my application be able to interact with other applications? <i>(transfer tokens between blockchains and gate experiences with external token ownership)</i></p>
+                </li>
+                <li>
+                    <p>Can users verify data fetched from an API is correct? <i>(supermajority of validators indicate whether a payment was finalized, not an API provider)</i></p>
+                </li>
+            </ul>
+            <p>Today, we're excited to share how @commonwarexyz is answering these questions with <a href="https://docs.rs/commonware-cryptography">commonware-cryptography</a> (now in ALPHA).</p>
+            <p>commonware-cryptography is an open (Apache-2 and MIT) implementation of BLS12-381 Distributed Key Generation (DKG), Resharing, and Threshold Signatures in Rust. Unlike most implementations, commonware-cryptography does not employ a "board" for share distribution (that requires dealers to broadcast encrypted shares over a public channel). Rather, dealers distribute shares over encrypted connections directly with each recipient and recipients broadcast an acknowledgement when they receive a correct share (no share material included).</p>
+            <p>With an eye towards consensus integration (natively emitting Threshold Signatures during finalization), the commonware-cryptography DKG/Resharing construction identifies disqualified contributors in each round (missing commitment, invalid commitment, invalid share distribution, ignoring reveal requests, etc.) and supports maintaining a threshold of 2f + 1 (of 3f + 1 total contributors) across Reshares (which can be run to introduce/remove contributors and/or proactively on a regular interval to bound the age of shares). You can read more about this construction <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/index.html">here</a>.</p>
+            <p>So, how does this answer any of a developer's questions?</p>
+            <ul>
+                <li>
+                    <p><b>Seeds <i>(Randomness)</i>:</b> BLS12-381 Threshold Signatures are deterministic and can be used as a bias-resistant source of randomness. No contributor knows the value of a signature until collecting at least "threshold" partial signatures.</p>
+                </li>
+                <li>
+                    <p><b>Links <i>(Connectivity)</i>:</b> With BLS12-381 DKG/Resharing, a group of contributors (like a validator set) maintain a static public key over time (even as participants are added/removed). If this set of contributors signs over a finalized block, anyone can verify that block (or anything provable from its header) is included in the canonical history using the static public key of the group (48 bytes) and a Threshold Signature (96 bytes). A blockchain can support verification of BLS signatures in the execution layer (many already do) and read finalized data from another blockchain without following its consensus or tracking its validator set (as a lite client).</p>
+                </li>
+                <li>
+                    <p><b>Views <i>(Access)</i>:</b> "Links" can be extended beyond blockchain execution environments to wallets and explorers to provide trust-minimized access to onchain activity. Like a blockchain, all a user requires to verify that a blockchain included/emitted some data is its static public key (can be hardcoded) and a Threshold Signature over a block (or whatever artifact a developer wants to emit) referencing said data.</p>
+                </li>
+            </ul>
+            <p>To showcase how "Seeds" will work, we implemented a <a href="https://docs.rs/commonware-vrf">Proof-of-Concept Verifiable Random Function (VRF) CLI</a> with a trusted Arbiter (that will be removed after the release of commonware-consensus) and untrusted Contributors:</p>
+            <div class="video-container">
+                <iframe src="https://www.youtube.com/embed/nGIJk4w63F0?si=jy2QGEvsC0WHJUwi" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+            </div>
+            <p>Contributors to this VRF connect to each other over commonware-p2p (using ED25519 identities), perform an initial DKG (to generate a static public key), and then perform a proactive refresh every 10 seconds. After a successful DKG and/or Reshare, contributors generate partial signatures over the round number and gossip them to others in the group (again using commonware-p2p). These partial signatures, when aggregated, form a bias-resistant source of randomness that was not knowable to any contributor prior to signing.</p>
+            <p>To demonstrate how malicious contributors are tolerated, the CLI also lets you behave as a "rogue" dealer that generates invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, or a "defiant" dealer that doesn't respond to requests to reveal shares that weren't acknowledged by other contributors.</p>
+            <p>Next up, commonware-consensus!</p>
+            <p><i>To support contributors and developers working with the Commonware Library, we launched a <a href="https://discord.gg/wt5VtKXv5c">Discord</a>. We look forward to seeing you there soon!</i></p>
     </div>
 
     <div id="footer-placeholder"></div>
