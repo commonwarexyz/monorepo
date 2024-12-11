@@ -92,7 +92,7 @@
 //! ### [Phase 2] Step 5: Finalize Commitments and Distribute Reveals
 //!
 //! After Step 2 (or 4), the arbiter will forward all commitments with at least `threshold - 1` acks to
-//! all qualified contributors (and any accompanying reveals). The arbtier will then recover the
+//! all qualified contributors (and any accompanying reveals). The arbiter will then recover the
 //! new group polynomial using all valid commitments, if a DKG, or the first `threshold` commitments
 //! (sorted by participant identity), if a reshare.
 //!
