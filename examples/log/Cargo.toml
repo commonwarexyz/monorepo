@@ -2,9 +2,9 @@
 name = "commonware-log"
 edition = "2021"
 publish = true
-version = "0.0.1"
+version = "0.0.2"
 license = "MIT OR Apache-2.0"
-description = "Generate secret logs and agree on their hash."
+description = "Commit to a secret log and agree to its hash."
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/log"

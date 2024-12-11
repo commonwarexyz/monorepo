@@ -380,7 +380,7 @@ checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "chrono",
  "clap",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-consensus"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bytes",
  "commonware-cryptography",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-log"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bytes",
  "chrono",

@@ -1,4 +1,4 @@
-//! Generate secret logs and agree on their hash.
+//! Commit to a secret log and agree to its hash.
 //!
 //! This example demonstrates how to build an application that employs [commonware-consensus::simplex`](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html).
 //! Whenever it is a participants turn to build a block, they randomly generate a 16-byte secret message and send the

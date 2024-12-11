@@ -9,6 +9,7 @@
 
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
+* [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
@@ -20,6 +21,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 _Examples may include insecure code (i.e. deriving keypairs from an integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
 
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
+* [log](./examples/log/README.md):  Commit to a secret log and agree to its hash.
 * [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
 
 ## Miscellaneous
