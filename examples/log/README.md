@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-log.svg)](https://crates.io/crates/commonware-log)
 
-Generate secret logs and agree on their hash.
+Commit to a secret log and agree to its hash.
 
 # Usage (Run at Least 3 to Make Progress)
 
