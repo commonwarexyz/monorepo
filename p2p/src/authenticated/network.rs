@@ -10,6 +10,7 @@ use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Listener, Network as RNetwork, Sink, Spawner, Stream};
 use commonware_stream::public_key;
+use commonware_utils::union;
 use governor::{clock::ReasonablyRealtime, Quota};
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
@@ -28,6 +29,12 @@ use tracing::{debug, info, warn};
 //
 // (*) assumes that the length is no more than 4GB
 const PROTOBUF_OVERHEAD: usize = 64;
+
+/// Unique suffix for all messages signed by the tracker.
+const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
+
+/// Unique suffix for all messages signed in a stream.
+const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
@@ -74,7 +81,7 @@ impl<
             runtime.clone(),
             tracker::Config {
                 crypto: cfg.crypto.clone(),
-                namespace: cfg.namespace.clone(),
+                namespace: union(&cfg.namespace, TRACKER_SUFFIX),
                 registry: cfg.registry.clone(),
                 address: cfg.dialable,
                 bootstrappers: cfg.bootstrappers.clone(),
@@ -164,7 +171,7 @@ impl<
         // Start listener
         let stream_cfg = public_key::Config {
             crypto: self.cfg.crypto,
-            namespace: self.cfg.namespace,
+            namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
             max_message_size: self.cfg.max_message_size + PROTOBUF_OVERHEAD,
             synchrony_bound: self.cfg.synchrony_bound,
             max_handshake_age: self.cfg.max_handshake_age,

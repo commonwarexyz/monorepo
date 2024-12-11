@@ -4,15 +4,9 @@ use bytes::Bytes;
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
-use commonware_utils::{union, SystemTimeExt};
+use commonware_utils::SystemTimeExt;
 use prost::Message;
 use std::time::{Duration, SystemTime};
-
-const NAMESPACE_SUFFIX_HANDSHAKE: &[u8] = b"_HANDSHAKE";
-
-fn suffix_namespace(namespace: &[u8]) -> Vec<u8> {
-    union(namespace, NAMESPACE_SUFFIX_HANDSHAKE)
-}
 
 pub fn create_handshake<C: Scheme>(
     crypto: &mut C,
@@ -26,7 +20,7 @@ pub fn create_handshake<C: Scheme>(
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key.as_bytes());
     payload.extend_from_slice(&timestamp.to_be_bytes());
-    let signature = crypto.sign(&suffix_namespace(namespace), &payload);
+    let signature = crypto.sign(namespace, &payload);
 
     // Send handshake
     Ok(wire::Handshake {
@@ -43,13 +37,13 @@ pub fn create_handshake<C: Scheme>(
 }
 
 pub struct Handshake {
-    pub(super) ephemeral_public_key: x25519_dalek::PublicKey,
-    pub(super) peer_public_key: PublicKey,
+    pub ephemeral_public_key: x25519_dalek::PublicKey,
+    pub peer_public_key: PublicKey,
 }
 
 impl Handshake {
     pub fn verify<E: Clock, C: Scheme>(
-        runtime: E,
+        runtime: &E,
         crypto: &C,
         namespace: &[u8],
         synchrony_bound: Duration,
@@ -106,12 +100,7 @@ impl Handshake {
         payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
 
         // Verify signature
-        if !C::verify(
-            &suffix_namespace(namespace),
-            &payload,
-            &public_key,
-            &signature.signature,
-        ) {
+        if !C::verify(namespace, &payload, &public_key, &signature.signature) {
             return Err(Error::InvalidSignature);
         }
 
@@ -123,17 +112,17 @@ impl Handshake {
 }
 
 pub struct IncomingHandshake<Si: Sink, St: Stream> {
-    pub(super) sink: Si,
-    pub(super) stream: St,
-    pub(super) deadline: SystemTime,
-    pub(super) ephemeral_public_key: x25519_dalek::PublicKey,
+    pub sink: Si,
+    pub stream: St,
+    pub deadline: SystemTime,
+    pub ephemeral_public_key: x25519_dalek::PublicKey,
     pub peer_public_key: PublicKey,
 }
 
 impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
     #[allow(clippy::too_many_arguments)]
     pub async fn verify<E: Clock + Spawner, C: Scheme>(
-        runtime: E,
+        runtime: &E,
         crypto: &C,
         namespace: &[u8],
         max_message_size: usize,
@@ -232,7 +221,7 @@ mod tests {
 
             // Verify signature
             assert!(Ed25519::verify(
-                &suffix_namespace(TEST_NAMESPACE),
+                TEST_NAMESPACE,
                 &payload,
                 &sender.public_key(),
                 &handshake.signature.unwrap().signature,
@@ -240,7 +229,7 @@ mod tests {
 
             // Verify using the handshake struct
             let handshake = Handshake::verify(
-                runtime,
+                &runtime,
                 &recipient,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -286,7 +275,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                runtime,
+                &runtime,
                 &recipient,
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -337,7 +326,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                runtime,
+                &runtime,
                 &Ed25519::from_seed(2),
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -372,7 +361,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                runtime,
+                &runtime,
                 &Ed25519::from_seed(0),
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -426,7 +415,7 @@ mod tests {
 
             // Call the verify function
             let result = IncomingHandshake::verify(
-                runtime,
+                &runtime,
                 &recipient,
                 TEST_NAMESPACE,
                 ONE_MEGABYTE,
@@ -479,7 +468,7 @@ mod tests {
 
             // Verify the handshake
             let result = Handshake::verify(
-                runtime,
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
@@ -516,7 +505,7 @@ mod tests {
 
             // Verify the handshake
             let result = Handshake::verify(
-                runtime,
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
@@ -563,7 +552,7 @@ mod tests {
 
             // Verify the handshake
             let result = Handshake::verify(
-                runtime,
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 Duration::from_secs(5),
@@ -601,7 +590,7 @@ mod tests {
 
             // Verify the handshake, it should be fine still.
             Handshake::verify(
-                runtime.clone(),
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -615,7 +604,7 @@ mod tests {
 
             // Verify that a timeout error is returned.
             let result = Handshake::verify(
-                runtime,
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -658,7 +647,7 @@ mod tests {
 
             // Verify the okay handshake.
             Handshake::verify(
-                runtime.clone(),
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -668,7 +657,7 @@ mod tests {
 
             // Handshake too far into the future fails.
             let result = Handshake::verify(
-                runtime,
+                &runtime,
                 &crypto,
                 TEST_NAMESPACE,
                 synchrony_bound,
@@ -677,12 +666,5 @@ mod tests {
             );
             assert!(matches!(result, Err(Error::InvalidTimestampFuture(t)) if t == SYNCHRONY_BOUND_MILLIS + 1));
         });
-    }
-
-    #[test]
-    fn test_suffix_namespace() {
-        let namespace = b"test_namespace";
-        let expected = b"test_namespace_HANDSHAKE".to_vec();
-        assert_eq!(suffix_namespace(namespace), expected);
     }
 }

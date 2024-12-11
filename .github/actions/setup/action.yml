@@ -6,7 +6,7 @@ inputs:
   protoc-version:
     description: 'The version of protoc to use in cache keys'
     default: '28.2'
-    required: false 
+    required: false
 runs:
   using: 'composite'
   steps:

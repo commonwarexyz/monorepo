@@ -380,7 +380,7 @@ checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
 name = "commonware-chat"
-version = "0.0.25"
+version = "0.0.26"
 dependencies = [
  "chrono",
  "clap",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-cryptography"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "blst",
  "bytes",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-macros"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "futures",
  "futures-timer",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-p2p"
-version = "0.0.23"
+version = "0.0.24"
 dependencies = [
  "bitvec",
  "bytes",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-runtime"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "bytes",
  "commonware-macros",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-storage"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "bytes",
  "commonware-macros",
@@ -545,7 +545,7 @@ dependencies = [
 
 [[package]]
 name = "commonware-stream"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bytes",
  "chacha20poly1305",
@@ -563,14 +563,15 @@ dependencies = [
 
 [[package]]
 name = "commonware-utils"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
+ "prost",
  "sha2 0.10.8",
 ]
 
 [[package]]
 name = "commonware-vrf"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "bytes",
  "clap",

@@ -2,7 +2,7 @@
 name = "commonware-vrf"
 edition = "2021"
 publish = true
-version = "0.0.12"
+version = "0.0.13"
 license = "MIT OR Apache-2.0"
 description = "Generate bias-resistant randomness with untrusted contributors using commonware-cryptography and commonware-p2p."
 readme = "README.md"
@@ -13,13 +13,13 @@ documentation = "https://docs.rs/commonware-vrf"
 [dependencies]
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
-commonware-p2p = { workspace = true } 
+commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
-bytes = { workspace = true } 
+bytes = { workspace = true }
 rand = { workspace = true }
-tracing = { workspace = true } 
-prost = { workspace = true } 
+tracing = { workspace = true }
+prost = { workspace = true }
 futures = { workspace = true }
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -27,4 +27,4 @@ prometheus-client = { workspace = true }
 governor = { workspace = true }
 
 [build-dependencies]
-prost-build = { workspace = true } 
+prost-build = { workspace = true }

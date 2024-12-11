@@ -1,5 +1,6 @@
 //! Leverage common functionality across multiple primitives.
 
+use prost::{encode_length_delimiter, length_delimiter_len};
 use sha2::{Digest, Sha256};
 
 mod time;
@@ -53,6 +54,18 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
     union.extend_from_slice(a);
     union.extend_from_slice(b);
     union
+}
+
+/// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
+///
+/// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
+pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
+    let ld_len = length_delimiter_len(namespace.len());
+    let mut result = Vec::with_capacity(ld_len + namespace.len() + msg.len());
+    encode_length_delimiter(namespace.len(), &mut result).unwrap();
+    result.extend_from_slice(namespace);
+    result.extend_from_slice(msg);
+    result
 }
 
 #[cfg(test)]
@@ -140,5 +153,53 @@ mod tests {
             union(&[0x01, 0x02, 0x03], &[0x04, 0x05, 0x06]),
             [0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
         );
+    }
+
+    #[test]
+    fn test_union_unique() {
+        let namespace = b"namespace";
+        let msg = b"message";
+
+        let length_encoding = vec![0b0000_1001];
+        let mut expected = Vec::with_capacity(length_encoding.len() + namespace.len() + msg.len());
+        expected.extend_from_slice(&length_encoding);
+        expected.extend_from_slice(namespace);
+        expected.extend_from_slice(msg);
+
+        let result = union_unique(namespace, msg);
+        assert_eq!(result, expected);
+        assert_eq!(result.len(), result.capacity());
+    }
+
+    #[test]
+    fn test_union_unique_zero_length() {
+        let namespace = b"";
+        let msg = b"message";
+
+        let length_encoding = vec![0];
+        let mut expected = Vec::with_capacity(length_encoding.len() + namespace.len() + msg.len());
+        expected.extend_from_slice(&length_encoding);
+        expected.extend_from_slice(msg);
+
+        let result = union_unique(namespace, msg);
+        assert_eq!(result, expected);
+        assert_eq!(result.len(), result.capacity());
+    }
+
+    #[test]
+    fn test_union_unique_long_length() {
+        // Use a namespace of over length 127.
+        let namespace = &b"n".repeat(256);
+        let msg = b"message";
+
+        let length_encoding = vec![0b1000_0000, 0b0000_0010];
+        let mut expected = Vec::with_capacity(length_encoding.len() + namespace.len() + msg.len());
+        expected.extend_from_slice(&length_encoding);
+        expected.extend_from_slice(namespace);
+        expected.extend_from_slice(msg);
+
+        let result = union_unique(namespace, msg);
+        assert_eq!(result, expected);
+        assert_eq!(result.len(), result.capacity());
     }
 }

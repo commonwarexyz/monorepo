@@ -2,7 +2,7 @@
 name = "commonware-storage"
 edition = "2021"
 publish = true
-version = "0.0.4"
+version = "0.0.5"
 license = "MIT OR Apache-2.0"
 description = "Persist and retrieve data from an abstract store."
 readme = "README.md"
@@ -27,7 +27,7 @@ rangemap = "1.5.1"
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 rand = { workspace = true }
-criterion = { workspace = true } 
+criterion = { workspace = true }
 
 [[bench]]
 name="hashmap_iteration"

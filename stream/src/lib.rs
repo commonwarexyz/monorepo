@@ -7,6 +7,7 @@ use prost::DecodeError;
 use std::future::Future;
 use thiserror::Error;
 
+/// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("unexpected message")]

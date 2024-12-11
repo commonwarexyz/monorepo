@@ -2,7 +2,7 @@
 name = "commonware-cryptography"
 edition = "2021"
 publish = true
-version = "0.0.12"
+version = "0.0.13"
 license = "MIT OR Apache-2.0"
 description = "Generate keys, sign arbitrary messages, and deterministically verify signatures."
 readme = "README.md"
@@ -22,11 +22,11 @@ zeroize = "1.5.7"
 rayon = "1.10"
 
 [dev-dependencies]
-criterion = { workspace = true } 
+criterion = { workspace = true }
 proptest = "1"
 
 [build-dependencies]
-prost-build = { workspace = true } 
+prost-build = { workspace = true }
 
 [features]
 portable = ["blst/portable"]

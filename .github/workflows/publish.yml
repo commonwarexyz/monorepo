@@ -1,4 +1,4 @@
-name: Publish 
+name: Publish
 
 on:
   push:
@@ -17,28 +17,33 @@ jobs:
       uses: ./.github/actions/setup
       with:
         rust-version: ${{ steps.rust-version.outputs.rust_version}}
-    - name: Publish macros 
+    - name: Publish macros
       run: cargo publish --manifest-path macros/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Publish utils 
+    - name: Publish utils
       run: cargo publish --manifest-path utils/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Publish cryptography 
+    - name: Publish cryptography
       run: cargo publish --manifest-path cryptography/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Publish runtime 
+    - name: Publish runtime
       run: cargo publish --manifest-path runtime/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish storage
       run: cargo publish --manifest-path storage/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish stream
+      run: cargo publish --manifest-path stream/Cargo.toml
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -52,7 +57,7 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    - name: Publish vrf 
+    - name: Publish vrf
       run: cargo publish --manifest-path examples/vrf/Cargo.toml
       continue-on-error: true
       env:
