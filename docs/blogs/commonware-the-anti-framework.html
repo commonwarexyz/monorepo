@@ -114,44 +114,80 @@
             <img src="../imgs/commonware-primitives.png" alt="Assemble commonware however you want">
         </div>
         <p>Just like there are no specific features an application must have, there is no specific set of primitives that must be used to create an application. You can build from scratch or even inject these primitives into an existing blockchain.</p>
-        <h2>
-
-
-            <p>When I chat with a developer about launching their own onchain application (as a specialized blockchain), the same questions always come up:</p>
-            <ul>
-                <li>
-                    <p>Where can I source bias-resistant randomness? <i>(ensure fair and unpredictable outcomes in onchain games)</i></p>
-                </li>
-                <li>
-                    <p>Will my application be able to interact with other applications? <i>(transfer tokens between blockchains and gate experiences with external token ownership)</i></p>
-                </li>
-                <li>
-                    <p>Can users verify data fetched from an API is correct? <i>(supermajority of validators indicate whether a payment was finalized, not an API provider)</i></p>
-                </li>
-            </ul>
-            <p>Today, we're excited to share how @commonwarexyz is answering these questions with <a href="https://docs.rs/commonware-cryptography">commonware-cryptography</a> (now in ALPHA).</p>
-            <p>commonware-cryptography is an open (Apache-2 and MIT) implementation of BLS12-381 Distributed Key Generation (DKG), Resharing, and Threshold Signatures in Rust. Unlike most implementations, commonware-cryptography does not employ a "board" for share distribution (that requires dealers to broadcast encrypted shares over a public channel). Rather, dealers distribute shares over encrypted connections directly with each recipient and recipients broadcast an acknowledgement when they receive a correct share (no share material included).</p>
-            <p>With an eye towards consensus integration (natively emitting Threshold Signatures during finalization), the commonware-cryptography DKG/Resharing construction identifies disqualified contributors in each round (missing commitment, invalid commitment, invalid share distribution, ignoring reveal requests, etc.) and supports maintaining a threshold of 2f + 1 (of 3f + 1 total contributors) across Reshares (which can be run to introduce/remove contributors and/or proactively on a regular interval to bound the age of shares). You can read more about this construction <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/index.html">here</a>.</p>
-            <p>So, how does this answer any of a developer's questions?</p>
-            <ul>
-                <li>
-                    <p><b>Seeds <i>(Randomness)</i>:</b> BLS12-381 Threshold Signatures are deterministic and can be used as a bias-resistant source of randomness. No contributor knows the value of a signature until collecting at least "threshold" partial signatures.</p>
-                </li>
-                <li>
-                    <p><b>Links <i>(Connectivity)</i>:</b> With BLS12-381 DKG/Resharing, a group of contributors (like a validator set) maintain a static public key over time (even as participants are added/removed). If this set of contributors signs over a finalized block, anyone can verify that block (or anything provable from its header) is included in the canonical history using the static public key of the group (48 bytes) and a Threshold Signature (96 bytes). A blockchain can support verification of BLS signatures in the execution layer (many already do) and read finalized data from another blockchain without following its consensus or tracking its validator set (as a lite client).</p>
-                </li>
-                <li>
-                    <p><b>Views <i>(Access)</i>:</b> "Links" can be extended beyond blockchain execution environments to wallets and explorers to provide trust-minimized access to onchain activity. Like a blockchain, all a user requires to verify that a blockchain included/emitted some data is its static public key (can be hardcoded) and a Threshold Signature over a block (or whatever artifact a developer wants to emit) referencing said data.</p>
-                </li>
-            </ul>
-            <p>To showcase how "Seeds" will work, we implemented a <a href="https://docs.rs/commonware-vrf">Proof-of-Concept Verifiable Random Function (VRF) CLI</a> with a trusted Arbiter (that will be removed after the release of commonware-consensus) and untrusted Contributors:</p>
-            <div class="video-container">
-                <iframe src="https://www.youtube.com/embed/nGIJk4w63F0?si=jy2QGEvsC0WHJUwi" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
-            </div>
-            <p>Contributors to this VRF connect to each other over commonware-p2p (using ED25519 identities), perform an initial DKG (to generate a static public key), and then perform a proactive refresh every 10 seconds. After a successful DKG and/or Reshare, contributors generate partial signatures over the round number and gossip them to others in the group (again using commonware-p2p). These partial signatures, when aggregated, form a bias-resistant source of randomness that was not knowable to any contributor prior to signing.</p>
-            <p>To demonstrate how malicious contributors are tolerated, the CLI also lets you behave as a "rogue" dealer that generates invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, or a "defiant" dealer that doesn't respond to requests to reveal shares that weren't acknowledged by other contributors.</p>
-            <p>Next up, commonware-consensus!</p>
-            <p><i>To support contributors and developers working with the Commonware Library, we launched a <a href="https://discord.gg/wt5VtKXv5c">Discord</a>. We look forward to seeing you there soon!</i></p>
+        <h2>Commonware: Now Including Consensus</h2>
+        <p>How far along are we? In early August, we released <a href="https://commonware.xyz/blogs/introducing-commonware.html">p2p::authenticated</a> to provide authenticated and encrypted communication directly between public keys. In late August, we released <a href="https://commonware.xyz/blogs/commonware-cryptography.html">cryptography::bls12381</a> (with DKG and Resharing Support) to unlock verifiable randomness, connectivity, and trusted access for users. In late September, we released <a href="https://commonware.xyz/blogs/commonware-runtime.html">runtime::deterministic</a> to provide a foundation to deterministically test and optimize any primitive (internal or external). Today, we are excited to share our biggest release yet: <a href="https://docs.rs/commonware-consensus">consensus::simplex</a> (our first consensus primitive).</p>
+        <p>consensus::simplex provides Byzantine Fault Tolerant (BFT) agreement via a new construction inspired by <a href="https://eprint.iacr.org/2023/463">Simplex Consensus</a>. Unlike other “off-the-shelf” consensus implementations, consensus::simplex is refreshingly minimal. It delivers simple agreement over opaque “blobs”. Functions that have historically motivated developers to create forks, like block broadcast and state sync, are abstracted as interfaces that can be externally implemented. Here are a few nice features:</p>
+        <ul>
+            <li>
+                <p><b>Fast Blocks and Optimal Finalization Latency:</b> Generate a new block after 2 network hops (propose -> notarize ->) and finalize a block after 3 network hops (propose -> notarize -> finalize ->) with authenticated multicast (implemented by p2p::authenticated). With an average network latency between participants of ~150ms, this would mean ~300ms block times and ~450ms finality. Faster network? It moves faster.</p>
+            </li>
+            <li>
+                <p><b>Unrestricted Execution:</b> Deploy an existing execution environment (like reth) or develop something from scratch with your own blocks, transactions, and whatever else you come up with. Consensus runs over opaque hashes rather than some prescribed block format you must comply with.</p>
+            </li>
+            <li>
+                <p><b>Externalized Uptime and Fault Proofs:</b> Track and slash validators defined on another blockchain (like an AVS). Determine how and when validators are rewarded for participating in consensus.</p>
+            </li>
+            <li>
+                <p><b>Decoupled Broadcast and Mempool:</b> Scale throughput with custom logic to propagate application data before, during, and after consensus. Use a proprietary algorithm or even employ the cloud.</p>
+            </li>
+        </ul>
+        <p>To maintain reliability, we run consensus::simplex through a suite of deterministic simulations on every commit. This suite enforces correct behavior during mock network partitions, Byzantine faults, slow/lossy link performance, and cluster-wide unclean shutdown. With deterministic simulation, we can guarantee each simulation covers novel interactions (never running the same order of concurrent events) and yet fully-reproducible, even in a step-by-step debugger. As a result of this focus on testing, consensus::simplex has >90% coverage.</p>
+        <p>You can see what it looks like to build with consensus::simplex in examples::log, p2p::authenticated in examples::chat, and cryptography::bls12381 in examples::vrf.</p>
+        <h2>Accelerating Development: $9M Fundraise</h2>
+        <div class="image-container">
+            <img src="../imgs/commonware-raise.png" alt="$9M Fundraise">
+        </div>
+        <p>We’re excited to share that Haun Ventures and Dragonfly Capital are co-leading a $9M investment in Commonware to accelerate our work and to equip us to better support the developers who leverage it.</p>
+        <p>We are also fortunate to have the support of an experienced group of friends, mentors, and builders pushing the limit of what’s possible onchain:</p>
+        <ul>
+            <li>
+                <p>Mert Mumtaz (@0xMert_)</p>
+            </li>
+            <li>
+                <p>Nick White (@nickwh8te)</p>
+            </li>
+            <li>
+                <p>Viktor Bunin (@ViktorBunin)</p>
+            </li>
+            <li>
+                <p>Sreeram Kannan (@sreeramkannan)</p>
+            </li>
+            <li>
+                <p>Andrew Huang (@KAndrewHuang)</p>
+            </li>
+            <li>
+                <p>Dan Romero (@dwr)
+            <li>
+                <p>Smokey The Bera (@SmokeyTheBera)</p>
+            </li>
+            <li>
+                <p>Kevin Sekniqi (@kevinsekniqi)</p>
+            </li>
+            <li>
+                <p>Jonathan Claudius (@claudijd)</p>
+            </li>
+            <li>
+                <p>Zaki Manian (@zmanian)</p>
+            </li>
+            <li>
+                <p>Marko Baricevic (@MarkoBaricevic_)</p>
+            </li>
+            <li>
+                <p>Scott Sunarto (@smsunarto)</p>
+            </li>
+            <li>
+                <p>Felix Wilhelm (@_fel1x)</p>
+            </li>
+            <li>
+                <p>Nemil Dalal (@nemild)
+            <li>
+                <p>Jeff Schroeder (@SEJeff)</p>
+            </li>
+        </ul>
+        <p>Going from 0 to 1 isn’t the same as going from 1 to 100. What makes it easy to deploy onchain at the start isn’t the same thing that allows you to push the frontier next.</p>
+        <p>That’s what commonware is for.</p>
+        <h2>Let’s Build Something Together</h2>
+        <p>If you can’t build what you want onchain, reach out to us at partners@commonware.xyz. We’re looking for 3 ambitious teams to collaborate with that want to leverage commonware to build unique applications across a variety of security configurations (L0, L1, L2, restaked security, or somewhere between).</p>
     </div>
 
     <div id="footer-placeholder"></div>
