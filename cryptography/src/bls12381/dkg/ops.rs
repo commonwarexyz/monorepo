@@ -111,7 +111,7 @@ pub fn recover_public(
         return Err(Error::InsufficientDealings);
     }
 
-    // Construct poool to perform interpolation
+    // Construct pool to perform interpolation
     let pool = ThreadPoolBuilder::new()
         .num_threads(concurrency)
         .build()

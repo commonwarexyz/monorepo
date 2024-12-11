@@ -65,7 +65,7 @@ pub struct P0 {
 }
 
 impl P0 {
-    /// Create a new abiter for a DKG/Resharing procedure.
+    /// Create a new arbiter for a DKG/Resharing procedure.
     pub fn new(
         threshold: u32,
         previous: Option<poly::Public>,

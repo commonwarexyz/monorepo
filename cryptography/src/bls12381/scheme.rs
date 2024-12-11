@@ -29,7 +29,7 @@ use rand::{CryptoRng, Rng, SeedableRng};
 /// BLS12-381 implementation of the `Scheme` trait.
 ///
 /// This implementation uses the `blst` crate for BLS12-381 operations. This
-/// crate implments serialization according to the "ZCash BLS12-381" specification
+/// crate implements serialization according to the "ZCash BLS12-381" specification
 /// (<https://github.com/supranational/blst/tree/master?tab=readme-ov-file#serialization-format>) and
 /// hashes messages according to RFC 9380.
 #[derive(Clone)]
