@@ -119,25 +119,25 @@
         <p>consensus::simplex provides Byzantine Fault Tolerant (BFT) agreement via a new construction inspired by <a href="https://eprint.iacr.org/2023/463">Simplex Consensus</a>. Unlike other “off-the-shelf” consensus implementations, consensus::simplex is refreshingly minimal. It delivers simple agreement over opaque “blobs”. Functions that have historically motivated developers to create forks, like block broadcast and state sync, are abstracted as interfaces that can be externally implemented. Here are a few nice features:</p>
         <ul>
             <li>
-                <p><b>Fast Blocks and Optimal Finalization Latency:</b> Generate a new block after 2 network hops (propose -> notarize ->) and finalize a block after 3 network hops (propose -> notarize -> finalize ->) with authenticated multicast (implemented by p2p::authenticated). With an average network latency between participants of ~150ms, this would mean ~300ms block times and ~450ms finality. Faster network? It moves faster.</p>
+                <p><b>Fast Blocks and Optimal Finalization Latency:</b> Generate a new block after 2 network hops (propose -> notarize ->) and finalize a block after 3 network hops (propose -> notarize -> finalize ->) with authenticated multicast (implemented by p2p::authenticated). With an <a href="https://www.cloudping.co/grid/p_50/timeframe/1M">average network latency</a> between participants of ~150ms, this would mean ~300ms block times and ~450ms finality. Faster network? It moves faster.</p>
             </li>
             <li>
-                <p><b>Unrestricted Execution:</b> Deploy an existing execution environment (like reth) or develop something from scratch with your own blocks, transactions, and whatever else you come up with. Consensus runs over opaque hashes rather than some prescribed block format you must comply with.</p>
+                <p><b>Unrestricted Execution:</b> Deploy an existing execution environment (like <a href="https://github.com/paradigmxyz/reth">reth</a>) or develop something from scratch with your own blocks, transactions, and whatever else you come up with. Consensus runs over opaque hashes rather than some prescribed block format you must comply with.</p>
             </li>
             <li>
-                <p><b>Externalized Uptime and Fault Proofs:</b> Track and slash validators defined on another blockchain (like an AVS). Determine how and when validators are rewarded for participating in consensus.</p>
+                <p><b>Externalized Uptime and Fault Proofs:</b> Track and slash validators defined on another blockchain (like an <a href="https://app.eigenlayer.xyz/avs">AVS</a>). Determine how and when validators are rewarded for participating in consensus.</p>
             </li>
             <li>
                 <p><b>Decoupled Broadcast and Mempool:</b> Scale throughput with custom logic to propagate application data before, during, and after consensus. Use a proprietary algorithm or even employ the cloud.</p>
             </li>
         </ul>
-        <p>To maintain reliability, we run consensus::simplex through a suite of deterministic simulations on every commit. This suite enforces correct behavior during mock network partitions, Byzantine faults, slow/lossy link performance, and cluster-wide unclean shutdown. With deterministic simulation, we can guarantee each simulation covers novel interactions (never running the same order of concurrent events) and yet fully-reproducible, even in a step-by-step debugger. As a result of this focus on testing, consensus::simplex has >90% coverage.</p>
-        <p>You can see what it looks like to build with consensus::simplex in examples::log, p2p::authenticated in examples::chat, and cryptography::bls12381 in examples::vrf.</p>
+        <p>To maintain reliability, we run consensus::simplex through a suite of deterministic simulations on every commit. This suite enforces correct behavior during mock network partitions, Byzantine faults, slow/lossy link performance, and cluster-wide unclean shutdown. <a href="https://www.youtube.com/watch?v=m3HwXlQPCEU">With deterministic simulation</a>, we can guarantee each simulation covers novel interactions (never running the same order of concurrent events) and yet fully-reproducible, even in a step-by-step debugger. As a result of this focus on testing, consensus::simplex has >90% coverage.</p>
+        <p>You can see what it looks like to build with consensus::simplex in <a href="https://docs.rs/commonware-log">examples::log</a>, p2p::authenticated in <a href="https://docs.rs/commonware-chat">examples::chat</a>, and cryptography::bls12381 in <a href="https://docs.rs/commonware-vrf">examples::vrf</a>.</p>
         <h2>Accelerating Development: $9M Fundraise</h2>
         <div class="image-container">
             <img src="../imgs/commonware-raise.png" alt="$9M Fundraise">
         </div>
-        <p>We’re excited to share that Haun Ventures and Dragonfly Capital are co-leading a $9M investment in Commonware to accelerate our work and to equip us to better support the developers who leverage it.</p>
+        <p>We’re excited to share that <a href="https://www.haun.co/">Haun Ventures</a> and <a href="https://www.dragonfly.xyz/">Dragonfly Capital</a> are co-leading a $9M investment in Commonware to accelerate our work and to equip us to better support the developers who leverage it.</p>
         <p>We are also fortunate to have the support of an experienced group of friends, mentors, and builders pushing the limit of what’s possible onchain:</p>
         <ul>
             <li>
@@ -156,7 +156,7 @@
                 <p>Andrew Huang (@KAndrewHuang)</p>
             </li>
             <li>
-                <p>Dan Romero (@dwr)
+                <p>Dan Romero (@dwr)</p>
             <li>
                 <p>Smokey The Bera (@SmokeyTheBera)</p>
             </li>
@@ -179,7 +179,8 @@
                 <p>Felix Wilhelm (@_fel1x)</p>
             </li>
             <li>
-                <p>Nemil Dalal (@nemild)
+                <p>Nemil Dalal (@nemild)</p>
+            </li>
             <li>
                 <p>Jeff Schroeder (@SEJeff)</p>
             </li>
