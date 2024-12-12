@@ -118,8 +118,8 @@ function insertFooter() {
     const footerHTML = `
     <div class="footer">
         <div class="socials">
-            <a href="https://discord.gg/wt5VtKXv5c">Discord</a>
             <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
+            <a href="https://github.com/commonwarexyz/monorepo/discussions">Discussions</a>
             <a href="https://x.com/commonwarexyz">X</a>
         </div>
         &copy; 2024 Commonware, Inc. All rights reserved.
