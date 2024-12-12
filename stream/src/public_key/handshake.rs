@@ -120,7 +120,6 @@ pub struct IncomingHandshake<Si: Sink, St: Stream> {
 }
 
 impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
-    #[allow(clippy::too_many_arguments)]
     pub async fn verify<E: Clock + Spawner, C: Scheme>(
         runtime: &E,
         config: &Config<C>,
