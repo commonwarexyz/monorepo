@@ -36,79 +36,70 @@ pub fn create_handshake<C: Scheme>(
     .into())
 }
 
-pub struct Handshake {
-    pub ephemeral_public_key: x25519_dalek::PublicKey,
-    pub peer_public_key: PublicKey,
-}
+/// Returns (ephemeral_public_key, peer_public_key)
+pub fn verify_handshake<E: Clock, C: Scheme>(
+    runtime: &E,
+    crypto: &C,
+    namespace: &[u8],
+    synchrony_bound: Duration,
+    max_handshake_age: Duration,
+    handshake_bytes: Bytes,
+) -> Result<(x25519_dalek::PublicKey, PublicKey), Error> {
+    // Parse handshake message
+    let handshake = wire::Handshake::decode(handshake_bytes).map_err(Error::UnableToDecode)?;
 
-impl Handshake {
-    pub fn verify<E: Clock, C: Scheme>(
-        runtime: &E,
-        crypto: &C,
-        namespace: &[u8],
-        synchrony_bound: Duration,
-        max_handshake_age: Duration,
-        msg: Bytes,
-    ) -> Result<Self, Error> {
-        // Parse handshake message
-        let handshake = wire::Handshake::decode(msg).map_err(Error::UnableToDecode)?;
+    // Verify that ephemeral public key is valid
+    let ephemeral_public_key = x25519::decode_public_key(&handshake.ephemeral_public_key)
+        .map_err(|_| Error::InvalidEphemeralPublicKey)?;
 
-        // Verify that ephemeral public key is valid
-        let ephemeral_public_key = x25519::decode_public_key(&handshake.ephemeral_public_key)
-            .map_err(|_| Error::InvalidEphemeralPublicKey)?;
-
-        // Verify that the signature is for us
-        //
-        // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
-        // they would not be able to decrypt any messages from the shared secret). This would prevent us
-        // from making a legitimate connection to the intended peer.
-        let our_public_key: PublicKey = handshake.recipient_public_key;
-        if !C::validate(&our_public_key) {
-            return Err(Error::InvalidChannelPublicKey);
-        }
-        if crypto.public_key() != our_public_key {
-            return Err(Error::HandshakeNotForUs);
-        }
-
-        // Verify that the timestamp in the handshake is recent
-        //
-        // This prevents an adversary from reopening an encrypted connection
-        // if a peer's ephemeral key is compromised (which would be stored in-memory
-        // unlike the peer identity) and/or from blocking a peer from connecting
-        // to others (if an adversary recovered a handshake message could open a
-        // connection to a peer first, peers only maintain one connection per peer).
-        let current_timestamp = runtime.current().epoch();
-        let handshake_timestamp = Duration::from_millis(handshake.timestamp);
-        if handshake_timestamp + max_handshake_age < current_timestamp {
-            return Err(Error::InvalidTimestampOld(handshake.timestamp));
-        }
-        if handshake_timestamp > current_timestamp + synchrony_bound {
-            return Err(Error::InvalidTimestampFuture(handshake.timestamp));
-        }
-
-        // Get signature from peer
-        let signature = handshake.signature.ok_or(Error::MissingSignature)?;
-        let public_key: PublicKey = signature.public_key;
-        if !C::validate(&public_key) {
-            return Err(Error::InvalidPeerPublicKey);
-        }
-
-        // Construct signing payload (ephemeral public key + my public key + timestamp)
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&our_public_key);
-        payload.extend_from_slice(&handshake.ephemeral_public_key);
-        payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
-
-        // Verify signature
-        if !C::verify(namespace, &payload, &public_key, &signature.signature) {
-            return Err(Error::InvalidSignature);
-        }
-
-        Ok(Self {
-            ephemeral_public_key,
-            peer_public_key: public_key,
-        })
+    // Verify that the signature is for us
+    //
+    // If we didn't verify this, it would be trivial for any peer to impersonate another peer (even though
+    // they would not be able to decrypt any messages from the shared secret). This would prevent us
+    // from making a legitimate connection to the intended peer.
+    let our_public_key: PublicKey = handshake.recipient_public_key;
+    if !C::validate(&our_public_key) {
+        return Err(Error::InvalidChannelPublicKey);
     }
+    if crypto.public_key() != our_public_key {
+        return Err(Error::HandshakeNotForUs);
+    }
+
+    // Verify that the timestamp in the handshake is recent
+    //
+    // This prevents an adversary from reopening an encrypted connection
+    // if a peer's ephemeral key is compromised (which would be stored in-memory
+    // unlike the peer identity) and/or from blocking a peer from connecting
+    // to others (if an adversary recovered a handshake message could open a
+    // connection to a peer first, peers only maintain one connection per peer).
+    let current_timestamp = runtime.current().epoch();
+    let handshake_timestamp = Duration::from_millis(handshake.timestamp);
+    if handshake_timestamp + max_handshake_age < current_timestamp {
+        return Err(Error::InvalidTimestampOld(handshake.timestamp));
+    }
+    if handshake_timestamp > current_timestamp + synchrony_bound {
+        return Err(Error::InvalidTimestampFuture(handshake.timestamp));
+    }
+
+    // Get signature from peer
+    let signature = handshake.signature.ok_or(Error::MissingSignature)?;
+    let public_key: PublicKey = signature.public_key;
+    if !C::validate(&public_key) {
+        return Err(Error::InvalidPeerPublicKey);
+    }
+
+    // Construct signing payload (ephemeral public key + my public key + timestamp)
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&our_public_key);
+    payload.extend_from_slice(&handshake.ephemeral_public_key);
+    payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
+
+    // Verify signature
+    if !C::verify(namespace, &payload, &public_key, &signature.signature) {
+        return Err(Error::InvalidSignature);
+    }
+
+    Ok((ephemeral_public_key, public_key))
 }
 
 pub struct IncomingHandshake<Si: Sink, St: Stream> {
@@ -146,7 +137,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
         };
 
         // Verify handshake message from peer
-        let handshake = Handshake::verify(
+        let (ephemeral_public_key, peer_public_key) = verify_handshake(
             runtime,
             crypto,
             namespace,
@@ -158,8 +149,8 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
             sink,
             stream,
             deadline,
-            ephemeral_public_key: handshake.ephemeral_public_key,
-            peer_public_key: handshake.peer_public_key,
+            ephemeral_public_key,
+            peer_public_key,
         })
     }
 }
@@ -228,7 +219,7 @@ mod tests {
             ));
 
             // Verify using the handshake struct
-            let handshake = Handshake::verify(
+            let (ephemeral_public_key, peer_public_key) = verify_handshake(
                 &runtime,
                 &recipient,
                 TEST_NAMESPACE,
@@ -237,8 +228,8 @@ mod tests {
                 handshake_bytes,
             )
             .unwrap();
-            assert_eq!(handshake.peer_public_key, sender.public_key());
-            assert_eq!(handshake.ephemeral_public_key, ephemeral_public_key);
+            assert_eq!(peer_public_key, sender.public_key());
+            assert_eq!(ephemeral_public_key, ephemeral_public_key);
         });
     }
 
@@ -467,7 +458,7 @@ mod tests {
             });
 
             // Verify the handshake
-            let result = Handshake::verify(
+            let result = verify_handshake(
                 &runtime,
                 &crypto,
                 TEST_NAMESPACE,
@@ -504,7 +495,7 @@ mod tests {
             handshake.ephemeral_public_key = ephemeral_public_key.into();
 
             // Verify the handshake
-            let result = Handshake::verify(
+            let result = verify_handshake(
                 &runtime,
                 &crypto,
                 TEST_NAMESPACE,
@@ -551,7 +542,7 @@ mod tests {
             });
 
             // Verify the handshake
-            let result = Handshake::verify(
+            let result = verify_handshake(
                 &runtime,
                 &crypto,
                 TEST_NAMESPACE,
@@ -589,7 +580,7 @@ mod tests {
             runtime.sleep(timeout_duration).await;
 
             // Verify the handshake, it should be fine still.
-            Handshake::verify(
+            verify_handshake(
                 &runtime,
                 &crypto,
                 TEST_NAMESPACE,
@@ -603,7 +594,7 @@ mod tests {
             runtime.sleep(Duration::from_millis(1)).await;
 
             // Verify that a timeout error is returned.
-            let result = Handshake::verify(
+            let result = verify_handshake(
                 &runtime,
                 &crypto,
                 TEST_NAMESPACE,
@@ -646,7 +637,7 @@ mod tests {
             ).unwrap();
 
             // Verify the okay handshake.
-            Handshake::verify(
+            verify_handshake(
                 &runtime,
                 &crypto,
                 TEST_NAMESPACE,
@@ -656,7 +647,7 @@ mod tests {
             ).unwrap(); // no error
 
             // Handshake too far into the future fails.
-            let result = Handshake::verify(
+            let result = verify_handshake(
                 &runtime,
                 &crypto,
                 TEST_NAMESPACE,
