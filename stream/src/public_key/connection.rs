@@ -1,5 +1,5 @@
 use super::{
-    handshake::{create_handshake, Handshake, IncomingHandshake},
+    handshake::{create_handshake, verify_handshake, IncomingHandshake},
     utils::{
         codec::{recv_frame, send_frame},
         nonce,
@@ -116,7 +116,7 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         };
 
         // Verify handshake message from peer
-        let handshake = Handshake::verify(
+        let (ephemeral_public_key, peer_public_key) = verify_handshake(
             &runtime,
             &config.crypto,
             &config.namespace,
@@ -126,12 +126,12 @@ impl<Si: Sink, St: Stream> Connection<Si, St> {
         )?;
 
         // Ensure we connected to the right peer
-        if peer != handshake.peer_public_key {
+        if peer != peer_public_key {
             return Err(Error::WrongPeer);
         }
 
         // Create cipher
-        let shared_secret = secret.diffie_hellman(&handshake.ephemeral_public_key);
+        let shared_secret = secret.diffie_hellman(&ephemeral_public_key);
         let cipher = ChaCha20Poly1305::new_from_slice(shared_secret.as_bytes())
             .map_err(|_| Error::CipherCreationFailed)?;
 
