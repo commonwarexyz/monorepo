@@ -38,12 +38,7 @@ impl<C: Scheme, Si: Sink, St: Stream> IncomingConnection<C, Si, St> {
     ) -> Result<Self, Error> {
         let handshake = IncomingHandshake::verify(
             runtime,
-            &config.crypto,
-            &config.namespace,
-            config.max_message_size,
-            config.synchrony_bound,
-            config.max_handshake_age,
-            config.handshake_timeout,
+            &config,
             sink,
             stream,
         )
