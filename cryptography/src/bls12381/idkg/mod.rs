@@ -1,6 +1,6 @@
-//! Distributed Key Generation (DKG) and Resharing protocol for the BLS12-381 curve.
+//! Interactive Distributed Key Generation (DKG) and Resharing protocol for the BLS12-381 curve.
 //!
-//! This crate implements a Distributed Key Generation (DKG) and Resharing protocol
+//! This crate implements an Interactive Distributed Key Generation (DKG) and Resharing protocol
 //! for the BLS12-381 curve. Unlike many other constructions, this scheme only requires
 //! participants to publicly post shares during a "forced reveal" (when a given dealer
 //! does not distribute a share required for a party to recover their secret). Outside of this
@@ -20,20 +20,27 @@
 //! a standalone process or by some consensus protocol. Contributors are the participants
 //! that deal shares and commitments to other contributors in the protocol.
 //!
-//! The protocol is designed to maintain a `2f + 1` threshold (over `3f + 1` participants) in the
-//! synchronous network model and a `f + 1` threshold (over `3f + 1` participants) in the asynchronous
-//! network model (where partitions of unbounded length may occur) across any reshare (including ones
-//! with a changing contributor set) where `2f + 1` contributors are online and honest (although
-//! the threshold can be arbitrarily configured). To achieve this, the protocol sacrifices
-//! responsiveness and instead relies on "timeouts" that all online and honest contributors
-//! are expected to communicate within. To provide a "feeling" of responsiveness, the protocol
-//! can be implemented with view-based timeouts over an optimistically responsive protocol.
+//! The protocol safely maintains a `f + 1` threshold (over `3f + 1` participants) in the partially
+//! synchronous network model (where messages may be arbitrarily delayed between any 2 participants)
+//! across any reshare (including ones with a changing contributor set) where `2f + 1` contributors
+//! are online and honest.
 //!
-//! Whether or not the protocol succeeds in a given round (i.e. `2f + 1` participants are not
-//! online and honest), all contributors that do not adhere to the protocol will be identified
-//! and returned. If the protocol succeeds, the contributions of any contributors that did not
-//! adhere to the protocol are excluded (and still returned). It is expected that the set of
-//! contributors would punish/exclude "bad" contributors prior to a future round.
+//! Whether or not the protocol succeeds in a given round, all contributors that do not adhere to the
+//! protocol will be identified and returned. If the protocol succeeds, the contributions of any
+//! contributors that did not adhere to the protocol are excluded (and still returned). It is expected
+//! that the set of contributors would punish/exclude "bad" contributors prior to a future round (to eventually
+//! make progress).
+//!
+//! ## Extension to `2f + 1` Threshold
+//!
+//! It is possible to extend this construction to a `2f + 1` threshold (over `3f + 1` participants)
+//! in the synchronous network model. To achieve this, timeouts in each phase can be introduced
+//! (greater than the synchrony bound for any honest participant to broadcast a message to all other
+//! participants). The insight here is that `2f + 1` honest participants "have the time" to interact
+//! by the timeout at each phase and will make progress regardless of the actions of up to `f` byzantine
+//! participants. This does not apply to the partially synchronous network model because a partition
+//! might form that groups `f + 1` honest participants with `f` byzantine participants that could complete
+//! the protocol (after which the byzantine nodes could drop offline).
 //!
 //! ## Arbiter
 //!
