@@ -39,6 +39,8 @@
 //! not provided by the Arbiter because this authorization function is highly dependent on
 //! the context in which the contributor is being used.
 
+use commonware_utils::quorum;
+
 use super::utils;
 use crate::bls12381::{
     idkg::{ops, Error},
@@ -66,8 +68,6 @@ pub struct P0 {
 impl P0 {
     /// Create a new arbiter for a DKG/Resharing procedure.
     pub fn new(
-        threshold: u32,
-        // TODO: provide a separate requirement (for f+1 need 2f+1 commitments)
         previous: Option<poly::Public>,
         mut dealers: Vec<PublicKey>,
         mut recipients: Vec<PublicKey>,
@@ -86,7 +86,7 @@ impl P0 {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
-            threshold,
+            threshold: ((quorum(recipients.len() as u32).unwrap() - 1) / 2) + 1,
             previous,
             concurrency,
             dealers,
@@ -101,8 +101,8 @@ impl P0 {
     /// Required number of commitments to continue procedure.
     pub fn required(&self) -> u32 {
         match &self.previous {
-            Some(previous) => previous.required(),
-            None => self.threshold,
+            Some(_) => quorum(self.dealers.len() as u32).unwrap(),
+            None => quorum(self.recipients.len() as u32).unwrap(),
         }
     }
 
@@ -142,7 +142,7 @@ impl P0 {
         Ok(())
     }
 
-    /// If there exist at least `required()` commitments, proceed to `P1`.
+    /// If there exist `required()` commitments, proceed to `P1`.
     pub fn finalize(mut self) -> (Option<P1>, HashSet<PublicKey>) {
         // Disqualify any contributors who did not submit a commitment
         for contributor in self.dealers.iter() {
@@ -196,16 +196,12 @@ pub struct P1 {
 /// Alias for a commitment from a dealer.
 pub type Commitment = (u32, PublicKey, poly::Public);
 
-/// Alias for a request for a missing share from a dealer
-/// for a recipient.
-pub type Request = (u32, u32);
-
 impl P1 {
     /// Required number of commitments to continue procedure.
     pub fn required(&self) -> u32 {
         match &self.previous {
-            Some(previous) => previous.required(),
-            None => self.threshold,
+            Some(_) => quorum(self.dealers.len() as u32).unwrap(),
+            None => quorum(self.recipients.len() as u32).unwrap(),
         }
     }
 
@@ -398,7 +394,7 @@ impl P1 {
     }
 
     /// If there exist at least `threshold - 1` acks each for `required()` dealers, proceed to `P2`.
-    pub fn finalize(mut self) -> (Option<(P2, Vec<Request>)>, HashSet<PublicKey>) {
+    pub fn finalize(mut self) -> Option<(P2, HashSet<PublicKey>)> {
         // Remove acks of disqualified recipients
         for acks in self.acks.values_mut() {
             for disqualified in self.disqualified.iter() {
@@ -466,10 +462,9 @@ impl P1 {
 pub struct Output {
     pub public: poly::Public,
     pub commitments: Vec<u32>,
-    pub resolutions: HashMap<(u32, u32), Share>,
 }
 
-/// Collect missing shares (if any) and recover the public polynomial.
+/// Recover the public polynomial.
 pub struct P2 {
     threshold: u32,
     previous: Option<poly::Public>,
@@ -482,9 +477,6 @@ pub struct P2 {
     disqualified: HashSet<PublicKey>,
 
     acks: HashMap<u32, HashSet<u32>>,
-
-    missing_dealings: HashMap<u32, HashSet<u32>>,
-    resolutions: HashMap<(u32, u32), Share>,
 }
 
 impl P2 {
