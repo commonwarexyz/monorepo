@@ -143,6 +143,9 @@ impl P0 {
     }
 
     /// If there exist `required()` commitments, proceed to `P1`.
+    ///
+    /// TODO: exit early if impossible to reach `required()` commitments
+    /// with disqualifications.
     pub fn finalize(mut self) -> (Option<P1>, HashSet<PublicKey>) {
         // Disqualify any contributors who did not submit a commitment
         for contributor in self.dealers.iter() {
