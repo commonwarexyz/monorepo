@@ -6,22 +6,18 @@
 //!
 //! Each contributor should run its own instance of the arbiter over a replicated
 //! log (deterministic order of events across all contributors) of commitments,
-//! acknowledgements, complaints, and resolutions. All correct contributors, when given
+//! acknowledgements, and complaints. All correct contributors, when given
 //! the same log, will arrive at the same result (will recover the same group polynomial
 //! and a share that can generate partial signatures over it). Using a replicated log allows
 //! us to provide both reliable broadcast (all honest contributors see all messages from
 //! all other honest contributors) and to enforce a "timeout" (using log index) for each
-//! phase of DKG/Resharing
-//!
-//!
-//! TODO: fix (needed to support a `2f + 1` threshold in this construction).
+//! phase of DKG/Resharing.
 //!
 //! ## Trusted Alternative: Standalone Process
 //!
 //! It is possible to run the arbiter as a standalone process that contributors
-//! must trust to track commitments, acks, complaints, and reveals. A rogue arbiter
-//! could request reveals from all dealers for all participants and recover the group
-//! secret key.
+//! must trust to track commitments, acknowledgements, and complaints and then notify
+//! all parties which commitments and shares to use to generate the group public key and shares.
 //!
 //! _For an example of this approach, refer to <https://docs.rs/commonware-vrf>._
 //!
@@ -33,9 +29,9 @@
 //! information and penalizing them for this is not helpful (i.e. an acknowledgement may be inflight when another
 //! contributor submits a valid complaint).
 //!
-//! Submitting invalid information (invalid commitment) or refusing to submit required information (not sending a commitment)
-//! qualifies as an attributable fault that disqualifies a dealer/recipient from a round of DKG/Resharing. A developer
-//! can additionally handle such a fault as they see fit (may warrant additional punishment).
+//! Submitting invalid information (invalid commitment) qualifies as an attributable fault that disqualifies a
+//! dealer/recipient from a round of DKG/Resharing. A developer can additionally handle such a fault as they see
+//! fit (may warrant additional punishment).
 //!
 //! # Warning
 //!
