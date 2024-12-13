@@ -20,13 +20,14 @@
 //! a standalone process or by some consensus protocol. Contributors are the participants
 //! that deal shares and commitments to other contributors in the protocol.
 //!
-//! Because the target use case for this protocol is a blockchain, the protocol is designed
-//! to maintain a `2f + 1` threshold over `3f + 1` participants across any reshare (including reshares
+//! The protocol is designed to maintain a `2f + 1` threshold (over `3f + 1` participants) in the
+//! synchronous network model and a `f + 1` threshold (over `3f + 1` participants) in the asynchronous
+//! network model (where partitions of unbounded length may occur) across any reshare (including ones
 //! with a changing contributor set) where `2f + 1` contributors are online and honest (although
 //! the threshold can be arbitrarily configured). To achieve this, the protocol sacrifices
 //! responsiveness and instead relies on "timeouts" that all online and honest contributors
 //! are expected to communicate within. To provide a "feeling" of responsiveness, the protocol
-//! can be implemented with block height-based timeouts over an optimistically responsive protocol.
+//! can be implemented with view-based timeouts over an optimistically responsive protocol.
 //!
 //! Whether or not the protocol succeeds in a given round (i.e. `2f + 1` participants are not
 //! online and honest), all contributors that do not adhere to the protocol will be identified
