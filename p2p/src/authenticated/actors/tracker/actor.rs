@@ -34,7 +34,7 @@ struct PeerSet {
     index: u64,
     sorted: Vec<PublicKey>,
     order: HashMap<PublicKey, usize>,
-    knowldege: BitVec<u8, Lsb0>,
+    knowledge: BitVec<u8, Lsb0>,
     msg: wire::BitVec,
 }
 
@@ -48,26 +48,26 @@ impl PeerSet {
         }
 
         // Create bit vector
-        let knowldege = BitVec::repeat(false, peers.len());
+        let knowledge = BitVec::repeat(false, peers.len());
 
         // Create message
         let msg = wire::BitVec {
             index,
-            bits: knowldege.clone().into(),
+            bits: knowledge.clone().into(),
         };
 
         Self {
             index,
             sorted: peers,
             order,
-            knowldege,
+            knowledge,
             msg,
         }
     }
 
     fn found(&mut self, peer: PublicKey) -> bool {
         if let Some(idx) = self.order.get(&peer) {
-            self.knowldege.set(*idx, true);
+            self.knowledge.set(*idx, true);
             return true;
         }
         false
@@ -76,7 +76,7 @@ impl PeerSet {
     fn update_msg(&mut self) {
         self.msg = wire::BitVec {
             index: self.index,
-            bits: self.knowldege.clone().into(),
+            bits: self.knowledge.clone().into(),
         };
     }
 
