@@ -33,10 +33,10 @@ pub struct Eval<C: Element> {
 impl<C: Element> Eval<C> {
     /// Canonically serializes the evaluation.
     pub fn serialize(&self) -> Vec<u8> {
-        let serialized = self.value.serialize();
-        let mut bytes = Vec::with_capacity(std::mem::size_of::<u32>() + serialized.len());
+        let value_serialized = self.value.serialize();
+        let mut bytes = Vec::with_capacity(std::mem::size_of::<u32>() + value_serialized.len());
         bytes.extend_from_slice(&self.index.to_be_bytes());
-        bytes.extend_from_slice(&serialized);
+        bytes.extend_from_slice(&value_serialized);
         bytes
     }
 
