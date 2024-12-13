@@ -191,7 +191,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::dkg::{arbiter, contributor};
+    use crate::bls12381::idkg::{arbiter, contributor};
     use crate::bls12381::primitives::group::Private;
     use crate::{Ed25519, Scheme};
     use std::collections::HashMap;

@@ -16,7 +16,7 @@
 //! the context in which the contributor is being used.
 
 use crate::bls12381::{
-    dkg::{ops, Error},
+    idkg::{ops, Error},
     primitives::{
         group::{self, Element, Share},
         poly::{self, Eval},

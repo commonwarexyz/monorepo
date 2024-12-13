@@ -83,7 +83,7 @@
 mod handlers;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{bls12381::dkg::utils::max_reveals, Ed25519, Scheme};
+use commonware_cryptography::{bls12381::idkg::utils::max_reveals, Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},

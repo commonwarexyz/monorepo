@@ -45,7 +45,7 @@
 
 use super::utils;
 use crate::bls12381::{
-    dkg::{ops, Error},
+    idkg::{ops, Error},
     primitives::{group::Share, poly},
 };
 use crate::PublicKey;

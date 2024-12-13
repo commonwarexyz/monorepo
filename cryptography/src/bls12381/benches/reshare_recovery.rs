@@ -1,5 +1,5 @@
 use commonware_cryptography::{
-    bls12381::{dkg, primitives::poly},
+    bls12381::{idkg, primitives::poly},
     Ed25519, Scheme,
 };
 use commonware_utils::quorum;
@@ -26,7 +26,7 @@ fn benchmark_reshare_recovery(c: &mut Criterion) {
         let mut commitments = Vec::new();
         for i in 0..n {
             let me = contributors[i as usize].clone();
-            let p0 = dkg::contributor::P0::new(
+            let p0 = idkg::contributor::P0::new(
                 me,
                 t,
                 None,
@@ -109,7 +109,7 @@ fn benchmark_reshare_recovery(c: &mut Criterion) {
                         for i in 0..n {
                             let me = contributors[i as usize].clone();
                             let share = outputs[i as usize].share;
-                            let p0 = dkg::contributor::P0::new(
+                            let p0 = idkg::contributor::P0::new(
                                 me,
                                 t,
                                 Some((group.clone(), share)),

@@ -151,7 +151,7 @@ pub fn verify_aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::{dkg::ops::generate_shares, primitives::group::DST_G2};
+    use crate::bls12381::{idkg::ops::generate_shares, primitives::group::DST_G2};
     use blst::BLST_ERROR;
     use rand::prelude::*;
 

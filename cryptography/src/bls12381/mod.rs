@@ -121,7 +121,7 @@
 //! conc=16 msgs=50000      time:   [769.73 ms 773.88 ms 777.97 ms]
 //! ```
 
-pub mod dkg;
+pub mod idkg;
 pub mod primitives;
 mod scheme;
 pub use scheme::Bls12381;
@@ -129,7 +129,7 @@ pub use scheme::Bls12381;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dkg::ops::generate_shares;
+    use idkg::ops::generate_shares;
     use primitives::group::Private;
     use primitives::ops::{partial_aggregate, partial_sign, partial_verify, verify};
     use primitives::poly::public;
