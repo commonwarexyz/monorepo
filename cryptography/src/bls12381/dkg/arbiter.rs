@@ -11,7 +11,10 @@
 //! and a share that can generate partial signatures over it). Using a replicated log allows
 //! us to provide both reliable broadcast (all honest contributors see all messages from
 //! all other honest contributors) and to enforce a "timeout" (using log index) for each
-//! phase of DKG/Resharing (needed to support a `2f + 1` threshold in this construction).
+//! phase of DKG/Resharing
+//!
+//!
+//! TODO: fix (needed to support a `2f + 1` threshold in this construction).
 //!
 //! ## Trusted Alternative: Standalone Process
 //!
