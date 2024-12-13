@@ -49,60 +49,35 @@
 //! In the first phase, the arbiter collects randomly generated commitments from all contributors.
 //! If the arbiter is instantiated with a polynomial (from a previous DKG/Reshare), it will enforce all
 //! generated commitments are consistent with said polynomial. The arbiter, lastly, enforces that the
-//! degree of each commitment is `threshold - 1`.
+//! degree of each commitment is `f`.
 //!
-//! Any contributors that do not submit a commitment before the timeout or submit an invalid commitment
-//! are disqualified.
-//!
-//! If there are not at least `threshold` valid commitments (or `previous.degree + 1` commitments in
-//! resharing), the arbiter will abort the protocol.
+//! If there do not exist `2f + 1` valid commitments (computed from the previous set in the case of resharing)
+//! by some timeout, the arbiter will abort the protocol.
 //!
 //! ### [Phase 0] Step 1: Distribute Valid Commitments
 //!
-//! After the Phase 0 timeout, the arbiter sends all valid commitments to all qualified contributors (this
-//! can be implemented as a read operation on a blockchain and does not actually need to be a network message).
+//! The arbiter sends all qualified commitments to all contributors (regardless of whether or not their commitment
+//! was selected).
 //!
 //! ### [Phase 1] Step 2: Collect Acks and Complaints
 //!
-//! After distributing valid commitments, the arbiter will listen for acks and complaints from qualified
+//! After distributing valid commitments, the arbiter will listen for acks and complaints from all
 //! contributors. An "ack" is a message indicating that a given contributor has received a valid
-//! share from a dealer (does not include encrypted or plaintext share material). A "complaint" is a
-//! signed share from a given dealer that is invalid (signing is external to this implementation).
+//! share from a contributor (does not include encrypted or plaintext share material). A "complaint" is a
+//! signed share from a given contributor that is invalid (signing is external to this implementation).
 //! If the complaint is valid, the dealer that sent it is disqualified. If the complaint is invalid
-//! (it is a valid share), the recipient is disqualified. Because all shares must be signed by the contributor
+//! (it is a valid share), the recipient is disqualified. Because all shares must be signed by the dealer
 //! that generates them and this signature is over the plaintext share, there is no need to have a
-//! "justification" phase where said contributor must "defend" itself.
+//! "justification" phase where said dealer must "defend" itself.
 //!
-//! Any commitments without at least `threshold - 1` acks (dealers don't need to ack their own
-//! commitment) are disqualified. Contributors that are missing more than (threshold - 1)/2 shares
-//! (on commitments with at least `threshold - 1` acks) are disqualified (revealing this many shares
-//! could allow an adversary to reconstruct the secret).
+//! If `f + 1` commitments (or `previous.degree + 1` commitments in resharing) are not acked by the same
+//! subset of `2f + 1` contributors (each contributor in the subset must have acked the same `f + 1` commitments)
+//! by some timeout, the arbiter will abort the protocol.
 //!
-//! If there are not at least `threshold` valid commitments (or `previous.degree + 1` commitments in
-//! resharing), the arbiter will abort the protocol.
+//! ### [Phase 2] Step 3: Finalize Commitments and Distribute Reveals
 //!
-//! ### [Phase 1] Step 3 (Optional): Request Reveals
-//!
-//! After the Phase 1 timeout, the arbiter will send a request to contributors of any commitments with
-//! at least `threshold - 1` acks for qualified contributors that have not yet sent an ack for
-//! said commitment.
-//!
-//! If there are no such requests, the arbiter will proceed directly to step 5 (without waiting for
-//! a timeout).
-//!
-//! If there are such requests, the arbiter will proceed to step 4.
-//!
-//! ### [Phase 2] Step 4 (Optional): Collect Reveals
-//!
-//! Collect reveals that match any requests from Step 3. If a valid reveal for a commitment
-//! is not sent before the timeout or the reveal is invalid, the arbiter will disqualify the commitment.
-//!
-//! ### [Phase 2] Step 5: Finalize Commitments and Distribute Reveals
-//!
-//! After Step 2 (or 4), the arbiter will forward all commitments with at least `threshold - 1` acks to
-//! all qualified contributors (and any accompanying reveals). The arbiter will then recover the
-//! new group polynomial using all valid commitments, if a DKG, or the first `threshold` commitments
-//! (sorted by participant identity), if a reshare.
+//! The arbiter forwards these `f + 1` commitments to all contributors. The arbiter will then recover the
+//! new group polynomial using said commitments.
 //!
 //! ## Contributor
 //!
@@ -111,14 +86,14 @@
 //! If a contributor is joining a pre-existing group (and is not a dealer), it proceeds to Step 2.
 //!
 //! Otherwise, it generates shares and a commitment. If it is a DKG, the commitment is a random polynomial
-//! with degree of `threshold - 1`. If it is a reshare, the commitment must be consistent with the previous
+//! with degree of `f`. If it is a reshare, the commitment must be consistent with the previous
 //! group polynomial. The contributor generates the shares and commitment for Step 1 and sends the commitment
 //! to the arbiter.
 //!
 //! ### [Phase 0] Step 1 (Optional): Distribute Shares
 //!
 //! After receiving qualified commitments from the arbiter, the contributor (if qualified) will distribute
-//! shares to all other contributors (ordered by participant identity).
+//! shares to all participants (ordered by participant identity).
 //!
 //! ### [Phase 1] Step 2: Submit Acks/Complaints
 //!
@@ -127,18 +102,12 @@
 //!
 //! The contributor will not send an "ack" for its own share (if it is a qualified contributor).
 //!
-//! ### [Phase 2] Step 3 (Optional): Respond to Reveal Requests
+//! ### [Phase 2] Step 3 (Optional): Recover Group Polynomial and Derive Share
 //!
-//! If a contributor receives a "request" from the arbiter to reveal a share, it will do so. Even
-//! if it knows it sent said share to said contributor, it is possible that this contributor is malicious
-//! and chose not to "ack" it (this should not be a penalty for the contributor that must reveal).
-//!
-//! ### [Phase 2] Step 4 (Optional): Collect Reveals, Recover Group Polynomial, and Derive Share
-//!
-//! If the round is successful, the arbiter will forward the valid commitments and any reveals required
-//! to construct shares for the new group polynomial (which shares the same constant term if it is a
-//! reshare). Like above, the contributor will recover the group polynomial. Unlike above, the
-//! contributor will also recover its new share of the secret (rather than just adding all shares together).
+//! If the round is successful, the arbiter will forward the valid commitments to construct shares for the
+//! new group polynomial (which shares the same constant term if it is a reshare). Like the aribiter, the contributor
+//! will recover the group polynomial. Unlike above, the contributor will also recover its new share of the secret
+//! (rather than just adding all shares together).
 //!
 //! # Example
 //!
