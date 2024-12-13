@@ -19,7 +19,7 @@
     <meta property="og:description" content="When I chat with a developer about launching their own onchain application (as a specialized blockchain), the same questions always come up." />
     <meta property="article:author" content="https://x.com/_patrickogrady" />
     <meta property="article:published_time" content="2024-08-28T00:00:00Z" />
-    <meta property="article:modified_time" content="2024-08-28T00:00:00Z" />
+    <meta property="article:modified_time" content="2024-12-13T00:00:00Z" />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
@@ -93,7 +93,7 @@
         </ul>
         <p>Today, we're excited to share how @commonwarexyz is answering these questions with <a href="https://docs.rs/commonware-cryptography">commonware-cryptography</a> (now in ALPHA).</p>
         <p>commonware-cryptography is an open (Apache-2 and MIT) implementation of BLS12-381 Distributed Key Generation (DKG), Resharing, and Threshold Signatures in Rust. Unlike most implementations, commonware-cryptography does not employ a "board" for share distribution (that requires dealers to broadcast encrypted shares over a public channel). Rather, dealers distribute shares over encrypted connections directly with each recipient and recipients broadcast an acknowledgement when they receive a correct share (no share material included).</p>
-        <p>With an eye towards consensus integration (natively emitting Threshold Signatures during finalization), the commonware-cryptography DKG/Resharing construction identifies disqualified contributors in each round (missing commitment, invalid commitment, invalid share distribution, ignoring reveal requests, etc.) and supports maintaining a threshold of 2f + 1 (of 3f + 1 total contributors) across Reshares (which can be run to introduce/remove contributors and/or proactively on a regular interval to bound the age of shares). You can read more about this construction <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/index.html">here</a>.</p>
+        <p>This DKG/Resharing construction can identify disqualified contributors in each round (missing commitment, invalid commitment, invalid share distribution, ignoring reveal requests, etc.) and is safe to run with a threshold of 2f + 1 (of 3f + 1 total contributors) in the synchronous network model and f + 1 (of 3f + 1 total contributors) in the asynchronous network model (where partitions of unbounded length may occur) across reshares (which can be run to introduce/remove contributors and/or proactively on a regular interval to bound the age of shares). You can read more about this construction <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/index.html">here</a>.</p>
         <p>So, how does this answer any of a developer's questions?</p>
         <ul>
             <li>
