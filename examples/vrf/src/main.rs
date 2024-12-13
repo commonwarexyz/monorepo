@@ -71,14 +71,6 @@
 //! ```bash
 //! cargo run --release -- --lazy --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 //! ```
-//!
-//! ## Contributor 4 (Lazy + Defiant)
-//!
-//! _Only share `t-1` shares. Don't post any requested shares to arbiter (commitment will be dropped)._
-//!
-//! ```bash
-//! cargo run --release -- --lazy --defiant --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
-//! ```
 
 mod handlers;
 
@@ -151,12 +143,6 @@ fn main() {
         .arg(Arg::new("lazy").long("lazy").num_args(0).help(
             "Configures whether the contributor distributes shares to everyone or just t-1 participants",
         ))
-        .arg(
-            Arg::new("defiant")
-                .long("defiant")
-                .num_args(0)
-                .help("Configures whether the contributor responds to reveal requests"),
-        )
         .get_matches();
 
     // Create logger
@@ -260,7 +246,6 @@ fn main() {
             // Create contributor
             let rogue = matches.get_flag("rogue");
             let lazy = matches.get_flag("lazy");
-            let defiant = matches.get_flag("defiant");
             let (contributor_sender, contributor_receiver) = network.register(
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
