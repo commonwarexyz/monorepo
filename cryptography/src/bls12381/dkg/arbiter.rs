@@ -68,6 +68,7 @@ impl P0 {
     /// Create a new arbiter for a DKG/Resharing procedure.
     pub fn new(
         threshold: u32,
+        // TODO: provide a separate requirement (for f+1 need 2f+1 commitments)
         previous: Option<poly::Public>,
         mut dealers: Vec<PublicKey>,
         mut recipients: Vec<PublicKey>,
@@ -85,7 +86,6 @@ impl P0 {
             .enumerate()
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
-        dealers.sort();
         Self {
             threshold,
             previous,
