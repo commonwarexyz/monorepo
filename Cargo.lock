@@ -432,6 +432,7 @@ dependencies = [
  "commonware-utils",
  "criterion",
  "ed25519-consensus",
+ "itertools 0.13.0",
  "proptest",
  "prost-build",
  "rand",

@@ -74,7 +74,7 @@
 //! subset of `2f + 1` contributors (each contributor in the subset must have acked the same `f + 1` commitments)
 //! by some timeout, the arbiter will abort the protocol.
 //!
-//! ### [Phase 2] Step 3: Finalize Commitments and Distribute Reveals
+//! ### [Phase 1] Step 3: Finalize Commitments
 //!
 //! The arbiter forwards these `f + 1` commitments to all contributors. The arbiter will then recover the
 //! new group polynomial using said commitments.
@@ -102,7 +102,7 @@
 //!
 //! The contributor will not send an "ack" for its own share (if it is a qualified contributor).
 //!
-//! ### [Phase 2] Step 3 (Optional): Recover Group Polynomial and Derive Share
+//! ### [Phase 1] Step 3 (Optional): Recover Group Polynomial and Derive Share
 //!
 //! If the round is successful, the arbiter will forward the valid commitments to construct shares for the
 //! new group polynomial (which shares the same constant term if it is a reshare). Like the aribiter, the contributor
