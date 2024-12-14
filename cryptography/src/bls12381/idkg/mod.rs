@@ -578,4 +578,130 @@ mod tests {
         assert!(result.is_err());
         assert!(disqualified.len() == active as usize);
     }
+
+    #[test]
+    fn test_disjoint_acks() {
+        // Initialize test
+        let n = 5;
+        let concurrency = 1;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create shares
+        let mut contributor_shares = HashMap::new();
+        let mut contributor_cons = HashMap::new();
+        for con in &contributors {
+            let me = con.clone();
+            let p0 = contributor::P0::new(
+                me,
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                concurrency,
+            );
+            let (p1, public, shares) = p0.finalize();
+            contributor_shares.insert(con.clone(), (public, shares));
+            contributor_cons.insert(con.clone(), p1.unwrap());
+        }
+
+        // Inform arbiter of commitments
+        let mut arb = arbiter::P0::new(
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            concurrency,
+        );
+        for contributor in contributors.iter() {
+            let (public, _) = contributor_shares.get(contributor).unwrap();
+            arb.commitment(contributor.clone(), public.clone()).unwrap();
+        }
+        assert!(arb.ready());
+        let (result, disqualified) = arb.finalize();
+
+        // Verify disqualifications are empty (only occurs if invalid commitment)
+        assert_eq!(disqualified.len(), 0);
+        let mut arb = result.unwrap();
+
+        // Send select commitments to contributors
+        for (_, dealer, commitment) in arb.commitments().iter() {
+            for contributor in contributors.iter() {
+                contributor_cons
+                    .get_mut(contributor)
+                    .unwrap()
+                    .commitment(dealer.clone(), commitment.clone())
+                    .unwrap();
+            }
+        }
+
+        // Finalize contributor P1
+        let mut p2 = HashMap::new();
+        for contributor in contributors.iter() {
+            let output = contributor_cons
+                .remove(contributor)
+                .unwrap()
+                .finalize()
+                .unwrap();
+            p2.insert(contributor.clone(), output);
+        }
+        let mut contributor_cons = p2;
+
+        // Distribute shares to contributors and send acks to arbiter
+        let mut commitments = Vec::new();
+        for (dealer, dealer_key, _) in arb.commitments().iter() {
+            commitments.push(*dealer);
+            for (idx, recipient) in contributors.iter().enumerate() {
+                let (_, shares) = contributor_shares.get(dealer_key).unwrap().clone();
+                let share = shares[idx];
+                contributor_cons
+                    .get_mut(recipient)
+                    .unwrap()
+                    .share(dealer_key.clone(), share)
+                    .unwrap();
+
+                // Skip ack for self
+                if dealer_key == recipient {
+                    continue;
+                }
+            }
+        }
+
+        // Ensure not ready
+        assert!(!arb.ready());
+
+        // Add acks (need 3 per commitment over 2 commitments) but no intersection
+        // `commitment[0]` has implicit ack from `contributor[0]`
+        arb.ack(contributors[1].clone(), commitments[0]).unwrap();
+        arb.ack(contributors[3].clone(), commitments[0]).unwrap();
+        arb.ack(contributors[0].clone(), commitments[1]).unwrap();
+        // `commitment[1]` has implicit ack from `contributor[1]`
+        arb.ack(contributors[2].clone(), commitments[1]).unwrap();
+        assert!(!arb.ready());
+
+        // Add acks with intersection
+        arb.ack(contributors[3].clone(), commitments[1]).unwrap();
+
+        // Finalize arb P1
+        assert!(arb.ready());
+        let (result, disqualified) = arb.finalize();
+
+        // Verify disqualifications (unchanged)
+        assert_eq!(disqualified.len(), 0);
+        let output = result.unwrap();
+
+        // Distribute final commitments to contributors and recover public key
+        for contributor in contributors.iter() {
+            let result = contributor_cons
+                .remove(contributor)
+                .unwrap()
+                .finalize(output.commitments.clone())
+                .unwrap();
+            assert_eq!(result.public, output.public);
+        }
+    }
 }
