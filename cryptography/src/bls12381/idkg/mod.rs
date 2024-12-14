@@ -34,13 +34,15 @@
 //! ## Extension to `2f + 1` Threshold
 //!
 //! It is possible to extend this construction to a `2f + 1` threshold (over `3f + 1` participants)
-//! in the synchronous network model. To achieve this, timeouts in each phase can be introduced
+//! under the synchronous network model. To achieve this, timeouts in each phase can be introduced
 //! (greater than the synchrony bound for any honest participant to broadcast a message to all other
 //! participants). The insight here is that `2f + 1` honest participants "have the time" to interact
-//! by the timeout at each phase and will make progress regardless of the actions of up to `f` byzantine
-//! participants. This does not apply to the partially synchronous network model because a partition
-//! might form that groups `f + 1` honest participants with `f` byzantine participants that could complete
-//! the protocol (after which the byzantine nodes could drop offline).
+//! by the timeout at each phase and will make progress regardless of the actions of up to `f` Byzantine
+//! participants. This does not apply to the partially synchronous network model as `f` honest contributors
+//! could be partitioned away from `f + 1` honest contributors + `f` Byzantine contributors, the `2f + 1`
+//! contributors with good network connections could complete a reshare, and then the Byzantine contributors
+//! could drop off (never to be seen again). There would be no way for the `f` honest partitioned contributors
+//! to recover shares when rejoining.
 //!
 //! ## Arbiter
 //!
