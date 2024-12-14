@@ -34,7 +34,7 @@
 //! This example assumes the network is synchronous and responsive. If you want to run it over an asynchronous network (with unbounded
 //! message delay and/or partitions of unbounded length), you should reduce the threshold to `f + 1` rather than `2f + 1`.
 //!
-//! # Usage (3 of 4 Threshold)
+//! # Usage (2 of 4 Threshold)
 //!
 //! ## Arbiter
 //! ```bash
@@ -75,13 +75,13 @@
 mod handlers;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{bls12381::idkg::utils::max_reveals, Ed25519, Scheme};
+use commonware_cryptography::{bls12381::idkg::utils::threshold, Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
     Runner, Spawner,
 };
-use commonware_utils::{hex, quorum};
+use commonware_utils::hex;
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -234,10 +234,8 @@ fn main() {
         }
 
         // Infer threshold
-        let threshold = quorum(contributors.len() as u32)
-            .expect("not enough contributors to form a threshold of 2f+1");
-        let max_reveals = max_reveals(threshold);
-        info!(threshold, max_reveals, "inferred threshold");
+        let threshold = threshold(contributors.len() as u32).expect("insufficient participants");
+        info!(threshold, "inferred threshold");
 
         // Check if I am the arbiter
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
@@ -253,15 +251,8 @@ fn main() {
                 COMPRESSION_LEVEL,
             );
             let arbiter = Ed25519::from_seed(*arbiter).public_key();
-            let (contributor, requests) = handlers::Contributor::new(
-                signer,
-                arbiter,
-                contributors.clone(),
-                threshold,
-                rogue,
-                lazy,
-                defiant,
-            );
+            let (contributor, requests) =
+                handlers::Contributor::new(signer, arbiter, contributors.clone(), rogue, lazy);
             runtime.spawn(
                 "contributor",
                 contributor.run(contributor_sender, contributor_receiver),
