@@ -20,6 +20,7 @@ ed25519-consensus = "2.1.0"
 blst = { version = "0.3.13", features = ["no-threads"] }
 zeroize = "1.5.7"
 rayon = "1.10"
+itertools = "0.13.0"
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -37,9 +38,9 @@ harness = false
 path = "src/bls12381/benches/dkg_recovery.rs"
 
 [[bench]]
-name="reshare_recovery"
+name="dkg_reshare_recovery"
 harness = false
-path = "src/bls12381/benches/reshare_recovery.rs"
+path = "src/bls12381/benches/dkg_reshare_recovery.rs"
 
 [[bench]]
 name="signature_generation"

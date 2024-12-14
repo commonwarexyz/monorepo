@@ -32,12 +32,20 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Assuming that `n = 3f + 1`, compute the minimum size of `t` such that `t >= 2f + 1`.
-pub fn quorum(n: u32) -> Option<u32> {
-    let f = (n - 1) / 3;
+/// Compute the maximum value of `f` (faults) that can be tolerated given `n = 3f + 1`.
+pub fn max_faults(n: u32) -> Option<u32> {
+    let f = n.checked_sub(1)? / 3;
     if f == 0 {
         return None;
     }
+    Some(f)
+}
+
+/// Assuming that `n = 3f + 1`, compute the minimum size of `q` such that `q >= 2f + 1`.
+///
+/// If the value of `n` is too small to tolerate any faults, this function returns `None`.
+pub fn quorum(n: u32) -> Option<u32> {
+    let f = max_faults(n)?;
     Some((2 * f) + 1)
 }
 
