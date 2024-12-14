@@ -6,6 +6,9 @@
 /// If the value of `n` is too small to tolerate any faults, this function returns `None`.
 pub fn threshold(n: u32) -> Option<u32> {
     let f = n.checked_sub(1)? / 3;
+    if f == 0 {
+        return None;
+    }
     Some(f + 1)
 }
 
