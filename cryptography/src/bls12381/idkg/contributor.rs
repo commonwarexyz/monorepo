@@ -15,8 +15,7 @@
 //! not provided by the contributor because this authorization function is highly dependent on
 //! the context in which the contributor is being used.
 
-use commonware_utils::quorum;
-
+use super::utils::threshold;
 use crate::bls12381::{
     idkg::{ops, Error},
     primitives::{
@@ -25,9 +24,8 @@ use crate::bls12381::{
     },
 };
 use crate::PublicKey;
+use commonware_utils::quorum;
 use std::collections::{BTreeMap, HashMap, HashSet};
-
-use super::utils::threshold;
 
 /// Output of a DKG/Resharing procedure.
 #[derive(Clone)]
@@ -242,14 +240,17 @@ pub struct P2 {
 
 impl P2 {
     /// Required number of commitments to finish procedure.
-    pub fn required(&self) -> u32 {
+    ///
+    /// Unlike in `P1`, we only require the threshold number of commitments
+    /// to construct the public polynomial and our share.
+    fn required(&self) -> u32 {
         match &self.previous {
             Some(previous) => previous.required(),
             None => self.threshold,
         }
     }
 
-    /// Verify and track a share from a dealer.
+    ///  Verify and track a share from a dealer.
     pub fn share(&mut self, dealer: PublicKey, share: Share) -> Result<(), Error> {
         // Ensure contributor is valid
         let idx = match self.dealers_ordered.get(&dealer) {
