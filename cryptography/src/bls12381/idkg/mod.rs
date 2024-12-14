@@ -1,4 +1,4 @@
-//! Interactive Distributed Key Generation (DKG) and Resharing protocol for the BLS12-381 curve.
+//! Interactive Distributed Key Generation (IDKG) and Resharing protocol for the BLS12-381 curve.
 //!
 //! This crate implements an Interactive Distributed Key Generation (DKG) and Resharing protocol
 //! for the BLS12-381 curve. Unlike many other constructions, this scheme only requires
@@ -20,16 +20,15 @@
 //! a standalone process or by some consensus protocol. Contributors are the participants
 //! that deal shares and commitments to other contributors in the protocol.
 //!
-//! The protocol safely maintains a `f + 1` threshold (over `3f + 1` participants) in the partially
+//! The protocol can safely maintains a `f + 1` threshold (over `3f + 1` participants) under the partially
 //! synchronous network model (where messages may be arbitrarily delayed between any 2 participants)
 //! across any reshare (including ones with a changing contributor set) where `2f + 1` contributors
-//! are online and honest.
+//! are honest.
 //!
-//! Whether or not the protocol succeeds in a given round, all contributors that do not adhere to the
-//! protocol will be identified and returned. If the protocol succeeds, the contributions of any
-//! contributors that did not adhere to the protocol are excluded (and still returned). It is expected
-//! that the set of contributors would punish/exclude "bad" contributors prior to a future round (to eventually
-//! make progress).
+//! Whether or not the protocol succeeds (may need to retry during periods of network instability), all contributors
+//! that violate the protocol will be identified and returned. If the protocol succeeds, the contributions of any
+//! contributors that violated the protocol are excluded (and still returned). It is expected that the set of
+//! contributors would punish/exclude "bad" contributors prior to a future round (to eventually make progress).
 //!
 //! ## Extension to `2f + 1` Threshold
 //!
@@ -72,14 +71,13 @@
 //! that generates them and this signature is over the plaintext share, there is no need to have a
 //! "justification" phase where said dealer must "defend" itself.
 //!
-//! If `f + 1` commitments (or `previous.degree + 1` commitments in resharing) are not ack'd by the same
-//! subset of `2f + 1` contributors (each contributor in the subset must have ack'd the same `f + 1` commitments)
-//! by some timeout, the arbiter will abort the protocol.
+//! If `f + 1` commitments are not ack'd by the same subset of `2f + 1` contributors (each contributor in the subset
+//! must have ack'd the same `f + 1` commitments) by some timeout, the arbiter will abort the protocol.
 //!
 //! ### [Phase 1] Step 3: Finalize Commitments
 //!
-//! The arbiter forwards these `f + 1` commitments to all contributors. The arbiter will then recover the
-//! new group polynomial using said commitments.
+//! The arbiter forwards the `f + 1` commitments that satisfy the above requirement to all contributors. The arbiter
+//! will then recover the new group polynomial using said commitments.
 //!
 //! ## Contributor
 //!

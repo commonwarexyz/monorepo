@@ -89,10 +89,13 @@ impl P0 {
             threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
+
             dealers,
             dealers_ordered,
+
             recipients,
             recipients_ordered,
+
             commitments: BTreeMap::new(),
             disqualified: HashSet::new(),
         }
