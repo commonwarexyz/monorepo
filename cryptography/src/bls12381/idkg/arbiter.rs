@@ -191,13 +191,18 @@ impl P0 {
                 threshold: self.threshold,
                 previous: self.previous,
                 concurrency: self.concurrency,
+
                 dealers: self.dealers,
                 dealers_ordered: self.dealers_ordered,
+
                 recipients: self.recipients,
                 recipients_ordered: self.recipients_ordered,
+
                 commitments: self.commitments,
                 disqualified: self.disqualified.clone(),
+
                 acks,
+
                 threshold_commitments: None,
             }),
             self.disqualified,

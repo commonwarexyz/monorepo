@@ -78,6 +78,7 @@ impl P0 {
             threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
+
             dealers_ordered,
             recipients,
             recipients_ordered,
@@ -126,7 +127,6 @@ pub struct P1 {
     recipients_ordered: HashMap<PublicKey, u32>,
 
     commitments: HashMap<PublicKey, poly::Public>,
-
     valid: BTreeMap<u32, (poly::Public, Share)>,
 }
 
@@ -156,8 +156,10 @@ impl P1 {
             threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
+
             dealers_ordered,
             recipients_ordered,
+
             commitments: HashMap::new(),
             valid: BTreeMap::new(),
         }
@@ -206,8 +208,10 @@ impl P1 {
             threshold: self.threshold,
             previous: self.previous,
             concurrency: self.concurrency,
+
             dealers_ordered: self.dealers_ordered,
             recipients_ordered: self.recipients_ordered,
+
             commitments: self.commitments,
             valid: self.valid,
         })
@@ -225,7 +229,6 @@ pub struct P2 {
     recipients_ordered: HashMap<PublicKey, u32>,
 
     commitments: HashMap<PublicKey, poly::Public>,
-
     valid: BTreeMap<u32, (poly::Public, Share)>,
 }
 
