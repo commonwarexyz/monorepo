@@ -39,15 +39,14 @@
 //! not provided by the Arbiter because this authorization function is highly dependent on
 //! the context in which the contributor is being used.
 
-use commonware_utils::quorum;
-use itertools::Itertools;
-
 use super::utils::threshold;
 use crate::bls12381::{
     idkg::{ops, Error},
     primitives::{group::Share, poly},
 };
 use crate::PublicKey;
+use commonware_utils::quorum;
+use itertools::Itertools;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Gather commitments from all contributors.
@@ -122,7 +121,7 @@ impl P0 {
         // Find the index of the contributor
         let idx = match self.dealers_ordered.get(&dealer) {
             Some(idx) => *idx,
-            None => return Err(Error::ContirbutorInvalid),
+            None => return Err(Error::ContributorInvalid),
         };
 
         // Check if commitment already exists
@@ -280,7 +279,7 @@ impl P1 {
         // Find the index of the recipient
         let idx = match self.recipients_ordered.get(&recipient) {
             Some(idx) => *idx,
-            None => return Err(Error::ContirbutorInvalid),
+            None => return Err(Error::ContributorInvalid),
         };
 
         {
@@ -332,7 +331,7 @@ impl P1 {
         // Find the index of the contributor
         let idx = match self.recipients_ordered.get(&recipient) {
             Some(idx) => *idx,
-            None => return Err(Error::ContirbutorInvalid),
+            None => return Err(Error::ContributorInvalid),
         };
 
         // Find the dealer that submitted the commitment
