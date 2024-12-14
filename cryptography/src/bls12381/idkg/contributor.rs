@@ -465,4 +465,223 @@ mod tests {
     fn test_large_dkg() {
         create_and_verify_shares(100, 80, 4);
     }
+
+    #[test]
+    fn test_insufficient_commitments() {
+        // Initialize test
+        let n = 10;
+        let concurrency = 1;
+        let active_dealers = 4;
+
+        // Create contributors
+        let mut contributors = (0..n)
+            .map(|i| Ed25519::from_seed(i as u64).public_key())
+            .collect::<Vec<_>>();
+        contributors.sort();
+
+        // Create shares
+        let mut contributor_shares = HashMap::new();
+        let mut commitments = Vec::new();
+        for i in 0..n {
+            let me = contributors[i as usize].clone();
+            let contributor = P0::new(
+                me,
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                concurrency,
+            );
+            let (contributor, public, shares) = contributor.finalize();
+            contributor_shares.insert(i, (public.clone(), shares, contributor.unwrap()));
+            commitments.push(public);
+        }
+
+        // Distribute commitments
+        for i in 0..active_dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (commitment, _, _) = contributor_shares.get(&i).unwrap();
+                let commitment = commitment.clone();
+
+                // Send share to recipient
+                let (_, _, ref mut recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.commitment(dealer.clone(), commitment).unwrap();
+            }
+        }
+
+        // Convert to p2
+        for i in 0..n {
+            let (_, _, contributor) = contributor_shares.remove(&i).unwrap();
+            assert!(contributor.finalize().is_none());
+        }
+    }
+
+    #[test]
+    fn test_share_from_only_threshold() {
+        // Initialize test
+        let n = 10;
+        let dealers = 8;
+        let share_dealers = 4;
+        let concurrency = 1;
+
+        // Create contributors
+        let mut contributors = (0..n)
+            .map(|i| Ed25519::from_seed(i as u64).public_key())
+            .collect::<Vec<_>>();
+        contributors.sort();
+
+        // Create shares
+        let mut contributor_shares = HashMap::new();
+        let mut commitments = Vec::new();
+        for i in 0..n {
+            let me = contributors[i as usize].clone();
+            let contributor = P0::new(
+                me,
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                concurrency,
+            );
+            let (contributor, public, shares) = contributor.finalize();
+            contributor_shares.insert(i, (public.clone(), shares, contributor.unwrap()));
+            commitments.push(public);
+        }
+
+        // Distribute commitments
+        for i in 0..dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (commitment, _, _) = contributor_shares.get(&i).unwrap();
+                let commitment = commitment.clone();
+
+                // Send share to recipient
+                let (_, _, ref mut recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.commitment(dealer.clone(), commitment).unwrap();
+            }
+        }
+
+        // Convert to p2
+        let mut p2 = HashMap::new();
+        for i in 0..n {
+            let (_, shares, contributor) = contributor_shares.remove(&i).unwrap();
+            let contributor = contributor.finalize().unwrap();
+            p2.insert(i, (shares, contributor));
+        }
+        let mut contributor_shares = p2;
+
+        // Distribute shares
+        for i in 0..share_dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (shares, _) = contributor_shares.get(&i).unwrap();
+                let share = shares[j as usize];
+
+                // Send share to recipient
+                let (_, recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.share(dealer.clone(), share).unwrap();
+            }
+        }
+
+        // Finalize
+        let included_commitments = (0..share_dealers).collect::<Vec<_>>();
+        let commitments = commitments[0..share_dealers as usize].to_vec();
+        let mut group: Option<poly::Public> = None;
+        for i in 0..n {
+            let (_, contributor) = contributor_shares.remove(&i).unwrap();
+            let output = contributor
+                .finalize(included_commitments.clone())
+                .expect("unable to finalize");
+            assert_eq!(output.commitments, commitments);
+            match &group {
+                Some(group) => {
+                    assert_eq!(output.public, *group);
+                }
+                None => {
+                    group = Some(output.public);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_share_insufficient() {
+        // Initialize test
+        let n = 10;
+        let dealers = 8;
+        let share_dealers = 2;
+        let concurrency = 1;
+
+        // Create contributors
+        let mut contributors = (0..n)
+            .map(|i| Ed25519::from_seed(i as u64).public_key())
+            .collect::<Vec<_>>();
+        contributors.sort();
+
+        // Create shares
+        let mut contributor_shares = HashMap::new();
+        let mut commitments = Vec::new();
+        for i in 0..n {
+            let me = contributors[i as usize].clone();
+            let contributor = P0::new(
+                me,
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                concurrency,
+            );
+            let (contributor, public, shares) = contributor.finalize();
+            contributor_shares.insert(i, (public.clone(), shares, contributor.unwrap()));
+            commitments.push(public);
+        }
+
+        // Distribute commitments
+        for i in 0..dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (commitment, _, _) = contributor_shares.get(&i).unwrap();
+                let commitment = commitment.clone();
+
+                // Send share to recipient
+                let (_, _, ref mut recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.commitment(dealer.clone(), commitment).unwrap();
+            }
+        }
+
+        // Convert to p2
+        let mut p2 = HashMap::new();
+        for i in 0..n {
+            let (_, shares, contributor) = contributor_shares.remove(&i).unwrap();
+            let contributor = contributor.finalize().unwrap();
+            p2.insert(i, (shares, contributor));
+        }
+        let mut contributor_shares = p2;
+
+        // Distribute shares
+        for i in 0..share_dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (shares, _) = contributor_shares.get(&i).unwrap();
+                let share = shares[j as usize];
+
+                // Send share to recipient
+                let (_, recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.share(dealer.clone(), share).unwrap();
+            }
+        }
+
+        // Finalize
+        let included_commitments = (0..dealers).collect::<Vec<_>>();
+        for i in 0..n {
+            let (_, contributor) = contributor_shares.remove(&i).unwrap();
+            assert!(matches!(
+                contributor.finalize(included_commitments.clone()),
+                Err(Error::MissingShare)
+            ));
+        }
+    }
 }

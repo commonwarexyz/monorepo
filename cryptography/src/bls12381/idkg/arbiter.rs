@@ -42,7 +42,7 @@
 use commonware_utils::quorum;
 use itertools::Itertools;
 
-use super::utils::{self, threshold};
+use super::utils::threshold;
 use crate::bls12381::{
     idkg::{ops, Error},
     primitives::{group::Share, poly},
