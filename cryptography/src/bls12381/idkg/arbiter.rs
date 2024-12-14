@@ -444,6 +444,11 @@ impl P1 {
                     .intersection(recipients.get(acks).unwrap())
                     .cloned()
                     .collect();
+
+                // Early exit if intersection has already dipped below required acks
+                if intersection.len() < required_acks {
+                    break;
+                }
             }
 
             // If intersection is of size `threshold`, we can proceed
