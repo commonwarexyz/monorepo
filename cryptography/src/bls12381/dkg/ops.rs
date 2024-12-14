@@ -1,7 +1,7 @@
 //! Stateless operations useful in a DKG/Resharing procedure.
 
 use crate::bls12381::{
-    idkg::Error,
+    dkg::Error,
     primitives::{group::Share, poly},
 };
 use rayon::{prelude::*, ThreadPoolBuilder};

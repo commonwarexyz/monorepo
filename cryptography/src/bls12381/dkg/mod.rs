@@ -1,4 +1,4 @@
-//! Interactive Distributed Key Generation (DKG) and Resharing protocol for the BLS12-381 curve.
+//! Distributed Key Generation (DKG) and Resharing protocol for the BLS12-381 curve.
 //!
 //! This crate implements an interactive Distributed Key Generation (DKG) and Resharing protocol
 //! for the BLS12-381 curve. Unlike many other constructions, this scheme only requires
@@ -172,7 +172,7 @@ mod tests {
     use utils::threshold;
 
     use super::*;
-    use crate::bls12381::idkg::{arbiter, contributor};
+    use crate::bls12381::dkg::{arbiter, contributor};
     use crate::bls12381::primitives::group::Private;
     use crate::{Ed25519, Scheme};
     use std::collections::HashMap;

@@ -39,7 +39,7 @@
 
 use super::utils::threshold;
 use crate::bls12381::{
-    idkg::{ops, Error},
+    dkg::{ops, Error},
     primitives::{group::Share, poly},
 };
 use crate::PublicKey;

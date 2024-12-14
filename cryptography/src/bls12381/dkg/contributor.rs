@@ -17,7 +17,7 @@
 
 use super::utils::threshold;
 use crate::bls12381::{
-    idkg::{ops, Error},
+    dkg::{ops, Error},
     primitives::{
         group::{self, Element, Share},
         poly::{self, Eval},

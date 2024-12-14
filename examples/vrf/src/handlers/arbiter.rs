@@ -4,7 +4,7 @@ use crate::handlers::{
 };
 use commonware_cryptography::{
     bls12381::{
-        idkg::arbiter::P0,
+        dkg::arbiter::P0,
         primitives::{
             group::{self, Element},
             poly,

@@ -1,5 +1,5 @@
 use commonware_cryptography::Ed25519;
-use commonware_cryptography::{bls12381::idkg, Scheme};
+use commonware_cryptography::{bls12381::dkg, Scheme};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -21,7 +21,7 @@ fn benchmark_idkg_recovery(c: &mut Criterion) {
                     let mut commitments = HashMap::new();
                     for i in 0..n {
                         let me = contributors[i as usize].clone();
-                        let p0 = idkg::contributor::P0::new(
+                        let p0 = dkg::contributor::P0::new(
                             me,
                             None,
                             contributors.clone(),

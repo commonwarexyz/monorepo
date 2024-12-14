@@ -1,5 +1,5 @@
 use commonware_cryptography::{
-    bls12381::{idkg, primitives::poly},
+    bls12381::{dkg, primitives::poly},
     Ed25519, Scheme,
 };
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
@@ -25,7 +25,7 @@ fn benchmark_idkg_reshare_recovery(c: &mut Criterion) {
         for i in 0..n {
             let me = contributors[i as usize].clone();
             let p0 =
-                idkg::contributor::P0::new(me, None, contributors.clone(), contributors.clone(), 1);
+                dkg::contributor::P0::new(me, None, contributors.clone(), contributors.clone(), 1);
             let (p1, commitment, shares) = p0.finalize();
             contributor_shares.insert(i, (commitment.clone(), shares, p1.unwrap()));
             commitments.push(commitment);
@@ -101,7 +101,7 @@ fn benchmark_idkg_reshare_recovery(c: &mut Criterion) {
                         for i in 0..n {
                             let me = contributors[i as usize].clone();
                             let share = outputs[i as usize].share;
-                            let p0 = idkg::contributor::P0::new(
+                            let p0 = dkg::contributor::P0::new(
                                 me,
                                 Some((group.clone(), share)),
                                 contributors.clone(),

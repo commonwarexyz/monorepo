@@ -1,7 +1,7 @@
 use crate::handlers::wire;
 use commonware_cryptography::{
     bls12381::{
-        idkg::contributor::Output,
+        dkg::contributor::Output,
         primitives::{
             group::{self, Element},
             ops,
