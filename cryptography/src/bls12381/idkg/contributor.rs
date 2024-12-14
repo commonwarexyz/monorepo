@@ -163,14 +163,6 @@ impl P1 {
         }
     }
 
-    /// Required number of commitments to continue procedure.
-    pub fn required(&self) -> u32 {
-        match &self.previous {
-            Some(_) => quorum(self.dealers_ordered.len() as u32).unwrap(),
-            None => quorum(self.recipients_ordered.len() as u32).unwrap(),
-        }
-    }
-
     /// Verify and track a commitment from a dealer.
     pub fn commitment(&mut self, dealer: PublicKey, commitment: poly::Public) -> Result<(), Error> {
         // Ensure contributor is valid
@@ -197,10 +189,14 @@ impl P1 {
         self.commitments.len()
     }
 
-    /// If there exist at least `required()` commitments, proceed to `P2`.
+    /// If there exist at least `2f + 1` commitments, proceed to `P2`.
     pub fn finalize(self) -> Option<P2> {
         // Ensure there are enough commitments to proceed
-        if self.commitments.len() < self.required() as usize {
+        let required_commitments = match &self.previous {
+            Some(_) => quorum(self.dealers_ordered.len() as u32).unwrap(),
+            None => quorum(self.recipients_ordered.len() as u32).unwrap(),
+        } as usize;
+        if self.commitments.len() < required_commitments {
             return None;
         }
 
@@ -234,19 +230,6 @@ pub struct P2 {
 }
 
 impl P2 {
-    /// Required number of commitments to finish procedure.
-    ///
-    /// Unlike in `P1`, we only require the threshold number of commitments
-    /// to construct the public polynomial and our share.
-    ///
-    /// TODO: change this to make it clearer what it is (changes between phases)
-    fn required(&self) -> u32 {
-        match &self.previous {
-            Some(previous) => previous.required(),
-            None => self.threshold,
-        }
-    }
-
     ///  Verify and track a share from a dealer.
     pub fn share(&mut self, dealer: PublicKey, share: Share) -> Result<(), Error> {
         // Ensure contributor is valid
@@ -285,6 +268,16 @@ impl P2 {
     /// If we are tracking shares for all provided `commitments`, recover
     /// the new group public polynomial and our share.
     pub fn finalize(mut self, commitments: Vec<u32>) -> Result<Output, Error> {
+        // Ensure commitments equals required commitment count
+        let required_commitments_u32 = match &self.previous {
+            Some(_) => threshold(self.dealers_ordered.len() as u32).unwrap(),
+            None => self.threshold,
+        };
+        let required_commitments = required_commitments_u32 as usize;
+        if commitments.len() != required_commitments {
+            return Err(Error::TooManyCommitments);
+        }
+
         // Ensure we have all required shares
         for dealer in &commitments {
             if !self.valid.contains_key(dealer) {
@@ -301,15 +294,9 @@ impl P2 {
         }
 
         // Ensure we have enough shares to construct a secret
-        let required = self.required();
         let shares = self.valid.len();
-        if shares < required as usize {
+        if shares < required_commitments {
             return Err(Error::InsufficientDealings);
-        }
-
-        // Ensure commitments equals threshold
-        if commitments.len() != required as usize {
-            return Err(Error::TooManyCommitments);
         }
 
         // Construct secret
@@ -334,7 +321,7 @@ impl P2 {
                 let commitments: BTreeMap<u32, poly::Public> = self
                     .valid
                     .iter()
-                    .take(required as usize)
+                    .take(required_commitments)
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
                     .collect();
                 t_commitments = commitments.values().cloned().collect();
@@ -345,13 +332,13 @@ impl P2 {
                 let shares = self
                     .valid
                     .into_iter()
-                    .take(required as usize)
+                    .take(required_commitments)
                     .map(|(dealer, (_, share))| Eval {
                         index: dealer,
                         value: share.private,
                     })
                     .collect::<Vec<_>>();
-                secret = match poly::Private::recover(required, shares) {
+                secret = match poly::Private::recover(required_commitments_u32, shares) {
                     Ok(share) => share,
                     Err(_) => return Err(Error::ShareInterpolationFailed),
                 };
