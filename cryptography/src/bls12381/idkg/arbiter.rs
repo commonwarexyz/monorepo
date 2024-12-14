@@ -291,7 +291,7 @@ impl P1 {
                 .ok_or(Error::DealerInvalid)?;
 
             // Check if commitment is still valid
-            if self.disqualified.contains(dealer) | !self.commitments.contains_key(dealer) {
+            if self.disqualified.contains(dealer) || !self.commitments.contains_key(dealer) {
                 // We don't disqualify the submitter here as this could have happened
                 // without their knowledge.
                 return Err(Error::CommitmentDisqualified);
@@ -346,7 +346,7 @@ impl P1 {
         }
 
         // Check if commitment is still valid
-        if self.disqualified.contains(dealer_key) | !self.commitments.contains_key(dealer_key) {
+        if self.disqualified.contains(dealer_key) || !self.commitments.contains_key(dealer_key) {
             // We don't disqualify the submitter here as this could have happened
             // without their knowledge.
             return Err(Error::CommitmentDisqualified);

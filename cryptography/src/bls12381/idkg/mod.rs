@@ -265,14 +265,8 @@ mod tests {
                     continue;
                 }
 
-                // Ensure ack fails if not commitment
-                let result = arb.ack(recipient.clone(), *dealer);
-                if idx < dealers_0 as usize {
-                    result.unwrap();
-                } else {
-                    // Should fail if never sent a commitment
-                    result.unwrap_err();
-                }
+                // Record ack
+                arb.ack(recipient.clone(), *dealer).unwrap();
             }
         }
 
@@ -365,6 +359,8 @@ mod tests {
             }
             seen += 1;
         }
+
+        // Assert we only track the required number of commitments
         assert_eq!(seen, required);
 
         // Finalize contributor P0
@@ -421,13 +417,12 @@ mod tests {
     fn test_dkg_and_reshare_all_active() {
         run_dkg_and_reshare(5, 5, 10, 5, 4);
     }
+
+    #[test]
+    fn test_dkg_and_reshare_min_active() {
+        run_dkg_and_reshare(5, 3, 10, 3, 4);
+    }
 }
-//
-//     #[test]
-//     fn test_dkg_and_reshare_all_active() {
-//         run_dkg_and_reshare(5, 3, 5, 10, 7, 5, 4);
-//     }
-//
 //     #[test]
 //     fn test_dkg_and_reshare_min_active() {
 //         run_dkg_and_reshare(5, 3, 3, 10, 7, 3, 4);
