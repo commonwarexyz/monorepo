@@ -142,18 +142,16 @@ impl P0 {
         Ok(())
     }
 
-    /// If there exist `required()` commitments, proceed to `P1`.
-    ///
-    /// TODO: exit early if impossible to reach `required()` commitments
-    /// with disqualifications.
-    pub fn finalize(mut self) -> (Option<P1>, HashSet<PublicKey>) {
-        // Disqualify any contributors who did not submit a commitment
-        for contributor in self.dealers.iter() {
-            if !self.commitments.contains_key(contributor) {
-                self.disqualified.insert(contributor.clone());
-            }
-        }
+    /// Indicates whether we should proceed to the next phase.
+    pub fn ready(&self) -> bool {
+        let total = self.dealers.len();
+        let required = self.required() as usize;
+        self.commitments.len() >= required || self.disqualified.len() > total - required
+    }
 
+    /// If there exist `required()` commitments, proceed to `P1`.
+    /// Return the disqualified contributors.
+    pub fn finalize(self) -> (Option<P1>, HashSet<PublicKey>) {
         // Ensure we have enough commitments to proceed
         if self.commitments.len() < self.required() as usize {
             return (None, self.disqualified);
@@ -338,62 +336,55 @@ impl P1 {
         }
     }
 
-    /// Request missing dealings.
-    fn requests(&self) -> (HashMap<u32, HashSet<u32>>, Vec<Request>) {
-        // Compute missing shares
-        let mut missing_dealings = HashMap::new(); // dealer -> {recipient}
-        let mut required_reveals = HashMap::new(); // recipient -> {dealer}
-        for (dealer, acks) in self.acks.iter() {
-            for (recipient, recipient_bytes) in self.recipients.iter().enumerate() {
-                // Skip any recipients that are disqualified or have already acked
-                let dealer_bytes = self.dealers[*dealer as usize].clone();
-                if *recipient_bytes == dealer_bytes {
-                    continue;
-                }
-                if self.disqualified.contains(recipient_bytes) {
-                    continue;
-                }
-                let recipient = recipient as u32;
-                if acks.contains(&recipient) {
-                    continue;
+    pub fn ready(&mut self) -> bool {
+        // Remove acks of disqualified recipients
+        for acks in self.acks.values_mut() {
+            for disqualified in self.disqualified.iter() {
+                if let Some(idx) = self.recipients_ordered.get(disqualified) {
+                    acks.remove(idx);
                 }
 
-                // Add dealer -> recipient to tracker
-                let entry = missing_dealings.entry(*dealer).or_insert_with(HashSet::new);
-                entry.insert(recipient);
-                let entry = required_reveals
-                    .entry(recipient)
-                    .or_insert_with(HashSet::new);
-                entry.insert(*dealer);
+                // If we can't find the recipient, it is probably a disqualified dealer.
             }
         }
 
-        // Do not request reveals for recipients with more than `max_reveals` missing shares
-        let max_reveals = utils::max_reveals(self.threshold);
-        for (recipient, dealers) in required_reveals.iter() {
-            if dealers.len() <= max_reveals as usize {
+        // Record all commitments with at least `required()` acks
+        let required = self.required() as usize;
+        let mut sufficient = HashMap::new();
+        for dealer in self.commitments.keys() {
+            // Get acks for commitment
+            let idx = self.dealers_ordered.get(dealer).unwrap();
+            let Some(acks) = self.acks.get(idx) else {
+                continue;
+            };
+
+            // Check against `required - 1` because we don't send an
+            // ack for ourselves.
+            //
+            // TODO: need to be careful here because the dealer may not be in the recipients
+            if acks.len() < required - 1 {
                 continue;
             }
 
-            // Remove recipient from missing dealings
-            for dealer in dealers.iter() {
-                if let Some(recipients) = missing_dealings.get_mut(dealer) {
-                    recipients.remove(recipient);
-                }
-            }
+            // Add dealer
+            let recipient_idx
+            let acks = sufficient.entry(dealer).or_insert_with(HashSet::new);
 
-            // We do not disqualify dealers that would otherwise need to distribute
-            // shares because a particular recipient may just be refusing to participate.
-        }
-
-        // Construct required reveals
-        let mut reveals = Vec::new();
-        for (dealer, recipients) in missing_dealings.iter() {
-            for recipient in recipients.iter() {
-                reveals.push((*dealer, *recipient));
+            // Record commitment for all acks
+            for ack in acks {
+                let acks = sufficient.entry(ack).or_insert_with(HashSet::new);
+                acks.insert(idx);
             }
         }
-        (missing_dealings, reveals)
+
+        // Remove all recipients
+
+        // Look for some subset of recipients of size `required()` that is present in
+        // `threshold` commitments.
+
+        let total = self.dealers.len();
+        let required = self.required() as usize;
+        self.acks.len() >= required || self.disqualified.len() > total - required
     }
 
     /// If there exist at least `threshold - 1` acks each for `required()` dealers, proceed to `P2`.
