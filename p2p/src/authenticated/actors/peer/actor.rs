@@ -1,5 +1,7 @@
 use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::{actors::tracker, channels::Channels, metrics, wire};
+use crate::authenticated::{
+    actors::tracker, channels::Channels, metrics, wire, wire::message::Payload,
+};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
@@ -101,7 +103,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
     // send_message creates a message from a payload, then sends and increments metrics.
     async fn send_message<Si: Sink>(
         sender: &mut Sender<Si>,
-        payload: wire::message::Payload,
+        payload: Payload,
         metrics_message: metrics::Message,
         sent_messages: &Family<metrics::Message, Counter>,
     ) -> Result<(), Error> {
@@ -155,27 +157,17 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 Some(msg_control) => msg_control,
                                 None => return Err(Error::PeerDisconnected),
                             };
-                            match msg {
-                                Message::BitVec { bit_vec } => {
-                                    Self::send_message(
-                                        &mut conn_sender,
-                                        wire::message::Payload::BitVec(bit_vec),
-                                        metrics::Message::new_bit_vec(&peer),
-                                        &self.sent_messages)
-                                        .await?;
-                                }
-                                Message::Peers { peers: msg } => {
-                                    Self::send_message(
-                                        &mut conn_sender,
-                                        wire::message::Payload::Peers(msg),
-                                        metrics::Message::new_peers(&peer),
-                                        &self.sent_messages)
-                                        .await?;
-                                }
+                            let (payload, metric_msg) = match msg {
+                                Message::BitVec { bit_vec } =>
+                                    (Payload::BitVec(bit_vec), metrics::Message::new_bit_vec(&peer)),
+                                Message::Peers { peers: msg } =>
+                                    (Payload::Peers(msg), metrics::Message::new_peers(&peer)),
                                 Message::Kill => {
                                     return Err(Error::PeerKilled(hex(&peer)))
                                 }
-                            }
+                            };
+                            Self::send_message(&mut conn_sender,payload,metric_msg,&self.sent_messages)
+                                .await?;
                         },
                         msg_high = self.high.next() => {
                             let data = Self::validate_prioritized_data(msg_high, |key| rate_limits.contains_key(key))?;
