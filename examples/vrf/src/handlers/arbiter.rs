@@ -111,7 +111,7 @@ impl<E: Clock> Arbiter<E> {
                             let msg = match msg.payload {
                                 Some(wire::dkg::Payload::Commitment(msg)) => msg,
                                 _ => {
-                                    p0.disqualify(sender);
+                                    // Useless message from previous step
                                     continue;
                                 }
                             };
@@ -247,7 +247,7 @@ impl<E: Clock> Arbiter<E> {
                                     let _ = p1.complaint(sender, complaint.dealer, &share);
                                 }
                                 _ => {
-                                    p1.disqualify(sender);
+                                    // Useless message from previous step
                                     continue
                                 }
                             }

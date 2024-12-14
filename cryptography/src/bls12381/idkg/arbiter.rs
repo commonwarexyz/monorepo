@@ -403,7 +403,6 @@ impl P1 {
             // Get acks for commitment
             let dealer_idx = self.dealers_ordered.get(dealer).unwrap();
             let Some(recipient_acks) = self.acks.get(dealer_idx) else {
-                println!("no acks for dealer {}", dealer_idx);
                 continue;
             };
 

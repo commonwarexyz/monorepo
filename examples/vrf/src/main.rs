@@ -283,8 +283,8 @@ fn main() {
             );
             let arbiter = handlers::Arbiter::new(
                 runtime.clone(),
-                Duration::from_secs(10),
                 Duration::from_secs(5),
+                Duration::from_secs(2),
                 contributors,
                 threshold,
             );
