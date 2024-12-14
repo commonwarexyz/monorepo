@@ -100,7 +100,7 @@ impl P0 {
     }
 
     /// Required number of commitments to continue procedure.
-    pub fn required(&self) -> u32 {
+    fn required(&self) -> u32 {
         match &self.previous {
             Some(_) => quorum(self.dealers.len() as u32).unwrap(),
             None => quorum(self.recipients.len() as u32).unwrap(),
@@ -143,7 +143,7 @@ impl P0 {
         Ok(())
     }
 
-    /// Indicates whether we should proceed to the next phase.
+    /// Indicates whether we can proceed to the next phase.
     pub fn ready(&self) -> bool {
         self.commitments.len() >= self.required() as usize
     }
@@ -218,7 +218,7 @@ pub type Commitment = (u32, PublicKey, poly::Public);
 
 impl P1 {
     /// Required number of acks to continue procedure.
-    pub fn required(&self) -> u32 {
+    fn required(&self) -> u32 {
         quorum(self.recipients.len() as u32).unwrap()
     }
 
@@ -352,6 +352,7 @@ impl P1 {
         }
     }
 
+    /// Indicates whether we can finalize the procedure.
     pub fn ready(&mut self) -> bool {
         // Remove acks of disqualified recipients
         for acks in self.acks.values_mut() {

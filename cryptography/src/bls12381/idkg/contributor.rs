@@ -197,11 +197,6 @@ impl P1 {
         self.commitments.len()
     }
 
-    /// Indicates whether we should proceed to the next phase.
-    pub fn ready(&self) -> bool {
-        self.commitments.len() >= self.required() as usize
-    }
-
     /// If there exist at least `required()` commitments, proceed to `P2`.
     pub fn finalize(self) -> Option<P2> {
         // Ensure there are enough commitments to proceed
