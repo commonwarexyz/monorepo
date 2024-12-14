@@ -14,7 +14,7 @@
 //! cargo bench
 //! ```
 //!
-//! ## IDKG Recovery (Contributor)
+//! ## Interactive DKG Recovery (Contributor)
 //!
 //! ```txt
 //! conc=1 n=5              time:   [7.8876 µs 8.0956 µs 8.4308 µs]
@@ -26,7 +26,7 @@
 //! conc=1 n=500            time:   [79.523 ms 80.812 ms 82.645 ms]
 //! ```
 //!
-//! ## IDKG Reshare Recovery (Contributor)
+//! ## Interactive DKG Reshare Recovery (Contributor)
 //!
 //! ```txt
 //! conc=1 n=5              time:   [241.59 µs 253.86 µs 263.90 µs]

@@ -1,6 +1,6 @@
-//! Interactive Distributed Key Generation (IDKG) and Resharing protocol for the BLS12-381 curve.
+//! Interactive Distributed Key Generation (DKG) and Resharing protocol for the BLS12-381 curve.
 //!
-//! This crate implements an Interactive Distributed Key Generation (DKG) and Resharing protocol
+//! This crate implements an interactive Distributed Key Generation (DKG) and Resharing protocol
 //! for the BLS12-381 curve. Unlike many other constructions, this scheme only requires
 //! participants to publicly post shares during a "forced reveal" (when a given dealer
 //! does not distribute a share required for a party to recover their secret). Outside of this
