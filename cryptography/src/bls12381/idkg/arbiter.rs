@@ -99,6 +99,8 @@ impl P0 {
     }
 
     /// Required number of commitments to continue procedure.
+    ///
+    /// TODO: rename to better indicate if this threshold or quorum
     fn required(&self) -> u32 {
         match &self.previous {
             Some(_) => quorum(self.dealers.len() as u32).unwrap(),
@@ -450,6 +452,9 @@ impl P1 {
 
             // If intersection is of size `threshold`, we can proceed
             if intersection.len() >= required_acks {
+                // TODO: Limit to `threshold` commitments
+
+                // Set final commitments
                 self.final_commitments = Some(intersection);
                 return true;
             }

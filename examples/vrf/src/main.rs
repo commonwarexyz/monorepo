@@ -81,7 +81,7 @@ use commonware_runtime::{
     tokio::{self, Executor},
     Runner, Spawner,
 };
-use commonware_utils::hex;
+use commonware_utils::{hex, quorum};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -234,8 +234,9 @@ fn main() {
         }
 
         // Infer threshold
+        let quorum = quorum(contributors.len() as u32).expect("insufficient participants");
         let threshold = threshold(contributors.len() as u32).expect("insufficient participants");
-        info!(threshold, "inferred threshold");
+        info!(threshold, quorum, "inferred parameters");
 
         // Check if I am the arbiter
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;

@@ -238,6 +238,8 @@ impl P2 {
     ///
     /// Unlike in `P1`, we only require the threshold number of commitments
     /// to construct the public polynomial and our share.
+    ///
+    /// TODO: change this to make it clearer what it is (changes between phases)
     fn required(&self) -> u32 {
         match &self.previous {
             Some(previous) => previous.required(),
@@ -303,6 +305,11 @@ impl P2 {
         let shares = self.valid.len();
         if shares < required as usize {
             return Err(Error::InsufficientDealings);
+        }
+
+        // Ensure commitments equals threshold
+        if commitments.len() != required as usize {
+            return Err(Error::TooManyCommitments);
         }
 
         // Construct secret
@@ -431,8 +438,9 @@ mod tests {
         }
 
         // Finalize
-        let included_commitments = (0..dealers).collect::<Vec<_>>();
-        let commitments = commitments[0..dealers as usize].to_vec();
+        let required = threshold(n).expect("insufficient participants");
+        let included_commitments = (0..required).collect::<Vec<_>>();
+        let commitments = commitments[0..required as usize].to_vec();
         let mut group: Option<poly::Public> = None;
         for i in 0..n {
             let (_, contributor) = contributor_shares.remove(&i).unwrap();
@@ -459,6 +467,82 @@ mod tests {
     #[test]
     fn test_large_dkg() {
         create_and_verify_shares(100, 80, 4);
+    }
+
+    #[test]
+    fn test_too_many_commitments() {
+        // Initialize test
+        let n = 10;
+        let dealers = 8;
+        let concurrency = 1;
+
+        // Create contributors
+        let mut contributors = (0..n)
+            .map(|i| Ed25519::from_seed(i as u64).public_key())
+            .collect::<Vec<_>>();
+        contributors.sort();
+
+        // Create shares
+        let mut contributor_shares = HashMap::new();
+        let mut commitments = Vec::new();
+        for i in 0..n {
+            let me = contributors[i as usize].clone();
+            let contributor = P0::new(
+                me,
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                concurrency,
+            );
+            let (contributor, public, shares) = contributor.finalize();
+            contributor_shares.insert(i, (public.clone(), shares, contributor.unwrap()));
+            commitments.push(public);
+        }
+
+        // Distribute commitments
+        for i in 0..dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (commitment, _, _) = contributor_shares.get(&i).unwrap();
+                let commitment = commitment.clone();
+
+                // Send share to recipient
+                let (_, _, ref mut recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.commitment(dealer.clone(), commitment).unwrap();
+            }
+        }
+
+        // Convert to p2
+        let mut p2 = HashMap::new();
+        for i in 0..n {
+            let (_, shares, contributor) = contributor_shares.remove(&i).unwrap();
+            let contributor = contributor.finalize().unwrap();
+            p2.insert(i, (shares, contributor));
+        }
+        let mut contributor_shares = p2;
+
+        // Distribute shares
+        for i in 0..dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (shares, _) = contributor_shares.get(&i).unwrap();
+                let share = shares[j as usize];
+
+                // Send share to recipient
+                let (_, recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.share(dealer.clone(), share).unwrap();
+            }
+        }
+
+        // Finalize
+        let included_commitments = (0..dealers).collect::<Vec<_>>();
+        for i in 0..n {
+            let (_, contributor) = contributor_shares.remove(&i).unwrap();
+            let result = contributor.finalize(included_commitments.clone());
+            assert!(matches!(result, Err(Error::TooManyCommitments)));
+        }
     }
 
     #[test]

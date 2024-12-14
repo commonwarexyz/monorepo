@@ -152,10 +152,10 @@ pub enum Error {
     ContributorInvalid,
     #[error("complaint is invalid")]
     ComplaintInvalid,
-    #[error("unexpected reveal")]
-    UnexpectedReveal,
     #[error("missing commitment")]
     MissingCommitment,
+    #[error("too many commitments")]
+    TooManyCommitments,
     #[error("self-ack")]
     SelfAck,
     #[error("self-complaint")]
@@ -169,6 +169,7 @@ pub enum Error {
 #[cfg(test)]
 mod tests {
     use commonware_utils::quorum;
+    use utils::threshold;
 
     use super::*;
     use crate::bls12381::idkg::{arbiter, contributor};
@@ -277,6 +278,10 @@ mod tests {
         // Verify disqualifications (unchanged)
         assert_eq!(disqualified.len(), 0);
         let output = result.unwrap();
+
+        // Enforce commitments are only threshold
+        let expected_commitments = threshold(n_0).unwrap();
+        assert_eq!(output.commitments.len(), expected_commitments as usize);
 
         // Distribute final commitments to contributors and recover public key
         let mut results = HashMap::new();
@@ -402,6 +407,10 @@ mod tests {
         assert_eq!(disqualified.len(), 0);
         let output = result.unwrap();
 
+        // Enforce commitments are only threshold
+        let expected_commitments = threshold(n_1).unwrap();
+        assert_eq!(output.commitments.len(), expected_commitments as usize);
+
         // Distribute final commitments to contributors and recover public key
         for contributor in reshare_recipients.iter() {
             let result = reshare_contributor_cons
@@ -420,6 +429,11 @@ mod tests {
 
     #[test]
     fn test_dkg_and_reshare_min_active() {
+        run_dkg_and_reshare(4, 3, 4, 3, 4);
+    }
+
+    #[test]
+    fn test_dkg_and_reshare_min_active_different_sizes() {
         run_dkg_and_reshare(5, 3, 10, 3, 4);
     }
 
