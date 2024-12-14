@@ -424,20 +424,16 @@ mod tests {
     }
 
     #[test]
+    fn test_dkg_and_reshare_min_active_large() {
+        run_dkg_and_reshare(20, 13, 100, 13, 4);
+    }
+
+    #[test]
     #[should_panic]
     fn test_dkg_and_reshare_insufficient_active() {
         run_dkg_and_reshare(5, 3, 10, 2, 4);
     }
 }
-//     #[test]
-//     fn test_dkg_and_reshare_min_active() {
-//         run_dkg_and_reshare(5, 3, 3, 10, 7, 3, 4);
-//     }
-//
-//     #[test]
-//     fn test_dkg_and_reshare_min_active_large() {
-//         run_dkg_and_reshare(20, 13, 13, 100, 67, 13, 4);
-//     }
 //
 //     #[test]
 //     #[should_panic]
