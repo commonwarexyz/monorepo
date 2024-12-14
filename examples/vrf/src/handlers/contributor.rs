@@ -4,7 +4,7 @@ use crate::handlers::{
 };
 use commonware_cryptography::{
     bls12381::{
-        idkg::{
+        dkg::{
             self,
             contributor::{Output, P0, P1},
             utils::threshold,
@@ -423,8 +423,8 @@ impl<C: Scheme> Contributor<C> {
                                 .expect("could not send ack");
                             debug!(round, dealer, "sent ack");
                         }
-                        Err(idkg::Error::ShareWrongCommitment)
-                        | Err(idkg::Error::CommitmentWrongDegree) => {
+                        Err(dkg::Error::ShareWrongCommitment)
+                        | Err(dkg::Error::CommitmentWrongDegree) => {
                             warn!(round, dealer, "received invalid share");
 
                             // Send complaint

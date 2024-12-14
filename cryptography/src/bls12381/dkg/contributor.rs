@@ -17,7 +17,7 @@
 
 use super::utils::threshold;
 use crate::bls12381::{
-    idkg::{ops, Error},
+    dkg::{ops, Error},
     primitives::{
         group::{self, Element, Share},
         poly::{self, Eval},
@@ -78,6 +78,7 @@ impl P0 {
             threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
+
             dealers_ordered,
             recipients,
             recipients_ordered,
@@ -126,7 +127,6 @@ pub struct P1 {
     recipients_ordered: HashMap<PublicKey, u32>,
 
     commitments: HashMap<PublicKey, poly::Public>,
-
     valid: BTreeMap<u32, (poly::Public, Share)>,
 }
 
@@ -156,18 +156,12 @@ impl P1 {
             threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
+
             dealers_ordered,
             recipients_ordered,
+
             commitments: HashMap::new(),
             valid: BTreeMap::new(),
-        }
-    }
-
-    /// Required number of commitments to continue procedure.
-    pub fn required(&self) -> u32 {
-        match &self.previous {
-            Some(_) => quorum(self.dealers_ordered.len() as u32).unwrap(),
-            None => quorum(self.recipients_ordered.len() as u32).unwrap(),
         }
     }
 
@@ -197,10 +191,14 @@ impl P1 {
         self.commitments.len()
     }
 
-    /// If there exist at least `required()` commitments, proceed to `P2`.
+    /// If there exist at least `2f + 1` commitments, proceed to `P2`.
     pub fn finalize(self) -> Option<P2> {
         // Ensure there are enough commitments to proceed
-        if self.commitments.len() < self.required() as usize {
+        let required_commitments = match &self.previous {
+            Some(_) => quorum(self.dealers_ordered.len() as u32).unwrap(),
+            None => quorum(self.recipients_ordered.len() as u32).unwrap(),
+        } as usize;
+        if self.commitments.len() < required_commitments {
             return None;
         }
 
@@ -210,8 +208,10 @@ impl P1 {
             threshold: self.threshold,
             previous: self.previous,
             concurrency: self.concurrency,
+
             dealers_ordered: self.dealers_ordered,
             recipients_ordered: self.recipients_ordered,
+
             commitments: self.commitments,
             valid: self.valid,
         })
@@ -229,24 +229,10 @@ pub struct P2 {
     recipients_ordered: HashMap<PublicKey, u32>,
 
     commitments: HashMap<PublicKey, poly::Public>,
-
     valid: BTreeMap<u32, (poly::Public, Share)>,
 }
 
 impl P2 {
-    /// Required number of commitments to finish procedure.
-    ///
-    /// Unlike in `P1`, we only require the threshold number of commitments
-    /// to construct the public polynomial and our share.
-    ///
-    /// TODO: change this to make it clearer what it is (changes between phases)
-    fn required(&self) -> u32 {
-        match &self.previous {
-            Some(previous) => previous.required(),
-            None => self.threshold,
-        }
-    }
-
     ///  Verify and track a share from a dealer.
     pub fn share(&mut self, dealer: PublicKey, share: Share) -> Result<(), Error> {
         // Ensure contributor is valid
@@ -285,6 +271,16 @@ impl P2 {
     /// If we are tracking shares for all provided `commitments`, recover
     /// the new group public polynomial and our share.
     pub fn finalize(mut self, commitments: Vec<u32>) -> Result<Output, Error> {
+        // Ensure commitments equals required commitment count
+        let required_commitments_u32 = match &self.previous {
+            Some(_) => threshold(self.dealers_ordered.len() as u32).unwrap(),
+            None => self.threshold,
+        };
+        let required_commitments = required_commitments_u32 as usize;
+        if commitments.len() != required_commitments {
+            return Err(Error::TooManyCommitments);
+        }
+
         // Ensure we have all required shares
         for dealer in &commitments {
             if !self.valid.contains_key(dealer) {
@@ -301,15 +297,9 @@ impl P2 {
         }
 
         // Ensure we have enough shares to construct a secret
-        let required = self.required();
         let shares = self.valid.len();
-        if shares < required as usize {
+        if shares < required_commitments {
             return Err(Error::InsufficientDealings);
-        }
-
-        // Ensure commitments equals threshold
-        if commitments.len() != required as usize {
-            return Err(Error::TooManyCommitments);
         }
 
         // Construct secret
@@ -334,7 +324,7 @@ impl P2 {
                 let commitments: BTreeMap<u32, poly::Public> = self
                     .valid
                     .iter()
-                    .take(required as usize)
+                    .take(required_commitments)
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
                     .collect();
                 t_commitments = commitments.values().cloned().collect();
@@ -345,13 +335,13 @@ impl P2 {
                 let shares = self
                     .valid
                     .into_iter()
-                    .take(required as usize)
+                    .take(required_commitments)
                     .map(|(dealer, (_, share))| Eval {
                         index: dealer,
                         value: share.private,
                     })
                     .collect::<Vec<_>>();
-                secret = match poly::Private::recover(required, shares) {
+                secret = match poly::Private::recover(required_commitments_u32, shares) {
                     Ok(share) => share,
                     Err(_) => return Err(Error::ShareInterpolationFailed),
                 };
@@ -688,7 +678,7 @@ mod tests {
     #[test]
     fn test_share_insufficient() {
         // Initialize test
-        let n = 10;
+        let (n, t) = (10, 4);
         let dealers = 8;
         let share_dealers = 2;
         let concurrency = 1;
@@ -754,7 +744,7 @@ mod tests {
         }
 
         // Finalize
-        let included_commitments = (0..dealers).collect::<Vec<_>>();
+        let included_commitments = (0..t).collect::<Vec<_>>();
         for i in 0..n {
             let (_, contributor) = contributor_shares.remove(&i).unwrap();
             assert!(matches!(

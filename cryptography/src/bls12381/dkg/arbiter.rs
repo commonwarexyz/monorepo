@@ -4,14 +4,12 @@
 //!
 //! ## Recommended: All Contributors Run the Arbiter
 //!
-//! Each contributor should run its own instance of the arbiter over a replicated
-//! log (deterministic order of events across all contributors) of commitments,
-//! acknowledgements, and complaints. All correct contributors, when given
-//! the same log, will arrive at the same result (will recover the same group polynomial
-//! and a share that can generate partial signatures over it). Using a replicated log allows
-//! us to provide both reliable broadcast (all honest contributors see all messages from
-//! all other honest contributors) and to enforce a "timeout" (using log index) for each
-//! phase of DKG/Resharing.
+//! Each contributor should run its own instance of the arbiter over a replicated log (deterministic
+//! order of events across all contributors) of commitments, acknowledgements, and complaints.
+//! All correct contributors, when given the same log, will arrive at the same result (will recover
+//! the same group polynomial and a share that can generate partial signatures over it). Using a
+//! replicated log allows us to provide both reliable broadcast (all honest contributors see all messages from
+//! all other honest contributors) and to enforce a "timeout" (using log index) for each phase of DKG/Resharing.
 //!
 //! ## Trusted Alternative: Standalone Process
 //!
@@ -41,7 +39,7 @@
 
 use super::utils::threshold;
 use crate::bls12381::{
-    idkg::{ops, Error},
+    dkg::{ops, Error},
     primitives::{group::Share, poly},
 };
 use crate::PublicKey;
@@ -89,19 +87,20 @@ impl P0 {
             threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
+
             dealers,
             dealers_ordered,
+
             recipients,
             recipients_ordered,
+
             commitments: BTreeMap::new(),
             disqualified: HashSet::new(),
         }
     }
 
     /// Required number of commitments to continue procedure.
-    ///
-    /// TODO: rename to better indicate if this threshold or quorum
-    fn required(&self) -> u32 {
+    fn quorum(&self) -> u32 {
         match &self.previous {
             Some(_) => quorum(self.dealers.len() as u32).unwrap(),
             None => quorum(self.recipients.len() as u32).unwrap(),
@@ -144,43 +143,39 @@ impl P0 {
         Ok(())
     }
 
-    /// Indicates whether we can proceed to the next phase.
-    pub fn ready(&mut self) -> bool {
+    /// If there exist `2f + 1` commitments, we are prepared to proceed to `P1`.
+    pub fn prepared(&mut self) -> bool {
         // Drop commitments from disqualified contributors
         for disqualified in self.disqualified.iter() {
             self.commitments.remove(disqualified);
         }
 
         // See if we have enough commitments to proceed
-        self.commitments.len() >= self.required() as usize
+        self.commitments.len() >= self.quorum() as usize
     }
 
-    /// If there exist `required()` commitments, proceed to `P1`.
+    /// If we are prepared, proceed to `P1`.
+    ///
     /// Return the disqualified contributors.
     pub fn finalize(mut self) -> (Option<P1>, HashSet<PublicKey>) {
-        // Drop commitments from disqualified contributors
-        for disqualified in self.disqualified.iter() {
-            self.commitments.remove(disqualified);
-        }
-
-        // Ensure we have enough commitments to proceed
-        let required = self.required() as usize;
-        if self.commitments.len() < required {
+        // If we aren't done, we cannot proceed
+        if !self.prepared() {
             return (None, self.disqualified);
         }
 
-        // Select first `required()` commitments
+        // Select first `2f + 1` commitments
+        let required_commitments = self.quorum() as usize;
         let keys = self
             .commitments
             .keys()
-            .skip(required)
+            .skip(required_commitments)
             .cloned()
             .collect::<Vec<_>>();
         for key in keys {
             self.commitments.remove(&key);
         }
 
-        // Add self-acks for all commitments
+        // Add implicit acks for all selected commitments
         let mut acks = HashMap::new();
         for (idx, dealer) in self.dealers.iter().enumerate() {
             let Some(recipient_idx) = self.recipients_ordered.get(dealer) else {
@@ -196,14 +191,19 @@ impl P0 {
                 threshold: self.threshold,
                 previous: self.previous,
                 concurrency: self.concurrency,
+
                 dealers: self.dealers,
                 dealers_ordered: self.dealers_ordered,
+
                 recipients: self.recipients,
                 recipients_ordered: self.recipients_ordered,
+
                 commitments: self.commitments,
                 disqualified: self.disqualified.clone(),
+
                 acks,
-                final_commitments: None,
+
+                threshold_commitments: None,
             }),
             self.disqualified,
         )
@@ -227,7 +227,7 @@ pub struct P1 {
 
     acks: HashMap<u32, HashSet<u32>>,
 
-    final_commitments: Option<BTreeSet<u32>>,
+    threshold_commitments: Option<BTreeSet<u32>>,
 }
 
 /// Output of the DKG/Resharing procedure.
@@ -241,11 +241,6 @@ pub struct Output {
 pub type Commitment = (u32, PublicKey, poly::Public);
 
 impl P1 {
-    /// Required number of acks to continue procedure.
-    fn required(&self) -> u32 {
-        quorum(self.recipients.len() as u32).unwrap()
-    }
-
     /// Disqualify a contributor from the DKG for external reason (i.e. sending invalid messages).
     pub fn disqualify(&mut self, contributor: PublicKey) {
         self.disqualified.insert(contributor);
@@ -376,8 +371,14 @@ impl P1 {
         }
     }
 
-    /// Indicates whether we can finalize the procedure.
-    pub fn ready(&mut self) -> bool {
+    /// If there exist `2f + 1` acks from the same set of `f + 1` contributors for `f + 1` dealers, we are
+    /// prepared to finalize.
+    pub fn prepared(&mut self) -> bool {
+        // Check if we already checked
+        if self.threshold_commitments.is_some() {
+            return true;
+        }
+
         // Remove acks of disqualified recipients
         for acks in self.acks.values_mut() {
             for disqualified in self.disqualified.iter() {
@@ -396,48 +397,45 @@ impl P1 {
                 .remove(self.dealers_ordered.get(disqualified).unwrap());
         }
 
-        // Record recipient in all commitments with at least `required()` acks
-        let required = self.required() as usize;
+        // Record recipients from commitments with at least `2f + 1` acks
+        let recipient_quorum = quorum(self.recipients.len() as u32).unwrap() as usize;
         let mut recipients = BTreeMap::new();
         for dealer in self.commitments.keys() {
             // Get acks for commitment
             let dealer_idx = self.dealers_ordered.get(dealer).unwrap();
-            let Some(recipient_acks) = self.acks.get(dealer_idx) else {
+            let Some(dealer_acks) = self.acks.get(dealer_idx) else {
                 continue;
             };
 
-            // Skip if not `required()` acks
+            // Skip commitment if not `2f + 1` acks
             //
             // We previously ensure self-acks are included in this count.
-            if recipient_acks.len() < required {
+            if dealer_acks.len() < recipient_quorum {
                 continue;
             }
 
-            // Record commitment for all acks
-            for recipient in recipient_acks {
+            // Record acks for commitment
+            for recipient in dealer_acks {
                 let acks = recipients.entry(*recipient).or_insert_with(BTreeSet::new);
                 acks.insert(*dealer_idx);
             }
         }
 
-        // Compute required acks
-        let required_acks = threshold(self.dealers.len() as u32).unwrap() as usize;
+        // Remove all recipients that haven't ack'd at least `f + 1` commitments
+        let dealer_threshold = threshold(self.dealers.len() as u32).unwrap() as usize;
+        recipients.retain(|_, acks| acks.len() >= dealer_threshold);
 
-        // Remove all recipients that don't have at least `threshold` commitments
-        recipients.retain(|_, acks| acks.len() >= required_acks);
-
-        // If there are not `required()` recipients with at least `threshold` acks, we cannot proceed.
-        if recipients.len() < required {
+        // If there aren't `2f + 1` recipients with at acks on at least `f + 1` commitments, we can't proceed
+        if recipients.len() < recipient_quorum {
             return false;
         }
 
-        // Look for some subset of recipients of size `required()` that is present in
-        // `threshold` commitments
+        // Look for some subset of recipients of size `2f + 1` that has ack'd the same `f + 1` commitments
         //
         // When provided a data structure with a deterministic iteration order, combinations
         // produces a deterministic order of combinations.
-        for combination in recipients.keys().combinations(required) {
-            // Create intersection over all acks
+        for combination in recipients.keys().combinations(recipient_quorum) {
+            // Create intersection of commitment acks over selected contributors
             let mut intersection = recipients.get(combination[0]).unwrap().clone();
             for acks in combination.into_iter().skip(1) {
                 intersection = intersection
@@ -446,39 +444,41 @@ impl P1 {
                     .collect();
 
                 // Early exit if intersection has already dipped below required acks
-                if intersection.len() < required_acks {
+                if intersection.len() < dealer_threshold {
                     break;
                 }
             }
 
-            // If intersection is of size `threshold`, we can proceed
-            if intersection.len() >= required_acks {
-                // Limit to `threshold` commitments
+            // If intersection of commitments is of size `f + 1`, we are ready
+            if intersection.len() >= dealer_threshold {
+                // Limit to first `f + 1` commitments
                 let intersection: BTreeSet<u32> =
-                    intersection.into_iter().take(required_acks).collect();
+                    intersection.into_iter().take(dealer_threshold).collect();
 
-                // Set final commitments
-                self.final_commitments = Some(intersection);
+                // Cache intersection to avoid recomputation
+                self.threshold_commitments = Some(intersection);
                 return true;
             }
         }
 
-        // There exists no combination of recipients with at least
+        // There exists no combination of recipients that satisfy our requirements,
+        // we can try again later
         false
     }
 
-    /// If there exist at least `threshold - 1` acks each for `required()` dealers, proceed to `P2`.
-    pub fn finalize(self) -> (Result<Output, Error>, HashSet<PublicKey>) {
-        // If no final commitments, we cannot proceed
-        let Some(final_commitments) = self.final_commitments else {
+    /// If we are prepared to finalize, return the `Output`.
+    pub fn finalize(mut self) -> (Result<Output, Error>, HashSet<PublicKey>) {
+        // If we aren't prepared, we cannot generate the output
+        if !self.prepared() {
             return (Err(Error::InsufficientDealings), self.disqualified);
-        };
+        }
+        let threshold_commitments = self.threshold_commitments.unwrap();
 
         // Recover group
         let public = match self.previous {
             Some(previous) => {
                 let mut commitments = BTreeMap::new();
-                for idx in &final_commitments {
+                for idx in &threshold_commitments {
                     let dealer = self.dealers.get(*idx as usize).unwrap();
                     let commitment = self.commitments.get(dealer).unwrap();
                     commitments.insert(*idx, commitment.clone());
@@ -491,7 +491,7 @@ impl P1 {
             }
             None => {
                 let mut commitments = Vec::new();
-                for idx in &final_commitments {
+                for idx in &threshold_commitments {
                     let dealer = self.dealers.get(*idx as usize).unwrap();
                     let commitment = self.commitments.get(dealer).unwrap();
                     commitments.push(commitment.clone());
@@ -506,7 +506,7 @@ impl P1 {
         // Generate output
         let output = Output {
             public,
-            commitments: final_commitments.into_iter().collect(),
+            commitments: threshold_commitments.into_iter().collect(),
         };
 
         // Return output

@@ -1,13 +1,15 @@
+use commonware_cryptography::bls12381::dkg::utils::threshold;
 use commonware_cryptography::Ed25519;
-use commonware_cryptography::{bls12381::idkg, Scheme};
+use commonware_cryptography::{bls12381::dkg, Scheme};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
 
-fn benchmark_idkg_recovery(c: &mut Criterion) {
+fn benchmark_dkg_recovery(c: &mut Criterion) {
     let concurrency = 1; // only used in recovery during reshare
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
-        c.bench_function(&format!("conc={} n={}", concurrency, n), |b| {
+        let t = threshold(n).unwrap();
+        c.bench_function(&format!("dkg: conc={} n={} t={}", concurrency, n, t), |b| {
             b.iter_batched(
                 || {
                     // Create contributors
@@ -21,7 +23,7 @@ fn benchmark_idkg_recovery(c: &mut Criterion) {
                     let mut commitments = HashMap::new();
                     for i in 0..n {
                         let me = contributors[i as usize].clone();
-                        let p0 = idkg::contributor::P0::new(
+                        let p0 = dkg::contributor::P0::new(
                             me,
                             None,
                             contributors.clone(),
@@ -62,7 +64,7 @@ fn benchmark_idkg_recovery(c: &mut Criterion) {
                     }
 
                     // Finalize
-                    let commitments = (0..n).collect::<Vec<_>>();
+                    let commitments = (0..t).collect::<Vec<_>>();
                     (contributor, commitments)
                 },
                 |(contributor, commitments)| {
@@ -77,6 +79,6 @@ fn benchmark_idkg_recovery(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_idkg_recovery
+    targets = benchmark_dkg_recovery
 }
 criterion_main!(benches);
