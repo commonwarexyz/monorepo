@@ -52,8 +52,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Gather commitments from all contributors.
 pub struct P0 {
-    threshold: u32,
     previous: Option<poly::Public>,
+    threshold: u32,
     concurrency: usize,
 
     dealers: Vec<PublicKey>,
@@ -62,7 +62,7 @@ pub struct P0 {
     recipients: Vec<PublicKey>,
     recipients_ordered: HashMap<PublicKey, u32>,
 
-    commitments: HashMap<PublicKey, poly::Public>,
+    commitments: BTreeMap<PublicKey, poly::Public>,
     disqualified: HashSet<PublicKey>,
 }
 
@@ -94,7 +94,7 @@ impl P0 {
             dealers_ordered,
             recipients,
             recipients_ordered,
-            commitments: HashMap::new(),
+            commitments: BTreeMap::new(),
             disqualified: HashSet::new(),
         }
     }
@@ -144,16 +144,39 @@ impl P0 {
     }
 
     /// Indicates whether we can proceed to the next phase.
-    pub fn ready(&self) -> bool {
+    pub fn ready(&mut self) -> bool {
+        // Drop commitments from disqualified contributors
+        for disqualified in self.disqualified.iter() {
+            self.commitments.remove(disqualified);
+        }
+
+        // See if we have enough commitments to proceed
         self.commitments.len() >= self.required() as usize
     }
 
     /// If there exist `required()` commitments, proceed to `P1`.
     /// Return the disqualified contributors.
-    pub fn finalize(self) -> (Option<P1>, HashSet<PublicKey>) {
+    pub fn finalize(mut self) -> (Option<P1>, HashSet<PublicKey>) {
+        // Drop commitments from disqualified contributors
+        for disqualified in self.disqualified.iter() {
+            self.commitments.remove(disqualified);
+        }
+
         // Ensure we have enough commitments to proceed
-        if self.commitments.len() < self.required() as usize {
+        let required = self.required() as usize;
+        if self.commitments.len() < required {
             return (None, self.disqualified);
+        }
+
+        // Select first `required()` commitments
+        let keys = self
+            .commitments
+            .keys()
+            .skip(required)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.commitments.remove(&key);
         }
 
         // Add self-acks for all commitments
@@ -198,7 +221,7 @@ pub struct P1 {
     recipients: Vec<PublicKey>,
     recipients_ordered: HashMap<PublicKey, u32>,
 
-    commitments: HashMap<PublicKey, poly::Public>,
+    commitments: BTreeMap<PublicKey, poly::Public>,
     disqualified: HashSet<PublicKey>,
 
     acks: HashMap<u32, HashSet<u32>>,
@@ -374,33 +397,40 @@ impl P1 {
 
         // Record recipient in all commitments with at least `required()` acks
         let required = self.required() as usize;
-        let mut sufficient = BTreeMap::new();
+        let mut recipients = BTreeMap::new();
         for dealer in self.commitments.keys() {
             // Get acks for commitment
-            let idx = self.dealers_ordered.get(dealer).unwrap();
-            let Some(acks) = self.acks.get(idx) else {
+            let dealer_idx = self.dealers_ordered.get(dealer).unwrap();
+            let Some(recipient_acks) = self.acks.get(dealer_idx) else {
+                println!("no acks for dealer {}", dealer_idx);
                 continue;
             };
 
             // Skip if not `required()` acks
             //
             // We previously ensure self-acks are included in this count.
-            if acks.len() < required {
+            if recipient_acks.len() < required {
                 continue;
             }
 
             // Record commitment for all acks
-            for ack in acks {
-                let acks = sufficient.entry(*ack).or_insert_with(BTreeSet::new);
-                acks.insert(*idx);
+            for recipient in recipient_acks {
+                let acks = recipients.entry(*recipient).or_insert_with(BTreeSet::new);
+                acks.insert(*dealer_idx);
             }
         }
 
+        // Compute required acks
+        let required_acks = match self.previous {
+            Some(_) => threshold(self.dealers.len() as u32).unwrap(),
+            None => self.threshold,
+        } as usize;
+
         // Remove all recipients that don't have at least `threshold` commitments
-        sufficient.retain(|_, acks| acks.len() >= self.threshold as usize);
+        recipients.retain(|_, acks| acks.len() >= required_acks);
 
         // If there are not `required()` recipients with at least `threshold` acks, we cannot proceed.
-        if sufficient.len() < required {
+        if recipients.len() < required {
             return false;
         }
 
@@ -409,18 +439,18 @@ impl P1 {
         //
         // When provided a data structure with a deterministic iteration order, combinations
         // produces a deterministic order of combinations.
-        for combination in sufficient.keys().combinations(required) {
+        for combination in recipients.keys().combinations(required) {
             // Create intersection over all acks
-            let mut intersection = sufficient.get(combination[0]).unwrap().clone();
+            let mut intersection = recipients.get(combination[0]).unwrap().clone();
             for acks in combination.into_iter().skip(1) {
                 intersection = intersection
-                    .intersection(sufficient.get(acks).unwrap())
+                    .intersection(recipients.get(acks).unwrap())
                     .cloned()
                     .collect();
             }
 
             // If intersection is of size `threshold`, we can proceed
-            if intersection.len() >= self.threshold as usize {
+            if intersection.len() >= required_acks {
                 self.final_commitments = Some(intersection);
                 return true;
             }

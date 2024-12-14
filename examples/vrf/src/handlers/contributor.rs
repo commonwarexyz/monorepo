@@ -30,10 +30,8 @@ pub struct Contributor<C: Scheme> {
     arbiter: PublicKey,
     contributors: Vec<PublicKey>,
     contributors_ordered: HashMap<PublicKey, u32>,
-    t: u32,
     rogue: bool,
     lazy: bool,
-    defiant: bool,
 
     signatures: mpsc::Sender<(u64, Output)>,
 }
@@ -43,10 +41,8 @@ impl<C: Scheme> Contributor<C> {
         crypto: C,
         arbiter: PublicKey,
         mut contributors: Vec<PublicKey>,
-        t: u32,
         rogue: bool,
         lazy: bool,
-        defiant: bool,
     ) -> (Self, mpsc::Receiver<(u64, Output)>) {
         contributors.sort();
         let contributors_ordered: HashMap<PublicKey, u32> = contributors
@@ -61,10 +57,8 @@ impl<C: Scheme> Contributor<C> {
                 arbiter,
                 contributors,
                 contributors_ordered,
-                t,
                 rogue,
                 lazy,
-                defiant,
                 signatures: sender,
             },
             receiver,
@@ -165,7 +159,6 @@ impl<C: Scheme> Contributor<C> {
                 .map(|public| (public.clone(), previous.unwrap().share));
             let p0 = P0::new(
                 me.clone(),
-                self.t,
                 previous,
                 self.contributors.clone(),
                 self.contributors.clone(),
@@ -199,7 +192,6 @@ impl<C: Scheme> Contributor<C> {
             (
                 P1::new(
                     me.clone(),
-                    self.t,
                     public,
                     self.contributors.clone(),
                     self.contributors.clone(),
