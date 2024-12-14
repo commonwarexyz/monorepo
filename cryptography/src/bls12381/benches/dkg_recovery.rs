@@ -1,3 +1,4 @@
+use commonware_cryptography::bls12381::dkg::utils::threshold;
 use commonware_cryptography::Ed25519;
 use commonware_cryptography::{bls12381::dkg, Scheme};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
@@ -7,7 +8,8 @@ use std::hint::black_box;
 fn benchmark_dkg_recovery(c: &mut Criterion) {
     let concurrency = 1; // only used in recovery during reshare
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
-        c.bench_function(&format!("conc={} n={}", concurrency, n), |b| {
+        let t = threshold(n).unwrap();
+        c.bench_function(&format!("dkg: conc={} n={} t={}", concurrency, n, t), |b| {
             b.iter_batched(
                 || {
                     // Create contributors
@@ -62,7 +64,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                     }
 
                     // Finalize
-                    let commitments = (0..n).collect::<Vec<_>>();
+                    let commitments = (0..t).collect::<Vec<_>>();
                     (contributor, commitments)
                 },
                 |(contributor, commitments)| {
