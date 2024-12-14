@@ -16,7 +16,7 @@ resolver = "2"
 [workspace.dependencies]
 commonware-consensus = { version = "0.0.3", path = "consensus" }
 commonware-cryptography = { version = "0.0.14", path = "cryptography" }
-commonware-macros = { version = "0.0.6", path = "macros" }
+commonware-macros = { version = "0.0.5", path = "macros" }
 commonware-p2p = { version = "0.0.25", path = "p2p" }
 commonware-runtime = { version = "0.0.11", path = "runtime" }
 commonware-storage = { version = "0.0.6", path = "storage" }
