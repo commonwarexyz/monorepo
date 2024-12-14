@@ -456,6 +456,9 @@ mod tests {
             let result = arb.commitment(contributor.clone(), public.clone());
             assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
         }
+
+        // Check not ready
+        assert!(!arb.ready());
         let (result, disqualified) = arb.finalize();
 
         // Verify disqualifications
