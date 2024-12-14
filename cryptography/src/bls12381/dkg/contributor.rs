@@ -428,9 +428,9 @@ mod tests {
         }
 
         // Finalize
-        let required = threshold(n).expect("insufficient participants");
-        let included_commitments = (0..required).collect::<Vec<_>>();
-        let commitments = commitments[0..required as usize].to_vec();
+        let t = threshold(n).expect("insufficient participants");
+        let included_commitments = (0..t).collect::<Vec<_>>();
+        let commitments = commitments[0..t as usize].to_vec();
         let mut group: Option<poly::Public> = None;
         for i in 0..n {
             let (_, contributor) = contributor_shares.remove(&i).unwrap();
