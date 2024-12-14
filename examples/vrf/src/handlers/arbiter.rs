@@ -106,7 +106,6 @@ impl<E: Clock> Arbiter<E> {
                                 }
                             };
                             if msg.round != round {
-                                p0.disqualify(sender);
                                 continue;
                             }
                             let msg = match msg.payload {
@@ -218,7 +217,6 @@ impl<E: Clock> Arbiter<E> {
 
                             // Verify the message
                             if msg.round != round {
-                                p1.disqualify(sender);
                                 continue;
                             }
 
