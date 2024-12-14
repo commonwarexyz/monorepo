@@ -4,7 +4,7 @@
 //! Distributed Key Generation (DKG) to generate a static public key, and then perform a proactive Resharing every 10
 //! seconds. After a successful DKG and/or Reshare, contributors generate partial signatures over the round number and
 //! gossip them to others in the group (again using commonware-p2p). These partial signatures, when aggregated, form
-//! a threshold signature that was not knowable by any contributor prior to collecting `t` partial signatures.
+//! a threshold signature that was not knowable by any contributor prior to collecting `f + 1` partial signatures.
 //!
 //! To demonstrate how malicious contributors are handled, the CLI also lets you behave as a "rogue" dealer that generates
 //! invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, and/or a "defiant" dealer that
@@ -14,25 +14,20 @@
 //!
 //! If a new contributor joins the group after a successful DKG, the new contributor will jump to "Phase 1" of the contributor
 //! state machine during the next Resharing. They will skip the generation of a commitment/shares and just wait for commitments
-//! and shares from online contributors to be distributed to them. As long as `t` contributors are online and honest at this time,
+//! and shares from online contributors to be distributed to them. As long as `2f + 1` contributors are online and honest at this time,
 //! the new contributor will be able to recover the group public polynomial and generate a share that can be used to generate valid
-//! partial signatures. They will also be able to participate (share commitment/shares) in future Resharings.
+//! partial signatures. They will also be able to participate (share commitment/shares) in future resharings.
 //!
 //! # Trust Assumptions
 //!
-//! In this example, the arbiter is trusted. It tracks commitments, acknowledgements, complaints, and reveals submitted
+//! In this example, the arbiter is trusted. It tracks commitments, acknowledgements, and complaints submitted
 //! by contributors. As alluded to in the arbiter docs, production deployments of the arbiter should be run by all
 //! contributors over a replicated log (commonly instantiated with a BFT consensus algorithm). This ensures that all
 //! correct contributors have the same view of the arbiter's state at the end of a round.
 //!
-//! `Threshold` contributors are assumed to be honest and online. `n-threshold` contributors can behave arbitrarily and
-//! will not be able to interrupt a DKG, Resharing, or Threshold Signature. Diverging contributors will be identified
-//! by the arbiter and reported at the end of a DKG/Resharing.
-//!
-//! # Network Assumptions
-//!
-//! This example assumes the network is synchronous and responsive. If you want to run it over an asynchronous network (with unbounded
-//! message delay and/or partitions of unbounded length), you should reduce the threshold to `f + 1` rather than `2f + 1`.
+//! `2f + 1` contributors are assumed to be honest and online and any `f + 1` partial signatures can be used to construct
+//! a threshold signature. `f` contributors can behave arbitrarily and will not be able to interrupt a DKG, Resharing, or Threshold
+//! Signature. Incorrect contributors will be identified by the arbiter and reported at the end of each DKG/Resharing.
 //!
 //! # Usage (2 of 4 Threshold)
 //!
@@ -283,8 +278,8 @@ fn main() {
             );
             let arbiter = handlers::Arbiter::new(
                 runtime.clone(),
+                Duration::from_secs(10),
                 Duration::from_secs(5),
-                Duration::from_secs(2),
                 contributors,
                 threshold,
             );
