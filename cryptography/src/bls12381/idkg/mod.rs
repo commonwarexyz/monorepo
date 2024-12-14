@@ -83,26 +83,28 @@
 //!
 //! ### [Phase 0] Step 0 (Optional): Generate Shares and Commitment
 //!
-//! If a contributor is joining a pre-existing group (and is not a dealer), it proceeds to Step 2.
+//! If a contributor is joining a pre-existing group (and is not a dealer), it proceeds to Step 1.
 //!
 //! Otherwise, it generates shares and a commitment. If it is a DKG, the commitment is a random polynomial
 //! with degree of `f`. If it is a reshare, the commitment must be consistent with the previous
 //! group polynomial. The contributor generates the shares and commitment for Step 1 and sends the commitment
 //! to the arbiter.
 //!
-//! ### [Phase 1] Step 1 (Optional): Distribute Shares
+//! ### [Phase 1] Step 1: Verify Commitments and (Optionally) Distribute Shares
 //!
-//! After receiving qualified commitments from the arbiter, the contributor (if qualified) will distribute
-//! shares to all participants (ordered by participant identity).
+//! After receiving commitments from the arbiter, the contributor verifies that the commitments are valid
+//! and distributes shares generated from the first step (if any) to all participants (ordered by participant identity).
 //!
 //! ### [Phase 2] Step 2: Submit Acks/Complaints
 //!
 //! After receiving a share from a qualified contributor, the contributor will send an "ack" to the
 //! arbiter if the share is valid (confirmed against commitment) or a "complaint" if the share is invalid.
 //!
-//! The contributor will not send an "ack" for its own share (if it is a qualified contributor).
+//! The contributor will not send an "ack" for its own share.
 //!
 //! ### [Phase 2] Step 3 (Optional): Recover Group Polynomial and Derive Share
+//!
+//! If a contributor is only a dealer from a previous group, it will not enter this step.
 //!
 //! If the round is successful, the arbiter will forward the valid commitments to construct shares for the
 //! new group polynomial (which shares the same constant term if it is a reshare). Like the aribiter, the contributor

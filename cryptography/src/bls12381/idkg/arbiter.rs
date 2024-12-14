@@ -42,7 +42,7 @@
 use commonware_utils::quorum;
 use itertools::Itertools;
 
-use super::utils;
+use super::utils::{self, threshold};
 use crate::bls12381::{
     idkg::{ops, Error},
     primitives::{group::Share, poly},
@@ -87,7 +87,7 @@ impl P0 {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
-            threshold: ((quorum(recipients.len() as u32).unwrap() - 1) / 2) + 1,
+            threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
             dealers,
@@ -145,9 +145,7 @@ impl P0 {
 
     /// Indicates whether we should proceed to the next phase.
     pub fn ready(&self) -> bool {
-        let total = self.dealers.len();
-        let required = self.required() as usize;
-        self.commitments.len() >= required || self.disqualified.len() > total - required
+        self.commitments.len() >= self.required() as usize
     }
 
     /// If there exist `required()` commitments, proceed to `P1`.
@@ -371,11 +369,6 @@ impl P1 {
             self.commitments.remove(disqualified);
             self.acks
                 .remove(self.dealers_ordered.get(disqualified).unwrap());
-        }
-
-        // If not enough commitments left, we cannot proceed
-        if self.commitments.len() < self.threshold as usize {
-            return true;
         }
 
         // Record recipient in all commitments with at least `required()` acks

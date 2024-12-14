@@ -15,6 +15,8 @@
 //! not provided by the contributor because this authorization function is highly dependent on
 //! the context in which the contributor is being used.
 
+use commonware_utils::quorum;
+
 use crate::bls12381::{
     idkg::{ops, Error},
     primitives::{
@@ -24,6 +26,8 @@ use crate::bls12381::{
 };
 use crate::PublicKey;
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+use super::utils::threshold;
 
 /// Output of a DKG/Resharing procedure.
 #[derive(Clone)]
@@ -51,7 +55,6 @@ impl P0 {
     /// If `me` is not in `dealers`, this will panic.
     pub fn new(
         me: PublicKey,
-        threshold: u32,
         previous: Option<(poly::Public, Share)>,
         mut dealers: Vec<PublicKey>,
         mut recipients: Vec<PublicKey>,
@@ -74,7 +77,7 @@ impl P0 {
             .collect();
         Self {
             me,
-            threshold,
+            threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
             dealers_ordered,
@@ -133,7 +136,6 @@ impl P1 {
     /// Create a new contributor for a DKG/Resharing procedure.
     pub fn new(
         me: PublicKey,
-        threshold: u32,
         previous: Option<poly::Public>,
         mut dealers: Vec<PublicKey>,
         mut recipients: Vec<PublicKey>,
@@ -153,7 +155,7 @@ impl P1 {
             .collect();
         Self {
             me,
-            threshold,
+            threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
             dealers_ordered,
@@ -166,8 +168,8 @@ impl P1 {
     /// Required number of commitments to continue procedure.
     pub fn required(&self) -> u32 {
         match &self.previous {
-            Some(previous) => previous.required(),
-            None => self.threshold,
+            Some(_) => quorum(self.dealers_ordered.len() as u32).unwrap(),
+            None => quorum(self.recipients_ordered.len() as u32).unwrap(),
         }
     }
 
@@ -195,6 +197,11 @@ impl P1 {
     /// Return the count of tracked commitments.
     pub fn count(&self) -> usize {
         self.commitments.len()
+    }
+
+    /// Indicates whether we should proceed to the next phase.
+    pub fn ready(&self) -> bool {
+        self.commitments.len() >= self.required() as usize
     }
 
     /// If there exist at least `required()` commitments, proceed to `P2`.
@@ -234,7 +241,7 @@ pub struct P2 {
 }
 
 impl P2 {
-    /// Required number of commitments to continue procedure.
+    /// Required number of commitments to finish procedure.
     pub fn required(&self) -> u32 {
         match &self.previous {
             Some(previous) => previous.required(),
@@ -366,7 +373,7 @@ mod tests {
     use crate::{Ed25519, Scheme};
     use std::collections::HashMap;
 
-    fn create_and_verify_shares(n: u32, t: u32, dealers: u32, concurrency: usize) {
+    fn create_and_verify_shares(n: u32, dealers: u32, concurrency: usize) {
         // Create contributors
         let mut contributors = (0..n)
             .map(|i| Ed25519::from_seed(i as u64).public_key())
@@ -380,7 +387,6 @@ mod tests {
             let me = contributors[i as usize].clone();
             let contributor = P0::new(
                 me,
-                t,
                 None,
                 contributors.clone(),
                 contributors.clone(),
@@ -451,11 +457,11 @@ mod tests {
 
     #[test]
     fn test_simple_dkg() {
-        create_and_verify_shares(5, 3, 5, 4);
+        create_and_verify_shares(5, 5, 4);
     }
 
     #[test]
     fn test_large_dkg() {
-        create_and_verify_shares(100, 67, 80, 4);
+        create_and_verify_shares(100, 80, 4);
     }
 }
