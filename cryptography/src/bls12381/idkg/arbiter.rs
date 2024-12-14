@@ -422,10 +422,7 @@ impl P1 {
         }
 
         // Compute required acks
-        let required_acks = match self.previous {
-            Some(_) => threshold(self.dealers.len() as u32).unwrap(),
-            None => self.threshold,
-        } as usize;
+        let required_acks = threshold(self.dealers.len() as u32).unwrap() as usize;
 
         // Remove all recipients that don't have at least `threshold` commitments
         recipients.retain(|_, acks| acks.len() >= required_acks);
@@ -452,7 +449,9 @@ impl P1 {
 
             // If intersection is of size `threshold`, we can proceed
             if intersection.len() >= required_acks {
-                // TODO: Limit to `threshold` commitments
+                // Limit to `threshold` commitments
+                let intersection: BTreeSet<u32> =
+                    intersection.into_iter().take(required_acks).collect();
 
                 // Set final commitments
                 self.final_commitments = Some(intersection);
@@ -467,18 +466,18 @@ impl P1 {
     /// If there exist at least `threshold - 1` acks each for `required()` dealers, proceed to `P2`.
     pub fn finalize(self) -> (Result<Output, Error>, HashSet<PublicKey>) {
         // If no final commitments, we cannot proceed
-        if self.final_commitments.is_none() {
+        let Some(final_commitments) = self.final_commitments else {
             return (Err(Error::InsufficientDealings), self.disqualified);
-        }
+        };
 
         // Recover group
         let public = match self.previous {
             Some(previous) => {
                 let mut commitments = BTreeMap::new();
-                for idx in self.final_commitments.unwrap() {
-                    let dealer = self.dealers.get(idx as usize).unwrap();
+                for idx in &final_commitments {
+                    let dealer = self.dealers.get(*idx as usize).unwrap();
                     let commitment = self.commitments.get(dealer).unwrap();
-                    commitments.insert(idx, commitment.clone());
+                    commitments.insert(*idx, commitment.clone());
                 }
                 match ops::recover_public(&previous, commitments, self.threshold, self.concurrency)
                 {
@@ -488,8 +487,8 @@ impl P1 {
             }
             None => {
                 let mut commitments = Vec::new();
-                for idx in self.final_commitments.unwrap() {
-                    let dealer = self.dealers.get(idx as usize).unwrap();
+                for idx in &final_commitments {
+                    let dealer = self.dealers.get(*idx as usize).unwrap();
                     let commitment = self.commitments.get(dealer).unwrap();
                     commitments.push(commitment.clone());
                 }
@@ -503,11 +502,7 @@ impl P1 {
         // Generate output
         let output = Output {
             public,
-            commitments: self
-                .commitments
-                .keys()
-                .map(|contributor| *self.dealers_ordered.get(contributor).unwrap())
-                .collect(),
+            commitments: final_commitments.into_iter().collect(),
         };
 
         // Return output

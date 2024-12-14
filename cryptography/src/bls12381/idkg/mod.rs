@@ -408,7 +408,7 @@ mod tests {
         let output = result.unwrap();
 
         // Enforce commitments are only threshold
-        let expected_commitments = threshold(n_1).unwrap();
+        let expected_commitments = threshold(n_0).unwrap();
         assert_eq!(output.commitments.len(), expected_commitments as usize);
 
         // Distribute final commitments to contributors and recover public key
