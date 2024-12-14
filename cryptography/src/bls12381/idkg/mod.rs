@@ -90,19 +90,19 @@
 //! group polynomial. The contributor generates the shares and commitment for Step 1 and sends the commitment
 //! to the arbiter.
 //!
-//! ### [Phase 0] Step 1 (Optional): Distribute Shares
+//! ### [Phase 1] Step 1 (Optional): Distribute Shares
 //!
 //! After receiving qualified commitments from the arbiter, the contributor (if qualified) will distribute
 //! shares to all participants (ordered by participant identity).
 //!
-//! ### [Phase 1] Step 2: Submit Acks/Complaints
+//! ### [Phase 2] Step 2: Submit Acks/Complaints
 //!
 //! After receiving a share from a qualified contributor, the contributor will send an "ack" to the
 //! arbiter if the share is valid (confirmed against commitment) or a "complaint" if the share is invalid.
 //!
 //! The contributor will not send an "ack" for its own share (if it is a qualified contributor).
 //!
-//! ### [Phase 1] Step 3 (Optional): Recover Group Polynomial and Derive Share
+//! ### [Phase 2] Step 3 (Optional): Recover Group Polynomial and Derive Share
 //!
 //! If the round is successful, the arbiter will forward the valid commitments to construct shares for the
 //! new group polynomial (which shares the same constant term if it is a reshare). Like the aribiter, the contributor
