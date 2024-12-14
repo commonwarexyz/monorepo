@@ -2,12 +2,11 @@ use commonware_cryptography::{
     bls12381::{idkg, primitives::poly},
     Ed25519, Scheme,
 };
-use commonware_utils::quorum;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
 
-fn benchmark_reshare_recovery(c: &mut Criterion) {
+fn benchmark_idkg_reshare_recovery(c: &mut Criterion) {
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         // Perform DKG
         //
@@ -21,19 +20,12 @@ fn benchmark_reshare_recovery(c: &mut Criterion) {
         contributors.sort();
 
         // Create shares
-        let t = quorum(n).unwrap();
         let mut contributor_shares = HashMap::new();
         let mut commitments = Vec::new();
         for i in 0..n {
             let me = contributors[i as usize].clone();
-            let p0 = idkg::contributor::P0::new(
-                me,
-                t,
-                None,
-                contributors.clone(),
-                contributors.clone(),
-                1,
-            );
+            let p0 =
+                idkg::contributor::P0::new(me, None, contributors.clone(), contributors.clone(), 1);
             let (p1, commitment, shares) = p0.finalize();
             contributor_shares.insert(i, (commitment.clone(), shares, p1.unwrap()));
             commitments.push(commitment);
@@ -99,7 +91,7 @@ fn benchmark_reshare_recovery(c: &mut Criterion) {
         }
 
         for &concurrency in &[1, 2, 4, 8] {
-            c.bench_function(&format!("conc={} n={} t={}", concurrency, n, t), |b| {
+            c.bench_function(&format!("conc={} n={}", concurrency, n), |b| {
                 b.iter_batched(
                     || {
                         // Create reshare
@@ -111,7 +103,6 @@ fn benchmark_reshare_recovery(c: &mut Criterion) {
                             let share = outputs[i as usize].share;
                             let p0 = idkg::contributor::P0::new(
                                 me,
-                                t,
                                 Some((group.clone(), share)),
                                 contributors.clone(),
                                 contributors.clone(),
@@ -167,6 +158,6 @@ fn benchmark_reshare_recovery(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_reshare_recovery
+    targets = benchmark_idkg_reshare_recovery
 }
 criterion_main!(benches);

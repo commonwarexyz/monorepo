@@ -33,14 +33,14 @@ prost-build = { workspace = true }
 portable = ["blst/portable"]
 
 [[bench]]
-name="dkg_recovery"
+name="idkg_recovery"
 harness = false
-path = "src/bls12381/benches/dkg_recovery.rs"
+path = "src/bls12381/benches/idkg_recovery.rs"
 
 [[bench]]
-name="reshare_recovery"
+name="idkg_reshare_recovery"
 harness = false
-path = "src/bls12381/benches/reshare_recovery.rs"
+path = "src/bls12381/benches/idkg_reshare_recovery.rs"
 
 [[bench]]
 name="signature_generation"

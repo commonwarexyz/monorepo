@@ -14,49 +14,49 @@
 //! cargo bench
 //! ```
 //!
-//! ## DKG Recovery (Contributor)
+//! ## IDKG Recovery (Contributor)
 //!
 //! ```txt
-//! conc=1 n=5 t=3          time:   [7.8876 µs 8.0956 µs 8.4308 µs]
-//! conc=1 n=10 t=7         time:   [33.342 µs 33.436 µs 33.554 µs]
-//! conc=1 n=20 t=13        time:   [121.14 µs 123.02 µs 125.79 µs]
-//! conc=1 n=50 t=33        time:   [753.15 µs 761.27 µs 773.15 µs]
-//! conc=1 n=100 t=67       time:   [3.0440 ms 3.5310 ms 4.3212 ms]
-//! conc=1 n=250 t=167      time:   [19.164 ms 19.226 ms 19.295 ms]
-//! conc=1 n=500 t=333      time:   [79.523 ms 80.812 ms 82.645 ms]
+//! conc=1 n=5              time:   [7.8876 µs 8.0956 µs 8.4308 µs]
+//! conc=1 n=10             time:   [33.342 µs 33.436 µs 33.554 µs]
+//! conc=1 n=20             time:   [121.14 µs 123.02 µs 125.79 µs]
+//! conc=1 n=50             time:   [753.15 µs 761.27 µs 773.15 µs]
+//! conc=1 n=100            time:   [3.0440 ms 3.5310 ms 4.3212 ms]
+//! conc=1 n=250            time:   [19.164 ms 19.226 ms 19.295 ms]
+//! conc=1 n=500            time:   [79.523 ms 80.812 ms 82.645 ms]
 //! ```
 //!
-//! ## Reshare Recovery (Contributor)
+//! ## IDKG Reshare Recovery (Contributor)
 //!
 //! ```txt
-//! conc=1 n=5 t=3          time:   [241.59 µs 253.86 µs 263.90 µs]
-//! conc=2 n=5 t=3          time:   [175.10 µs 178.24 µs 184.16 µs]
-//! conc=4 n=5 t=3          time:   [134.88 µs 144.18 µs 151.21 µs]
-//! conc=8 n=5 t=3          time:   [174.37 µs 184.76 µs 192.81 µs]
-//! conc=1 n=10 t=7         time:   [1.4708 ms 1.5347 ms 1.6063 ms]
-//! conc=2 n=10 t=7         time:   [827.54 µs 908.99 µs 986.19 µs]
-//! conc=4 n=10 t=7         time:   [484.35 µs 504.77 µs 535.10 µs]
-//! conc=8 n=10 t=7         time:   [508.29 µs 606.27 µs 699.82 µs]
-//! conc=1 n=20 t=13        time:   [5.0725 ms 5.0793 ms 5.0857 ms]
-//! conc=2 n=20 t=13        time:   [2.8032 ms 2.8116 ms 2.8222 ms]
-//! conc=4 n=20 t=13        time:   [1.6856 ms 1.6892 ms 1.6938 ms]
-//! conc=8 n=20 t=13        time:   [1.0313 ms 1.1604 ms 1.2300 ms]
-//! conc=1 n=50 t=33        time:   [37.000 ms 37.248 ms 37.937 ms]
-//! conc=2 n=50 t=33        time:   [19.346 ms 19.642 ms 20.312 ms]
-//! conc=4 n=50 t=33        time:   [10.533 ms 10.567 ms 10.614 ms]
-//! conc=8 n=50 t=33        time:   [6.3829 ms 6.4347 ms 6.4721 ms]
-//! conc=1 n=100 t=67       time:   [174.30 ms 175.16 ms 176.05 ms]
-//! conc=2 n=100 t=67       time:   [89.835 ms 90.204 ms 90.599 ms]
-//! conc=4 n=100 t=67       time:   [46.736 ms 47.123 ms 47.531 ms]
-//! conc=8 n=100 t=67       time:   [29.193 ms 29.519 ms 29.870 ms]
-//! conc=1 n=250 t=167      time:   [1.4814 s 1.4927 s 1.5062 s]
-//! conc=2 n=250 t=167      time:   [751.83 ms 762.08 ms 780.29 ms]
-//! conc=4 n=250 t=167      time:   [394.18 ms 397.18 ms 400.52 ms]
-//! conc=8 n=250 t=167      time:   [239.81 ms 245.78 ms 252.11 ms]
-//! conc=1 n=500 t=333      time:   [6.9914 s 7.0182 s 7.0452 s]
-//! conc=2 n=500 t=333      time:   [3.5483 s 3.5575 s 3.5670 s]
-//! conc=4 n=500 t=333      time:   [1.8668 s 1.8851 s 1.9025 s]
-//! conc=8 n=500 t=333      time:   [1.1176 s 1.1355 s 1.1539 s]
+//! conc=1 n=5              time:   [241.59 µs 253.86 µs 263.90 µs]
+//! conc=2 n=5              time:   [175.10 µs 178.24 µs 184.16 µs]
+//! conc=4 n=5              time:   [134.88 µs 144.18 µs 151.21 µs]
+//! conc=8 n=5              time:   [174.37 µs 184.76 µs 192.81 µs]
+//! conc=1 n=10             time:   [1.4708 ms 1.5347 ms 1.6063 ms]
+//! conc=2 n=10             time:   [827.54 µs 908.99 µs 986.19 µs]
+//! conc=4 n=10             time:   [484.35 µs 504.77 µs 535.10 µs]
+//! conc=8 n=10             time:   [508.29 µs 606.27 µs 699.82 µs]
+//! conc=1 n=20             time:   [5.0725 ms 5.0793 ms 5.0857 ms]
+//! conc=2 n=20             time:   [2.8032 ms 2.8116 ms 2.8222 ms]
+//! conc=4 n=20             time:   [1.6856 ms 1.6892 ms 1.6938 ms]
+//! conc=8 n=20             time:   [1.0313 ms 1.1604 ms 1.2300 ms]
+//! conc=1 n=50             time:   [37.000 ms 37.248 ms 37.937 ms]
+//! conc=2 n=50             time:   [19.346 ms 19.642 ms 20.312 ms]
+//! conc=4 n=50             time:   [10.533 ms 10.567 ms 10.614 ms]
+//! conc=8 n=50             time:   [6.3829 ms 6.4347 ms 6.4721 ms]
+//! conc=1 n=100            time:   [174.30 ms 175.16 ms 176.05 ms]
+//! conc=2 n=100            time:   [89.835 ms 90.204 ms 90.599 ms]
+//! conc=4 n=100            time:   [46.736 ms 47.123 ms 47.531 ms]
+//! conc=8 n=100            time:   [29.193 ms 29.519 ms 29.870 ms]
+//! conc=1 n=250            time:   [1.4814 s 1.4927 s 1.5062 s]
+//! conc=2 n=250            time:   [751.83 ms 762.08 ms 780.29 ms]
+//! conc=4 n=250            time:   [394.18 ms 397.18 ms 400.52 ms]
+//! conc=8 n=250            time:   [239.81 ms 245.78 ms 252.11 ms]
+//! conc=1 n=500            time:   [6.9914 s 7.0182 s 7.0452 s]
+//! conc=2 n=500            time:   [3.5483 s 3.5575 s 3.5670 s]
+//! conc=4 n=500            time:   [1.8668 s 1.8851 s 1.9025 s]
+//! conc=8 n=500            time:   [1.1176 s 1.1355 s 1.1539 s]
 //! ```
 //!
 //! ## Partial Signature Aggregation
