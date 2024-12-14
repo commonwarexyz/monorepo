@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn test_share_insufficient() {
         // Initialize test
-        let n = 10;
+        let (n, t) = (10, 4);
         let dealers = 8;
         let share_dealers = 2;
         let concurrency = 1;
@@ -744,7 +744,7 @@ mod tests {
         }
 
         // Finalize
-        let included_commitments = (0..dealers).collect::<Vec<_>>();
+        let included_commitments = (0..t).collect::<Vec<_>>();
         for i in 0..n {
             let (_, contributor) = contributor_shares.remove(&i).unwrap();
             assert!(matches!(
