@@ -435,7 +435,36 @@ mod tests {
     }
 
     #[test]
-    fn test_dkg_complaint() {
+    fn test_dkg_invalid_commitment() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create invalid commitment
+        let (public, _) = ops::generate_shares(None, n * 2, 1);
+
+        // Inform arbiter of commitments
+        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+        for contributor in contributors.iter() {
+            let result = arb.commitment(contributor.clone(), public.clone());
+            assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
+        }
+        let (result, disqualified) = arb.finalize();
+
+        // Verify disqualifications
+        assert_eq!(disqualified.len(), n as usize);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_dkg_share_complaint() {
         // Initialize test
         let n = 5;
 
