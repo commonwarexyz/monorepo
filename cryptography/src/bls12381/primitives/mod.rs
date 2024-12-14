@@ -14,7 +14,7 @@
 //! ```rust
 //! use commonware_cryptography::bls12381::{
 //!     primitives::{ops::{partial_sign, partial_verify, partial_aggregate, verify}, poly::public},
-//!     idkg::ops::{generate_shares},
+//!     dkg::ops::{generate_shares},
 //! };
 //!
 //! // Configure threshold

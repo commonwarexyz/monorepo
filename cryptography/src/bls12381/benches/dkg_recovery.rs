@@ -4,7 +4,7 @@ use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
 
-fn benchmark_idkg_recovery(c: &mut Criterion) {
+fn benchmark_dkg_recovery(c: &mut Criterion) {
     let concurrency = 1; // only used in recovery during reshare
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         c.bench_function(&format!("conc={} n={}", concurrency, n), |b| {
@@ -77,6 +77,6 @@ fn benchmark_idkg_recovery(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_idkg_recovery
+    targets = benchmark_dkg_recovery
 }
 criterion_main!(benches);
