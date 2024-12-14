@@ -216,7 +216,7 @@ mod tests {
             let (public, _) = contributor_shares.get(contributor).unwrap();
             arb.commitment(contributor.clone(), public.clone()).unwrap();
         }
-        assert!(arb.ready());
+        assert!(arb.prepared());
         let (result, disqualified) = arb.finalize();
 
         // Verify disqualifications are empty (only occurs if invalid commitment)
@@ -274,7 +274,7 @@ mod tests {
         }
 
         // Finalize arb P1
-        assert!(arb.ready());
+        assert!(arb.prepared());
         let (result, disqualified) = arb.finalize();
 
         // Verify disqualifications (unchanged)
@@ -346,7 +346,7 @@ mod tests {
             let (public, _) = reshare_contributor_shares.get(con).unwrap();
             arb.commitment(con.clone(), public.clone()).unwrap();
         }
-        assert!(arb.ready());
+        assert!(arb.prepared());
         let (result, disqualified) = arb.finalize();
 
         // Verify disqualifications
@@ -402,7 +402,7 @@ mod tests {
         }
 
         // Finalize arb p1
-        assert!(arb.ready());
+        assert!(arb.prepared());
         let (result, disqualified) = arb.finalize();
 
         // Verify disqualifications (unchanged)
@@ -474,7 +474,7 @@ mod tests {
         }
 
         // Check not ready
-        assert!(!arb.ready());
+        assert!(!arb.prepared());
         let (result, disqualified) = arb.finalize();
 
         // Verify disqualifications
@@ -623,7 +623,7 @@ mod tests {
             let (public, _) = contributor_shares.get(contributor).unwrap();
             arb.commitment(contributor.clone(), public.clone()).unwrap();
         }
-        assert!(arb.ready());
+        assert!(arb.prepared());
         let (result, disqualified) = arb.finalize();
 
         // Verify disqualifications are empty (only occurs if invalid commitment)
@@ -674,7 +674,7 @@ mod tests {
         }
 
         // Ensure not ready
-        assert!(!arb.ready());
+        assert!(!arb.prepared());
 
         // Add acks (need 3 per commitment over 2 commitments) but no intersection
         // `commitment[0]` has implicit ack from `contributor[0]`
@@ -683,13 +683,13 @@ mod tests {
         arb.ack(contributors[0].clone(), commitments[1]).unwrap();
         // `commitment[1]` has implicit ack from `contributor[1]`
         arb.ack(contributors[2].clone(), commitments[1]).unwrap();
-        assert!(!arb.ready());
+        assert!(!arb.prepared());
 
         // Add acks with intersection
         arb.ack(contributors[3].clone(), commitments[1]).unwrap();
 
         // Finalize arb P1
-        assert!(arb.ready());
+        assert!(arb.prepared());
         let (result, disqualified) = arb.finalize();
 
         // Verify disqualifications (unchanged)

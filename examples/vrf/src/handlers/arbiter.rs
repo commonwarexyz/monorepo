@@ -125,7 +125,7 @@ impl<E: Clock> Arbiter<E> {
                             let _ = p0.commitment(sender, commitment);
 
                             // Check if we are ready to move to next phase
-                            if p0.ready() {
+                            if p0.prepared() {
                                 debug!(round, "commitment phase ready");
                                 break;
                             }
@@ -253,7 +253,7 @@ impl<E: Clock> Arbiter<E> {
                             }
 
                             // Check if we are ready to move to next phase
-                            if p1.ready() {
+                            if p1.prepared() {
                                 debug!(round, "ack phase ready");
                                 break;
                             }
