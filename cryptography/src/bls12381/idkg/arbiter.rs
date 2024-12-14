@@ -4,14 +4,12 @@
 //!
 //! ## Recommended: All Contributors Run the Arbiter
 //!
-//! Each contributor should run its own instance of the arbiter over a replicated
-//! log (deterministic order of events across all contributors) of commitments,
-//! acknowledgements, and complaints. All correct contributors, when given
-//! the same log, will arrive at the same result (will recover the same group polynomial
-//! and a share that can generate partial signatures over it). Using a replicated log allows
-//! us to provide both reliable broadcast (all honest contributors see all messages from
-//! all other honest contributors) and to enforce a "timeout" (using log index) for each
-//! phase of DKG/Resharing.
+//! Each contributor should run its own instance of the arbiter over a replicated log (deterministic
+//! order of events across all contributors) of commitments, acknowledgements, and complaints.
+//! All correct contributors, when given the same log, will arrive at the same result (will recover
+//! the same group polynomial and a share that can generate partial signatures over it). Using a
+//! replicated log allows us to provide both reliable broadcast (all honest contributors see all messages from
+//! all other honest contributors) and to enforce a "timeout" (using log index) for each phase of DKG/Resharing.
 //!
 //! ## Trusted Alternative: Standalone Process
 //!
