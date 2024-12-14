@@ -41,7 +41,7 @@ pub fn max_faults(n: u32) -> Option<u32> {
     Some(f)
 }
 
-/// Assuming that `n = 3f + 1`, compute the minimum size of `t` such that `t >= 2f + 1`.
+/// Assuming that `n = 3f + 1`, compute the minimum size of `q` such that `q >= 2f + 1`.
 ///
 /// If the value of `n` is too small to tolerate any faults, this function returns `None`.
 pub fn quorum(n: u32) -> Option<u32> {
