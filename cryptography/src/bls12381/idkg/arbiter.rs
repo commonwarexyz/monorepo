@@ -153,7 +153,7 @@ impl P0 {
         self.commitments.len() >= self.quorum() as usize
     }
 
-    /// If there exist `required()` commitments, proceed to `P1`.
+    /// If there exist `2f + 1` commitments, proceed to `P1`.
     /// Return the disqualified contributors.
     pub fn finalize(mut self) -> (Option<P1>, HashSet<PublicKey>) {
         // Drop commitments from disqualified contributors
@@ -167,7 +167,7 @@ impl P0 {
             return (None, self.disqualified);
         }
 
-        // Select first `required()` commitments
+        // Select first `2f + 1` commitments
         let keys = self
             .commitments
             .keys()
@@ -389,7 +389,7 @@ impl P1 {
                 .remove(self.dealers_ordered.get(disqualified).unwrap());
         }
 
-        // Record recipient in all commitments with at least `required()` acks
+        // Record recipients with at least `2f + 1` acks
         let recipient_quorum = quorum(self.recipients.len() as u32).unwrap() as usize;
         let mut recipients = BTreeMap::new();
         for dealer in self.commitments.keys() {
@@ -399,7 +399,7 @@ impl P1 {
                 continue;
             };
 
-            // Skip if not `required()` acks
+            // Skip if not `2f + 1` acks
             //
             // We previously ensure self-acks are included in this count.
             if dealer_acks.len() < recipient_quorum {
@@ -416,16 +416,16 @@ impl P1 {
         // Compute required acks
         let dealer_threshold = threshold(self.dealers.len() as u32).unwrap() as usize;
 
-        // Remove all recipients that don't have at least `threshold` commitments
+        // Remove all recipients that haven't acked at least `f + 1` commitments
         recipients.retain(|_, acks| acks.len() >= dealer_threshold);
 
-        // If there are not `required()` recipients with at least `threshold` acks, we cannot proceed.
+        // If there are not `2f + 1` recipients with at least `f + 1` acks, we cannot proceed.
         if recipients.len() < recipient_quorum {
             return false;
         }
 
-        // Look for some subset of recipients of size `required()` that is present in
-        // `threshold` commitments
+        // Look for some subset of recipients of size `2f + 1` that is present in
+        // `f + 1` commitments
         //
         // When provided a data structure with a deterministic iteration order, combinations
         // produces a deterministic order of combinations.
@@ -444,9 +444,9 @@ impl P1 {
                 }
             }
 
-            // If intersection is of size `threshold`, we can proceed
+            // If intersection is of size `f + 1`, we can proceed
             if intersection.len() >= dealer_threshold {
-                // Limit to `threshold` commitments
+                // Limit to `f + 1` commitments
                 let intersection: BTreeSet<u32> =
                     intersection.into_iter().take(dealer_threshold).collect();
 
@@ -460,7 +460,7 @@ impl P1 {
         false
     }
 
-    /// If there exist at least `threshold - 1` acks each for `required()` dealers, proceed to `P2`.
+    /// If there exist `2f + 1` acks each for `f + 1` dealers, finalize.
     pub fn finalize(self) -> (Result<Output, Error>, HashSet<PublicKey>) {
         // If no final commitments, we cannot proceed
         let Some(final_commitments) = self.final_commitments else {
