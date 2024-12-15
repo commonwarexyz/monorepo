@@ -16,7 +16,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use prost::Message as _;
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tracing::{debug, trace};
+use tracing::debug;
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
     runtime: E,
@@ -63,8 +63,9 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         )
     }
 
-    // prepare_msg returns Data after checking its channel is contained by rate_limits.
-    fn prepare_msg<V>(
+    /// Unpack `msg` and verify the underlying `channel` is registered in
+    /// the provided read-only `rate_limits`.
+    fn validate_msg<V>(
         msg: Option<wire::Data>,
         rate_limits: &Arc<HashMap<u32, V>>,
     ) -> Result<wire::Data, Error>
@@ -79,11 +80,11 @@ where {
         Ok(data)
     }
 
-    // send creates a message from a payload, then sends and increments metrics.
+    /// Creates a message from a payload, then sends and increments metrics.
     async fn send<Si: Sink>(
         sender: &mut Sender<Si>,
         payload: Payload,
-        metrics_message: metrics::Message,
+        metric: metrics::Message,
         sent_messages: &Family<metrics::Message, Counter>,
     ) -> Result<(), Error> {
         let msg = wire::Message {
@@ -91,7 +92,7 @@ where {
         }
         .encode_to_vec();
         sender.send(&msg).await.map_err(Error::SendFailed)?;
-        sent_messages.get_or_create(&metrics_message).inc();
+        sent_messages.get_or_create(&metric).inc();
         Ok(())
     }
 
@@ -136,7 +137,7 @@ where {
                                 Some(msg_control) => msg_control,
                                 None => return Err(Error::PeerDisconnected),
                             };
-                            let (payload, metric_msg) = match msg {
+                            let (payload, metric) = match msg {
                                 Message::BitVec { bit_vec } =>
                                     (Payload::BitVec(bit_vec), metrics::Message::new_bit_vec(&peer)),
                                 Message::Peers { peers: msg } =>
@@ -145,19 +146,19 @@ where {
                                     return Err(Error::PeerKilled(hex(&peer)))
                                 }
                             };
-                            Self::send(&mut conn_sender,payload,metric_msg,&self.sent_messages)
+                            Self::send(&mut conn_sender, payload, metric, &self.sent_messages)
                                 .await?;
                         },
                         msg_high = self.high.next() => {
-                            let msg = Self::prepare_msg(msg_high, &rate_limits)?;
-                            let metric_msg = metrics::Message::new_data(&peer, msg.channel);
-                            Self::send(&mut conn_sender, Payload::Data(msg), metric_msg, &self.sent_messages)
+                            let msg = Self::validate_msg(msg_high, &rate_limits)?;
+                            let metric = metrics::Message::new_data(&peer, msg.channel);
+                            Self::send(&mut conn_sender, Payload::Data(msg), metric, &self.sent_messages)
                                 .await?;
                         },
                         msg_low = self.low.next() => {
-                            let msg = Self::prepare_msg(msg_low, &rate_limits)?;
-                            let metric_msg = metrics::Message::new_data(&peer, msg.channel);
-                            Self::send(&mut conn_sender, Payload::Data(msg), metric_msg, &self.sent_messages)
+                            let msg = Self::validate_msg(msg_low, &rate_limits)?;
+                            let metric = metrics::Message::new_data(&peer, msg.channel);
+                            Self::send(&mut conn_sender, Payload::Data(msg), metric, &self.sent_messages)
                                 .await?;
                         }
                     }
