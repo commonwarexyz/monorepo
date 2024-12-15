@@ -63,45 +63,24 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         )
     }
 
-    async fn send_content<Si: Sink>(
-        sender: &mut Sender<Si>,
-        peer: &PublicKey,
-        data: wire::Data,
-        sent_messages: &Family<metrics::Message, Counter>,
-    ) -> Result<(), Error> {
-        trace!(peer = hex(peer), "sending data",);
-
-        let channel = data.channel;
-        Self::send_message(
-            sender,
-            wire::message::Payload::Data(data),
-            metrics::Message::new_data(peer, channel),
-            sent_messages,
-        )
-        .await?;
-        Ok(())
-    }
-
-    // validate_prioritized_data returns Data after few checks.
-    fn validate_prioritized_data<T>(
+    // prepare_msg returns Data after checking its channel is contained by rate_limits.
+    fn prepare_msg<V>(
         msg: Option<wire::Data>,
-        contains: T,
+        rate_limits: &Arc<HashMap<u32, V>>,
     ) -> Result<wire::Data, Error>
-    where
-        T: Fn(&u32) -> bool,
-    {
+where {
         let data = match msg {
             Some(data) => data,
             None => return Err(Error::PeerDisconnected),
         };
-        if !contains(&data.channel) {
+        if !rate_limits.contains_key(&data.channel) {
             return Err(Error::InvalidChannel);
         }
         Ok(data)
     }
 
-    // send_message creates a message from a payload, then sends and increments metrics.
-    async fn send_message<Si: Sink>(
+    // send creates a message from a payload, then sends and increments metrics.
+    async fn send<Si: Sink>(
         sender: &mut Sender<Si>,
         payload: Payload,
         metrics_message: metrics::Message,
@@ -166,16 +145,20 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                     return Err(Error::PeerKilled(hex(&peer)))
                                 }
                             };
-                            Self::send_message(&mut conn_sender,payload,metric_msg,&self.sent_messages)
+                            Self::send(&mut conn_sender,payload,metric_msg,&self.sent_messages)
                                 .await?;
                         },
                         msg_high = self.high.next() => {
-                            let data = Self::validate_prioritized_data(msg_high, |key| rate_limits.contains_key(key))?;
-                            Self::send_content(&mut conn_sender, &peer, data, &self.sent_messages).await?;
+                            let msg = Self::prepare_msg(msg_high, &rate_limits)?;
+                            let metric_msg = metrics::Message::new_data(&peer, msg.channel);
+                            Self::send(&mut conn_sender, Payload::Data(msg), metric_msg, &self.sent_messages)
+                                .await?;
                         },
                         msg_low = self.low.next() => {
-                            let data = Self::validate_prioritized_data(msg_low, |key| rate_limits.contains_key(key))?;
-                            Self::send_content(&mut conn_sender, &peer, data, &self.sent_messages).await?;
+                            let msg = Self::prepare_msg(msg_low, &rate_limits)?;
+                            let metric_msg = metrics::Message::new_data(&peer, msg.channel);
+                            Self::send(&mut conn_sender, Payload::Data(msg), metric_msg, &self.sent_messages)
+                                .await?;
                         }
                     }
                 }
