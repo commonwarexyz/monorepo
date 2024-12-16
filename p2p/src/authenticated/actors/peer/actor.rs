@@ -63,8 +63,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         )
     }
 
-    /// Unpack `msg` and verify the underlying `channel` is registered in
-    /// the provided read-only `rate_limits`.
+    /// Unpack `msg` and verify the underlying `channel` is registered.
     fn validate_msg<V>(
         msg: Option<wire::Data>,
         rate_limits: &Arc<HashMap<u32, V>>,
@@ -83,9 +82,9 @@ where {
     /// Creates a message from a payload, then sends and increments metrics.
     async fn send<Si: Sink>(
         sender: &mut Sender<Si>,
-        payload: Payload,
         metric: metrics::Message,
         sent_messages: &Family<metrics::Message, Counter>,
+        payload: Payload,
     ) -> Result<(), Error> {
         let msg = wire::Message {
             payload: Some(payload),
@@ -137,28 +136,26 @@ where {
                                 Some(msg_control) => msg_control,
                                 None => return Err(Error::PeerDisconnected),
                             };
-                            let (payload, metric) = match msg {
+                            let (metric, payload) = match msg {
                                 Message::BitVec { bit_vec } =>
-                                    (Payload::BitVec(bit_vec), metrics::Message::new_bit_vec(&peer)),
+                                    (metrics::Message::new_bit_vec(&peer), Payload::BitVec(bit_vec)),
                                 Message::Peers { peers: msg } =>
-                                    (Payload::Peers(msg), metrics::Message::new_peers(&peer)),
+                                    (metrics::Message::new_peers(&peer), Payload::Peers(msg)),
                                 Message::Kill => {
                                     return Err(Error::PeerKilled(hex(&peer)))
                                 }
                             };
-                            Self::send(&mut conn_sender, payload, metric, &self.sent_messages)
+                            Self::send(&mut conn_sender, metric, &self.sent_messages, payload)
                                 .await?;
                         },
                         msg_high = self.high.next() => {
                             let msg = Self::validate_msg(msg_high, &rate_limits)?;
-                            let metric = metrics::Message::new_data(&peer, msg.channel);
-                            Self::send(&mut conn_sender, Payload::Data(msg), metric, &self.sent_messages)
+                            Self::send(&mut conn_sender, metrics::Message::new_data(&peer, msg.channel), &self.sent_messages, Payload::Data(msg))
                                 .await?;
                         },
                         msg_low = self.low.next() => {
                             let msg = Self::validate_msg(msg_low, &rate_limits)?;
-                            let metric = metrics::Message::new_data(&peer, msg.channel);
-                            Self::send(&mut conn_sender, Payload::Data(msg), metric, &self.sent_messages)
+                            Self::send(&mut conn_sender, metrics::Message::new_data(&peer, msg.channel), &self.sent_messages, Payload::Data(msg))
                                 .await?;
                         }
                     }
