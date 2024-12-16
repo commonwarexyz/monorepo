@@ -82,8 +82,8 @@ where {
     /// Creates a message from a payload, then sends and increments metrics.
     async fn send<Si: Sink>(
         sender: &mut Sender<Si>,
-        metric: metrics::Message,
         sent_messages: &Family<metrics::Message, Counter>,
+        metric: metrics::Message,
         payload: Payload,
     ) -> Result<(), Error> {
         let msg = wire::Message {
@@ -145,17 +145,17 @@ where {
                                     return Err(Error::PeerKilled(hex(&peer)))
                                 }
                             };
-                            Self::send(&mut conn_sender, metric, &self.sent_messages, payload)
+                            Self::send(&mut conn_sender, &self.sent_messages, metric, payload)
                                 .await?;
                         },
                         msg_high = self.high.next() => {
                             let msg = Self::validate_msg(msg_high, &rate_limits)?;
-                            Self::send(&mut conn_sender, metrics::Message::new_data(&peer, msg.channel), &self.sent_messages, Payload::Data(msg))
+                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), Payload::Data(msg))
                                 .await?;
                         },
                         msg_low = self.low.next() => {
                             let msg = Self::validate_msg(msg_low, &rate_limits)?;
-                            Self::send(&mut conn_sender, metrics::Message::new_data(&peer, msg.channel), &self.sent_messages, Payload::Data(msg))
+                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), Payload::Data(msg))
                                 .await?;
                         }
                     }
