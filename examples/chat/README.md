@@ -1,4 +1,4 @@
-# commonware-chat 
+# commonware-chat
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-chat.svg)](https://crates.io/crates/commonware-chat)
 [![Docs.rs](https://docs.rs/commonware-chat/badge.svg)](https://docs.rs/commonware-chat)
@@ -23,6 +23,8 @@ dialects of `commonware-p2p` may not have this requirement.
 
 ## Usage (4 Friends)
 
+_To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
+
 ### Friend 1 (Bootstrapper)
 
 ```sh
@@ -32,13 +34,13 @@ cargo run --release -- --me=1@3001 --friends=1,2,3,4
 ### Friend 2
 
 ```sh
-cargo run --release -- --me=2@3002 --friends=1,2,3,4 --bootstrappers=1@127.0.0.1:3001 
+cargo run --release -- --me=2@3002 --friends=1,2,3,4 --bootstrappers=1@127.0.0.1:3001
 ```
 
 ### Friend 3
 
 ```sh
-cargo run --release -- --me=3@3003 --friends=1,2,3,4 --bootstrappers=1@127.0.0.1:3001 
+cargo run --release -- --me=3@3003 --friends=1,2,3,4 --bootstrappers=1@127.0.0.1:3001
 ```
 
 ### Friend 4 (Different Friend as Bootstrapper)
@@ -50,5 +52,5 @@ cargo run --release -- --me=4@3004 --friends=1,2,3,4 --bootstrappers=3@127.0.0.1
 ### Not Friend (Blocked)
 
 ```sh
-cargo run --release -- --me=5@3005 --friends=1,2,3,4,5 --bootstrappers=1@127.0.0.1:3001 
+cargo run --release -- --me=5@3005 --friends=1,2,3,4,5 --bootstrappers=1@127.0.0.1:3001
 ```

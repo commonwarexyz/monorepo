@@ -20,8 +20,6 @@ _Primitives are designed for deployment in adversarial environments. If you find
 
 _Examples may include insecure code (i.e. deriving keypairs from an integer arguments) to make them easier to run. Examples are not intended to be used directly in production._
 
-Examples require [protoc](https://grpc.io/docs/protoc-installation/) to be installed and path-accessible.
-
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
 * [log](./examples/log/README.md):  Commit to a secret log and agree to its hash.
 * [vrf](./examples/vrf/README.md): Generate bias-resistant randomness with untrusted contributors.
