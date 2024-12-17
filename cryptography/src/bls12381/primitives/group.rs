@@ -81,6 +81,7 @@ const BLST_FR_ONE: Scalar = Scalar(blst_fr {
 #[repr(transparent)]
 pub struct G1(blst_p1);
 
+/// The size in bytes of an encoded G1 element.
 pub const G1_ELEMENT_BYTE_LENGTH: usize = 48;
 
 /// Domain separation tag for hashing a proof of knowledge to G1.
@@ -93,6 +94,7 @@ pub const DST_G1_MESSAGE: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_"
 #[repr(transparent)]
 pub struct G2(blst_p2);
 
+/// The size in bytes of an encoded G2 element.
 pub const G2_ELEMENT_BYTE_LENGTH: usize = 96;
 
 /// Domain separation tag for hashing a proof of knowledge to G2.
@@ -113,8 +115,14 @@ pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 /// The public key type (G1).
 pub type Public = G1;
 
+/// The public key length (G1).
+pub const PUBLIC_KEY_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
+
 /// The signature type (G2).
 pub type Signature = G2;
+
+/// The signature length (G2).
+pub const SIGNATURE_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
 
 /// The DST for hashing a proof of possession to the exposed signature type (G2).
 pub const DST_PROOF_OF_POSSESSION: &[u8] = DST_G2_PROOF_OF_POSSESSION;
