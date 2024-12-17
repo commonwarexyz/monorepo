@@ -59,7 +59,7 @@
 //! conc=8 n=500 t=167     time:   [232.44 ms 238.31 ms 247.56 ms]
 //! ```
 //!
-//! ## Partial Signature Recovery
+//! ## Threshold Signature Recovery
 //!
 //! ```txt
 //! n=5 t=3                 time:   [126.85 µs 128.50 µs 130.67 µs]
@@ -132,13 +132,13 @@ mod tests {
     use dkg::ops::generate_shares;
     use primitives::group::Private;
     use primitives::ops::{
-        partial_recover_signature, partial_sign_message, partial_verify_message, verify_message,
+        partial_sign_message, partial_verify_message, signature_recover, verify_message,
     };
     use primitives::poly::public;
     use primitives::Error;
 
     #[test]
-    fn test_partial_recover_signature() {
+    fn test_signature_recover() {
         let (n, t) = (5, 4);
 
         // Create the private key polynomial and evaluate it at `n`
@@ -162,13 +162,13 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = partial_recover_signature(t, partials).unwrap();
+        let threshold_sig = signature_recover(t, partials).unwrap();
         let threshold_pub = public(&group);
         verify_message(&threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }
 
     #[test]
-    fn test_partial_recover_signature_bad_namespace() {
+    fn test_signature_recover_bad_namespace() {
         let (n, t) = (5, 4);
 
         // Create the private key polynomial and evaluate it at `n`
@@ -196,7 +196,7 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = partial_recover_signature(t, partials).unwrap();
+        let threshold_sig = signature_recover(t, partials).unwrap();
         let threshold_pub = public(&group);
         assert!(matches!(
             verify_message(&threshold_pub, namespace, msg, &threshold_sig).unwrap_err(),
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_recover_signature_insufficient() {
+    fn test_signature_recover_insufficient() {
         let (n, t) = (5, 4);
 
         // Create the private key polynomial and evaluate it at `n`
@@ -230,13 +230,13 @@ mod tests {
 
         // Generate the threshold sig
         assert!(matches!(
-            partial_recover_signature(t, partials).unwrap_err(),
+            signature_recover(t, partials).unwrap_err(),
             Error::NotEnoughPartialSignatures(4, 3)
         ));
     }
 
     #[test]
-    fn test_partial_recover_signature_insufficient_duplicates() {
+    fn test_signature_recover_insufficient_duplicates() {
         let (n, t) = (5, 4);
 
         // Create the private key polynomial and evaluate it at `n`
@@ -262,14 +262,14 @@ mod tests {
 
         // Generate the threshold sig
         assert!(matches!(
-            partial_recover_signature(t, partials).unwrap_err(),
+            signature_recover(t, partials).unwrap_err(),
             Error::DuplicateEval,
         ));
     }
 
     #[test]
     #[should_panic(expected = "InvalidSignature")]
-    fn test_partial_recover_signature_bad_share() {
+    fn test_signature_recover_bad_share() {
         let (n, t) = (5, 4);
 
         // Create the private key polynomial and evaluate it at `n`
@@ -294,7 +294,7 @@ mod tests {
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = partial_recover_signature(t, partials).unwrap();
+        let threshold_sig = signature_recover(t, partials).unwrap();
         let threshold_pub = public(&group);
         verify_message(&threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }

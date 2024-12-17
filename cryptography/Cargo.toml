@@ -48,9 +48,9 @@ harness = false
 path = "src/bls12381/benches/signature_generation.rs"
 
 [[bench]]
-name="partial_recover_signature"
+name="signature_recover"
 harness = false
-path = "src/bls12381/benches/partial_recover_signature.rs"
+path = "src/bls12381/benches/signature_recover.rs"
 
 [[bench]]
 name="signature_verification"

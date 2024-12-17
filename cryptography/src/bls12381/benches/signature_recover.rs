@@ -3,7 +3,7 @@ use commonware_utils::quorum;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::hint::black_box;
 
-fn benchmark_partial_recover_signature(c: &mut Criterion) {
+fn benchmark_signature_recover(c: &mut Criterion) {
     let namespace = b"benchmark";
     let msg = b"hello";
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
@@ -18,7 +18,7 @@ fn benchmark_partial_recover_signature(c: &mut Criterion) {
                         .collect::<Vec<_>>()
                 },
                 |partials| {
-                    black_box(primitives::ops::partial_recover_signature(t, partials).unwrap());
+                    black_box(primitives::ops::signature_recover(t, partials).unwrap());
                 },
                 BatchSize::SmallInput,
             );
@@ -26,5 +26,5 @@ fn benchmark_partial_recover_signature(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_partial_recover_signature);
+criterion_group!(benches, benchmark_signature_recover);
 criterion_main!(benches);

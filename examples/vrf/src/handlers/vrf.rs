@@ -151,7 +151,7 @@ impl<E: Clock> Vrf<E> {
         }
 
         // Recover signature from partials
-        match ops::partial_recover_signature(self.threshold, partials) {
+        match ops::signature_recover(self.threshold, partials) {
             Ok(signature) => Some(signature),
             Err(_) => {
                 warn!(round, "failed to aggregate partial signatures");

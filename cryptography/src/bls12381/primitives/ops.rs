@@ -135,7 +135,7 @@ pub fn partial_verify_message(
 ///
 /// Signatures recovered by this function are deterministic and are safe
 /// to use in a consensus-critical context.
-pub fn partial_recover_signature(
+pub fn signature_recover(
     threshold: u32,
     partials: Vec<Eval<group::Signature>>,
 ) -> Result<group::Signature, Error> {
@@ -334,7 +334,7 @@ mod tests {
         }
 
         // Aggregate partial signatures
-        let threshold_sig = partial_recover_signature(t, partials).unwrap();
+        let threshold_sig = signature_recover(t, partials).unwrap();
         let threshold_pub = poly::public(&public);
 
         // Verify the aggregated signature
