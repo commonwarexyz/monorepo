@@ -183,17 +183,23 @@ mod tests {
 
     #[test]
     fn test_single_compatibility() {
+        // Generate signature
         let (private, public) = keypair(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
         let sig = sign(&private, namespace, msg);
+
+        // Verify the signature
         verify(&public, namespace, msg, &sig).expect("signature should be valid");
+
+        // Verify the signature using blst
         let payload = union_unique(namespace, msg);
         blst_verify(&public, &payload, &sig).expect("signature should be valid");
     }
 
     #[test]
     fn test_threshold_compatibility() {
+        // Generate partial signatures
         let (n, t) = (5, 4);
         let (public, shares) = generate_shares(None, n, t);
         let msg = &[1, 9, 6, 9];
@@ -202,12 +208,20 @@ mod tests {
             .iter()
             .map(|s| partial_sign(s, namespace, msg))
             .collect();
+
+        // Verify partial signatures
         for p in &partials {
             partial_verify(&public, namespace, msg, p).expect("signature should be valid");
         }
+
+        // Aggregate partial signatures
         let threshold_sig = partial_aggregate(t, partials).unwrap();
         let threshold_pub = poly::public(&public);
+
+        // Verify the aggregated signature
         verify(&threshold_pub, namespace, msg, &threshold_sig).expect("signature should be valid");
+
+        // Verify the aggregated signature using blst
         let payload = union_unique(namespace, msg);
         blst_verify(&threshold_pub, &payload, &threshold_sig).expect("signature should be valid");
     }
