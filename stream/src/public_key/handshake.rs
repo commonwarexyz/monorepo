@@ -16,9 +16,11 @@ pub fn create_handshake<C: Scheme>(
     ephemeral_public_key: x25519_dalek::PublicKey,
 ) -> Result<Bytes, Error> {
     // Sign their public key
-    let mut payload = Vec::new();
+    let ephemeral_public_key_bytes = ephemeral_public_key.as_bytes();
+    let payload_len = recipient_public_key.len() + ephemeral_public_key_bytes.len() + std::mem::size_of::<u64>();
+    let mut payload = Vec::with_capacity(payload_len);
     payload.extend_from_slice(&recipient_public_key);
-    payload.extend_from_slice(ephemeral_public_key.as_bytes());
+    payload.extend_from_slice(ephemeral_public_key_bytes);
     payload.extend_from_slice(&timestamp.to_be_bytes());
     let signature = crypto.sign(namespace, &payload);
 
@@ -94,7 +96,8 @@ impl Handshake {
         }
 
         // Construct signing payload (ephemeral public key + my public key + timestamp)
-        let mut payload = Vec::new();
+        let payload_len =  our_public_key.len() + handshake.ephemeral_public_key.len() + std::mem::size_of::<u64>();
+        let mut payload = Vec::with_capacity(payload_len);
         payload.extend_from_slice(&our_public_key);
         payload.extend_from_slice(&handshake.ephemeral_public_key);
         payload.extend_from_slice(&handshake.timestamp.to_be_bytes());

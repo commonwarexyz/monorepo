@@ -18,7 +18,7 @@ pub struct Signature {
 }
 
 pub fn wire_peer_payload(peer: &Peer) -> Vec<u8> {
-    let mut payload = Vec::new();
+    let mut payload = Vec::with_capacity(peer.socket.len()+std::mem::size_of::<u64>());
     payload.extend_from_slice(&peer.socket);
     payload.extend_from_slice(&peer.timestamp.to_be_bytes());
     payload
@@ -26,7 +26,7 @@ pub fn wire_peer_payload(peer: &Peer) -> Vec<u8> {
 
 pub fn socket_peer_payload(socket: &SocketAddr, timestamp: u64) -> (Vec<u8>, Vec<u8>) {
     let socket = bytes(socket);
-    let mut payload = Vec::new();
+    let mut payload = Vec::with_capacity(socket.len()+std::mem::size_of::<u64>());
     payload.extend_from_slice(&socket);
     payload.extend_from_slice(&timestamp.to_be_bytes());
     (socket, payload)
