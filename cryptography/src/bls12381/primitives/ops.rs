@@ -199,6 +199,29 @@ mod tests {
     use rand::prelude::*;
 
     #[test]
+    fn test_encoding() {
+        // Encode private/public key
+        let (private, public) = keypair(&mut thread_rng());
+        let (private_bytes, public_bytes) = (private.serialize(), public.serialize());
+
+        // Decode private/public key
+        let (private_decoded, public_decoded) = (
+            group::Private::deserialize(&private_bytes).unwrap(),
+            group::Public::deserialize(&public_bytes).unwrap(),
+        );
+
+        // Ensure equal
+        assert_eq!(private, private_decoded);
+        assert_eq!(public, public_decoded);
+
+        // Ensure blst compatibility
+        blst::min_pk::SecretKey::from_bytes(private_bytes.as_slice()).unwrap();
+        let blst_public_decoded =
+            blst::min_pk::PublicKey::from_bytes(public_bytes.as_slice()).unwrap();
+        blst_public_decoded.validate().unwrap();
+    }
+
+    #[test]
     fn test_bad_namespace() {
         let (private, public) = keypair(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
