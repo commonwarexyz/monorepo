@@ -63,6 +63,6 @@ harness = false
 path = "src/bls12381/benches/signature_aggregation.rs"
 
 [[bench]]
-name="signature_verify_aggregation"
+name="verify_aggregated_signature"
 harness = false
-path = "src/bls12381/benches/signature_verify_aggregation.rs"
+path = "src/bls12381/benches/verify_aggregated_signature.rs"

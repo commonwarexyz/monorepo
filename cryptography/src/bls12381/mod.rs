@@ -91,7 +91,7 @@
 //! msgs=10000              time:   [11.878 ms 11.966 ms 12.068 ms]
 //! ```
 //!
-//! ## Aggregate Signature Verification (Same Public Key)
+//! ## Verify Aggregated Signature (Same Public Key)
 //!
 //! ```txt
 //! conc=1 msgs=10          time:   [1.9960 ms 2.0150 ms 2.0263 ms]

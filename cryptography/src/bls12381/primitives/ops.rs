@@ -162,14 +162,14 @@ pub fn aggregate_signatures(signatures: &[group::Signature]) -> group::Signature
     s
 }
 
-/// Verifies the aggregate signature over multiple unique messages from the same public key.
+/// Verifies the aggregated signature over multiple unique messages from the same public key.
 ///
 /// If the same message is provided multiple times, the function will error.
 ///
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `public` and `signature`.
-pub fn verify_aggregate_signature(
+pub fn verify_aggregated_signature(
     public: &group::Public,
     namespace: &[u8],
     messages: &[&[u8]],
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_signatures() {
+    fn test_verify_aggregated_signature() {
         // Generate signatures
         let (private, public) = keypair(&mut thread_rng());
         let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 3"];
@@ -377,7 +377,7 @@ mod tests {
         let aggregate_sig = aggregate_signatures(&signatures);
 
         // Verify the aggregated signature
-        verify_aggregate_signature(&public, namespace, &messages, &aggregate_sig, 4)
+        verify_aggregated_signature(&public, namespace, &messages, &aggregate_sig, 4)
             .expect("Aggregated signature should be valid");
 
         // Verify the aggregated signature using blst
@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_signatures_wrong_messages() {
+    fn test_verify_aggregated_signature_wrong_messages() {
         // Generate signatures
         let (private, public) = keypair(&mut thread_rng());
         let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 3"];
@@ -410,12 +410,12 @@ mod tests {
         // Verify the aggregated signature
         let wrong_messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 4"];
         let result =
-            verify_aggregate_signature(&public, namespace, &wrong_messages, &aggregate_sig, 4);
+            verify_aggregated_signature(&public, namespace, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
     #[test]
-    fn test_aggregate_signatures_duplicate_messages() {
+    fn test_verify_aggregated_signature_duplicate_messages() {
         // Generate signatures
         let (private, public) = keypair(&mut thread_rng());
         let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 2"];
@@ -429,12 +429,12 @@ mod tests {
         let aggregate_sig = aggregate_signatures(&signatures);
 
         // Verify the aggregated signature
-        let result = verify_aggregate_signature(&public, namespace, &messages, &aggregate_sig, 4);
+        let result = verify_aggregated_signature(&public, namespace, &messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::DuplicateMessage)));
     }
 
     #[test]
-    fn test_aggregate_signatures_wrong_message_count() {
+    fn test_verify_aggregated_signature_wrong_message_count() {
         // Generate signatures
         let (private, public) = keypair(&mut thread_rng());
         let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 3"];
@@ -450,7 +450,7 @@ mod tests {
         // Verify the aggregated signature
         let wrong_messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2"];
         let result =
-            verify_aggregate_signature(&public, namespace, &wrong_messages, &aggregate_sig, 4);
+            verify_aggregated_signature(&public, namespace, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 }

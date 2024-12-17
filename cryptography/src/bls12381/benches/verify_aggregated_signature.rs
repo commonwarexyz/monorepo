@@ -2,7 +2,7 @@ use commonware_cryptography::bls12381::primitives::ops;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 
-fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
+fn benchmark_verify_aggregated_signature(c: &mut Criterion) {
     let namespace = b"namespace";
     for n in [10, 100, 1000, 10000, 50000].into_iter() {
         let mut msgs = Vec::with_capacity(n);
@@ -25,7 +25,7 @@ fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
                         (public, ops::aggregate_signatures(&signatures))
                     },
                     |(public, signature)| {
-                        ops::verify_aggregate_signature(
+                        ops::verify_aggregated_signature(
                             &public,
                             namespace,
                             &msgs,
@@ -44,6 +44,6 @@ fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_signature_verify_aggregation
+    targets = benchmark_verify_aggregated_signature
 }
 criterion_main!(benches);
