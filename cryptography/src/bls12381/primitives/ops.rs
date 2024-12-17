@@ -76,7 +76,11 @@ pub fn verify_proof_of_possession(
 ///
 /// Signatures produced by this function are deterministic and are safe
 /// to use in a consensus-critical context.
-pub fn sign(private: &group::Private, namespace: &[u8], message: &[u8]) -> group::Signature {
+pub fn sign_message(
+    private: &group::Private,
+    namespace: &[u8],
+    message: &[u8],
+) -> group::Signature {
     let payload = union_unique(namespace, message);
     sign_dst(private, DST_MESSAGE, &payload)
 }
@@ -87,7 +91,7 @@ pub fn sign(private: &group::Private, namespace: &[u8], message: &[u8]) -> group
 ///
 /// This function assumes a group check was already performed on
 /// `public` and `signature`.
-pub fn verify(
+pub fn verify_message(
     public: &group::Public,
     namespace: &[u8],
     message: &[u8],
@@ -98,8 +102,12 @@ pub fn verify(
 }
 
 /// Signs the provided message with the key share.
-pub fn partial_sign(private: &Share, namespace: &[u8], message: &[u8]) -> Eval<group::Signature> {
-    let sig = sign(&private.private, namespace, message);
+pub fn partial_sign_message(
+    private: &Share,
+    namespace: &[u8],
+    message: &[u8],
+) -> Eval<group::Signature> {
+    let sig = sign_message(&private.private, namespace, message);
     Eval {
         value: sig,
         index: private.index,
@@ -111,14 +119,14 @@ pub fn partial_sign(private: &Share, namespace: &[u8], message: &[u8]) -> Eval<g
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `signature`.
-pub fn partial_verify(
+pub fn partial_verify_message(
     public: &poly::Public,
     namespace: &[u8],
     message: &[u8],
     partial: &Eval<group::Signature>,
 ) -> Result<(), Error> {
     let public = public.evaluate(partial.index);
-    verify(&public.value, namespace, message, &partial.value)
+    verify_message(&public.value, namespace, message, &partial.value)
 }
 
 /// Aggregates the partial signatures into a final signature.
@@ -243,9 +251,9 @@ mod tests {
     fn test_bad_namespace() {
         let (private, public) = keypair(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
-        let sig = sign(&private, b"good", msg);
+        let sig = sign_message(&private, b"good", msg);
         assert!(matches!(
-            verify(&public, b"bad", msg, &sig).unwrap_err(),
+            verify_message(&public, b"bad", msg, &sig).unwrap_err(),
             Error::InvalidSignature
         ));
     }
@@ -298,10 +306,10 @@ mod tests {
         let (private, public) = keypair(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
-        let sig = sign(&private, namespace, msg);
+        let sig = sign_message(&private, namespace, msg);
 
         // Verify the signature
-        verify(&public, namespace, msg, &sig).expect("signature should be valid");
+        verify_message(&public, namespace, msg, &sig).expect("signature should be valid");
 
         // Verify the signature using blst
         let payload = union_unique(namespace, msg);
@@ -317,12 +325,12 @@ mod tests {
         let namespace = b"test";
         let partials: Vec<_> = shares
             .iter()
-            .map(|s| partial_sign(s, namespace, msg))
+            .map(|s| partial_sign_message(s, namespace, msg))
             .collect();
 
         // Verify partial signatures
         for p in &partials {
-            partial_verify(&public, namespace, msg, p).expect("signature should be valid");
+            partial_verify_message(&public, namespace, msg, p).expect("signature should be valid");
         }
 
         // Aggregate partial signatures
@@ -330,7 +338,8 @@ mod tests {
         let threshold_pub = poly::public(&public);
 
         // Verify the aggregated signature
-        verify(&threshold_pub, namespace, msg, &threshold_sig).expect("signature should be valid");
+        verify_message(&threshold_pub, namespace, msg, &threshold_sig)
+            .expect("signature should be valid");
 
         // Verify the aggregated signature using blst
         let payload = union_unique(namespace, msg);
@@ -361,7 +370,7 @@ mod tests {
         let namespace = b"test";
         let signatures: Vec<_> = messages
             .iter()
-            .map(|msg| sign(&private, namespace, msg))
+            .map(|msg| sign_message(&private, namespace, msg))
             .collect();
 
         // Aggregate the signatures
@@ -392,7 +401,7 @@ mod tests {
         let namespace = b"test";
         let signatures: Vec<_> = messages
             .iter()
-            .map(|msg| sign(&private, namespace, msg))
+            .map(|msg| sign_message(&private, namespace, msg))
             .collect();
 
         // Aggregate the signatures
@@ -412,7 +421,7 @@ mod tests {
         let namespace = b"test";
         let signatures: Vec<_> = messages
             .iter()
-            .map(|msg| sign(&private, namespace, msg))
+            .map(|msg| sign_message(&private, namespace, msg))
             .collect();
 
         // Aggregate the signatures
@@ -431,7 +440,7 @@ mod tests {
         let namespace = b"test";
         let signatures: Vec<_> = messages
             .iter()
-            .map(|msg| sign(&private, namespace, msg))
+            .map(|msg| sign_message(&private, namespace, msg))
             .collect();
 
         // Aggregate the signatures
