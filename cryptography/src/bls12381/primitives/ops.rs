@@ -18,6 +18,14 @@ pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
     (private, public)
 }
 
+/// Sign the provided payload with the canonical domain separation tag.
+fn sign_dst(private: &group::Private, dst: &[u8], payload: &[u8]) -> group::Signature {
+    let mut s = group::Signature::zero();
+    s.map(dst, payload);
+    s.mul(private);
+    s
+}
+
 /// Generates a proof of possession for the private key.
 pub fn proof_of_possession(private: &group::Private) -> group::Signature {
     // Get public key
@@ -25,10 +33,19 @@ pub fn proof_of_possession(private: &group::Private) -> group::Signature {
     public.mul(private);
 
     // Sign the public key
-    let mut s = group::Signature::zero();
-    s.map(DST_G2_POP, public.serialize().as_slice());
-    s.mul(private);
-    s
+    sign_dst(private, DST_G2_POP, public.serialize().as_slice())
+}
+
+/// Verify the provided payload with the canonical domain separation tag.
+fn verify_dst(
+    public: &group::Public,
+    dst: &[u8],
+    payload: &[u8],
+    signature: &group::Signature,
+) -> bool {
+    let mut hm = group::Signature::zero();
+    hm.map(dst, payload);
+    equal(public, signature, &hm)
 }
 
 /// Verifies a proof of possession for the provided public key.
@@ -36,12 +53,11 @@ pub fn verify_proof_of_possession(
     public: &group::Public,
     signature: &group::Signature,
 ) -> Result<(), Error> {
-    let mut hm = group::Signature::zero();
-    hm.map(DST_G2_POP, public.serialize().as_slice());
-    if !equal(public, signature, &hm) {
-        return Err(Error::InvalidSignature);
+    if verify_dst(public, DST_G2_POP, public.serialize().as_slice(), signature) {
+        Ok(())
+    } else {
+        Err(Error::InvalidSignature)
     }
-    Ok(())
 }
 
 /// Signs the provided message with the private key.
@@ -54,10 +70,7 @@ pub fn verify_proof_of_possession(
 /// to use in a consensus-critical context.
 pub fn sign(private: &group::Private, namespace: &[u8], message: &[u8]) -> group::Signature {
     let payload = union_unique(namespace, message);
-    let mut s = group::Signature::zero();
-    s.map(DST_G2, &payload);
-    s.mul(private);
-    s
+    sign_dst(private, DST_G2, &payload)
 }
 
 /// Verifies the signature with the provided public key.
@@ -73,12 +86,11 @@ pub fn verify(
     signature: &group::Signature,
 ) -> Result<(), Error> {
     let payload = union_unique(namespace, message);
-    let mut hm = group::Signature::zero();
-    hm.map(DST_G2, &payload);
-    if !equal(public, signature, &hm) {
-        return Err(Error::InvalidSignature);
+    if verify_dst(public, DST_G2, &payload, signature) {
+        Ok(())
+    } else {
+        Err(Error::InvalidSignature)
     }
-    Ok(())
 }
 
 /// Signs the provided message with the key share.
