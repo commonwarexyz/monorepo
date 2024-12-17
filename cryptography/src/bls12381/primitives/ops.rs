@@ -42,7 +42,7 @@ fn verify_dst(
 }
 
 /// Generates a proof of possession for the private key.
-pub fn proof_of_possession(private: &group::Private) -> group::Signature {
+pub fn sign_proof_of_possession(private: &group::Private) -> group::Signature {
     // Get public key
     let mut public = group::Public::one();
     public.mul(private);
@@ -250,7 +250,7 @@ mod tests {
         ));
     }
 
-    fn blst_verify_pop(
+    fn blst_verify_proof_of_possession(
         public: &group::Public,
         signature: &group::Signature,
     ) -> Result<(), BLST_ERROR> {
@@ -268,17 +268,17 @@ mod tests {
     fn test_proof_of_posession() {
         // Generate PoP
         let (private, public) = keypair(&mut thread_rng());
-        let pop = proof_of_possession(&private);
+        let pop = sign_proof_of_possession(&private);
 
         // Verify PoP
         verify_proof_of_possession(&public, &pop).expect("PoP should be valid");
 
         // Verify PoP using blst
-        blst_verify_pop(&public, &pop).expect("PoP should be valid");
+        blst_verify_proof_of_possession(&public, &pop).expect("PoP should be valid");
     }
 
     /// Verify that a given signature is valid according to `blst`.
-    fn blst_verify(
+    fn blst_verify_message(
         public: &group::Public,
         msg: &[u8],
         signature: &group::Signature,
@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_compatibility() {
+    fn test_single_message() {
         // Generate signature
         let (private, public) = keypair(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
@@ -305,11 +305,11 @@ mod tests {
 
         // Verify the signature using blst
         let payload = union_unique(namespace, msg);
-        blst_verify(&public, &payload, &sig).expect("signature should be valid");
+        blst_verify_message(&public, &payload, &sig).expect("signature should be valid");
     }
 
     #[test]
-    fn test_threshold_compatibility() {
+    fn test_threshold_message() {
         // Generate partial signatures
         let (n, t) = (5, 4);
         let (public, shares) = generate_shares(None, n, t);
@@ -334,7 +334,8 @@ mod tests {
 
         // Verify the aggregated signature using blst
         let payload = union_unique(namespace, msg);
-        blst_verify(&threshold_pub, &payload, &threshold_sig).expect("signature should be valid");
+        blst_verify_message(&threshold_pub, &payload, &threshold_sig)
+            .expect("signature should be valid");
     }
 
     fn blst_verify_aggregate(
