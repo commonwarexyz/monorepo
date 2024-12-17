@@ -212,6 +212,21 @@ mod tests {
         blst_verify(&threshold_pub, &payload, &threshold_sig).expect("signature should be valid");
     }
 
+    fn blst_verify_aggregate(
+        public: &group::Public,
+        msgs: &[&[u8]],
+        signature: &group::Signature,
+    ) -> Result<(), BLST_ERROR> {
+        let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
+        let pks = vec![&public; msgs.len()];
+        let signature =
+            blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+        match signature.aggregate_verify(true, msgs, DST_G2, &pks, true) {
+            BLST_ERROR::BLST_SUCCESS => Ok(()),
+            e => Err(e),
+        }
+    }
+
     #[test]
     fn test_aggregate_signatures() {
         // Generate signatures
@@ -228,6 +243,18 @@ mod tests {
 
         // Verify the aggregated signature
         verify_aggregate(&public, namespace, &messages, &aggregate_sig, 4)
+            .expect("Aggregated signature should be valid");
+
+        // Verify the aggregated signature using blst
+        let messages = messages
+            .iter()
+            .map(|msg| union_unique(namespace, msg))
+            .collect::<Vec<_>>();
+        let messages = messages
+            .iter()
+            .map(|msg| msg.as_slice())
+            .collect::<Vec<_>>();
+        blst_verify_aggregate(&public, &messages, &aggregate_sig)
             .expect("Aggregated signature should be valid");
     }
 
