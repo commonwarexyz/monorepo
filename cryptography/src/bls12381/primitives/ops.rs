@@ -26,16 +26,6 @@ fn sign_dst(private: &group::Private, dst: &[u8], payload: &[u8]) -> group::Sign
     s
 }
 
-/// Generates a proof of possession for the private key.
-pub fn proof_of_possession(private: &group::Private) -> group::Signature {
-    // Get public key
-    let mut public = group::Public::one();
-    public.mul(private);
-
-    // Sign the public key
-    sign_dst(private, DST_G2_POP, public.serialize().as_slice())
-}
-
 /// Verify the provided payload with the canonical domain separation tag.
 fn verify_dst(
     public: &group::Public,
@@ -49,6 +39,16 @@ fn verify_dst(
         return Err(Error::InvalidSignature);
     }
     Ok(())
+}
+
+/// Generates a proof of possession for the private key.
+pub fn proof_of_possession(private: &group::Private) -> group::Signature {
+    // Get public key
+    let mut public = group::Public::one();
+    public.mul(private);
+
+    // Sign the public key
+    sign_dst(private, DST_G2_POP, public.serialize().as_slice())
 }
 
 /// Verifies a proof of possession for the provided public key.
