@@ -231,6 +231,8 @@ mod tests {
         let blst_public_decoded =
             blst::min_pk::PublicKey::from_bytes(public_bytes.as_slice()).unwrap();
         blst_public_decoded.validate().unwrap();
+        let blst_public_encoded = blst_public_decoded.compress().to_vec();
+        assert_eq!(public_bytes, blst_public_encoded.as_slice());
     }
 
     #[test]
