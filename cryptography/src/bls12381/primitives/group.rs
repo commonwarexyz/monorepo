@@ -45,7 +45,8 @@ pub trait Element: Clone + Eq + PartialEq + Send + Sync {
     /// Serialized size of the element.
     fn size() -> usize;
 
-    /// Deserializes a canonically encoded element.
+    /// Deserializes a canonically encoded element and performs any validation
+    /// necessary to ensure it is a valid element (assuming untrusted input).
     fn deserialize(bytes: &[u8]) -> Option<Self>;
 }
 

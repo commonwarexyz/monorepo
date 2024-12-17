@@ -35,6 +35,11 @@ pub fn sign(private: &group::Private, namespace: &[u8], message: &[u8]) -> group
 }
 
 /// Verifies the signature with the provided public key.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on
+/// `public` and `signature`.
 pub fn verify(
     public: &group::Public,
     namespace: &[u8],
@@ -60,6 +65,10 @@ pub fn partial_sign(private: &Share, namespace: &[u8], message: &[u8]) -> Eval<g
 }
 
 /// Verifies the partial signature against the public polynomial.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on `signature`.
 pub fn partial_verify(
     public: &poly::Public,
     namespace: &[u8],
@@ -91,6 +100,10 @@ pub fn partial_aggregate(
 ///
 /// If the same signatures is provided multiple times, the function will not error
 /// but any attempt to verify the aggregated signature will fail.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on each `signature`.
 pub fn aggregate(signatures: &[group::Signature]) -> group::Signature {
     let mut s = group::Signature::zero();
     for sig in signatures {
@@ -102,6 +115,10 @@ pub fn aggregate(signatures: &[group::Signature]) -> group::Signature {
 /// Verifies the aggregate signature over multiple unique messages from the same public key.
 ///
 /// If the same message is provided multiple times, the function will error.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on `public` and `signature`.
 pub fn verify_aggregate(
     public: &group::Public,
     namespace: &[u8],
