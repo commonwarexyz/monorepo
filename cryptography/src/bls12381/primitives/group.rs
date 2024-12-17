@@ -54,7 +54,7 @@ pub trait Element: Clone + Eq + PartialEq + Send + Sync {
 /// An element of a group that supports message hashing.
 pub trait Point: Element {
     /// Maps the provided data to a group element.
-    fn map(&mut self, message: &[u8]);
+    fn map(&mut self, dst: &[u8], message: &[u8]);
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -83,6 +83,9 @@ pub struct G1(blst_p1);
 
 pub const G1_ELEMENT_BYTE_LENGTH: usize = 48;
 
+/// Domain separation tag for a proof of knowledge of the secret key in G1.
+pub const DST_G1_POP: &[u8] = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
+
 /// Domain separation tag for hashing a message to G1.
 pub const DST_G1: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
 
@@ -91,6 +94,9 @@ pub const DST_G1: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
 pub struct G2(blst_p2);
 
 pub const G2_ELEMENT_BYTE_LENGTH: usize = 96;
+
+/// Domain separation tag for a proof of knowledge of the secret key in G2.
+pub const DST_G2_POP: &[u8] = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
 /// Domain separation tag for hashing a message to G2.
 pub const DST_G2: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
@@ -321,14 +327,14 @@ impl Element for G1 {
 }
 
 impl Point for G1 {
-    fn map(&mut self, data: &[u8]) {
+    fn map(&mut self, dst: &[u8], data: &[u8]) {
         unsafe {
             blst_hash_to_g1(
                 &mut self.0,
                 data.as_ptr(),
                 data.len(),
-                DST_G1.as_ptr(),
-                DST_G1.len(),
+                dst.as_ptr(),
+                dst.len(),
                 ptr::null(),
                 0,
             );
@@ -402,14 +408,14 @@ impl Element for G2 {
 }
 
 impl Point for G2 {
-    fn map(&mut self, data: &[u8]) {
+    fn map(&mut self, dst: &[u8], data: &[u8]) {
         unsafe {
             blst_hash_to_g2(
                 &mut self.0,
                 data.as_ptr(),
                 data.len(),
-                DST_G2.as_ptr(),
-                DST_G2.len(),
+                dst.as_ptr(),
+                dst.len(),
                 ptr::null(),
                 0,
             );

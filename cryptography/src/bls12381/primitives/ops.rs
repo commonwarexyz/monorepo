@@ -1,7 +1,7 @@
 //! Digital signatures over the BLS12-381 curve.
 
 use super::{
-    group::{self, equal, Element, Point, Share},
+    group::{self, equal, Element, Point, Share, DST_G2, DST_G2_POP},
     poly::{self, Eval},
     Error,
 };
@@ -18,6 +18,32 @@ pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
     (private, public)
 }
 
+/// Generates a proof of possession for the private key.
+pub fn proof_of_possession(private: &group::Private) -> group::Signature {
+    // Get public key
+    let mut public = group::Public::one();
+    public.mul(private);
+
+    // Sign the public key
+    let mut s = group::Signature::zero();
+    s.map(DST_G2_POP, public.serialize().as_slice());
+    s.mul(private);
+    s
+}
+
+/// Verifies a proof of possession for the provided public key.
+pub fn verify_proof_of_possession(
+    public: &group::Public,
+    signature: &group::Signature,
+) -> Result<(), Error> {
+    let mut hm = group::Signature::zero();
+    hm.map(DST_G2_POP, public.serialize().as_slice());
+    if !equal(public, signature, &hm) {
+        return Err(Error::InvalidSignature);
+    }
+    Ok(())
+}
+
 /// Signs the provided message with the private key.
 ///
 /// The message is hashed according to RFC 9380.
@@ -29,7 +55,7 @@ pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
 pub fn sign(private: &group::Private, namespace: &[u8], message: &[u8]) -> group::Signature {
     let payload = union_unique(namespace, message);
     let mut s = group::Signature::zero();
-    s.map(&payload);
+    s.map(DST_G2, &payload);
     s.mul(private);
     s
 }
@@ -48,7 +74,7 @@ pub fn verify(
 ) -> Result<(), Error> {
     let payload = union_unique(namespace, message);
     let mut hm = group::Signature::zero();
-    hm.map(&payload);
+    hm.map(DST_G2, &payload);
     if !equal(public, signature, &hm) {
         return Err(Error::InvalidSignature);
     }
@@ -149,7 +175,7 @@ pub fn verify_aggregate(
             .map(|msg| {
                 let payload = union_unique(namespace, msg);
                 let mut hm = group::Signature::zero();
-                hm.map(&payload);
+                hm.map(DST_G2, &payload);
                 hm
             })
             .reduce(group::Signature::zero, |mut sum, hm| {
@@ -172,6 +198,44 @@ mod tests {
     use blst::BLST_ERROR;
     use rand::prelude::*;
 
+    #[test]
+    fn test_bad_namespace() {
+        let (private, public) = keypair(&mut thread_rng());
+        let msg = &[1, 9, 6, 9];
+        let sig = sign(&private, b"good", msg);
+        assert!(matches!(
+            verify(&public, b"bad", msg, &sig).unwrap_err(),
+            Error::InvalidSignature
+        ));
+    }
+
+    fn blst_verify_pop(
+        public: &group::Public,
+        signature: &group::Signature,
+    ) -> Result<(), BLST_ERROR> {
+        let msg = public.serialize();
+        let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
+        let signature =
+            blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+        match signature.verify(true, &msg, DST_G2_POP, &[], &public, true) {
+            BLST_ERROR::BLST_SUCCESS => Ok(()),
+            e => Err(e),
+        }
+    }
+
+    #[test]
+    fn test_proof_of_posession() {
+        // Generate PoP
+        let (private, public) = keypair(&mut thread_rng());
+        let pop = proof_of_possession(&private);
+
+        // Verify PoP
+        verify_proof_of_possession(&public, &pop).expect("PoP should be valid");
+
+        // Verify PoP using blst
+        blst_verify_pop(&public, &pop).expect("PoP should be valid");
+    }
+
     /// Verify that a given signature is valid according to `blst`.
     fn blst_verify(
         public: &group::Public,
@@ -185,17 +249,6 @@ mod tests {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
         }
-    }
-
-    #[test]
-    fn test_bad_namespace() {
-        let (private, public) = keypair(&mut thread_rng());
-        let msg = &[1, 9, 6, 9];
-        let sig = sign(&private, b"good", msg);
-        assert!(matches!(
-            verify(&public, b"bad", msg, &sig).unwrap_err(),
-            Error::InvalidSignature
-        ));
     }
 
     #[test]
