@@ -192,7 +192,7 @@ pub fn verify_aggregated_signature(
         .build()
         .expect("Unable to build thread pool");
 
-    // Perform hashing an summation of messages in parallel
+    // Perform hashing and summation of messages in parallel
     let hm_sum = pool.install(|| {
         messages
             .par_iter()
