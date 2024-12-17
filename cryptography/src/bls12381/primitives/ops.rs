@@ -146,18 +146,10 @@ pub fn partial_recover_signature(
     poly::Signature::recover(threshold, partials)
 }
 
-pub fn aggregate_public_keys(public_keys: &[group::Public]) -> group::Public {
-    let mut p = group::Public::one();
-    for pk in public_keys {
-        p.add(pk);
-    }
-    p
-}
-
 /// Aggregates multiple signatures over unique messages from the same public key.
 ///
-/// If the same signatures is provided multiple times, the function will not error
-/// but any attempt to verify the aggregated signature will fail.
+/// If the same signature is provided multiple times, the function will not error
+/// but any attempt to verify the aggregated signature will fail using `verify_aggregate_signature`.
 ///
 /// # Warning
 ///
