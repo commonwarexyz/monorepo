@@ -15,7 +15,8 @@ fn benchmark_sender(c: &mut Criterion) {
                 || {
                     let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
                     let (sink, stream) = mocks::Channel::init();
-                    let connection = Connection::new(true, sink, stream, cipher, message_size);
+                    let connection =
+                        Connection::from_preestablished(true, sink, stream, cipher, message_size);
                     let (sender, _receiver) = connection.split();
                     let msg = msg.clone();
                     (sender, msg)
@@ -45,9 +46,20 @@ fn benchmark_receiver(c: &mut Criterion) {
                     let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
                     let (sink, stream) = mocks::Channel::init();
                     let (sink_dummy, stream_dummy) = mocks::Channel::init();
-                    let conn_a =
-                        Connection::new(false, sink, stream_dummy, cipher.clone(), message_size);
-                    let conn_b = Connection::new(true, sink_dummy, stream, cipher, message_size);
+                    let conn_a = Connection::from_preestablished(
+                        false,
+                        sink,
+                        stream_dummy,
+                        cipher.clone(),
+                        message_size,
+                    );
+                    let conn_b = Connection::from_preestablished(
+                        true,
+                        sink_dummy,
+                        stream,
+                        cipher,
+                        message_size,
+                    );
 
                     let (mut sender, _) = conn_a.split();
                     let (_, receiver) = conn_b.split();

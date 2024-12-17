@@ -67,8 +67,10 @@ pub struct Connection<Si: Sink, St: Stream> {
 }
 
 impl<Si: Sink, St: Stream> Connection<Si, St> {
-    /// Create a new connection with a peer.
-    pub fn new(
+    /// Create a new connection from pre-established components.
+    ///
+    /// This is useful in tests, or when upgrading a connection that has already been verified.
+    pub fn from_preestablished(
         dialer: bool,
         sink: Si,
         stream: St,
