@@ -32,6 +32,13 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used in testing to encode external test vectors without modification.
+pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
+    let hex = hex.replace(['\t', '\n', '\r', ' '], "");
+    let res = hex.strip_prefix("0x").unwrap_or(&hex);
+    from_hex(res)
+}
+
 /// Compute the maximum value of `f` (faults) that can be tolerated given `n = 3f + 1`.
 pub fn max_faults(n: u32) -> Option<u32> {
     let f = n.checked_sub(1)? / 3;
@@ -65,9 +72,13 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 }
 
 /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
+/// Method is the identity function if the namespace is empty.
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
+    if namespace.is_empty() {
+        return msg.to_vec();
+    }
     let ld_len = length_delimiter_len(namespace.len());
     let mut result = Vec::with_capacity(ld_len + namespace.len() + msg.len());
     encode_length_delimiter(namespace.len(), &mut result).unwrap();
@@ -107,6 +118,48 @@ mod tests {
         // Test case 4: invalid hexadecimal character
         let h = "01g3";
         assert!(from_hex(h).is_none());
+    }
+
+    #[test]
+    fn repltest_from_hex_formatted() {
+        // Test case 0: empty bytes
+        let b = &[];
+        let h = hex(b);
+        assert_eq!(h, "");
+        assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
+
+        // Test case 1: single byte
+        let b = &[0x01];
+        let h = hex(b);
+        assert_eq!(h, "01");
+        assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
+
+        // Test case 2: multiple bytes
+        let b = &[0x01, 0x02, 0x03];
+        let h = hex(b);
+        assert_eq!(h, "010203");
+        assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
+
+        // Test case 3: odd number of bytes
+        let h = "0102030";
+        assert!(from_hex_formatted(h).is_none());
+
+        // Test case 4: invalid hexadecimal character
+        let h = "01g3";
+        assert!(from_hex_formatted(h).is_none());
+
+        // Test case 5: whitespace
+        let h = "01 02 03";
+        assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
+
+        // Test case 6: 0x prefix
+        let h = "0x010203";
+        assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
+
+        // Test case 7: 0x prefix + different whitespace chars
+        let h = "    \n\n0x\r\n01
+                            02\t03\n";
+        assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
     }
 
     #[test]
@@ -180,18 +233,12 @@ mod tests {
     }
 
     #[test]
-    fn test_union_unique_zero_length() {
+    fn test_union_unique_no_namespace() {
         let namespace = b"";
         let msg = b"message";
 
-        let length_encoding = vec![0];
-        let mut expected = Vec::with_capacity(length_encoding.len() + namespace.len() + msg.len());
-        expected.extend_from_slice(&length_encoding);
-        expected.extend_from_slice(msg);
-
         let result = union_unique(namespace, msg);
-        assert_eq!(result, expected);
-        assert_eq!(result.len(), result.capacity());
+        assert_eq!(result, msg);
     }
 
     #[test]
