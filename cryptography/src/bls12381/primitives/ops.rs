@@ -42,10 +42,13 @@ fn verify_dst(
     dst: &[u8],
     payload: &[u8],
     signature: &group::Signature,
-) -> bool {
+) -> Result<(), Error> {
     let mut hm = group::Signature::zero();
     hm.map(dst, payload);
-    equal(public, signature, &hm)
+    if !equal(public, signature, &hm) {
+        return Err(Error::InvalidSignature);
+    }
+    Ok(())
 }
 
 /// Verifies a proof of possession for the provided public key.
@@ -53,11 +56,7 @@ pub fn verify_proof_of_possession(
     public: &group::Public,
     signature: &group::Signature,
 ) -> Result<(), Error> {
-    if verify_dst(public, DST_G2_POP, public.serialize().as_slice(), signature) {
-        Ok(())
-    } else {
-        Err(Error::InvalidSignature)
-    }
+    verify_dst(public, DST_G2_POP, public.serialize().as_slice(), signature)
 }
 
 /// Signs the provided message with the private key.
@@ -86,11 +85,7 @@ pub fn verify(
     signature: &group::Signature,
 ) -> Result<(), Error> {
     let payload = union_unique(namespace, message);
-    if verify_dst(public, DST_G2, &payload, signature) {
-        Ok(())
-    } else {
-        Err(Error::InvalidSignature)
-    }
+    verify_dst(public, DST_G2, &payload, signature)
 }
 
 /// Signs the provided message with the key share.
