@@ -24,7 +24,7 @@ fn benchmark_signature_aggregation(c: &mut Criterion) {
                     signatures
                 },
                 |signatures| {
-                    black_box(ops::aggregate(&signatures));
+                    black_box(ops::aggregate_signatures(&signatures));
                 },
                 BatchSize::SmallInput,
             );

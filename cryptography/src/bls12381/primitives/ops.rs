@@ -129,13 +129,13 @@ pub fn partial_verify_message(
     verify_message(&public.value, namespace, message, &partial.value)
 }
 
-/// Aggregates the partial signatures into a final signature.
+/// Recovers a signature from at least `threshold` partial signatures.
 ///
 /// # Determinism
 ///
 /// Signatures recovered by this function are deterministic and are safe
 /// to use in a consensus-critical context.
-pub fn partial_aggregate(
+pub fn partial_recover_signature(
     threshold: u32,
     partials: Vec<Eval<group::Signature>>,
 ) -> Result<group::Signature, Error> {
@@ -146,6 +146,14 @@ pub fn partial_aggregate(
     poly::Signature::recover(threshold, partials)
 }
 
+pub fn aggregate_public_keys(public_keys: &[group::Public]) -> group::Public {
+    let mut p = group::Public::one();
+    for pk in public_keys {
+        p.add(pk);
+    }
+    p
+}
+
 /// Aggregates multiple signatures over unique messages from the same public key.
 ///
 /// If the same signatures is provided multiple times, the function will not error
@@ -154,7 +162,7 @@ pub fn partial_aggregate(
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature`.
-pub fn aggregate(signatures: &[group::Signature]) -> group::Signature {
+pub fn aggregate_signatures(signatures: &[group::Signature]) -> group::Signature {
     let mut s = group::Signature::zero();
     for sig in signatures {
         s.add(sig);
@@ -169,7 +177,7 @@ pub fn aggregate(signatures: &[group::Signature]) -> group::Signature {
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `public` and `signature`.
-pub fn verify_aggregate(
+pub fn verify_aggregate_signature(
     public: &group::Public,
     namespace: &[u8],
     messages: &[&[u8]],
@@ -334,7 +342,7 @@ mod tests {
         }
 
         // Aggregate partial signatures
-        let threshold_sig = partial_aggregate(t, partials).unwrap();
+        let threshold_sig = partial_recover_signature(t, partials).unwrap();
         let threshold_pub = poly::public(&public);
 
         // Verify the aggregated signature
@@ -374,10 +382,10 @@ mod tests {
             .collect();
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate(&signatures);
+        let aggregate_sig = aggregate_signatures(&signatures);
 
         // Verify the aggregated signature
-        verify_aggregate(&public, namespace, &messages, &aggregate_sig, 4)
+        verify_aggregate_signature(&public, namespace, &messages, &aggregate_sig, 4)
             .expect("Aggregated signature should be valid");
 
         // Verify the aggregated signature using blst
@@ -405,11 +413,12 @@ mod tests {
             .collect();
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate(&signatures);
+        let aggregate_sig = aggregate_signatures(&signatures);
 
         // Verify the aggregated signature
         let wrong_messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 4"];
-        let result = verify_aggregate(&public, namespace, &wrong_messages, &aggregate_sig, 4);
+        let result =
+            verify_aggregate_signature(&public, namespace, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 
@@ -425,10 +434,10 @@ mod tests {
             .collect();
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate(&signatures);
+        let aggregate_sig = aggregate_signatures(&signatures);
 
         // Verify the aggregated signature
-        let result = verify_aggregate(&public, namespace, &messages, &aggregate_sig, 4);
+        let result = verify_aggregate_signature(&public, namespace, &messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::DuplicateMessage)));
     }
 
@@ -444,11 +453,12 @@ mod tests {
             .collect();
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate(&signatures);
+        let aggregate_sig = aggregate_signatures(&signatures);
 
         // Verify the aggregated signature
         let wrong_messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2"];
-        let result = verify_aggregate(&public, namespace, &wrong_messages, &aggregate_sig, 4);
+        let result =
+            verify_aggregate_signature(&public, namespace, &wrong_messages, &aggregate_sig, 4);
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 }

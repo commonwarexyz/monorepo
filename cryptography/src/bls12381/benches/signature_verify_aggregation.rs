@@ -22,11 +22,17 @@ fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
                             let signature = ops::sign_message(&private, namespace, msg);
                             signatures.push(signature);
                         }
-                        (public, ops::aggregate(&signatures))
+                        (public, ops::aggregate_signatures(&signatures))
                     },
                     |(public, signature)| {
-                        ops::verify_aggregate(&public, namespace, &msgs, &signature, concurrency)
-                            .unwrap();
+                        ops::verify_aggregate_signature(
+                            &public,
+                            namespace,
+                            &msgs,
+                            &signature,
+                            concurrency,
+                        )
+                        .unwrap();
                     },
                     BatchSize::SmallInput,
                 );
