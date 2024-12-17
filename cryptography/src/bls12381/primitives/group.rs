@@ -84,7 +84,7 @@ pub struct G1(blst_p1);
 /// The size in bytes of an encoded G1 element.
 pub const G1_ELEMENT_BYTE_LENGTH: usize = 48;
 
-/// Domain separation tag for hashing a proof of knowledge to G1.
+/// Domain separation tag for hashing a proof of possession (compressed G2) to G1.
 pub const DST_G1_PROOF_OF_POSSESSION: &[u8] = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
 /// Domain separation tag for hashing a message to G1.
@@ -97,7 +97,7 @@ pub struct G2(blst_p2);
 /// The size in bytes of an encoded G2 element.
 pub const G2_ELEMENT_BYTE_LENGTH: usize = 96;
 
-/// Domain separation tag for hashing a proof of knowledge to G2.
+/// Domain separation tag for hashing a proof of possession (compressed G1) to G2.
 pub const DST_G2_PROOF_OF_POSSESSION: &[u8] = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
 /// Domain separation tag for hashing a message to G2.
