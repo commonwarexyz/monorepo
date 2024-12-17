@@ -83,11 +83,11 @@ pub struct G1(blst_p1);
 
 pub const G1_ELEMENT_BYTE_LENGTH: usize = 48;
 
-/// Domain separation tag for a proof of knowledge of the secret key in G1.
-pub const DST_G1_POP: &[u8] = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
+/// Domain separation tag for hashing a proof of knowledge to G1.
+pub const DST_G1_PROOF_OF_POSSESSION: &[u8] = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
 /// Domain separation tag for hashing a message to G1.
-pub const DST_G1: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
+pub const DST_G1_MESSAGE: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
@@ -95,19 +95,32 @@ pub struct G2(blst_p2);
 
 pub const G2_ELEMENT_BYTE_LENGTH: usize = 96;
 
-/// Domain separation tag for a proof of knowledge of the secret key in G2.
-pub const DST_G2_POP: &[u8] = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+/// Domain separation tag for hashing a proof of knowledge to G2.
+pub const DST_G2_PROOF_OF_POSSESSION: &[u8] = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
 /// Domain separation tag for hashing a message to G2.
-pub const DST_G2: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+pub const DST_G2_MESSAGE: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct GT(blst_fp12);
 
+/// The private key type.
 pub type Private = Scalar;
+
+/// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
+
+/// The public key type (G1).
 pub type Public = G1;
+
+/// The signature type (G2).
 pub type Signature = G2;
+
+/// The DST for hashing a proof of possession to the exposed signature type (G2).
+pub const DST_PROOF_OF_POSSESSION: &[u8] = DST_G2_PROOF_OF_POSSESSION;
+
+/// The DST for hashing a message to the exposed signature type (G2).
+pub const DST_MESSAGE: &[u8] = DST_G2_MESSAGE;
 
 /// Returns the size in bits of a given blst_scalar (represented in little-endian).
 fn bits(scalar: &blst_scalar) -> usize {

@@ -1,7 +1,7 @@
-//! Digital signatures over the BLS12-381 curve.
+//! Digital signatures over the BLS12-381 curve using G1 as the Public Key and G2 as the Signature.
 
 use super::{
-    group::{self, equal, Element, Point, Share, DST_G2, DST_G2_POP},
+    group::{self, equal, Element, Point, Share, DST_MESSAGE, DST_PROOF_OF_POSSESSION},
     poly::{self, Eval},
     Error,
 };
@@ -48,7 +48,11 @@ pub fn proof_of_possession(private: &group::Private) -> group::Signature {
     public.mul(private);
 
     // Sign the public key
-    sign_dst(private, DST_G2_POP, public.serialize().as_slice())
+    sign_dst(
+        private,
+        DST_PROOF_OF_POSSESSION,
+        public.serialize().as_slice(),
+    )
 }
 
 /// Verifies a proof of possession for the provided public key.
@@ -56,7 +60,12 @@ pub fn verify_proof_of_possession(
     public: &group::Public,
     signature: &group::Signature,
 ) -> Result<(), Error> {
-    verify_dst(public, DST_G2_POP, public.serialize().as_slice(), signature)
+    verify_dst(
+        public,
+        DST_PROOF_OF_POSSESSION,
+        public.serialize().as_slice(),
+        signature,
+    )
 }
 
 /// Signs the provided message with the private key.
@@ -69,7 +78,7 @@ pub fn verify_proof_of_possession(
 /// to use in a consensus-critical context.
 pub fn sign(private: &group::Private, namespace: &[u8], message: &[u8]) -> group::Signature {
     let payload = union_unique(namespace, message);
-    sign_dst(private, DST_G2, &payload)
+    sign_dst(private, DST_MESSAGE, &payload)
 }
 
 /// Verifies the signature with the provided public key.
@@ -85,7 +94,7 @@ pub fn verify(
     signature: &group::Signature,
 ) -> Result<(), Error> {
     let payload = union_unique(namespace, message);
-    verify_dst(public, DST_G2, &payload, signature)
+    verify_dst(public, DST_MESSAGE, &payload, signature)
 }
 
 /// Signs the provided message with the key share.
@@ -182,7 +191,7 @@ pub fn verify_aggregate(
             .map(|msg| {
                 let payload = union_unique(namespace, msg);
                 let mut hm = group::Signature::zero();
-                hm.map(DST_G2, &payload);
+                hm.map(DST_MESSAGE, &payload);
                 hm
             })
             .reduce(group::Signature::zero, |mut sum, hm| {
@@ -201,7 +210,7 @@ pub fn verify_aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::{dkg::ops::generate_shares, primitives::group::DST_G2};
+    use crate::bls12381::dkg::ops::generate_shares;
     use blst::BLST_ERROR;
     use rand::prelude::*;
 
@@ -249,7 +258,7 @@ mod tests {
         let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
         let signature =
             blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
-        match signature.verify(true, &msg, DST_G2_POP, &[], &public, true) {
+        match signature.verify(true, &msg, DST_PROOF_OF_POSSESSION, &[], &public, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
         }
@@ -277,7 +286,7 @@ mod tests {
         let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
         let signature =
             blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
-        match signature.verify(true, msg, DST_G2, &[], &public, true) {
+        match signature.verify(true, msg, DST_MESSAGE, &[], &public, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
         }
@@ -337,7 +346,7 @@ mod tests {
         let pks = vec![&public; msgs.len()];
         let signature =
             blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
-        match signature.aggregate_verify(true, msgs, DST_G2, &pks, true) {
+        match signature.aggregate_verify(true, msgs, DST_MESSAGE, &pks, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
         }
