@@ -8,8 +8,7 @@
 //! Ensure that points are checked to belong to the correct subgroup
 //! (G1 or G2) to prevent small subgroup attacks. This is particularly important
 //! when handling deserialized points or points received from untrusted sources. This
-//! is already taken care of for you if you use the provided `serialize` and `deserialize`
-//! functions.
+//! is already taken care of for you if you use the provided `deserialize` function.
 
 use blst::{
     blst_bendian_from_scalar, blst_final_exp, blst_fp12, blst_fr, blst_fr_add, blst_fr_from_scalar,
@@ -45,14 +44,17 @@ pub trait Element: Clone + Eq + PartialEq + Send + Sync {
     /// Serialized size of the element.
     fn size() -> usize;
 
-    /// Deserializes a canonically encoded element.
+    /// Deserializes an untrusted, canonically-encoded element.
+    ///
+    /// This function performs any validation necessary to ensure the decoded
+    /// element is valid (like an infinity or group check).
     fn deserialize(bytes: &[u8]) -> Option<Self>;
 }
 
 /// An element of a group that supports message hashing.
 pub trait Point: Element {
     /// Maps the provided data to a group element.
-    fn map(&mut self, message: &[u8]);
+    fn map(&mut self, dst: &[u8], message: &[u8]);
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -79,27 +81,54 @@ const BLST_FR_ONE: Scalar = Scalar(blst_fr {
 #[repr(transparent)]
 pub struct G1(blst_p1);
 
+/// The size in bytes of an encoded G1 element.
 pub const G1_ELEMENT_BYTE_LENGTH: usize = 48;
 
+/// Domain separation tag for hashing a proof of possession (compressed G2) to G1.
+pub const DST_G1_PROOF_OF_POSSESSION: &[u8] = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
+
 /// Domain separation tag for hashing a message to G1.
-pub const DST_G1: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
+pub const DST_G1_MESSAGE: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct G2(blst_p2);
 
+/// The size in bytes of an encoded G2 element.
 pub const G2_ELEMENT_BYTE_LENGTH: usize = 96;
 
+/// Domain separation tag for hashing a proof of possession (compressed G1) to G2.
+pub const DST_G2_PROOF_OF_POSSESSION: &[u8] = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+
 /// Domain separation tag for hashing a message to G2.
-pub const DST_G2: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+pub const DST_G2_MESSAGE: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct GT(blst_fp12);
 
+/// The private key type.
 pub type Private = Scalar;
+
+/// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
+
+/// The public key type (G1).
 pub type Public = G1;
+
+/// The public key length (G1).
+pub const PUBLIC_KEY_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
+
+/// The signature type (G2).
 pub type Signature = G2;
+
+/// The signature length (G2).
+pub const SIGNATURE_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
+
+/// The DST for hashing a proof of possession to the exposed signature type (G2).
+pub const DST_PROOF_OF_POSSESSION: &[u8] = DST_G2_PROOF_OF_POSSESSION;
+
+/// The DST for hashing a message to the exposed signature type (G2).
+pub const DST_MESSAGE: &[u8] = DST_G2_MESSAGE;
 
 /// Returns the size in bits of a given blst_scalar (represented in little-endian).
 fn bits(scalar: &blst_scalar) -> usize {
@@ -319,14 +348,14 @@ impl Element for G1 {
 }
 
 impl Point for G1 {
-    fn map(&mut self, data: &[u8]) {
+    fn map(&mut self, dst: &[u8], data: &[u8]) {
         unsafe {
             blst_hash_to_g1(
                 &mut self.0,
                 data.as_ptr(),
                 data.len(),
-                DST_G1.as_ptr(),
-                DST_G1.len(),
+                dst.as_ptr(),
+                dst.len(),
                 ptr::null(),
                 0,
             );
@@ -400,14 +429,14 @@ impl Element for G2 {
 }
 
 impl Point for G2 {
-    fn map(&mut self, data: &[u8]) {
+    fn map(&mut self, dst: &[u8], data: &[u8]) {
         unsafe {
             blst_hash_to_g2(
                 &mut self.0,
                 data.as_ptr(),
                 data.len(),
-                DST_G2.as_ptr(),
-                DST_G2.len(),
+                dst.as_ptr(),
+                dst.len(),
                 ptr::null(),
                 0,
             );
