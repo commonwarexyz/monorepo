@@ -15,3 +15,4 @@ coverage:
     project:
       default:
         threshold: 0.25%
+        only_pulls: true
