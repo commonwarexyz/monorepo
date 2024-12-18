@@ -193,6 +193,10 @@ pub fn verify_aggregated_signature(
         .expect("Unable to build thread pool");
 
     // Perform hashing and summation of messages in parallel
+    //
+    // Just like public key aggregation takes advantage of the bilinearity property of
+    // pairings, so too can we reduce the number of pairings required to verify multiple
+    // messages signed by a single public key (as long as all messages are unique).
     let hm_sum = pool.install(|| {
         messages
             .par_iter()
