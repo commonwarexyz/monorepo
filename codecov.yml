@@ -1,6 +1,6 @@
 comment:
   layout: "header, diff, files, footer"
-  behavior: new 
+  behavior: new
   require_changes: false
   require_head: false
   require_base: false
@@ -11,6 +11,8 @@ coverage:
     patch:
       default:
         threshold: 0.25%
+        only_pulls: true
     project:
       default:
         threshold: 0.25%
+        only_pulls: true
