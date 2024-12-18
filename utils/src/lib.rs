@@ -32,7 +32,8 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used in testing to encode external test vectors without modification.
+/// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used
+/// in testing to encode external test vectors without modification.
 pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
     let hex = hex.replace(['\t', '\n', '\r', ' '], "");
     let res = hex.strip_prefix("0x").unwrap_or(&hex);
@@ -72,13 +73,9 @@ pub fn union(a: &[u8], b: &[u8]) -> Vec<u8> {
 }
 
 /// Concatenate a namespace and a message, prepended by a varint encoding of the namespace length.
-/// Method is the identity function if the namespace is empty.
 ///
 /// This produces a unique byte sequence (i.e. no collisions) for each `(namespace, msg)` pair.
 pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
-    if namespace.is_empty() {
-        return msg.to_vec();
-    }
     let ld_len = length_delimiter_len(namespace.len());
     let mut result = Vec::with_capacity(ld_len + namespace.len() + msg.len());
     encode_length_delimiter(namespace.len(), &mut result).unwrap();
@@ -233,12 +230,18 @@ mod tests {
     }
 
     #[test]
-    fn test_union_unique_no_namespace() {
+    fn test_union_unique_zero_length() {
         let namespace = b"";
         let msg = b"message";
 
+        let length_encoding = vec![0];
+        let mut expected = Vec::with_capacity(length_encoding.len() + namespace.len() + msg.len());
+        expected.extend_from_slice(&length_encoding);
+        expected.extend_from_slice(msg);
+
         let result = union_unique(namespace, msg);
-        assert_eq!(result, msg);
+        assert_eq!(result, expected);
+        assert_eq!(result.len(), result.capacity());
     }
 
     #[test]

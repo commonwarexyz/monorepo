@@ -14,7 +14,7 @@
 //! let mut signer = Ed25519::new(&mut OsRng);
 //!
 //! // Create a message to sign
-//! let namespace = b"demo";
+//! let namespace = Some(&b"demo"[..]);
 //! let msg = b"hello, world!";
 //!
 //! // Sign the message
@@ -76,9 +76,12 @@ impl Scheme for Ed25519 {
         self.verifier.clone()
     }
 
-    fn sign(&mut self, namespace: &[u8], message: &[u8]) -> Signature {
-        let payload = union_unique(namespace, message);
-        self.signer.sign(&payload).to_bytes().to_vec().into()
+    fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
+        let sig = match namespace {
+            Some(namespace) => self.signer.sign(&union_unique(namespace, message)),
+            None => self.signer.sign(message),
+        };
+        sig.to_bytes().to_vec().into()
     }
 
     fn validate(public_key: &PublicKey) -> bool {
@@ -90,7 +93,7 @@ impl Scheme for Ed25519 {
     }
 
     fn verify(
-        namespace: &[u8],
+        namespace: Option<&[u8]>,
         message: &[u8],
         public_key: &PublicKey,
         signature: &Signature,
@@ -108,8 +111,13 @@ impl Scheme for Ed25519 {
             Err(_) => return false,
         };
         let signature = ed25519_consensus::Signature::from(signature);
-        let payload = union_unique(namespace, message);
-        public_key.verify(&signature, &payload).is_ok()
+        match namespace {
+            Some(namespace) => {
+                let payload = union_unique(namespace, message);
+                public_key.verify(&signature, &payload).is_ok()
+            }
+            None => public_key.verify(&signature, message).is_ok(),
+        }
     }
 
     fn len() -> (usize, usize) {
@@ -130,10 +138,10 @@ mod tests {
     ) {
         let pkey = PrivateKey::from(secret_key.to_vec());
         let mut signer = <Ed25519 as Scheme>::from(pkey).unwrap();
-        let computed_signature = signer.sign(b"", message);
+        let computed_signature = signer.sign(None, message);
         assert_eq!(computed_signature.as_ref(), signature);
         assert!(Ed25519::verify(
-            b"",
+            None,
             message,
             &PublicKey::from(public_key.to_vec()),
             &Signature::from(computed_signature)

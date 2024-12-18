@@ -19,14 +19,20 @@ fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
                         let (private, public) = ops::keypair(&mut thread_rng());
                         let mut signatures = Vec::with_capacity(n);
                         for msg in msgs.iter() {
-                            let signature = ops::sign(&private, namespace, msg);
+                            let signature = ops::sign(&private, Some(namespace), msg);
                             signatures.push(signature);
                         }
                         (public, ops::aggregate(&signatures))
                     },
                     |(public, signature)| {
-                        ops::verify_aggregate(&public, namespace, &msgs, &signature, concurrency)
-                            .unwrap();
+                        ops::verify_aggregate(
+                            &public,
+                            Some(namespace),
+                            &msgs,
+                            &signature,
+                            concurrency,
+                        )
+                        .unwrap();
                     },
                     BatchSize::SmallInput,
                 );

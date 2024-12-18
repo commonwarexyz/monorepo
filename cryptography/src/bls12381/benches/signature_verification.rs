@@ -12,12 +12,12 @@ fn benchmark_signature_verification(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let mut signer = Bls12381::new(&mut thread_rng());
-                    let signature = signer.sign(namespace, msg);
+                    let signature = signer.sign(Some(namespace), msg);
                     (signer, signature)
                 },
                 |(signer, signature)| {
                     black_box(Bls12381::verify(
-                        namespace,
+                        Some(namespace),
                         msg,
                         &signer.public_key(),
                         &signature,

@@ -20,7 +20,7 @@ pub fn create_handshake<C: Scheme>(
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key.as_bytes());
     payload.extend_from_slice(&timestamp.to_be_bytes());
-    let signature = crypto.sign(namespace, &payload);
+    let signature = crypto.sign(Some(namespace), &payload);
 
     // Send handshake
     Ok(wire::Handshake {
@@ -100,7 +100,7 @@ impl Handshake {
         payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
 
         // Verify signature
-        if !C::verify(namespace, &payload, &public_key, &signature.signature) {
+        if !C::verify(Some(namespace), &payload, &public_key, &signature.signature) {
             return Err(Error::InvalidSignature);
         }
 
@@ -221,7 +221,7 @@ mod tests {
 
             // Verify signature
             assert!(Ed25519::verify(
-                TEST_NAMESPACE,
+                Some(TEST_NAMESPACE),
                 &payload,
                 &sender.public_key(),
                 &handshake.signature.unwrap().signature,

@@ -14,7 +14,7 @@ fn benchmark_partial_signature_aggregation(c: &mut Criterion) {
                     let (_, shares) = dkg::ops::generate_shares(None, n, t);
                     shares
                         .iter()
-                        .map(|s| primitives::ops::partial_sign(s, namespace, msg))
+                        .map(|s| primitives::ops::partial_sign(s, Some(namespace), msg))
                         .collect::<Vec<_>>()
                 },
                 |partials| {

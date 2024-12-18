@@ -18,7 +18,7 @@ fn benchmark_signature_aggregation(c: &mut Criterion) {
                     let private = ops::keypair(&mut thread_rng()).0;
                     let mut signatures = Vec::with_capacity(n);
                     for msg in msgs.iter() {
-                        let signature = ops::sign(&private, namespace, msg);
+                        let signature = ops::sign(&private, Some(namespace), msg);
                         signatures.push(signature);
                     }
                     signatures

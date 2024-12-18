@@ -12,7 +12,7 @@ fn benchmark_signature_generation(c: &mut Criterion) {
             b.iter_batched(
                 || Bls12381::new(&mut thread_rng()),
                 |mut signer| {
-                    black_box(signer.sign(namespace, msg));
+                    black_box(signer.sign(Some(namespace), msg));
                 },
                 BatchSize::SmallInput,
             );

@@ -51,14 +51,14 @@ pub trait Scheme: Clone + Send + Sync + 'static {
 
     /// Sign the given message.
     ///
-    /// The message should not be hashed prior to calling this function. If a particular
-    /// scheme requires a payload to be hashed before it is signed, it will be done internally.
+    /// The message should not be hashed prior to calling this function. If a particular scheme
+    /// requires a payload to be hashed before it is signed, it will be done internally.
     ///
-    /// To protect against replay attacks, it is required to provide a namespace
-    /// to prefix any message. This ensures that a signature meant for one context cannot be used
-    /// unexpectedly in another (i.e. signing a message on the network layer can't accidentally
-    /// spend funds on the execution layer).
-    fn sign(&mut self, namespace: &[u8], message: &[u8]) -> Signature;
+    /// A namespace should be used to prevent replay attacks. It will be prepended to the message so
+    /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
+    /// a message on the network layer can't accidentally spend funds on the execution layer). See
+    /// [union_unique](commonware_utils::union_unique) for details
+    fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature;
 
     /// Check that a signature is valid for the given message and public key.
     ///
@@ -68,7 +68,7 @@ pub trait Scheme: Clone + Send + Sync + 'static {
     /// Because namespace is prepended to message before signing, the namespace provided here must
     /// match the namespace provided during signing.
     fn verify(
-        namespace: &[u8],
+        namespace: Option<&[u8]>,
         message: &[u8],
         public_key: &PublicKey,
         signature: &Signature,
@@ -150,7 +150,7 @@ mod tests {
 
     fn test_sign_and_verify<C: Scheme>() {
         let mut signer = C::from_seed(0);
-        let namespace = b"test_namespace";
+        let namespace = Some(&b"test_namespace"[..]);
         let message = b"test_message";
         let signature = signer.sign(namespace, message);
         let public_key = signer.public_key();
@@ -159,7 +159,7 @@ mod tests {
 
     fn test_sign_and_verify_wrong_message<C: Scheme>() {
         let mut signer = C::from_seed(0);
-        let namespace = b"test_namespace";
+        let namespace: Option<&[u8]> = Some(&b"test_namespace"[..]);
         let message = b"test_message";
         let wrong_message = b"wrong_message";
         let signature = signer.sign(namespace, message);
@@ -174,8 +174,8 @@ mod tests {
 
     fn test_sign_and_verify_wrong_namespace<C: Scheme>() {
         let mut signer = C::from_seed(0);
-        let namespace = b"test_namespace";
-        let wrong_namespace = b"wrong_namespace";
+        let namespace = Some(&b"test_namespace"[..]);
+        let wrong_namespace = Some(&b"wrong_namespace"[..]);
         let message = b"test_message";
         let signature = signer.sign(namespace, message);
         let public_key = signer.public_key();
@@ -187,10 +187,20 @@ mod tests {
         ));
     }
 
+    fn test_empty_vs_none_namespace<C: Scheme>() {
+        let mut signer = C::from_seed(0);
+        let empty_namespace = Some(&b""[..]);
+        let message = b"test_message";
+        let signature = signer.sign(empty_namespace, message);
+        let public_key = signer.public_key();
+        assert!(C::verify(empty_namespace, message, &public_key, &signature));
+        assert!(!C::verify(None, message, &public_key, &signature));
+    }
+
     fn test_signature_determinism<C: Scheme>() {
         let mut signer_1 = C::from_seed(0);
         let mut signer_2 = C::from_seed(0);
-        let namespace = b"test_namespace";
+        let namespace = Some(&b"test_namespace"[..]);
         let message = b"test_message";
         let signature_1 = signer_1.sign(namespace, message);
         let signature_2 = signer_2.sign(namespace, message);
@@ -200,7 +210,7 @@ mod tests {
 
     fn test_invalid_signature_length<C: Scheme>() {
         let mut signer = C::from_seed(0);
-        let namespace = b"test_namespace";
+        let namespace = Some(&b"test_namespace"[..]);
         let message = b"test_message";
         let mut signature = signer.sign(namespace, message);
         signature.truncate(signature.len() - 1); // Invalidate the signature
@@ -236,6 +246,11 @@ mod tests {
     #[test]
     fn test_ed25519_sign_and_verify_wrong_namespace() {
         test_sign_and_verify_wrong_namespace::<Ed25519>();
+    }
+
+    #[test]
+    fn test_ed25519_empty_vs_none_namespace() {
+        test_empty_vs_none_namespace::<Ed25519>();
     }
 
     #[test]
@@ -281,6 +296,11 @@ mod tests {
     #[test]
     fn test_bls12381_sign_and_verify_wrong_namespace() {
         test_sign_and_verify_wrong_namespace::<Bls12381>();
+    }
+
+    #[test]
+    fn test_bls12381_empty_vs_none_namespace() {
+        test_empty_vs_none_namespace::<Bls12381>();
     }
 
     #[test]
