@@ -21,7 +21,7 @@ jobs:
         with:
           rust-version: ${{ steps.rust-version.outputs.rust_version}}
       - name: Run benchmark
-        run: cargo bench --benches -- --output-format bencher | tee output.txt
+        run: cargo bench --bench connection "sender/1024" -- --output-format bencher | tee output.txt
       - name: Publish benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
