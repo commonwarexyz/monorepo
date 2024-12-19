@@ -29,6 +29,9 @@ tracing-subscriber = { workspace = true }
 rand = { workspace = true }
 criterion = { workspace = true }
 
+[lib]
+bench = false
+
 [[bench]]
 name="hashmap_iteration"
 harness = false

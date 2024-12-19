@@ -25,3 +25,6 @@ prometheus-client = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+
+[lib]
+bench = false

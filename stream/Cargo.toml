@@ -29,6 +29,9 @@ criterion = { workspace = true }
 [build-dependencies]
 prost-build = { workspace = true }
 
+[lib]
+bench = false
+
 [[bench]]
 name="connection"
 harness = false

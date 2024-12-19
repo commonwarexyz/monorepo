@@ -11,6 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/macros"
 documentation = "https://docs.rs/commonware-macros"
 
 [lib]
+bench = false
 proc-macro = true
 
 [dependencies]
