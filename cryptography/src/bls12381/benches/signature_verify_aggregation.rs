@@ -12,7 +12,7 @@ fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
             msgs.push(msg);
         }
         let msgs = msgs.iter().map(|msg| msg.as_ref()).collect::<Vec<_>>();
-        for concurrency in [1, 2, 4, 8, 16].into_iter() {
+        for concurrency in [1, 2, 4, 8].into_iter() {
             c.bench_function(&format!("conc={} msgs={}", concurrency, msgs.len()), |b| {
                 b.iter_batched(
                     || {

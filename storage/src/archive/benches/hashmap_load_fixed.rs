@@ -10,7 +10,7 @@ struct MockIndex {
 }
 
 fn benchmark_hashmap_load_fixed(c: &mut Criterion) {
-    for n in [100_000, 1_000_000, 10_000_000, 100_000_000] {
+    for n in [100_000, 1_000_000, 10_000_000] {
         c.bench_function(&format!("load_fixed: n={} k={}", n, 4), |b| {
             b.iter_batched(
                 || {
