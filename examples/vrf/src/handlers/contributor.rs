@@ -323,7 +323,7 @@ impl<C: Scheme> Contributor<C> {
                 }
 
                 let payload = payload(round, me_idx, &share_bytes);
-                let signature = self.crypto.sign(SHARE_NAMESPACE, &payload);
+                let signature = self.crypto.sign(Some(SHARE_NAMESPACE), &payload);
                 sender
                     .send(
                         Recipients::One(player.clone()),
@@ -397,7 +397,7 @@ impl<C: Scheme> Contributor<C> {
 
                     // Verify signature on incoming share
                     let payload = payload(round, *dealer as u32, &msg.share);
-                    if !C::verify(SHARE_NAMESPACE, &payload, &s, &msg.signature) {
+                    if !C::verify(Some(SHARE_NAMESPACE), &payload, &s, &msg.signature) {
                         warn!(round, dealer, "received invalid share signature");
                         continue;
                     }

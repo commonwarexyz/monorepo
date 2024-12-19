@@ -32,6 +32,14 @@ pub fn from_hex(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Converts a hexadecimal string to bytes, stripping whitespace and/or a `0x` prefix. Commonly used
+/// in testing to encode external test vectors without modification.
+pub fn from_hex_formatted(hex: &str) -> Option<Vec<u8>> {
+    let hex = hex.replace(['\t', '\n', '\r', ' '], "");
+    let res = hex.strip_prefix("0x").unwrap_or(&hex);
+    from_hex(res)
+}
+
 /// Compute the maximum value of `f` (faults) that can be tolerated given `n = 3f + 1`.
 pub fn max_faults(n: u32) -> Option<u32> {
     let f = n.checked_sub(1)? / 3;
@@ -107,6 +115,48 @@ mod tests {
         // Test case 4: invalid hexadecimal character
         let h = "01g3";
         assert!(from_hex(h).is_none());
+    }
+
+    #[test]
+    fn repltest_from_hex_formatted() {
+        // Test case 0: empty bytes
+        let b = &[];
+        let h = hex(b);
+        assert_eq!(h, "");
+        assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
+
+        // Test case 1: single byte
+        let b = &[0x01];
+        let h = hex(b);
+        assert_eq!(h, "01");
+        assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
+
+        // Test case 2: multiple bytes
+        let b = &[0x01, 0x02, 0x03];
+        let h = hex(b);
+        assert_eq!(h, "010203");
+        assert_eq!(from_hex_formatted(&h).unwrap(), b.to_vec());
+
+        // Test case 3: odd number of bytes
+        let h = "0102030";
+        assert!(from_hex_formatted(h).is_none());
+
+        // Test case 4: invalid hexadecimal character
+        let h = "01g3";
+        assert!(from_hex_formatted(h).is_none());
+
+        // Test case 5: whitespace
+        let h = "01 02 03";
+        assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
+
+        // Test case 6: 0x prefix
+        let h = "0x010203";
+        assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
+
+        // Test case 7: 0x prefix + different whitespace chars
+        let h = "    \n\n0x\r\n01
+                            02\t03\n";
+        assert_eq!(from_hex_formatted(h).unwrap(), b.to_vec());
     }
 
     #[test]

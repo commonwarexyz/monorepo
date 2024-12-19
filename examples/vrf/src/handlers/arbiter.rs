@@ -240,7 +240,7 @@ impl<E: Clock> Arbiter<E> {
                                         }
                                     };
                                     let payload = payload(round, complaint.dealer, &complaint.share);
-                                    if !C::verify(SHARE_NAMESPACE, &payload, &bad_dealer, &complaint.signature) {
+                                    if !C::verify(Some(SHARE_NAMESPACE), &payload, &bad_dealer, &complaint.signature) {
                                         p1.disqualify(sender);
                                         continue;
                                     }

@@ -100,7 +100,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
         seen.insert(signature.public_key);
 
         // Verify signature
-        if !C::verify(namespace, &message, public_key, &signature.signature) {
+        if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
             debug!(reason = "invalid signature", "dropping notarization");
             return false;
         }
@@ -186,7 +186,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
         seen.insert(signature.public_key);
 
         // Verify signature
-        if !C::verify(namespace, &message, public_key, &signature.signature) {
+        if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
             debug!(reason = "invalid signature", "dropping notarization");
             return false;
         }
@@ -281,7 +281,7 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
         seen.insert(signature.public_key);
 
         // Verify signature
-        if !C::verify(namespace, &message, public_key, &signature.signature) {
+        if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
             debug!(reason = "invalid signature", "dropping finalization");
             return false;
         }

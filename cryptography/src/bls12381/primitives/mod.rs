@@ -24,7 +24,7 @@
 //! let (commitment, shares) = generate_shares(None, n, t);
 //!
 //! // Generate partial signatures from shares
-//! let namespace = b"demo";
+//! let namespace = Some(&b"demo"[..]);
 //! let message = b"hello world";
 //! let partials: Vec<_> = shares.iter().map(|s| partial_sign(s, namespace, message)).collect();
 //!

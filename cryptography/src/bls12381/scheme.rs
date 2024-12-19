@@ -9,7 +9,7 @@
 //! let mut signer = Bls12381::new(&mut OsRng);
 //!
 //! // Create a message to sign
-//! let namespace = b"demo";
+//! let namespace = Some(&b"demo"[..]);
 //! let msg = b"hello, world!";
 //!
 //! // Sign the message
@@ -68,7 +68,7 @@ impl Scheme for Bls12381 {
         self.public.serialize().into()
     }
 
-    fn sign(&mut self, namespace: &[u8], message: &[u8]) -> Signature {
+    fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
         let signature = ops::sign(&self.private, namespace, message);
         signature.serialize().into()
     }
@@ -78,7 +78,7 @@ impl Scheme for Bls12381 {
     }
 
     fn verify(
-        namespace: &[u8],
+        namespace: Option<&[u8]>,
         message: &[u8],
         public_key: &PublicKey,
         signature: &Signature,

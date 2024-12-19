@@ -147,7 +147,7 @@ mod tests {
         let (group, shares) = generate_shares(None, n, t);
 
         // Generate the partial signatures
-        let namespace = b"test";
+        let namespace = Some(&b"test"[..]);
         let msg = b"hello";
         let partials = shares
             .iter()
@@ -177,7 +177,7 @@ mod tests {
         let (group, shares) = generate_shares(None, n, t);
 
         // Generate the partial signatures
-        let namespace = b"test";
+        let namespace = Some(&b"test"[..]);
         let msg = b"hello";
         let partials = shares
             .iter()
@@ -185,7 +185,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         // Each partial sig can be partially verified against the public polynomial
-        let namespace = b"bad";
+        let namespace = Some(&b"bad"[..]);
         partials.iter().for_each(|partial| {
             assert!(matches!(
                 partial_verify(&group, namespace, msg, partial).unwrap_err(),
@@ -214,7 +214,7 @@ mod tests {
         let shares = shares.into_iter().take(t as usize - 1).collect::<Vec<_>>();
 
         // Generate the partial signatures
-        let namespace = b"test";
+        let namespace = Some(&b"test"[..]);
         let msg = b"hello";
         let partials = shares
             .iter()
@@ -246,7 +246,7 @@ mod tests {
         shares.push(shares[0]);
 
         // Generate the partial signatures
-        let namespace = b"test";
+        let namespace = Some(&b"test"[..]);
         let msg = b"hello";
         let partials = shares
             .iter()
@@ -279,7 +279,7 @@ mod tests {
         share.private = Private::rand(&mut rand::thread_rng());
 
         // Generate the partial signatures
-        let namespace = b"test";
+        let namespace = Some(&b"test"[..]);
         let msg = b"hello";
         let partials = shares
             .iter()

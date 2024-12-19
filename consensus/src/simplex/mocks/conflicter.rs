@@ -99,7 +99,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         proposal: Some(proposal),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(&self.notarize_namespace, &msg),
+                            signature: self.crypto.sign(Some(&self.notarize_namespace), &msg),
                         }),
                     };
                     let msg = wire::Voter {
@@ -122,7 +122,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         }),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(&self.notarize_namespace, &msg),
+                            signature: self.crypto.sign(Some(&self.notarize_namespace), &msg),
                         }),
                     };
                     let msg = wire::Voter {
@@ -156,7 +156,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         proposal: Some(proposal),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(&self.finalize_namespace, &msg),
+                            signature: self.crypto.sign(Some(&self.finalize_namespace), &msg),
                         }),
                     };
                     let msg = wire::Voter {
@@ -179,7 +179,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         }),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(&self.finalize_namespace, &msg),
+                            signature: self.crypto.sign(Some(&self.finalize_namespace), &msg),
                         }),
                     };
                     let msg = wire::Voter {

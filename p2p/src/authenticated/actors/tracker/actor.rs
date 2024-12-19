@@ -164,7 +164,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         let timestamp = runtime.current().epoch_millis();
         let (socket_bytes, payload_bytes) = socket_peer_payload(&cfg.address, timestamp);
         let ip_namespace = union(&cfg.namespace, NAMESPACE_SUFFIX_IP);
-        let ip_signature = cfg.crypto.sign(&ip_namespace, &payload_bytes);
+        let ip_signature = cfg.crypto.sign(Some(&ip_namespace), &payload_bytes);
         let ip_signature = wire::Peer {
             socket: socket_bytes,
             timestamp,
@@ -419,7 +419,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
             // If any signature is invalid, disconnect from the peer
             let payload = wire_peer_payload(&peer);
             if !C::verify(
-                &self.ip_namespace,
+                Some(&self.ip_namespace),
                 &payload,
                 public_key,
                 &signature.signature,
@@ -778,7 +778,7 @@ mod tests {
             // Provide peer address
             let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let (socket_bytes, payload_bytes) = socket_peer_payload(&socket, 0);
-            let ip_signature = peer1_signer.sign(&ip_namespace, &payload_bytes);
+            let ip_signature = peer1_signer.sign(Some(&ip_namespace), &payload_bytes);
             let peers = wire::Peers {
                 peers: vec![wire::Peer {
                     socket: socket_bytes,

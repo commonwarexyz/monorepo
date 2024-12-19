@@ -85,7 +85,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
                 debug!(public_key = hex(&public_key), "invalid public key");
                 return None;
             }
-            if !C::verify(namespace, &proposal_message, &public_key, &signature) {
+            if !C::verify(Some(namespace), &proposal_message, &public_key, &signature) {
                 debug!(
                     namespace = hex(namespace),
                     public_key = hex(&public_key),
@@ -170,7 +170,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
                 if !C::validate(&public_key) {
                     return None;
                 }
-                if !C::verify(namespace, &message, &public_key, &signature) {
+                if !C::verify(Some(namespace), &message, &public_key, &signature) {
                     return None;
                 }
             }
@@ -277,9 +277,17 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             }
             let proposal_message_1 = proposal_message(view, parent_1, &payload_1);
             let proposal_message_2 = proposal_message(view, parent_2, &payload_2);
-            if !C::verify(namespace, &proposal_message_1, &public_key, &signature_1)
-                || !C::verify(namespace, &proposal_message_2, &public_key, &signature_2)
-            {
+            if !C::verify(
+                Some(namespace),
+                &proposal_message_1,
+                &public_key,
+                &signature_1,
+            ) || !C::verify(
+                Some(namespace),
+                &proposal_message_2,
+                &public_key,
+                &signature_2,
+            ) {
                 return None;
             }
         }
@@ -407,12 +415,12 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             let finalize_message = proposal_message(view, parent, &payload);
             let null_message = nullify_message(view);
             if !C::verify(
-                &self.finalize_namespace,
+                Some(&self.finalize_namespace),
                 &finalize_message,
                 &public_key,
                 &signature_finalize,
             ) || !C::verify(
-                &self.nullify_namespace,
+                Some(&self.nullify_namespace),
                 &null_message,
                 &public_key,
                 &signature_null,

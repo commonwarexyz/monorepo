@@ -751,7 +751,7 @@ impl<
             view: self.view,
             signature: Some(wire::Signature {
                 public_key: public_key_index,
-                signature: self.crypto.sign(&self.nullify_namespace, &message),
+                signature: self.crypto.sign(Some(&self.nullify_namespace), &message),
             }),
         };
 
@@ -804,7 +804,7 @@ impl<
         // Verify the signature
         let nullify_message = nullify_message(nullify.view);
         if !C::verify(
-            &self.nullify_namespace,
+            Some(&self.nullify_namespace),
             &nullify_message,
             &public_key,
             &signature.signature,
@@ -1130,7 +1130,7 @@ impl<
         // Verify the signature
         let notarize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         if !C::verify(
-            &self.notarize_namespace,
+            Some(&self.notarize_namespace),
             &notarize_message,
             &public_key,
             &signature.signature,
@@ -1338,7 +1338,7 @@ impl<
         // Verify the signature
         let finalize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         if !C::verify(
-            &self.finalize_namespace,
+            Some(&self.finalize_namespace),
             &finalize_message,
             &public_key,
             &signature.signature,
@@ -1480,7 +1480,7 @@ impl<
             signature: Some(wire::Signature {
                 public_key,
                 signature: self.crypto.sign(
-                    &self.notarize_namespace,
+                    Some(&self.notarize_namespace),
                     &proposal_message(proposal.view, proposal.parent, &proposal.payload),
                 ),
             }),
@@ -1587,7 +1587,7 @@ impl<
             signature: Some(wire::Signature {
                 public_key,
                 signature: self.crypto.sign(
-                    &self.finalize_namespace,
+                    Some(&self.finalize_namespace),
                     &proposal_message(proposal.view, proposal.parent, &proposal.payload),
                 ),
             }),

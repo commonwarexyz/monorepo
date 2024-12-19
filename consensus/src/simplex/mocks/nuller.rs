@@ -87,7 +87,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Nuller<C, H, S> {
                         view,
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(&self.nullify_namespace, &msg),
+                            signature: self.crypto.sign(Some(&self.nullify_namespace), &msg),
                         }),
                     };
                     let msg = wire::Voter {
@@ -105,7 +105,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Nuller<C, H, S> {
                         proposal: Some(proposal.clone()),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
-                            signature: self.crypto.sign(&self.finalize_namespace, &msg),
+                            signature: self.crypto.sign(Some(&self.finalize_namespace), &msg),
                         }),
                     };
                     let msg = wire::Voter {
