@@ -1,0 +1,34 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request: # TODO: Remove
+
+jobs:
+  benchmark:
+    name: Publish benchmark results
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust toolchain
+        run: rustup toolchain install nightly
+      - name: Get Rust version
+        id: rust-version
+        run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+      - name: Run setup
+        uses: ./.github/actions/setup
+        with:
+          rust-version: ${{ steps.rust-version.outputs.rust_version}}
+      - name: Run benchmark
+        run: cargo bench -- --output-format bencher | tee output.txt
+      - name: Publish benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: 'cargo'
+          output-file-path: output.txt
+          github-token: ${{ secrets.BENCHMARKS_TOKEN }}
+          gh-repository: github.com/commonwarexyz/benchmarks
+          gh-pages-branch: main
+          benchmark-data-dir-path: dev/bench
+          auto-push: true
