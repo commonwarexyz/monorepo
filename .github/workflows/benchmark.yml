@@ -21,13 +21,13 @@ jobs:
         with:
           rust-version: ${{ steps.rust-version.outputs.rust_version}}
       - name: Run benchmark
-        run: cargo bench -- --output-format bencher | tee output.txt
+        run: cargo bench --benches -- --output-format bencher | tee output.txt
       - name: Publish benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
           tool: 'cargo'
           output-file-path: output.txt
-          github-token: ${{ secrets.BENCHMARKS_TOKEN }}
+          github-token: ${{ secrets.BENCHMARKS_SECRET }}
           gh-repository: github.com/commonwarexyz/benchmarks
           gh-pages-branch: main
           benchmark-data-dir-path: dev/bench
