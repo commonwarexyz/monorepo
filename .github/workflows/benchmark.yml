@@ -7,12 +7,13 @@ on:
 
 jobs:
   benchmark:
-    name: Publish benchmark results
+    name: Publish Benchmark
     runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - package: commonware-cryptography
+          - package: commonware-storage
           - package: commonware-stream
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +26,8 @@ jobs:
         uses: ./.github/actions/setup
         with:
           rust-version: ${{ steps.rust-version.outputs.rust_version}}
-
+      - name: Compile benchmarks
+        run: cargo bench --no-run
       - name: Run benchmark
         run: cargo bench --benches -p ${{ matrix.package }} -- --output-format bencher | tee ${{ matrix.package }}.txt
       - name: Publish benchmark result
