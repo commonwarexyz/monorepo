@@ -13,3 +13,6 @@ documentation = "https://docs.rs/commonware-utils"
 [dependencies]
 prost = { workspace = true }
 sha2 = { workspace = true }
+
+[lib]
+bench = false
