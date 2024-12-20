@@ -1,3 +1,4 @@
+use crate::MODULE_NAME;
 use commonware_cryptography::bls12381::primitives::ops;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
@@ -12,23 +13,26 @@ fn benchmark_signature_aggregation(c: &mut Criterion) {
             thread_rng().fill(&mut msg);
             msgs.push(msg);
         }
-        c.bench_function(&format!("aggregate: msgs={}", msgs.len()), |b| {
-            b.iter_batched(
-                || {
-                    let private = ops::keypair(&mut thread_rng()).0;
-                    let mut signatures = Vec::with_capacity(n);
-                    for msg in msgs.iter() {
-                        let signature = ops::sign(&private, Some(namespace), msg);
-                        signatures.push(signature);
-                    }
-                    signatures
-                },
-                |signatures| {
-                    black_box(ops::aggregate(&signatures));
-                },
-                BatchSize::SmallInput,
-            );
-        });
+        c.bench_function(
+            &format!("{} aggregate: msgs={}", MODULE_NAME, msgs.len()),
+            |b| {
+                b.iter_batched(
+                    || {
+                        let private = ops::keypair(&mut thread_rng()).0;
+                        let mut signatures = Vec::with_capacity(n);
+                        for msg in msgs.iter() {
+                            let signature = ops::sign(&private, Some(namespace), msg);
+                            signatures.push(signature);
+                        }
+                        signatures
+                    },
+                    |signatures| {
+                        black_box(ops::aggregate(&signatures));
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
 }
 

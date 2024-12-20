@@ -1,3 +1,4 @@
+use crate::MODULE_NAME;
 use commonware_cryptography::bls12381::primitives::ops;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
@@ -14,7 +15,12 @@ fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
         let msgs = msgs.iter().map(|msg| msg.as_ref()).collect::<Vec<_>>();
         for concurrency in [1, 2, 4, 8].into_iter() {
             c.bench_function(
-                &format!("verify_aggregate: conc={} msgs={}", concurrency, msgs.len()),
+                &format!(
+                    "{} verify_aggregate: conc={} msgs={}",
+                    MODULE_NAME,
+                    concurrency,
+                    msgs.len()
+                ),
                 |b| {
                     b.iter_batched(
                         || {

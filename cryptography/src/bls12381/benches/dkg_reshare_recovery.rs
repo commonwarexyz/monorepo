@@ -1,3 +1,4 @@
+use crate::MODULE_NAME;
 use commonware_cryptography::{
     bls12381::{
         dkg::{self, utils::threshold},
@@ -96,7 +97,10 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
 
         for &concurrency in &[1, 2, 4, 8] {
             c.bench_function(
-                &format!("reshare: conc={} n={} t={}", concurrency, n, t),
+                &format!(
+                    "{} reshare: conc={} n={} t={}",
+                    MODULE_NAME, concurrency, n, t
+                ),
                 |b| {
                     b.iter_batched(
                         || {
