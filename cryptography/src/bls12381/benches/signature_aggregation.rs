@@ -12,7 +12,7 @@ fn benchmark_signature_aggregation(c: &mut Criterion) {
             thread_rng().fill(&mut msg);
             msgs.push(msg);
         }
-        c.bench_function(&format!("msgs={}", msgs.len()), |b| {
+        c.bench_function(&format!("aggregate: msgs={}", msgs.len()), |b| {
             b.iter_batched(
                 || {
                     let private = ops::keypair(&mut thread_rng()).0;

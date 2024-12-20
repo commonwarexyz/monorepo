@@ -13,30 +13,33 @@ fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
         }
         let msgs = msgs.iter().map(|msg| msg.as_ref()).collect::<Vec<_>>();
         for concurrency in [1, 2, 4, 8].into_iter() {
-            c.bench_function(&format!("conc={} msgs={}", concurrency, msgs.len()), |b| {
-                b.iter_batched(
-                    || {
-                        let (private, public) = ops::keypair(&mut thread_rng());
-                        let mut signatures = Vec::with_capacity(n);
-                        for msg in msgs.iter() {
-                            let signature = ops::sign(&private, Some(namespace), msg);
-                            signatures.push(signature);
-                        }
-                        (public, ops::aggregate(&signatures))
-                    },
-                    |(public, signature)| {
-                        ops::verify_aggregate(
-                            &public,
-                            Some(namespace),
-                            &msgs,
-                            &signature,
-                            concurrency,
-                        )
-                        .unwrap();
-                    },
-                    BatchSize::SmallInput,
-                );
-            });
+            c.bench_function(
+                &format!("verify_aggregate: conc={} msgs={}", concurrency, msgs.len()),
+                |b| {
+                    b.iter_batched(
+                        || {
+                            let (private, public) = ops::keypair(&mut thread_rng());
+                            let mut signatures = Vec::with_capacity(n);
+                            for msg in msgs.iter() {
+                                let signature = ops::sign(&private, Some(namespace), msg);
+                                signatures.push(signature);
+                            }
+                            (public, ops::aggregate(&signatures))
+                        },
+                        |(public, signature)| {
+                            ops::verify_aggregate(
+                                &public,
+                                Some(namespace),
+                                &msgs,
+                                &signature,
+                                concurrency,
+                            )
+                            .unwrap();
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
         }
     }
 }

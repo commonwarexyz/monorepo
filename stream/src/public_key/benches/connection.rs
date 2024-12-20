@@ -1,16 +1,15 @@
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 use commonware_runtime::mocks;
 use commonware_stream::{public_key::Connection, Receiver, Sender};
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use futures::executor::block_on;
 
 fn benchmark_sender(c: &mut Criterion) {
     let kbs = [1, 4, 16, 256, 1024, 4_096, 16_384, 65_536];
-    let mut group = c.benchmark_group("sender");
     for &kb in &kbs {
         let message_size = kb * 1024;
         let msg = vec![0u8; message_size];
-        group.bench_with_input(BenchmarkId::from_parameter(message_size), &msg, |b, msg| {
+        c.bench_function(&format!("sender: len={}", message_size), |b| {
             b.iter_batched(
                 || {
                     let cipher = ChaCha20Poly1305::new(&[0u8; 32].into());
@@ -34,11 +33,10 @@ fn benchmark_sender(c: &mut Criterion) {
 
 fn benchmark_receiver(c: &mut Criterion) {
     let kbs = [1, 4, 16, 256, 1024, 4_096, 16_384, 65_536];
-    let mut group = c.benchmark_group("receiver");
     for &kb in &kbs {
         let message_size = kb * 1024;
         let msg = vec![0u8; message_size];
-        group.bench_with_input(BenchmarkId::from_parameter(message_size), &msg, |b, msg| {
+        c.bench_function(&format!("receiver: len={}", message_size), |b| {
             b.iter_batched(
                 || {
                     // Set up a connection between two parties.
@@ -65,7 +63,7 @@ fn benchmark_receiver(c: &mut Criterion) {
                     let (_, receiver) = conn_b.split();
 
                     block_on(async {
-                        sender.send(msg).await.unwrap();
+                        sender.send(&msg).await.unwrap();
                     });
                     receiver
                 },
