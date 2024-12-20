@@ -1,3 +1,5 @@
+use criterion::criterion_main;
+
 mod dkg_recovery;
 mod dkg_reshare_recovery;
 mod partial_signature_aggregation;
@@ -5,8 +7,6 @@ mod signature_aggregation;
 mod signature_generation;
 mod signature_verification;
 mod signature_verify_aggregation;
-
-use criterion::criterion_main;
 
 criterion_main!(
     dkg_recovery::benches,
