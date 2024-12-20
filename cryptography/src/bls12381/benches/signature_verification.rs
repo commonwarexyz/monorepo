@@ -1,4 +1,3 @@
-use crate::MODULE_NAME;
 use commonware_cryptography::{Bls12381, Scheme};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use rand::thread_rng;
@@ -10,7 +9,7 @@ fn benchmark_signature_verification(c: &mut Criterion) {
     c.bench_function(
         &format!(
             "{} verify: ns_len={} msg_len={}",
-            MODULE_NAME,
+            module_path!(),
             namespace.len(),
             msg.len()
         ),

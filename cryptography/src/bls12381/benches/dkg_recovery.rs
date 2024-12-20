@@ -1,4 +1,3 @@
-use crate::MODULE_NAME;
 use commonware_cryptography::bls12381::dkg::utils::threshold;
 use commonware_cryptography::Ed25519;
 use commonware_cryptography::{bls12381::dkg, Scheme};
@@ -11,7 +10,13 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = threshold(n).unwrap();
         c.bench_function(
-            &format!("{} dkg: conc={} n={} t={}", MODULE_NAME, concurrency, n, t),
+            &format!(
+                "{} dkg: conc={} n={} t={}",
+                module_path!(),
+                concurrency,
+                n,
+                t
+            ),
             |b| {
                 b.iter_batched(
                     || {

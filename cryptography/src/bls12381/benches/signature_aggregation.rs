@@ -1,4 +1,3 @@
-use crate::MODULE_NAME;
 use commonware_cryptography::bls12381::primitives::ops;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
@@ -14,7 +13,7 @@ fn benchmark_signature_aggregation(c: &mut Criterion) {
             msgs.push(msg);
         }
         c.bench_function(
-            &format!("{} aggregate: msgs={}", MODULE_NAME, msgs.len()),
+            &format!("{} aggregate: msgs={}", module_path!(), msgs.len()),
             |b| {
                 b.iter_batched(
                     || {

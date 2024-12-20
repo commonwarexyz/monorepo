@@ -8,8 +8,6 @@ mod signature_verify_aggregation;
 
 use criterion::criterion_main;
 
-pub(crate) const MODULE_NAME: &str = "bls12381";
-
 criterion_main!(
     dkg_recovery::benches,
     dkg_reshare_recovery::benches,

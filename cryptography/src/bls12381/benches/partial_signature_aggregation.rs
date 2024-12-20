@@ -1,4 +1,3 @@
-use crate::MODULE_NAME;
 use commonware_cryptography::bls12381::{dkg, primitives};
 use commonware_utils::quorum;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
@@ -10,7 +9,7 @@ fn benchmark_partial_signature_aggregation(c: &mut Criterion) {
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = quorum(n).unwrap();
         c.bench_function(
-            &format!("{} partial_aggregate: n={} t={}", MODULE_NAME, n, t),
+            &format!("{} partial_aggregate: n={} t={}", module_path!(), n, t),
             |b| {
                 b.iter_batched(
                     || {
