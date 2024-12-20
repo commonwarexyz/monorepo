@@ -5,7 +5,6 @@ on:
     - cron: '0 10 * * *' # Run at 10:00 UTC every day
 
 jobs:
-
   # Check if there are new commits in the last 24 hours
   has-new-commit:
     name: Has New Commit?
