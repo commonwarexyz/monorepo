@@ -1,7 +1,7 @@
 use commonware_cryptography::bls12381::dkg::utils::threshold;
 use commonware_cryptography::Ed25519;
 use commonware_cryptography::{bls12381::dkg, Scheme};
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
 
@@ -84,4 +84,3 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = benchmark_dkg_recovery
 }
-criterion_main!(benches);

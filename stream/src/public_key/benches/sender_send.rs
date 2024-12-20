@@ -1,7 +1,7 @@
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
 use commonware_runtime::mocks;
 use commonware_stream::{public_key::Connection, Sender};
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use futures::executor::block_on;
 
 fn benchmark_sender(c: &mut Criterion) {
@@ -32,4 +32,3 @@ fn benchmark_sender(c: &mut Criterion) {
 }
 
 criterion_group!(benches, benchmark_sender);
-criterion_main!(benches);

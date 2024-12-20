@@ -5,7 +5,7 @@ use commonware_cryptography::{
     },
     Ed25519, Scheme,
 };
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
 
@@ -167,4 +167,3 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = benchmark_dkg_reshare_recovery
 }
-criterion_main!(benches);

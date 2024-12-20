@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{black_box, criterion_group, BatchSize, Criterion};
 use rand::Rng;
 use std::collections::HashMap;
 
@@ -49,4 +49,3 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = benchmark_hashmap_iteration
 }
-criterion_main!(benches);

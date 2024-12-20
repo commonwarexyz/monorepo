@@ -1,5 +1,5 @@
 use commonware_cryptography::{Bls12381, Scheme};
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use rand::thread_rng;
 use std::hint::black_box;
 
@@ -26,4 +26,3 @@ fn benchmark_signature_generation(c: &mut Criterion) {
 }
 
 criterion_group!(benches, benchmark_signature_generation);
-criterion_main!(benches);

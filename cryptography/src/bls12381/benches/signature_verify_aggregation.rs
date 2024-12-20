@@ -1,5 +1,5 @@
 use commonware_cryptography::bls12381::primitives::ops;
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 
 fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
@@ -54,4 +54,3 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = benchmark_signature_verify_aggregation
 }
-criterion_main!(benches);

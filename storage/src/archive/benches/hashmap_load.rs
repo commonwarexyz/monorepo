@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use rand::Rng;
 use std::collections::HashMap;
 
@@ -56,4 +56,3 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = benchmark_hashmap_load
 }
-criterion_main!(benches);
