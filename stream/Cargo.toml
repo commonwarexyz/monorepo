@@ -29,7 +29,10 @@ criterion = { workspace = true }
 [build-dependencies]
 prost-build = { workspace = true }
 
+[lib]
+bench = false
+
 [[bench]]
-name="connection"
+name="public_key"
 harness = false
-path = "src/public_key/benches/connection.rs"
+path = "src/public_key/benches/bench.rs"

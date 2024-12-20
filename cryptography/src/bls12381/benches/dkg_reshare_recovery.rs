@@ -5,7 +5,7 @@ use commonware_cryptography::{
     },
     Ed25519, Scheme,
 };
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use std::collections::HashMap;
 use std::hint::black_box;
 
@@ -96,7 +96,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
 
         for &concurrency in &[1, 2, 4, 8] {
             c.bench_function(
-                &format!("reshare: conc={} n={} t={}", concurrency, n, t),
+                &format!("{}/conc={} n={} t={}", module_path!(), concurrency, n, t),
                 |b| {
                     b.iter_batched(
                         || {
@@ -167,4 +167,3 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = benchmark_dkg_reshare_recovery
 }
-criterion_main!(benches);

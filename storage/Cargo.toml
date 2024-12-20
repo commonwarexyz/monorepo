@@ -29,17 +29,10 @@ tracing-subscriber = { workspace = true }
 rand = { workspace = true }
 criterion = { workspace = true }
 
-[[bench]]
-name="hashmap_iteration"
-harness = false
-path = "src/archive/benches/hashmap_iteration.rs"
+[lib]
+bench = false
 
 [[bench]]
-name="hashmap_load"
+name="archive"
 harness = false
-path = "src/archive/benches/hashmap_load.rs"
-
-[[bench]]
-name="hashmap_load_fixed"
-harness = false
-path = "src/archive/benches/hashmap_load_fixed.rs"
+path = "src/archive/benches/bench.rs"

@@ -29,40 +29,13 @@ proptest = "1"
 [build-dependencies]
 prost-build = { workspace = true }
 
+[lib]
+bench = false
+
 [features]
 portable = ["blst/portable"]
 
 [[bench]]
-name="dkg_recovery"
+name="bls12381"
 harness = false
-path = "src/bls12381/benches/dkg_recovery.rs"
-
-[[bench]]
-name="dkg_reshare_recovery"
-harness = false
-path = "src/bls12381/benches/dkg_reshare_recovery.rs"
-
-[[bench]]
-name="signature_generation"
-harness = false
-path = "src/bls12381/benches/signature_generation.rs"
-
-[[bench]]
-name="partial_signature_aggregation"
-harness = false
-path = "src/bls12381/benches/partial_signature_aggregation.rs"
-
-[[bench]]
-name="signature_verification"
-harness = false
-path = "src/bls12381/benches/signature_verification.rs"
-
-[[bench]]
-name="signature_aggregation"
-harness = false
-path = "src/bls12381/benches/signature_aggregation.rs"
-
-[[bench]]
-name="signature_verify_aggregation"
-harness = false
-path = "src/bls12381/benches/signature_verify_aggregation.rs"
+path = "src/bls12381/benches/bench.rs"

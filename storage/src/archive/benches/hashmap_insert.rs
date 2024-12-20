@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use rand::Rng;
 use std::collections::HashMap;
 
@@ -9,10 +9,10 @@ struct MockIndex {
     _next: Option<Box<MockIndex>>,
 }
 
-fn benchmark_hashmap_load(c: &mut Criterion) {
-    for n in [100_000, 1_000_000, 10_000_000, 100_000_000] {
+fn benchmark_hashmap_insert(c: &mut Criterion) {
+    for n in [100_000, 1_000_000, 10_000_000] {
         for k in [4, 8, 16, 32] {
-            c.bench_function(&format!("load: n={} k={}", n, k), |b| {
+            c.bench_function(&format!("{}/n={} k={}", module_path!(), n, k), |b| {
                 b.iter_batched(
                     || {
                         // Perform all random ops
@@ -54,6 +54,5 @@ fn benchmark_hashmap_load(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_hashmap_load
+    targets = benchmark_hashmap_insert
 }
-criterion_main!(benches);

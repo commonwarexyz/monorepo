@@ -1,6 +1,6 @@
 use commonware_cryptography::bls12381::{dkg, primitives};
 use commonware_utils::quorum;
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use std::hint::black_box;
 
 fn benchmark_partial_signature_aggregation(c: &mut Criterion) {
@@ -8,7 +8,7 @@ fn benchmark_partial_signature_aggregation(c: &mut Criterion) {
     let msg = b"hello";
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = quorum(n).unwrap();
-        c.bench_function(&format!("n={} t={}", n, t), |b| {
+        c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
             b.iter_batched(
                 || {
                     let (_, shares) = dkg::ops::generate_shares(None, n, t);
@@ -27,4 +27,3 @@ fn benchmark_partial_signature_aggregation(c: &mut Criterion) {
 }
 
 criterion_group!(benches, benchmark_partial_signature_aggregation);
-criterion_main!(benches);

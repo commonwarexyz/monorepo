@@ -1,5 +1,5 @@
 use commonware_cryptography::bls12381::primitives::ops;
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 
 fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
@@ -12,31 +12,39 @@ fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
             msgs.push(msg);
         }
         let msgs = msgs.iter().map(|msg| msg.as_ref()).collect::<Vec<_>>();
-        for concurrency in [1, 2, 4, 8, 16].into_iter() {
-            c.bench_function(&format!("conc={} msgs={}", concurrency, msgs.len()), |b| {
-                b.iter_batched(
-                    || {
-                        let (private, public) = ops::keypair(&mut thread_rng());
-                        let mut signatures = Vec::with_capacity(n);
-                        for msg in msgs.iter() {
-                            let signature = ops::sign(&private, Some(namespace), msg);
-                            signatures.push(signature);
-                        }
-                        (public, ops::aggregate(&signatures))
-                    },
-                    |(public, signature)| {
-                        ops::verify_aggregate(
-                            &public,
-                            Some(namespace),
-                            &msgs,
-                            &signature,
-                            concurrency,
-                        )
-                        .unwrap();
-                    },
-                    BatchSize::SmallInput,
-                );
-            });
+        for concurrency in [1, 2, 4, 8].into_iter() {
+            c.bench_function(
+                &format!(
+                    "{}/conc={} msgs={}",
+                    module_path!(),
+                    concurrency,
+                    msgs.len()
+                ),
+                |b| {
+                    b.iter_batched(
+                        || {
+                            let (private, public) = ops::keypair(&mut thread_rng());
+                            let mut signatures = Vec::with_capacity(n);
+                            for msg in msgs.iter() {
+                                let signature = ops::sign(&private, Some(namespace), msg);
+                                signatures.push(signature);
+                            }
+                            (public, ops::aggregate(&signatures))
+                        },
+                        |(public, signature)| {
+                            ops::verify_aggregate(
+                                &public,
+                                Some(namespace),
+                                &msgs,
+                                &signature,
+                                concurrency,
+                            )
+                            .unwrap();
+                        },
+                        BatchSize::SmallInput,
+                    );
+                },
+            );
         }
     }
 }
@@ -46,4 +54,3 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = benchmark_signature_verify_aggregation
 }
-criterion_main!(benches);
