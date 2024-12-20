@@ -21,10 +21,14 @@ blst = { version = "0.3.13", features = ["no-threads"] }
 zeroize = "1.5.7"
 rayon = "1.10"
 itertools = "0.13.0"
+serde_json.workspace = true
+serde = "1.0.216"
+hex = "0.4.3"
 
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = "1"
+num-bigint = "0.4"
 
 [build-dependencies]
 prost-build = { workspace = true }

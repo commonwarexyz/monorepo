@@ -98,3 +98,65 @@ impl Scheme for Bls12381 {
         (group::G1_ELEMENT_BYTE_LENGTH, group::G2_ELEMENT_BYTE_LENGTH)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Bls12381, Scheme};
+    use blst::min_pk::SecretKey;
+    use core::str;
+    use hex;
+    use itertools::Itertools;
+    use num_bigint::BigInt;
+    use num_bigint::BigUint;
+    use serde::{Deserialize, Deserializer};
+    use serde_json;
+    use std::fs;
+
+    use crate::PrivateKey;
+
+    /// Strip the '0x' prefix.
+    fn strip_prefix<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let hex_str: String = Deserialize::deserialize(deserializer)?;
+        Ok(hex_str.strip_prefix("0x").unwrap().to_string())
+    }
+
+    // Parse the hexadecimal string to a BigUint
+    fn hex_to_int(hex_str: &str) -> BigUint {
+        BigUint::parse_bytes(hex_str.as_bytes(), 16).expect("Invalid hexadecimal string")
+    }
+
+    #[derive(Deserialize)]
+    struct PrivateKeyMessage {
+        #[serde(rename = "privkey", deserialize_with = "strip_prefix")]
+        private_key: String,
+        #[serde(deserialize_with = "strip_prefix")]
+        message: String,
+    }
+
+    #[derive(Deserialize)]
+    struct SigningVector {
+        input: PrivateKeyMessage,
+        #[serde(deserialize_with = "strip_prefix")]
+        output: String,
+    }
+
+    fn load_sign_case_vector() -> SigningVector {
+        let content = r#"{"input": {"privkey": "0x47b8192d77bf871b62e87859d653922725724a5c031afeabc60bcef5ff665138", "message": "0xabababababababababababababababababababababababababababababababab"}, "output": "0x9674e2228034527f4c083206032b020310face156d4a4685e2fcaec2f6f3665aa635d90347b6ce124eb879266b1e801d185de36a0a289b85e9039662634f2eea1e02e670bc7ab849d006a70b2f93b84597558a05b879c8d445f387a5d5b653df"}"#;
+        serde_json::from_str(content).unwrap()
+    }
+
+    #[test]
+    fn sign() {
+        let signing_vector = load_sign_case_vector();
+        let s = signing_vector.input.private_key;
+        let big_int = hex_to_int(&s);
+        let b = big_int.to_bytes_be();
+        let private_key = PrivateKey::from(b);
+        let mut bls = <Bls12381 as Scheme>::from(private_key).unwrap();
+        let signature = bls.sign(None, &hex::decode(&signing_vector.input.message).unwrap());
+        assert_eq!(signing_vector.output, hex::encode(signature));
+    }
+}
