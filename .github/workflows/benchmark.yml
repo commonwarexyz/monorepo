@@ -1,16 +1,37 @@
 name: Benchmark
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request: # TODO: Remove
+  schedule:
+    - cron: '0 10 * * *' # Run at 10:00 UTC every day
 
 jobs:
-  benchmark:
-    name: Publish Benchmark
+
+  # Check if there are new commits in the last 24 hours
+  has-new-commit:
+    name: Has New Commit?
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - name: Exit early if no new commits
+        id: check-commits
+        run: |
+          count=$(git log --oneline --since '24 hours ago' | wc -l)
+          if [ "$count" -eq 0 ]; then
+            echo "No new commits found in the last 24 hours"
+            exit 1
+          fi
+
+  publish:
+    name: Publish
+    needs: has-new-commit # Only run if there are new commits
     runs-on: ubuntu-latest-8
     timeout-minutes: 90
     strategy:
+      max-parallel: 1 # Run one package at a time
       matrix:
         include:
           - package: commonware-cryptography
