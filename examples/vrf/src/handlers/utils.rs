@@ -10,8 +10,8 @@ pub const SHARE_NAMESPACE: &[u8] = b"_COMMONWARE_DKG_SHARE_";
 /// invalid secret during the DKG/Resharing procedure.
 pub fn payload(round: u64, dealer: u32, share: &[u8]) -> Vec<u8> {
     let mut payload = Vec::with_capacity(size_of::<u64>() + size_of::<u32>() + share.len());
-    payload.extend_from_slice(&round.to_be_bytes());
-    payload.extend_from_slice(&dealer.to_be_bytes());
+    payload.put_u64(round);
+    payload.put_u32(dealer);
     payload.extend_from_slice(share);
     payload
 }

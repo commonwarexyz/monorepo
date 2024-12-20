@@ -23,7 +23,7 @@ pub struct Signature {
 pub fn wire_peer_payload(peer: &Peer) -> Vec<u8> {
     let mut payload = Vec::with_capacity(peer.socket.len() + size_of::<u64>());
     payload.extend_from_slice(&peer.socket);
-    payload.extend_from_slice(&peer.timestamp.to_be_bytes());
+    payload.put_u64(peer.timestamp);
     payload
 }
 
@@ -31,7 +31,7 @@ pub fn socket_peer_payload(socket: &SocketAddr, timestamp: u64) -> (Vec<u8>, Vec
     let socket = bytes(socket);
     let mut payload = Vec::with_capacity(socket.len() + size_of::<u64>());
     payload.extend_from_slice(&socket);
-    payload.extend_from_slice(&timestamp.to_be_bytes());
+    payload.put_u64(timestamp);
     (socket, payload)
 }
 
@@ -66,13 +66,13 @@ pub fn bytes(socket: &SocketAddr) -> Vec<u8> {
         SocketAddr::V4(v4) => {
             let mut bytes = Vec::with_capacity(IPV4_LEN);
             bytes.extend_from_slice(&v4.ip().octets());
-            bytes.extend_from_slice(&v4.port().to_be_bytes());
+            bytes.put_u16(v4.port());
             bytes
         }
         SocketAddr::V6(v6) => {
             let mut bytes = Vec::with_capacity(IPV6_LEN);
             bytes.extend_from_slice(&v6.ip().octets());
-            bytes.extend_from_slice(&v6.port().to_be_bytes());
+            bytes.put_u16(v6.port());
             bytes
         }
     }

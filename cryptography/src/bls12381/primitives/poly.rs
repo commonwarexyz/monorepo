@@ -35,7 +35,7 @@ impl<C: Element> Eval<C> {
     pub fn serialize(&self) -> Vec<u8> {
         let value_serialized = self.value.serialize();
         let mut bytes = Vec::with_capacity(size_of::<u32>() + value_serialized.len());
-        bytes.extend_from_slice(&self.index.to_be_bytes());
+        bytes.put_u64(self.index);
         bytes.extend_from_slice(&value_serialized);
         bytes
     }
