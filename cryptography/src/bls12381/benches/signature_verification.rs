@@ -8,7 +8,7 @@ fn benchmark_signature_verification(c: &mut Criterion) {
     let msg = b"hello";
     c.bench_function(
         &format!(
-            "{} verify: ns_len={} msg_len={}",
+            "{}/ns_len={} msg_len={}",
             module_path!(),
             namespace.len(),
             msg.len()

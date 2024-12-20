@@ -8,7 +8,7 @@ fn benchmark_signature_generation(c: &mut Criterion) {
     let msg = b"hello";
     c.bench_function(
         &format!(
-            "{} sign: ns_len={} msg_len={}",
+            "{}/ns_len={} msg_len={}",
             module_path!(),
             namespace.len(),
             msg.len()

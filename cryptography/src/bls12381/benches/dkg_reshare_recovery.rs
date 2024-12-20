@@ -96,13 +96,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
 
         for &concurrency in &[1, 2, 4, 8] {
             c.bench_function(
-                &format!(
-                    "{} reshare: conc={} n={} t={}",
-                    module_path!(),
-                    concurrency,
-                    n,
-                    t
-                ),
+                &format!("{}/conc={} n={} t={}", module_path!(), concurrency, n, t),
                 |b| {
                     b.iter_batched(
                         || {

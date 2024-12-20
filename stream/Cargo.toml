@@ -33,6 +33,6 @@ prost-build = { workspace = true }
 bench = false
 
 [[bench]]
-name="connection"
+name="public_key"
 harness = false
-path = "src/public_key/benches/connection.rs"
+path = "src/public_key/benches/bench.rs"

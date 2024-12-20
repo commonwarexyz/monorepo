@@ -15,7 +15,7 @@ fn benchmark_signature_verify_aggregation(c: &mut Criterion) {
         for concurrency in [1, 2, 4, 8].into_iter() {
             c.bench_function(
                 &format!(
-                    "{} verify_aggregate: conc={} msgs={}",
+                    "{}/conc={} msgs={}",
                     module_path!(),
                     concurrency,
                     msgs.len()

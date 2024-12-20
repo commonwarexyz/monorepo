@@ -10,13 +10,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = threshold(n).unwrap();
         c.bench_function(
-            &format!(
-                "{} dkg: conc={} n={} t={}",
-                module_path!(),
-                concurrency,
-                n,
-                t
-            ),
+            &format!("{}/conc={} n={} t={}", module_path!(), concurrency, n, t),
             |b| {
                 b.iter_batched(
                     || {
