@@ -4,7 +4,7 @@ use commonware_stream::{public_key::Connection, Receiver, Sender};
 use criterion::{criterion_group, BatchSize, Criterion};
 use futures::executor::block_on;
 
-fn benchmark_receiver(c: &mut Criterion) {
+fn benchmark_receiver_receive(c: &mut Criterion) {
     let kbs = [1, 4, 16, 256, 1024, 4_096, 16_384, 65_536];
     for &kb in &kbs {
         let message_size = kb * 1024;
@@ -51,4 +51,4 @@ fn benchmark_receiver(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_receiver);
+criterion_group!(benches, benchmark_receiver_receive);
