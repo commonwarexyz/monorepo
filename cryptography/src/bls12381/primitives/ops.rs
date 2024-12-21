@@ -210,8 +210,8 @@ pub fn verify_aggregate(
             .map(|msg| {
                 let mut hm = group::Signature::zero();
                 match namespace {
-                    Some(namespace) => hm.map(&union_unique(namespace, msg)),
-                    None => hm.map(msg),
+                    Some(namespace) => hm.map(MESSAGE, &union_unique(namespace, msg)),
+                    None => hm.map(MESSAGE, msg),
                 };
                 hm
             })
