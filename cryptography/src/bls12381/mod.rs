@@ -59,7 +59,7 @@
 //! conc=8 n=500 t=167     time:   [232.44 ms 238.31 ms 247.56 ms]
 //! ```
 //!
-//! ## Partial Signature Aggregation
+//! ## Threshold Signature Recovery
 //!
 //! ```txt
 //! n=5 t=3                 time:   [126.85 µs 128.50 µs 130.67 µs]
