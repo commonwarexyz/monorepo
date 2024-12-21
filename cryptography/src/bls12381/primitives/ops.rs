@@ -179,7 +179,7 @@ pub fn aggregate_signatures(signatures: &[group::Signature]) -> group::Signature
     s
 }
 
-/// Verifies the aggregate signature over a single message.
+/// Verifies the aggregate signature over a single message from multiple public keys.
 ///
 /// # Warning
 ///
@@ -193,18 +193,29 @@ pub fn aggregate_verify_multiple_public_keys(
     signature: &group::Signature,
 ) -> Result<(), Error> {
     // Aggregate public keys
+    //
+    // We can take advantage of the bilinearity property of pairings to aggregate public keys
+    // that have all signed the same message (as long as all public keys are unique).
     let agg_public = aggregate_public_keys(public);
 
     // Verify the signature
     verify_message(&agg_public, namespace, message, signature)
 }
 
-/// Verifies the aggregate signature over multiple unique messages.
+/// Verifies the aggregate signature over multiple unique messages from a single public key.
 ///
 /// # Warning
 ///
 /// This function assumes a group check was already performed on `public` and `signature`. It is not
-/// safe to provide duplicate messages.
+/// safe to provide an aggregate public key or to provide duplicate messages.
+///
+/// ## Why not aggregate public keys?
+///
+/// We rely on the bilinearity property in this function to reduce pairing computations by summing
+/// the hashed messages against a single public key. If the public key were itself an aggregate of
+/// multiple public keys, an attacker could exploit this optimization in unintended ways (potentially forging signatures
+/// across different sets of participants). This would lead to this function incorrectly returning an aggregate
+/// signature is valid when it really isn't.
 pub fn aggregate_verify_multiple_messages(
     public: &group::Public,
     namespace: Option<&[u8]>,
