@@ -367,6 +367,106 @@ mod tests {
             .expect("signature should be valid");
     }
 
+    fn blst_aggregate_verify_multiple_public_keys(
+        public: &[group::Public],
+        message: &[u8],
+        signature: &group::Signature,
+    ) -> Result<(), BLST_ERROR> {
+        let public = public
+            .iter()
+            .map(|pk| blst::min_pk::PublicKey::from_bytes(pk.serialize().as_slice()).unwrap())
+            .collect::<Vec<_>>();
+        let public = public.iter().collect::<Vec<_>>();
+        let signature =
+            blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+        match signature.fast_aggregate_verify(true, message, MESSAGE, &public) {
+            BLST_ERROR::BLST_SUCCESS => Ok(()),
+            e => Err(e),
+        }
+    }
+
+    #[test]
+    fn test_aggregate_verify_multiple_public_keys() {
+        // Generate signatures
+        let (private1, public1) = keypair(&mut thread_rng());
+        let (private2, public2) = keypair(&mut thread_rng());
+        let (private3, public3) = keypair(&mut thread_rng());
+        let namespace = b"test";
+        let message = b"message";
+        let sig1 = sign_message(&private1, Some(namespace), message);
+        let sig2 = sign_message(&private2, Some(namespace), message);
+        let sig3 = sign_message(&private3, Some(namespace), message);
+        let pks = vec![public1, public2, public3];
+        let signatures = vec![sig1, sig2, sig3];
+
+        // Aggregate the signatures
+        let aggregate_sig = aggregate_signatures(&signatures);
+
+        // Verify the aggregated signature
+        aggregate_verify_multiple_public_keys(&pks, Some(namespace), message, &aggregate_sig)
+            .expect("Aggregated signature should be valid");
+
+        // Verify the aggregated signature using blst
+        let payload = union_unique(namespace, message);
+        blst_aggregate_verify_multiple_public_keys(&pks, &payload, &aggregate_sig)
+            .expect("Aggregated signature should be valid");
+    }
+
+    #[test]
+    fn test_aggregate_verify_wrong_public_keys() {
+        // Generate signatures
+        let (private1, public1) = keypair(&mut thread_rng());
+        let (private2, public2) = keypair(&mut thread_rng());
+        let (private3, _) = keypair(&mut thread_rng());
+        let namespace = b"test";
+        let message = b"message";
+        let sig1 = sign_message(&private1, Some(namespace), message);
+        let sig2 = sign_message(&private2, Some(namespace), message);
+        let sig3 = sign_message(&private3, Some(namespace), message);
+        let signatures = vec![sig1, sig2, sig3];
+
+        // Aggregate the signatures
+        let aggregate_sig = aggregate_signatures(&signatures);
+
+        // Verify the aggregated signature
+        let (_, public4) = keypair(&mut thread_rng());
+        let wrong_pks = vec![public1, public2, public4];
+        let result = aggregate_verify_multiple_public_keys(
+            &wrong_pks,
+            Some(namespace),
+            message,
+            &aggregate_sig,
+        );
+        assert!(matches!(result, Err(Error::InvalidSignature)));
+    }
+
+    #[test]
+    fn test_aggregate_verify_wrong_public_key_count() {
+        // Generate signatures
+        let (private1, public1) = keypair(&mut thread_rng());
+        let (private2, public2) = keypair(&mut thread_rng());
+        let (private3, _) = keypair(&mut thread_rng());
+        let namespace = b"test";
+        let message = b"message";
+        let sig1 = sign_message(&private1, Some(namespace), message);
+        let sig2 = sign_message(&private2, Some(namespace), message);
+        let sig3 = sign_message(&private3, Some(namespace), message);
+        let signatures = vec![sig1, sig2, sig3];
+
+        // Aggregate the signatures
+        let aggregate_sig = aggregate_signatures(&signatures);
+
+        // Verify the aggregated signature
+        let wrong_pks = vec![public1, public2];
+        let result = aggregate_verify_multiple_public_keys(
+            &wrong_pks,
+            Some(namespace),
+            message,
+            &aggregate_sig,
+        );
+        assert!(matches!(result, Err(Error::InvalidSignature)));
+    }
+
     fn blst_aggregate_verify_multiple_messages(
         public: &group::Public,
         msgs: &[&[u8]],
