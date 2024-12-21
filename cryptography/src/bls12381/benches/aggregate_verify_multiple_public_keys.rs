@@ -6,7 +6,7 @@ fn benchmark_aggregate_verify_multiple_public_keys(c: &mut Criterion) {
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     thread_rng().fill(&mut msg);
-    for n in [10, 100, 1000, 10000, 50000].into_iter() {
+    for n in [10, 100, 1000, 10000].into_iter() {
         c.bench_function(&format!("{}/pks={}", module_path!(), n), |b| {
             b.iter_batched(
                 || {

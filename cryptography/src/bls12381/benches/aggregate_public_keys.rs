@@ -24,4 +24,8 @@ fn benchmark_aggregate_public_keys(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_aggregate_public_keys);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = benchmark_aggregate_public_keys
+}

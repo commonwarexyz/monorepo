@@ -32,4 +32,8 @@ fn benchmark_aggregate_signatures(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_aggregate_signatures);
+criterion_group! {
+    name = benches;
+    config = Criterion::default().sample_size(10);
+    targets = benchmark_aggregate_signatures
+}

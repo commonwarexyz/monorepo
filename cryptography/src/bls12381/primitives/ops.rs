@@ -213,9 +213,9 @@ pub fn aggregate_verify_multiple_public_keys(
 ///
 /// We rely on the bilinearity property in this function to reduce pairing computations by summing
 /// the hashed messages against a single public key. If the public key were itself an aggregate of
-/// multiple public keys, an attacker could exploit this optimization in unintended ways (potentially forging signatures
-/// across different sets of participants). This would lead to this function incorrectly returning an aggregate
-/// signature is valid when it really isn't.
+/// multiple public keys, an attacker could exploit this optimization in unintended ways (potentially forging
+/// signatures across different sets of participants). This would lead to this function incorrectly returning
+/// an aggregate signature is valid when it really isn't.
 pub fn aggregate_verify_multiple_messages(
     public: &group::Public,
     namespace: Option<&[u8]>,
