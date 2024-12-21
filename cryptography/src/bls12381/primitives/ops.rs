@@ -8,14 +8,14 @@
 //! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 
 use super::{
-    group::{self, equal, Element, Point, Share, DST, PROOF_OF_POSSESSION},
+    group::{self, equal, Element, Point, Share, DST, MESSAGE, PROOF_OF_POSSESSION},
     poly::{self, Eval},
     Error,
 };
 use commonware_utils::union_unique;
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 /// Returns a new keypair derived from the provided randomness.
 pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
@@ -73,8 +73,6 @@ pub fn verify_proof_of_possession(
 
 /// Signs the provided message with the private key.
 ///
-/// The message is hashed according to RFC 9380.
-///
 /// # Determinism
 ///
 /// Signatures produced by this function are deterministic and are safe
@@ -84,40 +82,39 @@ pub fn sign_message(
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> group::Signature {
-    let mut s = group::Signature::zero();
-    match namespace {
-        Some(namespace) => s.map(&union_unique(namespace, message)),
-        None => s.map(message),
+    let payload = match namespace {
+        Some(namespace) => Cow::Owned(union_unique(namespace, message)),
+        None => Cow::Borrowed(message),
     };
-    s.mul(private);
-    s
+    sign(private, MESSAGE, &payload)
 }
 
 /// Verifies the signature with the provided public key.
-pub fn verify(
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on
+/// `public` and `signature`.
+pub fn verify_message(
     public: &group::Public,
     namespace: Option<&[u8]>,
     message: &[u8],
     signature: &group::Signature,
 ) -> Result<(), Error> {
-    let mut hm = group::Signature::zero();
-    match namespace {
-        Some(namespace) => hm.map(&union_unique(namespace, message)),
-        None => hm.map(message),
+    let payload = match namespace {
+        Some(namespace) => Cow::Owned(union_unique(namespace, message)),
+        None => Cow::Borrowed(message),
     };
-    if !equal(public, signature, &hm) {
-        return Err(Error::InvalidSignature);
-    }
-    Ok(())
+    verify(public, MESSAGE, &payload, signature)
 }
 
 /// Signs the provided message with the key share.
-pub fn partial_sign(
+pub fn partial_sign_message(
     private: &Share,
     namespace: Option<&[u8]>,
     message: &[u8],
 ) -> Eval<group::Signature> {
-    let sig = sign(&private.private, namespace, message);
+    let sig = sign_message(&private.private, namespace, message);
     Eval {
         value: sig,
         index: private.index,
@@ -125,23 +122,27 @@ pub fn partial_sign(
 }
 
 /// Verifies the partial signature against the public polynomial.
-pub fn partial_verify(
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on `signature`.
+pub fn partial_verify_message(
     public: &poly::Public,
     namespace: Option<&[u8]>,
     message: &[u8],
     partial: &Eval<group::Signature>,
 ) -> Result<(), Error> {
     let public = public.evaluate(partial.index);
-    verify(&public.value, namespace, message, &partial.value)
+    verify_message(&public.value, namespace, message, &partial.value)
 }
 
-/// Aggregates the partial signatures into a final signature.
+/// Recovers a signature from at least `threshold` partial signatures.
 ///
 /// # Determinism
 ///
 /// Signatures recovered by this function are deterministic and are safe
 /// to use in a consensus-critical context.
-pub fn partial_aggregate(
+pub fn signature_recover(
     threshold: u32,
     partials: Vec<Eval<group::Signature>>,
 ) -> Result<group::Signature, Error> {
@@ -156,6 +157,10 @@ pub fn partial_aggregate(
 ///
 /// If the same signatures is provided multiple times, the function will not error
 /// but any attempt to verify the aggregated signature will fail.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on each `signature`.
 pub fn aggregate(signatures: &[group::Signature]) -> group::Signature {
     let mut s = group::Signature::zero();
     for sig in signatures {
@@ -167,6 +172,10 @@ pub fn aggregate(signatures: &[group::Signature]) -> group::Signature {
 /// Verifies the aggregate signature over multiple unique messages from the same public key.
 ///
 /// If the same message is provided multiple times, the function will error.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on `public` and `signature`.
 pub fn verify_aggregate(
     public: &group::Public,
     namespace: Option<&[u8]>,
@@ -190,7 +199,11 @@ pub fn verify_aggregate(
         .build()
         .expect("Unable to build thread pool");
 
-    // Perform hashing an summation of messages in parallel
+    // Perform hashing and summation of messages in parallel
+    //
+    // Just like public key aggregation takes advantage of the bilinearity property of
+    // pairings, so too can we reduce the number of pairings required to verify multiple
+    // messages signed by a single public key (as long as all messages are unique).
     let hm_sum = pool.install(|| {
         messages
             .par_iter()
