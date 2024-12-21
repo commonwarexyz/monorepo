@@ -15,7 +15,7 @@ use super::{
 use commonware_utils::union_unique;
 use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
-use std::{borrow::Cow, collections::HashSet};
+use std::borrow::Cow;
 
 /// Returns a new keypair derived from the provided randomness.
 pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
@@ -26,7 +26,7 @@ pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
 }
 
 /// Sign the provided payload with the private key.
-fn sign(private: &group::Private, dst: DST, payload: &[u8]) -> group::Signature {
+pub fn sign(private: &group::Private, dst: DST, payload: &[u8]) -> group::Signature {
     let mut s = group::Signature::zero();
     s.map(dst, payload);
     s.mul(private);
@@ -34,7 +34,7 @@ fn sign(private: &group::Private, dst: DST, payload: &[u8]) -> group::Signature 
 }
 
 /// Verify the signature from the provided public key.
-fn verify(
+pub fn verify(
     public: &group::Public,
     dst: DST,
     payload: &[u8],
@@ -142,7 +142,7 @@ pub fn partial_verify_message(
 ///
 /// Signatures recovered by this function are deterministic and are safe
 /// to use in a consensus-critical context.
-pub fn signature_recover(
+pub fn threshold_signature_recover(
     threshold: u32,
     partials: Vec<Eval<group::Signature>>,
 ) -> Result<group::Signature, Error> {
@@ -153,15 +153,25 @@ pub fn signature_recover(
     poly::Signature::recover(threshold, partials)
 }
 
-/// Aggregates multiple signatures over unique messages from the same public key.
+/// Aggregates multiple public keys.
 ///
-/// If the same signatures is provided multiple times, the function will not error
-/// but any attempt to verify the aggregated signature will fail.
+/// # Warning
+///
+/// This function assumes a group check was already performed on each `public`.
+pub fn aggregate_public_keys(public_keys: &[group::Public]) -> group::Public {
+    let mut p = group::Public::zero();
+    for pk in public_keys {
+        p.add(pk);
+    }
+    p
+}
+
+/// Aggregates multiple signatures.
 ///
 /// # Warning
 ///
 /// This function assumes a group check was already performed on each `signature`.
-pub fn aggregate(signatures: &[group::Signature]) -> group::Signature {
+pub fn aggregate_signatures(signatures: &[group::Signature]) -> group::Signature {
     let mut s = group::Signature::zero();
     for sig in signatures {
         s.add(sig);
@@ -169,30 +179,39 @@ pub fn aggregate(signatures: &[group::Signature]) -> group::Signature {
     s
 }
 
-/// Verifies the aggregate signature over multiple unique messages from the same public key.
-///
-/// If the same message is provided multiple times, the function will error.
+/// Verifies the aggregate signature over a single message.
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on `public` and `signature`.
-pub fn verify_aggregate(
+/// This function assumes the caller has performed a group check and collected a proof-of-possession
+/// for all provided `public`. This function assumes a group check was already performed on the
+/// `signature`. It is not safe to provide duplicate public keys.
+pub fn aggregate_verify_single_message(
+    public: &[group::Public],
+    namespace: Option<&[u8]>,
+    message: &[u8],
+    signature: &group::Signature,
+) -> Result<(), Error> {
+    // Aggregate public keys
+    let agg_public = aggregate_public_keys(public);
+
+    // Verify the signature
+    verify_message(&agg_public, namespace, message, signature)
+}
+
+/// Verifies the aggregate signature over multiple unique messages.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on `public` and `signature`. It is not
+/// safe to provide duplicate messages.
+pub fn aggregate_verify_multiple_messages(
     public: &group::Public,
     namespace: Option<&[u8]>,
     messages: &[&[u8]],
     signature: &group::Signature,
     concurrency: usize,
 ) -> Result<(), Error> {
-    // Check for duplicate messages before parallel processing
-    {
-        let mut seen = HashSet::new();
-        for msg in messages {
-            if !seen.insert(*msg) {
-                return Err(Error::DuplicateMessage);
-            }
-        }
-    }
-
     // Build a thread pool with the specified concurrency
     let pool = ThreadPoolBuilder::new()
         .num_threads(concurrency)
@@ -231,12 +250,37 @@ pub fn verify_aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bls12381::{dkg::ops::generate_shares, primitives::group::DST_G2};
+    use crate::bls12381::dkg::ops::generate_shares;
     use blst::BLST_ERROR;
     use rand::prelude::*;
 
+    #[test]
+    fn test_encoding() {
+        // Encode private/public key
+        let (private, public) = keypair(&mut thread_rng());
+        let (private_bytes, public_bytes) = (private.serialize(), public.serialize());
+
+        // Decode private/public key
+        let (private_decoded, public_decoded) = (
+            group::Private::deserialize(&private_bytes).unwrap(),
+            group::Public::deserialize(&public_bytes).unwrap(),
+        );
+
+        // Ensure equal
+        assert_eq!(private, private_decoded);
+        assert_eq!(public, public_decoded);
+
+        // Ensure blst compatibility
+        blst::min_pk::SecretKey::from_bytes(private_bytes.as_slice()).unwrap();
+        let blst_public_decoded =
+            blst::min_pk::PublicKey::from_bytes(public_bytes.as_slice()).unwrap();
+        blst_public_decoded.validate().unwrap();
+        let blst_public_encoded = blst_public_decoded.compress().to_vec();
+        assert_eq!(public_bytes, blst_public_encoded.as_slice());
+    }
+
     /// Verify that a given signature is valid according to `blst`.
-    fn blst_verify(
+    fn blst_verify_message(
         public: &group::Public,
         msg: &[u8],
         signature: &group::Signature,
@@ -244,7 +288,7 @@ mod tests {
         let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
         let signature =
             blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
-        match signature.verify(true, msg, DST_G2, &[], &public, true) {
+        match signature.verify(true, msg, MESSAGE, &[], &public, true) {
             BLST_ERROR::BLST_SUCCESS => Ok(()),
             e => Err(e),
         }
@@ -254,43 +298,45 @@ mod tests {
     fn test_bad_namespace() {
         let (private, public) = keypair(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
-        let sig = sign(&private, Some(b"good"), msg);
+        let sig = sign_message(&private, Some(b"good"), msg);
         assert!(matches!(
-            verify(&public, Some(b"bad"), msg, &sig).unwrap_err(),
+            verify_message(&public, Some(b"bad"), msg, &sig).unwrap_err(),
             Error::InvalidSignature
         ));
     }
 
     #[test]
-    fn test_single_compatibility() {
+    fn test_single_message() {
         let (private, public) = keypair(&mut thread_rng());
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
-        let sig = sign(&private, Some(namespace), msg);
-        verify(&public, Some(namespace), msg, &sig).expect("signature should be valid");
+        let sig = sign_message(&private, Some(namespace), msg);
+        verify_message(&public, Some(namespace), msg, &sig).expect("signature should be valid");
         let payload = union_unique(namespace, msg);
-        blst_verify(&public, &payload, &sig).expect("signature should be valid");
+        blst_verify_message(&public, &payload, &sig).expect("signature should be valid");
     }
 
     #[test]
-    fn test_threshold_compatibility() {
+    fn test_threshold_message() {
         let (n, t) = (5, 4);
         let (public, shares) = generate_shares(None, n, t);
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
         let partials: Vec<_> = shares
             .iter()
-            .map(|s| partial_sign(s, Some(namespace), msg))
+            .map(|s| partial_sign_message(s, Some(namespace), msg))
             .collect();
         for p in &partials {
-            partial_verify(&public, Some(namespace), msg, p).expect("signature should be valid");
+            partial_verify_message(&public, Some(namespace), msg, p)
+                .expect("signature should be valid");
         }
-        let threshold_sig = partial_aggregate(t, partials).unwrap();
+        let threshold_sig = threshold_signature_recover(t, partials).unwrap();
         let threshold_pub = poly::public(&public);
-        verify(&threshold_pub, Some(namespace), msg, &threshold_sig)
+        verify_message(&threshold_pub, Some(namespace), msg, &threshold_sig)
             .expect("signature should be valid");
         let payload = union_unique(namespace, msg);
-        blst_verify(&threshold_pub, &payload, &threshold_sig).expect("signature should be valid");
+        blst_verify_message(&threshold_pub, &payload, &threshold_sig)
+            .expect("signature should be valid");
     }
 
     #[test]
@@ -301,14 +347,14 @@ mod tests {
         let namespace = Some(&b"test"[..]);
         let signatures: Vec<_> = messages
             .iter()
-            .map(|msg| sign(&private, namespace, msg))
+            .map(|msg| sign_message(&private, namespace, msg))
             .collect();
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate(&signatures);
+        let aggregate_sig = aggregate_signatures(&signatures);
 
         // Verify the aggregated signature
-        verify_aggregate(&public, namespace, &messages, &aggregate_sig, 4)
+        aggregate_verify_multiple_messages(&public, namespace, &messages, &aggregate_sig, 4)
             .expect("Aggregated signature should be valid");
     }
 
@@ -320,35 +366,22 @@ mod tests {
         let namespace = Some(&b"test"[..]);
         let signatures: Vec<_> = messages
             .iter()
-            .map(|msg| sign(&private, namespace, msg))
+            .map(|msg| sign_message(&private, namespace, msg))
             .collect();
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate(&signatures);
+        let aggregate_sig = aggregate_signatures(&signatures);
 
         // Verify the aggregated signature
         let wrong_messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 4"];
-        let result = verify_aggregate(&public, namespace, &wrong_messages, &aggregate_sig, 4);
+        let result = aggregate_verify_multiple_messages(
+            &public,
+            namespace,
+            &wrong_messages,
+            &aggregate_sig,
+            4,
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
-    }
-
-    #[test]
-    fn test_aggregate_signatures_duplicate_messages() {
-        // Generate signatures
-        let (private, public) = keypair(&mut thread_rng());
-        let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 2"];
-        let namespace = Some(&b"test"[..]);
-        let signatures: Vec<_> = messages
-            .iter()
-            .map(|msg| sign(&private, namespace, msg))
-            .collect();
-
-        // Aggregate the signatures
-        let aggregate_sig = aggregate(&signatures);
-
-        // Verify the aggregated signature
-        let result = verify_aggregate(&public, namespace, &messages, &aggregate_sig, 4);
-        assert!(matches!(result, Err(Error::DuplicateMessage)));
     }
 
     #[test]
@@ -359,15 +392,21 @@ mod tests {
         let namespace = Some(&b"test"[..]);
         let signatures: Vec<_> = messages
             .iter()
-            .map(|msg| sign(&private, namespace, msg))
+            .map(|msg| sign_message(&private, namespace, msg))
             .collect();
 
         // Aggregate the signatures
-        let aggregate_sig = aggregate(&signatures);
+        let aggregate_sig = aggregate_signatures(&signatures);
 
         // Verify the aggregated signature
         let wrong_messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2"];
-        let result = verify_aggregate(&public, namespace, &wrong_messages, &aggregate_sig, 4);
+        let result = aggregate_verify_multiple_messages(
+            &public,
+            namespace,
+            &wrong_messages,
+            &aggregate_sig,
+            4,
+        );
         assert!(matches!(result, Err(Error::InvalidSignature)));
     }
 }

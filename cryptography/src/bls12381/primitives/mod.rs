@@ -59,6 +59,4 @@ pub enum Error {
     NoInverse,
     #[error("duplicate eval")]
     DuplicateEval,
-    #[error("duplicate message")]
-    DuplicateMessage,
 }
