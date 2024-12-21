@@ -1,19 +1,23 @@
 use criterion::criterion_main;
 
+mod aggregate_public_keys;
+mod aggregate_signatures;
+mod aggregate_verify_multiple_messages;
+mod aggregate_verify_multiple_public_keys;
 mod dkg_recovery;
 mod dkg_reshare_recovery;
-mod partial_signature_aggregation;
-mod signature_aggregation;
 mod signature_generation;
 mod signature_verification;
-mod signature_verify_aggregation;
+mod threshold_signature_recover;
 
 criterion_main!(
     dkg_recovery::benches,
     dkg_reshare_recovery::benches,
-    partial_signature_aggregation::benches,
-    signature_aggregation::benches,
+    threshold_signature_recover::benches,
+    aggregate_public_keys::benches,
+    aggregate_signatures::benches,
     signature_generation::benches,
     signature_verification::benches,
-    signature_verify_aggregation::benches,
+    aggregate_verify_multiple_messages::benches,
+    aggregate_verify_multiple_public_keys::benches,
 );

@@ -59,7 +59,7 @@
 //! conc=8 n=500 t=167     time:   [232.44 ms 238.31 ms 247.56 ms]
 //! ```
 //!
-//! ## Partial Signature Aggregation
+//! ## Threshold Signature Recovery
 //!
 //! ```txt
 //! n=5 t=3                 time:   [126.85 µs 128.50 µs 130.67 µs]
@@ -131,7 +131,9 @@ mod tests {
     use super::*;
     use dkg::ops::generate_shares;
     use primitives::group::Private;
-    use primitives::ops::{partial_aggregate, partial_sign, partial_verify, verify};
+    use primitives::ops::{
+        partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message,
+    };
     use primitives::poly::public;
     use primitives::Error;
 
@@ -151,18 +153,18 @@ mod tests {
         let msg = b"hello";
         let partials = shares
             .iter()
-            .map(|s| partial_sign(s, namespace, msg))
+            .map(|s| partial_sign_message(s, namespace, msg))
             .collect::<Vec<_>>();
 
         // Each partial sig can be partially verified against the public polynomial
         partials.iter().for_each(|partial| {
-            partial_verify(&group, namespace, msg, partial).unwrap();
+            partial_verify_message(&group, namespace, msg, partial).unwrap();
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = partial_aggregate(t, partials).unwrap();
+        let threshold_sig = threshold_signature_recover(t, partials).unwrap();
         let threshold_pub = public(&group);
-        verify(&threshold_pub, namespace, msg, &threshold_sig).unwrap();
+        verify_message(&threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }
 
     #[test]
@@ -181,23 +183,23 @@ mod tests {
         let msg = b"hello";
         let partials = shares
             .iter()
-            .map(|s| partial_sign(s, namespace, msg))
+            .map(|s| partial_sign_message(s, namespace, msg))
             .collect::<Vec<_>>();
 
         // Each partial sig can be partially verified against the public polynomial
         let namespace = Some(&b"bad"[..]);
         partials.iter().for_each(|partial| {
             assert!(matches!(
-                partial_verify(&group, namespace, msg, partial).unwrap_err(),
+                partial_verify_message(&group, namespace, msg, partial).unwrap_err(),
                 Error::InvalidSignature
             ));
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = partial_aggregate(t, partials).unwrap();
+        let threshold_sig = threshold_signature_recover(t, partials).unwrap();
         let threshold_pub = public(&group);
         assert!(matches!(
-            verify(&threshold_pub, namespace, msg, &threshold_sig).unwrap_err(),
+            verify_message(&threshold_pub, namespace, msg, &threshold_sig).unwrap_err(),
             Error::InvalidSignature
         ));
     }
@@ -218,17 +220,17 @@ mod tests {
         let msg = b"hello";
         let partials = shares
             .iter()
-            .map(|s| partial_sign(s, namespace, msg))
+            .map(|s| partial_sign_message(s, namespace, msg))
             .collect::<Vec<_>>();
 
         // Each partial sig can be partially verified against the public polynomial
         partials.iter().for_each(|partial| {
-            partial_verify(&group, namespace, msg, partial).unwrap();
+            partial_verify_message(&group, namespace, msg, partial).unwrap();
         });
 
         // Generate the threshold sig
         assert!(matches!(
-            partial_aggregate(t, partials).unwrap_err(),
+            threshold_signature_recover(t, partials).unwrap_err(),
             Error::NotEnoughPartialSignatures(4, 3)
         ));
     }
@@ -250,17 +252,17 @@ mod tests {
         let msg = b"hello";
         let partials = shares
             .iter()
-            .map(|s| partial_sign(s, namespace, msg))
+            .map(|s| partial_sign_message(s, namespace, msg))
             .collect::<Vec<_>>();
 
         // Each partial sig can be partially verified against the public polynomial
         partials.iter().for_each(|partial| {
-            partial_verify(&group, namespace, msg, partial).unwrap();
+            partial_verify_message(&group, namespace, msg, partial).unwrap();
         });
 
         // Generate the threshold sig
         assert!(matches!(
-            partial_aggregate(t, partials).unwrap_err(),
+            threshold_signature_recover(t, partials).unwrap_err(),
             Error::DuplicateEval,
         ));
     }
@@ -283,17 +285,17 @@ mod tests {
         let msg = b"hello";
         let partials = shares
             .iter()
-            .map(|s| partial_sign(s, namespace, msg))
+            .map(|s| partial_sign_message(s, namespace, msg))
             .collect::<Vec<_>>();
 
         // Each partial sig can be partially verified against the public polynomial
         partials.iter().for_each(|partial| {
-            partial_verify(&group, namespace, msg, partial).unwrap();
+            partial_verify_message(&group, namespace, msg, partial).unwrap();
         });
 
         // Generate and verify the threshold sig
-        let threshold_sig = partial_aggregate(t, partials).unwrap();
+        let threshold_sig = threshold_signature_recover(t, partials).unwrap();
         let threshold_pub = public(&group);
-        verify(&threshold_pub, namespace, msg, &threshold_sig).unwrap();
+        verify_message(&threshold_pub, namespace, msg, &threshold_sig).unwrap();
     }
 }

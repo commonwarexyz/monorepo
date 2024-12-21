@@ -69,7 +69,7 @@ impl Scheme for Bls12381 {
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-        let signature = ops::sign(&self.private, namespace, message);
+        let signature = ops::sign_message(&self.private, namespace, message);
         signature.serialize().into()
     }
 
@@ -91,7 +91,7 @@ impl Scheme for Bls12381 {
             Some(signature) => signature,
             None => return false,
         };
-        ops::verify(&public, namespace, message, &signature).is_ok()
+        ops::verify_message(&public, namespace, message, &signature).is_ok()
     }
 
     fn len() -> (usize, usize) {
