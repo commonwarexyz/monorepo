@@ -108,6 +108,45 @@ pub fn verify_message(
     verify(public, MESSAGE, &payload, signature)
 }
 
+/// Generates a proof of possession for the private key share.
+pub fn partial_sign_proof_of_possession(
+    public: &poly::Public,
+    private: &Share,
+) -> Eval<group::Signature> {
+    // Get public key
+    let threshold_public = poly::public(public);
+
+    // Sign the public key
+    let sig = sign(
+        &private.private,
+        PROOF_OF_POSSESSION,
+        threshold_public.serialize().as_slice(),
+    );
+    Eval {
+        value: sig,
+        index: private.index,
+    }
+}
+
+/// Verifies the proof of possession for the provided public polynomial.
+///
+/// # Warning
+///
+/// This function assumes a group check was already performed on `signature`.
+pub fn partial_verify_proof_of_possession(
+    public: &poly::Public,
+    partial: &Eval<group::Signature>,
+) -> Result<(), Error> {
+    let threshold_public = poly::public(public);
+    let public = public.evaluate(partial.index);
+    verify(
+        &public.value,
+        PROOF_OF_POSSESSION,
+        threshold_public.serialize().as_slice(),
+        &partial.value,
+    )
+}
+
 /// Signs the provided message with the key share.
 pub fn partial_sign_message(
     private: &Share,
@@ -306,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_proof_of_posession() {
+    fn test_single_proof_of_possession() {
         // Generate PoP
         let (private, public) = keypair(&mut thread_rng());
         let pop = sign_proof_of_possession(&private);
@@ -316,6 +355,30 @@ mod tests {
 
         // Verify PoP using blst
         blst_verify_proof_of_possession(&public, &pop).expect("PoP should be valid");
+    }
+
+    #[test]
+    fn test_threshold_proof_of_possession() {
+        // Generate PoP
+        let (n, t) = (5, 4);
+        let (public, shares) = generate_shares(None, n, t);
+        let partials: Vec<_> = shares
+            .iter()
+            .map(|s| partial_sign_proof_of_possession(&public, s))
+            .collect();
+        for p in &partials {
+            partial_verify_proof_of_possession(&public, p).expect("signature should be valid");
+        }
+        let threshold_sig = threshold_signature_recover(t, partials).unwrap();
+        let threshold_pub = poly::public(&public);
+
+        // Verify PoP
+        verify_proof_of_possession(&threshold_pub, &threshold_sig)
+            .expect("signature should be valid");
+
+        // Verify PoP using blst
+        blst_verify_proof_of_possession(&threshold_pub, &threshold_sig)
+            .expect("signature should be valid");
     }
 
     /// Verify that a given message signature is valid according to `blst`.
@@ -357,6 +420,7 @@ mod tests {
 
     #[test]
     fn test_threshold_message() {
+        // Generate signature
         let (n, t) = (5, 4);
         let (public, shares) = generate_shares(None, n, t);
         let msg = &[1, 9, 6, 9];
@@ -371,8 +435,12 @@ mod tests {
         }
         let threshold_sig = threshold_signature_recover(t, partials).unwrap();
         let threshold_pub = poly::public(&public);
+
+        // Verify the signature
         verify_message(&threshold_pub, Some(namespace), msg, &threshold_sig)
             .expect("signature should be valid");
+
+        // Verify the signature using blst
         let payload = union_unique(namespace, msg);
         blst_verify_message(&threshold_pub, &payload, &threshold_sig)
             .expect("signature should be valid");
