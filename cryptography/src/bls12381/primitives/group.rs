@@ -26,7 +26,7 @@ use zeroize::Zeroize;
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
 ///
-/// Reference: https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites
+/// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
 pub type DST = &'static [u8];
 
 /// An element of a group.
@@ -73,7 +73,7 @@ const SCALAR_LENGTH: usize = 32;
 /// non-Montgomery form.
 ///
 /// mod(2^256, 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001) = 0x1824b159acc5056f998c4fefecbc4ff55884b7fa0003480200000001fffffffe
-// Reference: https://github.com/filecoin-project/blstrs/blob/ffbb41d1495d84e40a712583346439924603b49a/src/scalar.rs#L77-L89
+// Reference: <https://github.com/filecoin-project/blstrs/blob/ffbb41d1495d84e40a712583346439924603b49a/src/scalar.rs#L77-L89>
 const BLST_FR_ONE: Scalar = Scalar(blst_fr {
     l: [
         0x0000_0001_ffff_fffe,
