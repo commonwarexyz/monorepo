@@ -1,7 +1,14 @@
-//! Digital signatures over the BLS12-381 curve.
+//! Digital signatures over the BLS12-381 curve using G1 as the Public Key (48 bytes)
+//! and G2 as the Signature (96 bytes).
+//!
+//! # Domain Separation Tag (DST)
+//!
+//! All signatures use the `POP` (Proof of Possession) scheme during signing. For Proof-of-Posession (POP) signatures,
+//! the domain separation tag is `BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. For signatures over other messages, the
+//! domain separation tag is `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`. You can read more about DSTs [here](https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#section-4.2).
 
 use super::{
-    group::{self, equal, Element, Point, Share},
+    group::{self, equal, Element, Point, Share, DST, PROOF_OF_POSSESSION},
     poly::{self, Eval},
     Error,
 };
@@ -18,6 +25,52 @@ pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
     (private, public)
 }
 
+/// Sign the provided payload with the private key.
+fn sign(private: &group::Private, dst: DST, payload: &[u8]) -> group::Signature {
+    let mut s = group::Signature::zero();
+    s.map(dst, payload);
+    s.mul(private);
+    s
+}
+
+/// Verify the signature from the provided public key.
+fn verify(
+    public: &group::Public,
+    dst: DST,
+    payload: &[u8],
+    signature: &group::Signature,
+) -> Result<(), Error> {
+    let mut hm = group::Signature::zero();
+    hm.map(dst, payload);
+    if !equal(public, signature, &hm) {
+        return Err(Error::InvalidSignature);
+    }
+    Ok(())
+}
+
+/// Generates a proof of possession for the private key.
+pub fn sign_proof_of_possession(private: &group::Private) -> group::Signature {
+    // Get public key
+    let mut public = group::Public::one();
+    public.mul(private);
+
+    // Sign the public key
+    sign(private, PROOF_OF_POSSESSION, public.serialize().as_slice())
+}
+
+/// Verifies a proof of possession for the provided public key.
+pub fn verify_proof_of_possession(
+    public: &group::Public,
+    signature: &group::Signature,
+) -> Result<(), Error> {
+    verify(
+        public,
+        PROOF_OF_POSSESSION,
+        public.serialize().as_slice(),
+        signature,
+    )
+}
+
 /// Signs the provided message with the private key.
 ///
 /// The message is hashed according to RFC 9380.
@@ -26,7 +79,7 @@ pub fn keypair<R: RngCore>(rng: &mut R) -> (group::Private, group::Public) {
 ///
 /// Signatures produced by this function are deterministic and are safe
 /// to use in a consensus-critical context.
-pub fn sign(
+pub fn sign_message(
     private: &group::Private,
     namespace: Option<&[u8]>,
     message: &[u8],
