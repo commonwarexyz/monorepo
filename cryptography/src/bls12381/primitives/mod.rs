@@ -13,7 +13,7 @@
 //!
 //! ```rust
 //! use commonware_cryptography::bls12381::{
-//!     primitives::{ops::{partial_sign, partial_verify, partial_aggregate, verify}, poly::public},
+//!     primitives::{ops::{partial_sign_message, partial_verify_message, threshold_signature_recover, verify_message}, poly::public},
 //!     dkg::ops::{generate_shares},
 //! };
 //!
@@ -26,19 +26,19 @@
 //! // Generate partial signatures from shares
 //! let namespace = Some(&b"demo"[..]);
 //! let message = b"hello world";
-//! let partials: Vec<_> = shares.iter().map(|s| partial_sign(s, namespace, message)).collect();
+//! let partials: Vec<_> = shares.iter().map(|s| partial_sign_message(s, namespace, message)).collect();
 //!
 //! // Verify partial signatures
 //! for p in &partials {
-//!     partial_verify(&commitment, namespace, message, p).expect("signature should be valid");
+//!     partial_verify_message(&commitment, namespace, message, p).expect("signature should be valid");
 //! }
 //!
 //! // Aggregate partial signatures
-//! let threshold_sig = partial_aggregate(t, partials).unwrap();
+//! let threshold_sig = threshold_signature_recover(t, partials).unwrap();
 //!
 //! // Verify threshold signature
 //! let threshold_pub = public(&commitment);
-//! verify(&threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
+//! verify_message(&threshold_pub, namespace, message, &threshold_sig).expect("signature should be valid");
 //! ```
 
 pub mod group;
