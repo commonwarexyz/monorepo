@@ -186,7 +186,7 @@ pub fn aggregate_signatures(signatures: &[group::Signature]) -> group::Signature
 /// This function assumes the caller has performed a group check and collected a proof-of-possession
 /// for all provided `public`. This function assumes a group check was already performed on the
 /// `signature`. It is not safe to provide duplicate public keys.
-pub fn aggregate_verify_single_message(
+pub fn aggregate_verify_multiple_public_keys(
     public: &[group::Public],
     namespace: Option<&[u8]>,
     message: &[u8],
@@ -279,7 +279,35 @@ mod tests {
         assert_eq!(public_bytes, blst_public_encoded.as_slice());
     }
 
-    /// Verify that a given signature is valid according to `blst`.
+    /// Verify that a given proof-of-possession signature is valid according to `blst`.
+    fn blst_verify_proof_of_possession(
+        public: &group::Public,
+        signature: &group::Signature,
+    ) -> Result<(), BLST_ERROR> {
+        let msg = public.serialize();
+        let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
+        let signature =
+            blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+        match signature.verify(true, &msg, PROOF_OF_POSSESSION, &[], &public, true) {
+            BLST_ERROR::BLST_SUCCESS => Ok(()),
+            e => Err(e),
+        }
+    }
+
+    #[test]
+    fn test_proof_of_posession() {
+        // Generate PoP
+        let (private, public) = keypair(&mut thread_rng());
+        let pop = sign_proof_of_possession(&private);
+
+        // Verify PoP
+        verify_proof_of_possession(&public, &pop).expect("PoP should be valid");
+
+        // Verify PoP using blst
+        blst_verify_proof_of_possession(&public, &pop).expect("PoP should be valid");
+    }
+
+    /// Verify that a given message signature is valid according to `blst`.
     fn blst_verify_message(
         public: &group::Public,
         msg: &[u8],
@@ -339,8 +367,23 @@ mod tests {
             .expect("signature should be valid");
     }
 
+    fn blst_aggregate_verify_multiple_messages(
+        public: &group::Public,
+        msgs: &[&[u8]],
+        signature: &group::Signature,
+    ) -> Result<(), BLST_ERROR> {
+        let public = blst::min_pk::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
+        let pks = vec![&public; msgs.len()];
+        let signature =
+            blst::min_pk::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+        match signature.aggregate_verify(true, msgs, MESSAGE, &pks, true) {
+            BLST_ERROR::BLST_SUCCESS => Ok(()),
+            e => Err(e),
+        }
+    }
+
     #[test]
-    fn test_aggregate_signatures() {
+    fn test_aggregate_verify_multiple_messages() {
         // Generate signatures
         let (private, public) = keypair(&mut thread_rng());
         let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 3"];
@@ -356,10 +399,22 @@ mod tests {
         // Verify the aggregated signature
         aggregate_verify_multiple_messages(&public, namespace, &messages, &aggregate_sig, 4)
             .expect("Aggregated signature should be valid");
+
+        // Verify the aggregated signature using blst
+        let messages = messages
+            .iter()
+            .map(|msg| union_unique(b"test", msg))
+            .collect::<Vec<_>>();
+        let messages = messages
+            .iter()
+            .map(|msg| msg.as_slice())
+            .collect::<Vec<_>>();
+        blst_aggregate_verify_multiple_messages(&public, &messages, &aggregate_sig)
+            .expect("Aggregated signature should be valid");
     }
 
     #[test]
-    fn test_aggregate_signatures_wrong_messages() {
+    fn test_aggregate_verify_wrong_messages() {
         // Generate signatures
         let (private, public) = keypair(&mut thread_rng());
         let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 3"];
@@ -385,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggregate_signatures_wrong_message_count() {
+    fn test_aggregate_verify_wrong_message_count() {
         // Generate signatures
         let (private, public) = keypair(&mut thread_rng());
         let messages: Vec<&[u8]> = vec![b"Message 1", b"Message 2", b"Message 3"];
