@@ -47,6 +47,7 @@ pub mod poly;
 
 use thiserror::Error;
 
+/// Errors that can occur when working with BLS12-381 primitives.
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("not enough partial signatures: {0}/{1}")]

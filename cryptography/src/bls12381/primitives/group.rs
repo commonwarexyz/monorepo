@@ -62,6 +62,7 @@ pub trait Point: Element {
     fn map(&mut self, dst: DST, message: &[u8]);
 }
 
+/// A scalar representing an element of the BLS12-381 finite field.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
@@ -69,6 +70,10 @@ pub struct Scalar(blst_fr);
 /// Length of a scalar in bytes.
 const SCALAR_LENGTH: usize = 32;
 
+/// This constant serves as the multiplicative identity (i.e., "one") in the
+/// BLS12-381 finite field, ensuring that arithmetic is carried out within the
+/// correct modulo.
+///
 /// `R = 2^256 mod q` in little-endian Montgomery form which is equivalent to 1 in little-endian
 /// non-Montgomery form:
 ///
@@ -86,6 +91,7 @@ const BLST_FR_ONE: Scalar = Scalar(blst_fr {
     ],
 });
 
+/// A point on the BLS12-381 G1 curve.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct G1(blst_p1);
@@ -104,6 +110,7 @@ pub const G1_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO
 /// to be safely deployed in this environment).
 pub const G1_MESSAGE: DST = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
+/// A point on the BLS12-381 G2 curve.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct G2(blst_p2);
@@ -122,6 +129,10 @@ pub const G2_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO
 /// to be safely deployed in this environment).
 pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
+/// The target group of the BLS12-381 pairing.
+///
+/// This is an element in the extension field `F_p^12` and is
+/// produced as the result of a pairing operation.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct GT(blst_fp12);
 
