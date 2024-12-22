@@ -77,7 +77,7 @@ const SCALAR_LENGTH: usize = 32;
 /// `R = 2^256 mod q` in little-endian Montgomery form which is equivalent to 1 in little-endian
 /// non-Montgomery form:
 ///
-/// ```
+/// ```txt
 /// mod(2^256, 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001) = 0x1824b159acc5056f998c4fefecbc4ff55884b7fa0003480200000001fffffffe
 /// ```
 ///
