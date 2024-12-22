@@ -196,7 +196,10 @@ pub fn threshold_signature_recover(
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on each `public`.
+/// This function assumes a group check was already performed on all `public_keys`,
+/// that each `public_key` is unique, and that the caller has a Proof-of-Possession (PoP)
+/// for each `public_key`. If any of these assumptions are violated, an attacker can
+/// exploit this function to verify an incorrect aggregate signature.
 pub fn aggregate_public_keys(public_keys: &[group::Public]) -> group::Public {
     let mut p = group::Public::zero();
     for pk in public_keys {
@@ -209,7 +212,9 @@ pub fn aggregate_public_keys(public_keys: &[group::Public]) -> group::Public {
 ///
 /// # Warning
 ///
-/// This function assumes a group check was already performed on each `signature`.
+/// This function assumes a group check was already performed on each `signature` and
+/// that each `signature` is unique. If any of these assumptions are violated, an attacker can
+/// exploit this function to verify an incorrect aggregate signature.
 pub fn aggregate_signatures(signatures: &[group::Signature]) -> group::Signature {
     let mut s = group::Signature::zero();
     for sig in signatures {
