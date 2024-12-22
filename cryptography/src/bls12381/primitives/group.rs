@@ -483,13 +483,12 @@ pub(super) fn equal(p: &G1, sig: &G2, hm: &G2) -> bool {
 
 #[cfg(test)]
 mod tests {
-    // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
-
     use super::*;
     use rand::prelude::*;
 
     #[test]
     fn basic_group() {
+        // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
         let s = Scalar::rand(&mut thread_rng());
         let mut e1 = s;
         let e2 = s;

@@ -302,6 +302,7 @@ mod tests {
     use super::*;
     use crate::bls12381::dkg::ops::generate_shares;
     use blst::BLST_ERROR;
+    use group::{G1, G1_MESSAGE};
     use rand::prelude::*;
 
     #[test]
@@ -444,6 +445,32 @@ mod tests {
         let payload = union_unique(namespace, msg);
         blst_verify_message(&threshold_pub, &payload, &threshold_sig)
             .expect("signature should be valid");
+    }
+
+    #[test]
+    fn test_single_message_min_sig() {
+        // Generate keypair
+        let private = group::Private::rand(&mut thread_rng());
+        let mut public = group::G2::one();
+        public.mul(&private);
+
+        // Sign message
+        let msg = &[1, 9, 6, 9];
+        let namespace = b"test";
+        let payload = union_unique(namespace, msg);
+        let mut signature = G1::zero();
+        signature.map(G1_MESSAGE, &payload);
+        signature.mul(&private);
+
+        // Verify signature using blst
+        let public = blst::min_sig::PublicKey::from_bytes(public.serialize().as_slice()).unwrap();
+        let signature =
+            blst::min_sig::Signature::from_bytes(signature.serialize().as_slice()).unwrap();
+        let result = match signature.verify(true, &payload, G1_MESSAGE, &[], &public, true) {
+            BLST_ERROR::BLST_SUCCESS => Ok(()),
+            e => Err(e),
+        };
+        result.expect("signature should be valid");
     }
 
     fn blst_aggregate_verify_multiple_public_keys(
