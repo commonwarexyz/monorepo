@@ -302,7 +302,7 @@ mod tests {
     use super::*;
     use crate::bls12381::dkg::ops::generate_shares;
     use blst::BLST_ERROR;
-    use group::{G1, G1_MESSAGE};
+    use group::{G1, G1_MESSAGE, G1_PROOF_OF_POSSESSION};
     use rand::prelude::*;
 
     #[test]
@@ -380,6 +380,36 @@ mod tests {
         // Verify PoP using blst
         blst_verify_proof_of_possession(&threshold_pub, &threshold_sig)
             .expect("signature should be valid");
+    }
+
+    #[test]
+    fn test_single_proof_of_possession_min_sig() {
+        // Generate keypair
+        let private = group::Private::rand(&mut thread_rng());
+        let mut public = group::G2::one();
+        public.mul(&private);
+        let public_compressed = public.serialize();
+
+        // Generate PoP
+        let mut pop = G1::zero();
+        pop.map(G1_PROOF_OF_POSSESSION, &public_compressed);
+        pop.mul(&private);
+
+        // Verify PoP using blst
+        let public = blst::min_sig::PublicKey::from_bytes(&public_compressed).unwrap();
+        let signature = blst::min_sig::Signature::from_bytes(pop.serialize().as_slice()).unwrap();
+        let result = match signature.verify(
+            true,
+            &public_compressed,
+            G1_PROOF_OF_POSSESSION,
+            &[],
+            &public,
+            true,
+        ) {
+            BLST_ERROR::BLST_SUCCESS => Ok(()),
+            e => Err(e),
+        };
+        result.expect("signature should be valid");
     }
 
     /// Verify that a given message signature is valid according to `blst`.
