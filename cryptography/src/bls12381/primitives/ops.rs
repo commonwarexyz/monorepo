@@ -250,11 +250,10 @@ pub fn aggregate_verify_multiple_public_keys(
 ///
 /// ## Why not aggregate public keys?
 ///
-/// We rely on the bilinearity property in this function to reduce pairing computations by summing
-/// the hashed messages against a single public key. If the public key were itself an aggregate of
-/// multiple public keys, an attacker could exploit this optimization in unintended ways (potentially forging
-/// signatures across different sets of participants). This would lead to this function incorrectly returning
-/// an aggregate signature is valid when it really isn't.
+/// We rely on bilinearity to reduce pairing operations in this function, like in `aggregate_verify_multiple_public_keys`,
+/// and sum hashed messages together before performing a single pairing operation (instead of summing `len(messages)` pairings of
+/// hashed message and public key). If the public key itself is an aggregate of multiple public keys, an attacker can exploit
+/// this optimization to cause this function to return that an aggregate signature is valid when it really isn't.
 pub fn aggregate_verify_multiple_messages(
     public: &group::Public,
     namespace: Option<&[u8]>,
@@ -268,11 +267,7 @@ pub fn aggregate_verify_multiple_messages(
         .build()
         .expect("Unable to build thread pool");
 
-    // Perform hashing and summation of messages in parallel
-    //
-    // Just like public key aggregation takes advantage of the bilinearity property of
-    // pairings, so too can we reduce the number of pairings required to verify multiple
-    // messages signed by a single public key (as long as all messages are unique).
+    // Perform hashing to curve and summation of messages in parallel
     let hm_sum = pool.install(|| {
         messages
             .par_iter()
