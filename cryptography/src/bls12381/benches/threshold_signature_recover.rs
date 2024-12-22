@@ -3,7 +3,7 @@ use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
 use std::hint::black_box;
 
-fn benchmark_partial_signature_aggregation(c: &mut Criterion) {
+fn benchmark_threshold_signature_recover(c: &mut Criterion) {
     let namespace = b"benchmark";
     let msg = b"hello";
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
@@ -14,11 +14,11 @@ fn benchmark_partial_signature_aggregation(c: &mut Criterion) {
                     let (_, shares) = dkg::ops::generate_shares(None, n, t);
                     shares
                         .iter()
-                        .map(|s| primitives::ops::partial_sign(s, Some(namespace), msg))
+                        .map(|s| primitives::ops::partial_sign_message(s, Some(namespace), msg))
                         .collect::<Vec<_>>()
                 },
                 |partials| {
-                    black_box(primitives::ops::partial_aggregate(t, partials).unwrap());
+                    black_box(primitives::ops::threshold_signature_recover(t, partials).unwrap());
                 },
                 BatchSize::SmallInput,
             );
@@ -26,4 +26,4 @@ fn benchmark_partial_signature_aggregation(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_partial_signature_aggregation);
+criterion_group!(benches, benchmark_threshold_signature_recover);

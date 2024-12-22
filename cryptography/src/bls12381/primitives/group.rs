@@ -8,8 +8,7 @@
 //! Ensure that points are checked to belong to the correct subgroup
 //! (G1 or G2) to prevent small subgroup attacks. This is particularly important
 //! when handling deserialized points or points received from untrusted sources. This
-//! is already taken care of for you if you use the provided `serialize` and `deserialize`
-//! functions.
+//! is already taken care of for you if you use the provided `deserialize` function.
 
 use blst::{
     blst_bendian_from_scalar, blst_final_exp, blst_fp12, blst_fr, blst_fr_add, blst_fr_from_scalar,
@@ -24,6 +23,11 @@ use blst::{
 use rand::RngCore;
 use std::ptr;
 use zeroize::Zeroize;
+
+/// Domain separation tag used when hashing a message to a curve (G1 or G2).
+///
+/// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
+pub type DST = &'static [u8];
 
 /// An element of a group.
 pub trait Element: Clone + Eq + PartialEq + Send + Sync {
@@ -45,27 +49,39 @@ pub trait Element: Clone + Eq + PartialEq + Send + Sync {
     /// Serialized size of the element.
     fn size() -> usize;
 
-    /// Deserializes a canonically encoded element.
+    /// Deserializes an untrusted, canonically-encoded element.
+    ///
+    /// This function performs any validation necessary to ensure the decoded
+    /// element is valid (like an infinity or group check).
     fn deserialize(bytes: &[u8]) -> Option<Self>;
 }
 
 /// An element of a group that supports message hashing.
 pub trait Point: Element {
     /// Maps the provided data to a group element.
-    fn map(&mut self, message: &[u8]);
+    fn map(&mut self, dst: DST, message: &[u8]);
 }
 
+/// A scalar representing an element of the BLS12-381 finite field.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar(blst_fr);
 
+/// Length of a scalar in bytes.
 const SCALAR_LENGTH: usize = 32;
 
-/// `R = 2^256 mod q` in little-endian Montgomery form which is equivalent to 1 in little-endian
-/// non-Montgomery form.
+/// This constant serves as the multiplicative identity (i.e., "one") in the
+/// BLS12-381 finite field, ensuring that arithmetic is carried out within the
+/// correct modulo.
 ///
+/// `R = 2^256 mod q` in little-endian Montgomery form which is equivalent to 1 in little-endian
+/// non-Montgomery form:
+///
+/// ```txt
 /// mod(2^256, 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001) = 0x1824b159acc5056f998c4fefecbc4ff55884b7fa0003480200000001fffffffe
-// Reference: https://github.com/filecoin-project/blstrs/blob/ffbb41d1495d84e40a712583346439924603b49a/src/scalar.rs#L77-L89
+/// ```
+///
+/// Reference: <https://github.com/filecoin-project/blstrs/blob/ffbb41d1495d84e40a712583346439924603b49a/src/scalar.rs#L77-L89>
 const BLST_FR_ONE: Scalar = Scalar(blst_fr {
     l: [
         0x0000_0001_ffff_fffe,
@@ -75,31 +91,74 @@ const BLST_FR_ONE: Scalar = Scalar(blst_fr {
     ],
 });
 
+/// A point on the BLS12-381 G1 curve.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct G1(blst_p1);
 
+/// The size in bytes of an encoded G1 element.
 pub const G1_ELEMENT_BYTE_LENGTH: usize = 48;
 
-/// Domain separation tag for hashing a message to G1.
-pub const DST_G1: &[u8] = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
+/// Domain separation tag for hashing a proof of possession (compressed G2) to G1.
+pub const G1_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
 
+/// Domain separation tag for hashing a message to G1.
+///
+/// We use the `POP` scheme for hashing all messages because this crate is expected to be
+/// used in a Byzantine environment (where any player may attempt a rogue key attack) and
+/// any message could be aggregated into a multi-signature (which requires a proof-of-possession
+/// to be safely deployed in this environment).
+pub const G1_MESSAGE: DST = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
+
+/// A point on the BLS12-381 G2 curve.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct G2(blst_p2);
 
+/// The size in bytes of an encoded G2 element.
 pub const G2_ELEMENT_BYTE_LENGTH: usize = 96;
 
-/// Domain separation tag for hashing a message to G2.
-pub const DST_G2: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+/// Domain separation tag for hashing a proof of possession (compressed G1) to G2.
+pub const G2_PROOF_OF_POSSESSION: DST = b"BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
 
+/// Domain separation tag for hashing a message to G2.
+///
+/// We use the `POP` scheme for hashing all messages because this crate is expected to be
+/// used in a Byzantine environment (where any player may attempt a rogue key attack) and
+/// any message could be aggregated into a multi-signature (which requires a proof-of-possession
+/// to be safely deployed in this environment).
+pub const G2_MESSAGE: DST = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_";
+
+/// The target group of the BLS12-381 pairing.
+///
+/// This is an element in the extension field `F_p^12` and is
+/// produced as the result of a pairing operation.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct GT(blst_fp12);
 
+/// The private key type.
 pub type Private = Scalar;
+
+/// The private key length.
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
+
+/// The default public key type (G1).
 pub type Public = G1;
+
+/// The default public key length (G1).
+pub const PUBLIC_KEY_LENGTH: usize = G1_ELEMENT_BYTE_LENGTH;
+
+/// The default signature type (G2).
 pub type Signature = G2;
+
+/// The default signature length (G2).
+pub const SIGNATURE_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
+
+/// The DST for hashing a proof of possession to the default signature type (G2).
+pub const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
+
+/// The DST for hashing a message to the default signature type (G2).
+pub const MESSAGE: DST = G2_MESSAGE;
 
 /// Returns the size in bits of a given blst_scalar (represented in little-endian).
 fn bits(scalar: &blst_scalar) -> usize {
@@ -319,14 +378,14 @@ impl Element for G1 {
 }
 
 impl Point for G1 {
-    fn map(&mut self, data: &[u8]) {
+    fn map(&mut self, dst: DST, data: &[u8]) {
         unsafe {
             blst_hash_to_g1(
                 &mut self.0,
                 data.as_ptr(),
                 data.len(),
-                DST_G1.as_ptr(),
-                DST_G1.len(),
+                dst.as_ptr(),
+                dst.len(),
                 ptr::null(),
                 0,
             );
@@ -400,14 +459,14 @@ impl Element for G2 {
 }
 
 impl Point for G2 {
-    fn map(&mut self, data: &[u8]) {
+    fn map(&mut self, dst: DST, data: &[u8]) {
         unsafe {
             blst_hash_to_g2(
                 &mut self.0,
                 data.as_ptr(),
                 data.len(),
-                DST_G2.as_ptr(),
-                DST_G2.len(),
+                dst.as_ptr(),
+                dst.len(),
                 ptr::null(),
                 0,
             );
@@ -438,13 +497,12 @@ pub(super) fn equal(p: &G1, sig: &G2, hm: &G2) -> bool {
 
 #[cfg(test)]
 mod tests {
-    // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
-
     use super::*;
     use rand::prelude::*;
 
     #[test]
     fn basic_group() {
+        // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
         let s = Scalar::rand(&mut thread_rng());
         let mut e1 = s;
         let e2 = s;
