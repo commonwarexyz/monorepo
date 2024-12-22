@@ -70,10 +70,13 @@ pub struct Scalar(blst_fr);
 const SCALAR_LENGTH: usize = 32;
 
 /// `R = 2^256 mod q` in little-endian Montgomery form which is equivalent to 1 in little-endian
-/// non-Montgomery form.
+/// non-Montgomery form:
 ///
+/// ```
 /// mod(2^256, 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001) = 0x1824b159acc5056f998c4fefecbc4ff55884b7fa0003480200000001fffffffe
-// Reference: <https://github.com/filecoin-project/blstrs/blob/ffbb41d1495d84e40a712583346439924603b49a/src/scalar.rs#L77-L89>
+/// ```
+///
+/// Reference: <https://github.com/filecoin-project/blstrs/blob/ffbb41d1495d84e40a712583346439924603b49a/src/scalar.rs#L77-L89>
 const BLST_FR_ONE: Scalar = Scalar(blst_fr {
     l: [
         0x0000_0001_ffff_fffe,
