@@ -128,7 +128,7 @@ mod tests {
         ];
 
         for (index, test_case) in tests_cases.iter().enumerate() {
-            vector_sign_test(
+            test_vector_sign(
                 index + 1,
                 test_case.0.clone(),
                 test_case.1.clone(),
