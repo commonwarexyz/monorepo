@@ -106,7 +106,8 @@ impl Scheme for Bls12381 {
 
 #[cfg(test)]
 mod tests {
-    // Tests use the bls12381 test vectors from https://github.com/ethereum/bls12-381-tests
+    /// Tests use the bls12381 test vectors
+    /// from https://github.com/ethereum/bls12-381-tests (v0.1.2).
     use super::{Bls12381, Scheme};
     use crate::PrivateKey;
     use crate::PublicKey;
@@ -189,7 +190,8 @@ mod tests {
         }
     }
 
-    fn vector_sign_test(test_id: usize, private_key: Vec<u8>, message: Vec<u8>, output: Vec<u8>) {
+    /// Runs the provided `sign` vector test.
+    fn test_vector_sign(test_id: usize, private_key: Vec<u8>, message: Vec<u8>, output: Vec<u8>) {
         let private_key = PrivateKey::from(private_key);
         let mut signer =
             <Bls12381 as Scheme>::from(private_key).expect("unable to deserialize private key");
@@ -197,6 +199,7 @@ mod tests {
         assert_eq!(signature, output, "vector_sign_{} failed", test_id);
     }
 
+    /// Runs the provided `verfify` vector test.
     fn test_vector_verify(
         test_id: usize,
         public_key: Vec<u8>,
@@ -210,6 +213,7 @@ mod tests {
         assert_eq!(res, output, "vector_verify_{}", test_id);
     }
 
+    /// Generates `sign` vector from hex encoded data.
     fn vector_sign(
         private_key: &str,
         message: &str,
@@ -222,6 +226,7 @@ mod tests {
         )
     }
 
+    /// Generates `verify` vector from hex encoded data.
     fn vector_verify(
         public_key: &str,
         message: &str,
