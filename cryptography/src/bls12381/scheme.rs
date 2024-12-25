@@ -200,12 +200,12 @@ mod tests {
         public_key: Vec<u8>,
         message: Vec<u8>,
         signature: Vec<u8>,
-        output: bool,
+        success: bool,
     ) {
         let public_key = PublicKey::from(public_key);
         let signature = Bytes::from(signature);
         let res = Bls12381::verify(None, &message, &public_key, &signature);
-        assert_eq!(res, output, "vector_verify_{}", test_id);
+        assert_eq!(res, success, "vector_verify_{}", test_id);
     }
 
     /// Generates `sign` vector from hex encoded data.
@@ -226,13 +226,13 @@ mod tests {
         public_key: &str,
         message: &str,
         signature: &str,
-        output: bool,
+        success: bool,
     ) -> (Vec<u8>, Vec<u8>, Vec<u8>, bool) {
         (
             commonware_utils::from_hex_formatted(public_key).unwrap(),
             commonware_utils::from_hex_formatted(message).unwrap(),
             commonware_utils::from_hex_formatted(signature).unwrap(),
-            output,
+            success,
         )
     }
 
