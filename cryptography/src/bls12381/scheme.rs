@@ -26,8 +26,6 @@ use super::primitives::{
 use crate::{PrivateKey, PublicKey, Scheme, Signature};
 use rand::{CryptoRng, Rng, SeedableRng};
 
-const ZERO_PRIVATEKEY_BYTES: [u8; 32] = [0; 32];
-
 /// BLS12-381 implementation of the `Scheme` trait.
 ///
 /// This implementation uses the `blst` crate for BLS12-381 operations. This
@@ -51,9 +49,6 @@ impl Scheme for Bls12381 {
             Ok(key) => key,
             Err(_) => return None,
         };
-        if private_key == ZERO_PRIVATEKEY_BYTES {
-            return None;
-        }
         let private = Scalar::deserialize(&private_key)?;
         let mut public = group::Public::one();
         public.mul(&private);

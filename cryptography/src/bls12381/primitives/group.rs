@@ -17,8 +17,8 @@ use blst::{
     blst_p1_affine, blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf,
     blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress, blst_p2, blst_p2_add_or_double,
     blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf,
-    blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_scalar, blst_scalar_fr_check,
-    blst_scalar_from_bendian, blst_scalar_from_fr, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian,
+    blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use rand::RngCore;
 use std::ptr;
@@ -299,7 +299,9 @@ impl Element for Scalar {
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_scalar_fr_check(&scalar) {
+            // blst_scalar_fr_check is replaced by blst_sk_check as it enforces
+            // a non-zero scalar check.
+            if !blst_sk_check(&scalar) {
                 return None;
             }
             blst_fr_from_scalar(&mut ret, &scalar);
