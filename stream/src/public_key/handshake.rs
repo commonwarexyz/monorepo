@@ -1,6 +1,6 @@
 use super::{utils::codec::recv_frame, wire, x25519};
 use crate::Error;
-use bytes::Bytes;
+use bytes::{BufMut, Bytes};
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Sink, Spawner, Stream};
@@ -25,7 +25,7 @@ pub fn create_handshake<C: Scheme>(
     let mut payload = Vec::with_capacity(payload_len);
     payload.extend_from_slice(&recipient_public_key);
     payload.extend_from_slice(ephemeral_public_key_bytes);
-    payload.extend_from_slice(&timestamp.to_be_bytes());
+    payload.put_u64(timestamp);
     let signature = crypto.sign(Some(namespace), &payload);
 
     // Send handshake
@@ -105,7 +105,7 @@ impl Handshake {
         let mut payload = Vec::with_capacity(payload_len);
         payload.extend_from_slice(&our_public_key);
         payload.extend_from_slice(&handshake.ephemeral_public_key);
-        payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
+        payload.put_u64(handshake.timestamp);
 
         // Verify signature
         if !C::verify(Some(namespace), &payload, &public_key, &signature.signature) {
@@ -225,7 +225,7 @@ mod tests {
             let mut payload = Vec::new();
             payload.extend_from_slice(&handshake.recipient_public_key);
             payload.extend_from_slice(&handshake.ephemeral_public_key);
-            payload.extend_from_slice(&handshake.timestamp.to_be_bytes());
+            payload.put_u64(handshake.timestamp);
 
             // Verify signature
             assert!(Ed25519::verify(
