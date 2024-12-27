@@ -1,5 +1,4 @@
 use bytes::BufMut;
-
 use super::Error;
 use crate::authenticated::wire::Peer;
 use std::{
