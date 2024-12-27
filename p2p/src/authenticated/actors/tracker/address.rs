@@ -1,6 +1,6 @@
-use bytes::BufMut;
 use super::Error;
 use crate::authenticated::wire::Peer;
+use bytes::BufMut;
 use std::{
     mem::size_of,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
