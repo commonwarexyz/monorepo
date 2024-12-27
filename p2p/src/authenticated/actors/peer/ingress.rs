@@ -9,12 +9,15 @@ pub enum Message {
     Kill,
 }
 
+/// A fire-and-forget message sender.
+/// Note that its methods ignore errors returned by the internal [mpsc::Sender]
+/// and return the unit type.
 #[derive(Clone)]
-pub struct Mailbox {
+pub struct OutboundMailbox {
     sender: mpsc::Sender<Message>,
 }
 
-impl Mailbox {
+impl OutboundMailbox {
     pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
         Self { sender }
     }
@@ -25,11 +28,11 @@ impl Mailbox {
         (Self { sender }, receiver)
     }
 
-    pub async fn bit_vec(&mut self, bit_vec: wire::BitVec) {
+    pub async fn send_bit_vec(&mut self, bit_vec: wire::BitVec) {
         let _ = self.sender.send(Message::BitVec { bit_vec }).await;
     }
 
-    pub async fn peers(&mut self, peers: wire::Peers) {
+    pub async fn send_peers(&mut self, peers: wire::Peers) {
         let _ = self.sender.send(Message::Peers { peers }).await;
     }
 
@@ -40,13 +43,13 @@ impl Mailbox {
 
 #[derive(Clone)]
 pub struct Relay {
-    low: mpsc::Sender<wire::Data>,
-    high: mpsc::Sender<wire::Data>,
+    low_priority: mpsc::Sender<wire::Data>,
+    high_priority: mpsc::Sender<wire::Data>,
 }
 
 impl Relay {
     pub fn new(low: mpsc::Sender<wire::Data>, high: mpsc::Sender<wire::Data>) -> Self {
-        Self { low, high }
+        Self { low_priority: low, high_priority: high }
     }
 
     /// content sends a message to the peer.
@@ -60,17 +63,14 @@ impl Relay {
         message: Bytes,
         priority: bool,
     ) -> Result<(), Error> {
-        if priority {
-            return self
-                .high
-                .send(wire::Data { channel, message })
-                .await
-                .map_err(|_| Error::MessageDropped);
-        }
-        self.low
-            .send(wire::Data { channel, message })
-            .await
-            .map_err(|_| Error::MessageDropped)
+        let sender = if priority {
+            &mut self.high_priority
+        } else {
+            &mut self.low_priority
+        };
+        sender.send(wire::Data { channel, message })
+        .await
+        .map_err(|_| Error::MessageDropped)
     }
 }
 

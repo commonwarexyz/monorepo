@@ -1,4 +1,4 @@
-use super::{Config, Error, Mailbox, Message, Relay};
+use super::{Config, Error, OutboundMailbox, Message, Relay};
 use crate::authenticated::{
     actors::tracker, channels::Channels, metrics, wire, wire::message::Payload,
 };
@@ -25,7 +25,7 @@ pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
     allowed_bit_vec_rate: Quota,
     allowed_peers_rate: Quota,
 
-    mailbox: Mailbox,
+    mailbox: OutboundMailbox,
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<wire::Data>,
     low: mpsc::Receiver<wire::Data>,
@@ -47,7 +47,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         (
             Self {
                 runtime,
-                mailbox: Mailbox::new(control_sender),
+                mailbox: OutboundMailbox::new(control_sender),
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 allowed_bit_vec_rate: cfg.allowed_bit_vec_rate,
                 allowed_peers_rate: cfg.allowed_peers_rate,

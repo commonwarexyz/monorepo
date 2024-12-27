@@ -578,7 +578,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                     };
 
                     // Send bit vector if stored
-                    let _ = peer.bit_vec(set.msg()).await;
+                    let _ = peer.send_bit_vec(set.msg()).await;
                 }
                 Message::BitVec { bit_vec, mut peer } => {
                     let result = self.handle_bit_vec(bit_vec);
@@ -588,7 +588,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
                         continue;
                     }
                     if let Some(peers) = result.unwrap() {
-                        peer.peers(peers).await;
+                        peer.send_peers(peers).await;
                     }
                 }
                 Message::Peers { peers, mut peer } => {
@@ -736,7 +736,7 @@ mod tests {
             let peer3 = Ed25519::from_seed(3).public_key();
 
             // Request bit vector with unallowed peer
-            let (peer_mailbox, mut peer_receiver) = peer::Mailbox::test();
+            let (peer_mailbox, mut peer_receiver) = peer::OutboundMailbox::test();
             mailbox.construct(peer1.clone(), peer_mailbox.clone()).await;
             let msg = peer_receiver.next().await.unwrap();
             assert!(matches!(msg, peer::Message::Kill));

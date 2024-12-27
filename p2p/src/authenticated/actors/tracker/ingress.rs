@@ -17,15 +17,15 @@ pub enum Message<E: Spawner> {
     // Used by peer
     Construct {
         public_key: PublicKey,
-        peer: peer::Mailbox,
+        peer: peer::OutboundMailbox,
     },
     BitVec {
         bit_vec: wire::BitVec,
-        peer: peer::Mailbox,
+        peer: peer::OutboundMailbox,
     },
     Peers {
         peers: wire::Peers,
-        peer: peer::Mailbox,
+        peer: peer::OutboundMailbox,
     },
 
     // Used by dialer
@@ -55,21 +55,21 @@ impl<E: Spawner> Mailbox<E> {
         Self { sender }
     }
 
-    pub async fn construct(&mut self, public_key: PublicKey, peer: peer::Mailbox) {
+    pub async fn construct(&mut self, public_key: PublicKey, peer: peer::OutboundMailbox) {
         self.sender
             .send(Message::Construct { public_key, peer })
             .await
             .unwrap();
     }
 
-    pub async fn bit_vec(&mut self, bit_vec: wire::BitVec, peer: peer::Mailbox) {
+    pub async fn bit_vec(&mut self, bit_vec: wire::BitVec, peer: peer::OutboundMailbox) {
         self.sender
             .send(Message::BitVec { bit_vec, peer })
             .await
             .unwrap();
     }
 
-    pub async fn peers(&mut self, peers: wire::Peers, peer: peer::Mailbox) {
+    pub async fn peers(&mut self, peers: wire::Peers, peer: peer::OutboundMailbox) {
         self.sender
             .send(Message::Peers { peers, peer })
             .await
