@@ -225,6 +225,9 @@ impl Scalar {
             blst_keygen_v3(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
             blst_fr_from_scalar(&mut ret, &sc);
         }
+
+        // Zeroize the ikm buffer
+        ikm.zeroize();
         Self(ret)
     }
 
