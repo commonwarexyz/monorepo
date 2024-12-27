@@ -45,13 +45,20 @@ crossterm = "0.28.1"
 serde_json = "1.0.122"
 
 [profile.bench]
+# Because we enable overflow checks in "release," we should benchmark with them.
 overflow-checks = true
 
 [profile.dev]
+# Although overflow checks are enabled by default in "dev", we explicitly
+# enable them here for clarity.
 overflow-checks = true
 
 [profile.release]
+# To guard against unexpected behavior in production, we enable overflow checks in
+# "release" although they incur some performance penalty.
 overflow-checks = true
 
 [profile.test]
+# Although overflow checks are enabled by default in "test", we explicitly
+# enable them here for clarity.
 overflow-checks = true
