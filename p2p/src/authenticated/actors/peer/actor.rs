@@ -66,7 +66,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
     /// Unpack `msg` and verify the underlying `channel` is registered.
     fn validate_msg<V>(
         msg: Option<wire::Data>,
-        rate_limits: &Arc<HashMap<u32, V>>,
+        rate_limits: &HashMap<u32, V>,
     ) -> Result<wire::Data, Error>
 where {
         let data = match msg {
