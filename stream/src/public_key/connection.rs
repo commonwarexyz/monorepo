@@ -67,6 +67,25 @@ pub struct Connection<Si: Sink, St: Stream> {
 }
 
 impl<Si: Sink, St: Stream> Connection<Si, St> {
+    /// Create a new connection from pre-established components.
+    ///
+    /// This is useful in tests, or when upgrading a connection that has already been verified.
+    pub fn from_preestablished(
+        dialer: bool,
+        sink: Si,
+        stream: St,
+        cipher: ChaCha20Poly1305,
+        max_message_size: usize,
+    ) -> Self {
+        Self {
+            dialer,
+            sink,
+            stream,
+            cipher,
+            max_message_size,
+        }
+    }
+
     /// Attempt to upgrade a raw connection we initiated.
     ///
     /// This will send a handshake message to the peer, wait for a response,

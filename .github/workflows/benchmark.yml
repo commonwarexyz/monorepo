@@ -1,0 +1,65 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 10 * * *' # Run at 10:00 UTC every day
+
+jobs:
+  has-new-commit:
+    name: Has New Commit? # Check if there are new commits in the last 24 hours
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - name: Exit early if no new commits
+        id: check-commits
+        run: |
+          count=$(git log --oneline --since '24 hours ago' | wc -l)
+          if [ "$count" -eq 0 ]; then
+            echo "No new commits found in the last 24 hours"
+            exit 1
+          fi
+
+  publish:
+    name: Publish
+    needs: has-new-commit # Only run if there are new commits
+    runs-on: ubuntu-latest-8
+    timeout-minutes: 90
+    strategy:
+      max-parallel: 1 # Run one package at a time
+      matrix:
+        include:
+          - package: commonware-cryptography
+          - package: commonware-storage
+          - package: commonware-stream
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust toolchain
+        run: rustup toolchain install nightly
+      - name: Get Rust version
+        id: rust-version
+        run: echo "rust_version=$(rustc +nightly --version)" >> "$GITHUB_OUTPUT"
+      - name: Run setup
+        uses: ./.github/actions/setup
+        with:
+          rust-version: ${{ steps.rust-version.outputs.rust_version}}
+      - name: Compile benchmarks
+        run: cargo bench --no-run
+      - name: Run benchmark
+        run: cargo bench --benches -p ${{ matrix.package }} -- --output-format bencher | tee ${{ matrix.package }}.txt
+      - name: Publish benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: ${{ matrix.package }}
+          tool: 'cargo'
+          output-file-path: ${{ matrix.package }}.txt
+          github-token: ${{ secrets.BENCHMARKS_SECRET }}
+          gh-repository: github.com/commonwarexyz/benchmarks
+          gh-pages-branch: main
+          benchmark-data-dir-path: docs
+          auto-push: true
+

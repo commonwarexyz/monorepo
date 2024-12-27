@@ -1,13 +1,15 @@
-# commonware-vrf 
+# commonware-vrf
 
 [![Crates.io](https://img.shields.io/crates/v/commonware-vrf.svg)](https://crates.io/crates/commonware-vrf)
 [![Docs.rs](https://docs.rs/commonware-vrf/badge.svg)](https://docs.rs/commonware-vrf)
 
 Generate bias-resistant randomness with untrusted contributors using [commonware-cryptography](https://crates.io/crates/commonware-cryptography) and [commonware-p2p](https://crates.io/crates/commonware-p2p).
 
-# Usage (3 of 4 Threshold)
+# Usage (2 of 4 Threshold)
 
-## Arbiter 
+_To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
+
+## Arbiter
 ```bash
 cargo run --release -- --me 0@3000 --participants 0,1,2,3,4 --contributors 1,2,3,4
 ```
@@ -32,7 +34,7 @@ cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participan
 _Send invalid shares to other contributors._
 
 ```bash
-cargo run --release -- --rogue --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4 
+cargo run --release -- --rogue --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 ```
 
 ## Contributor 4 (Lazy)
@@ -40,13 +42,5 @@ cargo run --release -- --rogue --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --pa
 _Only share `t-1` shares. Post one share to arbiter to ensure commitment isn't dropped._
 
 ```bash
-cargo run --release -- --lazy --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4 
-```
-
-## Contributor 4 (Lazy + Defiant)
-
-_Only share `t-1` shares. Don't post any requested shares to arbiter (commitment will be dropped)._
-
-```bash
-cargo run --release -- --lazy --defiant --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4 
+cargo run --release -- --lazy --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 ```

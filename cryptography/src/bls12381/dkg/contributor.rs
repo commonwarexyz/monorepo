@@ -15,6 +15,7 @@
 //! not provided by the contributor because this authorization function is highly dependent on
 //! the context in which the contributor is being used.
 
+use super::utils::threshold;
 use crate::bls12381::{
     dkg::{ops, Error},
     primitives::{
@@ -23,6 +24,7 @@ use crate::bls12381::{
     },
 };
 use crate::PublicKey;
+use commonware_utils::quorum;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Output of a DKG/Resharing procedure.
@@ -51,7 +53,6 @@ impl P0 {
     /// If `me` is not in `dealers`, this will panic.
     pub fn new(
         me: PublicKey,
-        threshold: u32,
         previous: Option<(poly::Public, Share)>,
         mut dealers: Vec<PublicKey>,
         mut recipients: Vec<PublicKey>,
@@ -74,9 +75,10 @@ impl P0 {
             .collect();
         Self {
             me,
-            threshold,
+            threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
+
             dealers_ordered,
             recipients,
             recipients_ordered,
@@ -125,7 +127,6 @@ pub struct P1 {
     recipients_ordered: HashMap<PublicKey, u32>,
 
     commitments: HashMap<PublicKey, poly::Public>,
-
     valid: BTreeMap<u32, (poly::Public, Share)>,
 }
 
@@ -133,7 +134,6 @@ impl P1 {
     /// Create a new contributor for a DKG/Resharing procedure.
     pub fn new(
         me: PublicKey,
-        threshold: u32,
         previous: Option<poly::Public>,
         mut dealers: Vec<PublicKey>,
         mut recipients: Vec<PublicKey>,
@@ -153,21 +153,15 @@ impl P1 {
             .collect();
         Self {
             me,
-            threshold,
+            threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
+
             dealers_ordered,
             recipients_ordered,
+
             commitments: HashMap::new(),
             valid: BTreeMap::new(),
-        }
-    }
-
-    /// Required number of commitments to continue procedure.
-    pub fn required(&self) -> u32 {
-        match &self.previous {
-            Some(previous) => previous.required(),
-            None => self.threshold,
         }
     }
 
@@ -197,10 +191,14 @@ impl P1 {
         self.commitments.len()
     }
 
-    /// If there exist at least `required()` commitments, proceed to `P2`.
+    /// If there exist at least `2f + 1` commitments, proceed to `P2`.
     pub fn finalize(self) -> Option<P2> {
         // Ensure there are enough commitments to proceed
-        if self.commitments.len() < self.required() as usize {
+        let required_commitments = match &self.previous {
+            Some(_) => quorum(self.dealers_ordered.len() as u32).unwrap(),
+            None => quorum(self.recipients_ordered.len() as u32).unwrap(),
+        } as usize;
+        if self.commitments.len() < required_commitments {
             return None;
         }
 
@@ -210,8 +208,10 @@ impl P1 {
             threshold: self.threshold,
             previous: self.previous,
             concurrency: self.concurrency,
+
             dealers_ordered: self.dealers_ordered,
             recipients_ordered: self.recipients_ordered,
+
             commitments: self.commitments,
             valid: self.valid,
         })
@@ -229,20 +229,11 @@ pub struct P2 {
     recipients_ordered: HashMap<PublicKey, u32>,
 
     commitments: HashMap<PublicKey, poly::Public>,
-
     valid: BTreeMap<u32, (poly::Public, Share)>,
 }
 
 impl P2 {
-    /// Required number of commitments to continue procedure.
-    pub fn required(&self) -> u32 {
-        match &self.previous {
-            Some(previous) => previous.required(),
-            None => self.threshold,
-        }
-    }
-
-    /// Verify and track a share from a dealer.
+    ///  Verify and track a share from a dealer.
     pub fn share(&mut self, dealer: PublicKey, share: Share) -> Result<(), Error> {
         // Ensure contributor is valid
         let idx = match self.dealers_ordered.get(&dealer) {
@@ -280,6 +271,16 @@ impl P2 {
     /// If we are tracking shares for all provided `commitments`, recover
     /// the new group public polynomial and our share.
     pub fn finalize(mut self, commitments: Vec<u32>) -> Result<Output, Error> {
+        // Ensure commitments equals required commitment count
+        let required_commitments_u32 = match &self.previous {
+            Some(_) => threshold(self.dealers_ordered.len() as u32).unwrap(),
+            None => self.threshold,
+        };
+        let required_commitments = required_commitments_u32 as usize;
+        if commitments.len() != required_commitments {
+            return Err(Error::TooManyCommitments);
+        }
+
         // Ensure we have all required shares
         for dealer in &commitments {
             if !self.valid.contains_key(dealer) {
@@ -296,9 +297,8 @@ impl P2 {
         }
 
         // Ensure we have enough shares to construct a secret
-        let required = self.required();
         let shares = self.valid.len();
-        if shares < required as usize {
+        if shares < required_commitments {
             return Err(Error::InsufficientDealings);
         }
 
@@ -324,7 +324,7 @@ impl P2 {
                 let commitments: BTreeMap<u32, poly::Public> = self
                     .valid
                     .iter()
-                    .take(required as usize)
+                    .take(required_commitments)
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
                     .collect();
                 t_commitments = commitments.values().cloned().collect();
@@ -335,13 +335,13 @@ impl P2 {
                 let shares = self
                     .valid
                     .into_iter()
-                    .take(required as usize)
+                    .take(required_commitments)
                     .map(|(dealer, (_, share))| Eval {
                         index: dealer,
                         value: share.private,
                     })
                     .collect::<Vec<_>>();
-                secret = match poly::Private::recover(required, shares) {
+                secret = match poly::Private::recover(required_commitments_u32, shares) {
                     Ok(share) => share,
                     Err(_) => return Err(Error::ShareInterpolationFailed),
                 };
@@ -366,7 +366,7 @@ mod tests {
     use crate::{Ed25519, Scheme};
     use std::collections::HashMap;
 
-    fn create_and_verify_shares(n: u32, t: u32, dealers: u32, concurrency: usize) {
+    fn create_and_verify_shares(n: u32, dealers: u32, concurrency: usize) {
         // Create contributors
         let mut contributors = (0..n)
             .map(|i| Ed25519::from_seed(i as u64).public_key())
@@ -380,7 +380,105 @@ mod tests {
             let me = contributors[i as usize].clone();
             let contributor = P0::new(
                 me,
-                t,
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                concurrency,
+            );
+            let (contributor, public, shares) = contributor.finalize();
+            contributor_shares.insert(i, (public.clone(), shares, contributor.unwrap()));
+            commitments.push(public);
+        }
+
+        // Distribute commitments
+        for i in 0..dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (commitment, _, _) = contributor_shares.get(&i).unwrap();
+                let commitment = commitment.clone();
+
+                // Send share to recipient
+                let (_, _, ref mut recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.commitment(dealer.clone(), commitment).unwrap();
+            }
+        }
+
+        // Convert to p2
+        let mut p2 = HashMap::new();
+        for i in 0..n {
+            let (_, shares, contributor) = contributor_shares.remove(&i).unwrap();
+            let contributor = contributor.finalize().unwrap();
+            p2.insert(i, (shares, contributor));
+        }
+        let mut contributor_shares = p2;
+
+        // Distribute shares
+        for i in 0..dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (shares, _) = contributor_shares.get(&i).unwrap();
+                let share = shares[j as usize];
+
+                // Send share to recipient
+                let (_, recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.share(dealer.clone(), share).unwrap();
+            }
+        }
+
+        // Finalize
+        let t = threshold(n).expect("insufficient participants");
+        let included_commitments = (0..t).collect::<Vec<_>>();
+        let commitments = commitments[0..t as usize].to_vec();
+        let mut group: Option<poly::Public> = None;
+        for i in 0..n {
+            let (_, contributor) = contributor_shares.remove(&i).unwrap();
+            let output = contributor
+                .finalize(included_commitments.clone())
+                .expect("unable to finalize");
+            assert_eq!(output.commitments, commitments);
+            match &group {
+                Some(group) => {
+                    assert_eq!(output.public, *group);
+                }
+                None => {
+                    group = Some(output.public);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_simple_dkg() {
+        create_and_verify_shares(5, 5, 4);
+    }
+
+    #[test]
+    fn test_large_dkg() {
+        create_and_verify_shares(100, 80, 4);
+    }
+
+    #[test]
+    fn test_too_many_commitments() {
+        // Initialize test
+        let n = 10;
+        let dealers = 8;
+        let concurrency = 1;
+
+        // Create contributors
+        let mut contributors = (0..n)
+            .map(|i| Ed25519::from_seed(i as u64).public_key())
+            .collect::<Vec<_>>();
+        contributors.sort();
+
+        // Create shares
+        let mut contributor_shares = HashMap::new();
+        let mut commitments = Vec::new();
+        for i in 0..n {
+            let me = contributors[i as usize].clone();
+            let contributor = P0::new(
+                me,
                 None,
                 contributors.clone(),
                 contributors.clone(),
@@ -430,7 +528,135 @@ mod tests {
 
         // Finalize
         let included_commitments = (0..dealers).collect::<Vec<_>>();
-        let commitments = commitments[0..dealers as usize].to_vec();
+        for i in 0..n {
+            let (_, contributor) = contributor_shares.remove(&i).unwrap();
+            let result = contributor.finalize(included_commitments.clone());
+            assert!(matches!(result, Err(Error::TooManyCommitments)));
+        }
+    }
+
+    #[test]
+    fn test_insufficient_commitments() {
+        // Initialize test
+        let n = 10;
+        let concurrency = 1;
+        let active_dealers = 4;
+
+        // Create contributors
+        let mut contributors = (0..n)
+            .map(|i| Ed25519::from_seed(i as u64).public_key())
+            .collect::<Vec<_>>();
+        contributors.sort();
+
+        // Create shares
+        let mut contributor_shares = HashMap::new();
+        let mut commitments = Vec::new();
+        for i in 0..n {
+            let me = contributors[i as usize].clone();
+            let contributor = P0::new(
+                me,
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                concurrency,
+            );
+            let (contributor, public, shares) = contributor.finalize();
+            contributor_shares.insert(i, (public.clone(), shares, contributor.unwrap()));
+            commitments.push(public);
+        }
+
+        // Distribute commitments
+        for i in 0..active_dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (commitment, _, _) = contributor_shares.get(&i).unwrap();
+                let commitment = commitment.clone();
+
+                // Send share to recipient
+                let (_, _, ref mut recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.commitment(dealer.clone(), commitment).unwrap();
+            }
+        }
+
+        // Convert to p2
+        for i in 0..n {
+            let (_, _, contributor) = contributor_shares.remove(&i).unwrap();
+            assert!(contributor.finalize().is_none());
+        }
+    }
+
+    #[test]
+    fn test_share_from_only_threshold() {
+        // Initialize test
+        let n = 10;
+        let dealers = 8;
+        let share_dealers = 4;
+        let concurrency = 1;
+
+        // Create contributors
+        let mut contributors = (0..n)
+            .map(|i| Ed25519::from_seed(i as u64).public_key())
+            .collect::<Vec<_>>();
+        contributors.sort();
+
+        // Create shares
+        let mut contributor_shares = HashMap::new();
+        let mut commitments = Vec::new();
+        for i in 0..n {
+            let me = contributors[i as usize].clone();
+            let contributor = P0::new(
+                me,
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                concurrency,
+            );
+            let (contributor, public, shares) = contributor.finalize();
+            contributor_shares.insert(i, (public.clone(), shares, contributor.unwrap()));
+            commitments.push(public);
+        }
+
+        // Distribute commitments
+        for i in 0..dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (commitment, _, _) = contributor_shares.get(&i).unwrap();
+                let commitment = commitment.clone();
+
+                // Send share to recipient
+                let (_, _, ref mut recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.commitment(dealer.clone(), commitment).unwrap();
+            }
+        }
+
+        // Convert to p2
+        let mut p2 = HashMap::new();
+        for i in 0..n {
+            let (_, shares, contributor) = contributor_shares.remove(&i).unwrap();
+            let contributor = contributor.finalize().unwrap();
+            p2.insert(i, (shares, contributor));
+        }
+        let mut contributor_shares = p2;
+
+        // Distribute shares
+        for i in 0..share_dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (shares, _) = contributor_shares.get(&i).unwrap();
+                let share = shares[j as usize];
+
+                // Send share to recipient
+                let (_, recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.share(dealer.clone(), share).unwrap();
+            }
+        }
+
+        // Finalize
+        let included_commitments = (0..share_dealers).collect::<Vec<_>>();
+        let commitments = commitments[0..share_dealers as usize].to_vec();
         let mut group: Option<poly::Public> = None;
         for i in 0..n {
             let (_, contributor) = contributor_shares.remove(&i).unwrap();
@@ -450,12 +676,81 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_dkg() {
-        create_and_verify_shares(5, 3, 5, 4);
-    }
+    fn test_share_insufficient() {
+        // Initialize test
+        let (n, t) = (10, 4);
+        let dealers = 8;
+        let share_dealers = 2;
+        let concurrency = 1;
 
-    #[test]
-    fn test_large_dkg() {
-        create_and_verify_shares(100, 67, 80, 4);
+        // Create contributors
+        let mut contributors = (0..n)
+            .map(|i| Ed25519::from_seed(i as u64).public_key())
+            .collect::<Vec<_>>();
+        contributors.sort();
+
+        // Create shares
+        let mut contributor_shares = HashMap::new();
+        let mut commitments = Vec::new();
+        for i in 0..n {
+            let me = contributors[i as usize].clone();
+            let contributor = P0::new(
+                me,
+                None,
+                contributors.clone(),
+                contributors.clone(),
+                concurrency,
+            );
+            let (contributor, public, shares) = contributor.finalize();
+            contributor_shares.insert(i, (public.clone(), shares, contributor.unwrap()));
+            commitments.push(public);
+        }
+
+        // Distribute commitments
+        for i in 0..dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (commitment, _, _) = contributor_shares.get(&i).unwrap();
+                let commitment = commitment.clone();
+
+                // Send share to recipient
+                let (_, _, ref mut recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.commitment(dealer.clone(), commitment).unwrap();
+            }
+        }
+
+        // Convert to p2
+        let mut p2 = HashMap::new();
+        for i in 0..n {
+            let (_, shares, contributor) = contributor_shares.remove(&i).unwrap();
+            let contributor = contributor.finalize().unwrap();
+            p2.insert(i, (shares, contributor));
+        }
+        let mut contributor_shares = p2;
+
+        // Distribute shares
+        for i in 0..share_dealers {
+            let dealer = contributors[i as usize].clone();
+            for j in 0..n {
+                // Get recipient share
+                let (shares, _) = contributor_shares.get(&i).unwrap();
+                let share = shares[j as usize];
+
+                // Send share to recipient
+                let (_, recipient) = contributor_shares.get_mut(&j).unwrap();
+                recipient.share(dealer.clone(), share).unwrap();
+            }
+        }
+
+        // Finalize
+        let included_commitments = (0..t).collect::<Vec<_>>();
+        for i in 0..n {
+            let (_, contributor) = contributor_shares.remove(&i).unwrap();
+            assert!(matches!(
+                contributor.finalize(included_commitments.clone()),
+                Err(Error::MissingShare)
+            ));
+        }
     }
 }

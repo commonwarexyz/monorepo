@@ -66,7 +66,7 @@ impl<E: Clock> Vrf<E> {
     ) -> Option<group::Signature> {
         // Construct payload
         let payload = round.to_be_bytes();
-        let signature = ops::partial_sign(&output.share, VRF_NAMESPACE, &payload);
+        let signature = ops::partial_sign_message(&output.share, Some(VRF_NAMESPACE), &payload);
 
         // Construct partial signature
         let mut partials = vec![signature.clone()];
@@ -131,7 +131,7 @@ impl<E: Clock> Vrf<E> {
                                     continue;
                                 }
                             };
-                            match ops::partial_verify(&output.public, VRF_NAMESPACE, &payload, &signature) {
+                            match ops::partial_verify_message(&output.public, Some(VRF_NAMESPACE), &payload, &signature) {
                                 Ok(_) => {
                                     partials.push(signature);
                                     debug!(round, dealer, "received partial signature");
@@ -151,7 +151,7 @@ impl<E: Clock> Vrf<E> {
         }
 
         // Aggregate partial signatures
-        match ops::partial_aggregate(self.threshold, partials) {
+        match ops::threshold_signature_recover(self.threshold, partials) {
             Ok(signature) => Some(signature),
             Err(_) => {
                 warn!(round, "failed to aggregate partial signatures");

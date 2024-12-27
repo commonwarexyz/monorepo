@@ -1,9 +1,14 @@
 //! Utilities for a DKG/Resharing procedure.
 
-/// Assuming that `t >= 2f + 1`, compute the maximum number of shares that can be revealed
-/// without allowing an adversary of size `f` to reconstruct the secret.
-pub fn max_reveals(t: u32) -> u32 {
-    (t - 1) / 2
+use commonware_utils::max_faults;
+
+/// Assuming that `n = 3f + 1`, compute the maximum threshold `f + 1`
+/// that can be supported.
+///
+/// If the value of `n` is too small to tolerate any faults, this function returns `None`.
+pub fn threshold(n: u32) -> Option<u32> {
+    let f = max_faults(n)?;
+    Some(f + 1)
 }
 
 #[cfg(test)]
@@ -11,17 +16,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_max_reveals() {
-        // Test case 0: t = 2 (2*0 + 1)
-        assert_eq!(max_reveals(2), 0);
+    fn test_too_small() {
+        assert_eq!(threshold(0), None);
+    }
 
-        // Test case 1: t = 3 (2*1 + 1)
-        assert_eq!(max_reveals(3), 1);
+    #[test]
+    fn test_still_too_small() {
+        assert_eq!(threshold(1), None);
+    }
 
-        // Test case 2: t = 5 (2*2 + 1)
-        assert_eq!(max_reveals(5), 2);
+    #[test]
+    fn test_minimal() {
+        assert_eq!(threshold(4), Some(2));
+    }
 
-        // Test case 3: t = 7 (2*3 + 1)
-        assert_eq!(max_reveals(7), 3);
+    #[test]
+    fn test_floor() {
+        assert_eq!(threshold(5), Some(2));
+    }
+
+    #[test]
+    fn test_many() {
+        assert_eq!(threshold(100), Some(34));
     }
 }

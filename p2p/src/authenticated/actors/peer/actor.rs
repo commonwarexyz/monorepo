@@ -1,5 +1,7 @@
 use super::{Config, Error, Mailbox, Message, Relay};
-use crate::authenticated::{actors::tracker, channels::Channels, metrics, wire};
+use crate::authenticated::{
+    actors::tracker, channels::Channels, metrics, wire, wire::message::Payload,
+};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{Clock, Handle, Sink, Spawner, Stream};
@@ -14,7 +16,7 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use prost::Message as _;
 use rand::{CryptoRng, Rng};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tracing::{debug, trace};
+use tracing::debug;
 
 pub struct Actor<E: Spawner + Clock + ReasonablyRealtime> {
     runtime: E,
@@ -61,25 +63,35 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
         )
     }
 
-    async fn send_content<Si: Sink>(
-        sender: &mut Sender<Si>,
-        peer: &PublicKey,
-        data: wire::Data,
-        sent_messages: &Family<metrics::Message, Counter>,
-    ) -> Result<(), Error> {
-        trace!(peer = hex(peer), "sending data",);
+    /// Unpack `msg` and verify the underlying `channel` is registered.
+    fn validate_msg<V>(
+        msg: Option<wire::Data>,
+        rate_limits: &Arc<HashMap<u32, V>>,
+    ) -> Result<wire::Data, Error>
+where {
+        let data = match msg {
+            Some(data) => data,
+            None => return Err(Error::PeerDisconnected),
+        };
+        if !rate_limits.contains_key(&data.channel) {
+            return Err(Error::InvalidChannel);
+        }
+        Ok(data)
+    }
 
-        // Send data
-        let channel = data.channel;
+    /// Creates a message from a payload, then sends and increments metrics.
+    async fn send<Si: Sink>(
+        sender: &mut Sender<Si>,
+        sent_messages: &Family<metrics::Message, Counter>,
+        metric: metrics::Message,
+        payload: Payload,
+    ) -> Result<(), Error> {
         let msg = wire::Message {
-            payload: Some(wire::message::Payload::Data(data)),
+            payload: Some(payload),
         }
         .encode_to_vec();
         sender.send(&msg).await.map_err(Error::SendFailed)?;
-        sent_messages
-            .get_or_create(&metrics::Message::new_data(peer, channel))
-            .inc();
-
+        sent_messages.get_or_create(&metric).inc();
         Ok(())
     }
 
@@ -124,55 +136,27 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
                                 Some(msg_control) => msg_control,
                                 None => return Err(Error::PeerDisconnected),
                             };
-                            match msg {
-                                Message::BitVec { bit_vec } => {
-                                    let msg = wire::Message{
-                                        payload: Some(wire::message::Payload::BitVec(bit_vec)),
-                                    }.encode_to_vec();
-                                    conn_sender.send(&msg)
-                                        .await
-                                        .map_err(Error::SendFailed)?;
-                                    self.sent_messages
-                                        .get_or_create(&metrics::Message::new_bit_vec(&peer))
-                                        .inc();
-                                }
-                                Message::Peers { peers: msg } => {
-                                    let msg = wire::Message{
-                                        payload: Some(wire::message::Payload::Peers(msg)),
-                                    }.encode_to_vec();
-                                    conn_sender.send(&msg)
-                                        .await
-                                        .map_err(Error::SendFailed)?;
-                                    self.sent_messages
-                                        .get_or_create(&metrics::Message::new_peers(&peer))
-                                        .inc();
-                                }
+                            let (metric, payload) = match msg {
+                                Message::BitVec { bit_vec } =>
+                                    (metrics::Message::new_bit_vec(&peer), Payload::BitVec(bit_vec)),
+                                Message::Peers { peers: msg } =>
+                                    (metrics::Message::new_peers(&peer), Payload::Peers(msg)),
                                 Message::Kill => {
                                     return Err(Error::PeerKilled(hex(&peer)))
                                 }
-                            }
+                            };
+                            Self::send(&mut conn_sender, &self.sent_messages, metric, payload)
+                                .await?;
                         },
                         msg_high = self.high.next() => {
-                            let msg = match msg_high {
-                                Some(msg_high) => msg_high,
-                                None => return Err(Error::PeerDisconnected),
-                            };
-                            let entry = rate_limits.get(&msg.channel);
-                            if entry.is_none() {
-                                return Err(Error::InvalidChannel);
-                            }
-                            Self::send_content(&mut conn_sender, &peer, msg, &self.sent_messages).await?;
+                            let msg = Self::validate_msg(msg_high, &rate_limits)?;
+                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), Payload::Data(msg))
+                                .await?;
                         },
                         msg_low = self.low.next() => {
-                            let msg = match msg_low {
-                                Some(msg_low) => msg_low,
-                                None => return Err(Error::PeerDisconnected),
-                            };
-                            let entry = rate_limits.get(&msg.channel);
-                            if entry.is_none() {
-                                return Err(Error::InvalidChannel);
-                            }
-                            Self::send_content(&mut conn_sender, &peer, msg, &self.sent_messages).await?;
+                            let msg = Self::validate_msg(msg_low, &rate_limits)?;
+                            Self::send(&mut conn_sender, &self.sent_messages, metrics::Message::new_data(&peer, msg.channel), Payload::Data(msg))
+                                .await?;
                         }
                     }
                 }

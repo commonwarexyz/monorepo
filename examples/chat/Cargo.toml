@@ -2,7 +2,7 @@
 name = "commonware-chat"
 edition = "2021"
 publish = true
-version = "0.0.27"
+version = "0.0.28"
 license = "MIT OR Apache-2.0"
 description = "Send encrypted messages to a group of friends using commonware-cryptography and commonware-p2p."
 readme = "README.md"
@@ -26,3 +26,7 @@ chrono = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 serde_json = { workspace = true }
+
+[[bin]]
+name = "commonware-chat"
+bench = false

@@ -77,6 +77,33 @@
 //! This simple coordination prevents nonce reuse (which would allow for messages to be decrypted) and saves a small amount of
 //! bandwidth (no need to send the nonce alongside the encrypted message). This "pedantic" construction of the nonce
 //! also avoids accidentally reusing a nonce over long-lived connections when setting it to be a small hash (as in XChaCha-Poly1305).
+//!
+//! # Benchmarks
+//!
+//! _The following benchmarks were collected on 12/17/24 on a MacBook Air (15-inch M3 2024)._
+//!
+//! ## Connection (Send/Receive)
+//!
+//! The number indicates the size of the message in bytes.
+//!
+//! ```txt
+//! sender/1024             time:   [3.3344 µs 3.3436 µs 3.3576 µs]
+//! sender/4096             time:   [12.333 µs 12.364 µs 12.412 µs]
+//! sender/16384            time:   [48.218 µs 48.405 µs 48.647 µs]
+//! sender/262144           time:   [774.05 µs 783.77 µs 799.62 µs]
+//! sender/1048576          time:   [3.2141 ms 3.2447 ms 3.2812 ms]
+//! sender/4194304          time:   [12.729 ms 12.770 ms 12.813 ms]
+//! sender/16777216         time:   [50.453 ms 54.099 ms 60.754 ms]
+//! sender/67108864         time:   [205.32 ms 206.76 ms 208.58 ms]
+//! receiver/1024           time:   [4.0555 µs 4.0902 µs 4.1304 µs]
+//! receiver/4096           time:   [15.131 µs 15.360 µs 15.652 µs]
+//! receiver/16384          time:   [58.597 µs 62.849 µs 71.720 µs]
+//! receiver/262144         time:   [971.47 µs 972.63 µs 973.71 µs]
+//! receiver/1048576        time:   [3.8288 ms 3.8748 ms 3.9336 ms]
+//! receiver/4194304        time:   [15.516 ms 15.750 ms 16.170 ms]
+//! receiver/16777216       time:   [61.675 ms 61.708 ms 61.740 ms]
+//! receiver/67108864       time:   [251.29 ms 255.99 ms 264.45 ms]
+//! ```
 
 use commonware_cryptography::Scheme;
 use std::time::Duration;

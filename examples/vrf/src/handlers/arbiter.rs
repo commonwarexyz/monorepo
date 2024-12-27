@@ -17,10 +17,7 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
 use prost::Message;
-use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
-};
+use std::{collections::HashSet, time::Duration};
 use tracing::{debug, info, warn};
 
 pub struct Arbiter<E: Clock> {
@@ -34,10 +31,7 @@ pub struct Arbiter<E: Clock> {
 }
 
 /// Implementation of a "trusted arbiter" that tracks commitments,
-/// acknoledgements, complaints, and reveals during a DKG round.
-///
-/// Following the release of `commonware-consensus`, this will be
-/// updated to use the "replicated arbiter" pattern.
+/// acknowledgements, and complaints during a DKG round.
 impl<E: Clock> Arbiter<E> {
     pub fn new(
         runtime: E,
@@ -69,7 +63,6 @@ impl<E: Clock> Arbiter<E> {
         let start = self.runtime.current();
         let t_commitment = start + self.dkg_phase_timeout;
         let t_ack = start + self.dkg_phase_timeout * 2;
-        let t_repair = start + self.dkg_phase_timeout * 3;
 
         // Send round start message to players
         let mut group = None;
@@ -95,13 +88,7 @@ impl<E: Clock> Arbiter<E> {
             .expect("failed to send start message");
 
         // Collect commitments
-        let mut p0 = P0::new(
-            self.t,
-            previous,
-            self.players.clone(),
-            self.players.clone(),
-            1,
-        );
+        let mut p0 = P0::new(previous, self.players.clone(), self.players.clone(), 1);
         loop {
             select! {
                 _ = self.runtime.sleep_until(t_commitment) => {
@@ -119,13 +106,12 @@ impl<E: Clock> Arbiter<E> {
                                 }
                             };
                             if msg.round != round {
-                                p0.disqualify(sender);
                                 continue;
                             }
                             let msg = match msg.payload {
                                 Some(wire::dkg::Payload::Commitment(msg)) => msg,
                                 _ => {
-                                    p0.disqualify(sender);
+                                    // Useless message from previous step
                                     continue;
                                 }
                             };
@@ -137,6 +123,12 @@ impl<E: Clock> Arbiter<E> {
                                 }
                             };
                             let _ = p0.commitment(sender, commitment);
+
+                            // Check if we are ready to move to next phase
+                            if p0.prepared() {
+                                debug!(round, "commitment phase ready");
+                                break;
+                            }
                         },
                         Err(err) => {
                             warn!(round, ?err, "failed to receive commitment");
@@ -225,7 +217,6 @@ impl<E: Clock> Arbiter<E> {
 
                             // Verify the message
                             if msg.round != round {
-                                p1.disqualify(sender);
                                 continue;
                             }
 
@@ -249,16 +240,22 @@ impl<E: Clock> Arbiter<E> {
                                         }
                                     };
                                     let payload = payload(round, complaint.dealer, &complaint.share);
-                                    if !C::verify(SHARE_NAMESPACE, &payload, &bad_dealer, &complaint.signature) {
+                                    if !C::verify(Some(SHARE_NAMESPACE), &payload, &bad_dealer, &complaint.signature) {
                                         p1.disqualify(sender);
                                         continue;
                                     }
                                     let _ = p1.complaint(sender, complaint.dealer, &share);
                                 }
                                 _ => {
-                                    p1.disqualify(sender);
+                                    // Useless message from previous step
                                     continue
                                 }
+                            }
+
+                            // Check if we are ready to move to next phase
+                            if p1.prepared() {
+                                debug!(round, "ack phase ready");
+                                break;
                             }
                         }
                         Err(err) => {
@@ -271,172 +268,7 @@ impl<E: Clock> Arbiter<E> {
         }
 
         // Finalize P1
-        let (p2, disqualified) = p1.finalize();
-
-        // Abort if not `t` dealings each with at least `t` acks
-        let (mut p2, requests) = match p2 {
-            Some(p2) => p2,
-            None => {
-                sender
-                    .send(
-                        Recipients::All,
-                        wire::Dkg {
-                            round,
-                            payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
-                        }
-                        .encode_to_vec()
-                        .into(),
-                        true,
-                    )
-                    .await
-                    .expect("failed to send abort message");
-                return (None, disqualified);
-            }
-        };
-        let commitments = p2.commitments();
-        info!(
-            round,
-            commitments = ?commitments.iter().map(|(_, pk, _)| hex(pk)).collect::<Vec<_>>(),
-            disqualified = ?disqualified.into_iter().map(|pk| hex(&pk)).collect::<Vec<_>>(),
-            "ack phase complete"
-        );
-
-        // If no shares to reveal, broadcast success
-        if requests.is_empty() {
-            debug!(round, "no shares to reveal, recovering public key");
-
-            let (result, disqualified) = p2.finalize();
-            if let Err(e) = result {
-                warn!(round, error=?e, "unable to recover public key");
-                sender
-                    .send(
-                        Recipients::All,
-                        wire::Dkg {
-                            round,
-                            payload: Some(wire::dkg::Payload::Abort(wire::Abort {})),
-                        }
-                        .encode_to_vec()
-                        .into(),
-                        true,
-                    )
-                    .await
-                    .expect("failed to send abort message");
-                return (None, disqualified);
-            }
-
-            let result = result.unwrap();
-            sender
-                .send(
-                    Recipients::All,
-                    wire::Dkg {
-                        round,
-                        payload: Some(wire::dkg::Payload::Success(wire::Success {
-                            dealers: result.commitments,
-                            resolutions: Vec::new(),
-                        })),
-                    }
-                    .encode_to_vec()
-                    .into(),
-                    true,
-                )
-                .await
-                .expect("failed to send success message");
-            return (Some(result.public), disqualified);
-        }
-
-        // Broadcast missing shares
-        let mut missing = Vec::new();
-        for (dealer, recipient) in &requests {
-            missing.push(wire::Request {
-                dealer: *dealer,
-                share: *recipient,
-            });
-        }
-        debug!(round, missing = missing.len(), "requesting missing shares");
-        sender
-            .send(
-                Recipients::All,
-                wire::Dkg {
-                    round,
-                    payload: Some(wire::dkg::Payload::Missing(wire::Missing {
-                        shares: missing,
-                    })),
-                }
-                .encode_to_vec()
-                .into(),
-                false,
-            )
-            .await
-            .expect("failed to send missing shares");
-
-        // Collect missing shares
-        let mut signatures = HashMap::new();
-        loop {
-            select! {
-                _ = self.runtime.sleep_until(t_repair) => {
-                    break
-                },
-                result = receiver.recv() => {
-                    match result {
-                        Ok((sender, msg)) => {
-                            let msg = match wire::Dkg::decode(msg) {
-                                Ok(msg) => msg,
-                                Err(_) => {
-                                    p2.disqualify(sender);
-                                    continue;
-                                }
-                            };
-                            if msg.round != round {
-                                p2.disqualify(sender);
-                                continue;
-                            }
-                            let msg = match msg.payload {
-                                Some(wire::dkg::Payload::Reveal(msg)) => msg,
-                                _ => {
-                                    p2.disqualify(sender);
-                                    continue;
-                                }
-                            };
-                            let share = match group::Share::deserialize(&msg.share) {
-                                Some(share) => share,
-                                None => {
-                                    p2.disqualify(sender);
-                                    continue;
-                                }
-                            };
-                            let dealer = match p2.dealer(&sender) {
-                                Some(dealer) => dealer,
-                                None => {
-                                    p2.disqualify(sender);
-                                    continue;
-                                }
-                            };
-                            let payload = payload(round, dealer, &msg.share);
-                            if !C::verify(SHARE_NAMESPACE, &payload, &sender, &msg.signature) {
-                                p2.disqualify(sender);
-                                continue;
-                            }
-                            match p2.reveal(sender.clone(), share) {
-                                Ok(()) => {
-                                    signatures.insert((dealer, share.index), msg.signature);
-                                }
-                                Err(_) => {
-                                    p2.disqualify(sender);
-                                    continue;
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            warn!(round, ?err, "failed to receive missing share");
-                            break;
-                        }
-                    };
-                }
-            };
-        }
-
-        // Finalize P2
-        let (result, disqualified) = p2.finalize();
+        let (result, disqualified) = p1.finalize();
         let result = match result {
             Ok(result) => result,
             Err(e) => {
@@ -464,21 +296,10 @@ impl<E: Clock> Arbiter<E> {
                 .iter()
                 .map(|pk| hex(pk))
                 .collect::<Vec<_>>(),
-            "repair phase complete"
+            "ack phase complete"
         );
 
-        // Broadcast resolutions
-        let mut resolutions = Vec::new();
-        for ((dealer, recipient), share) in result.resolutions {
-            let signature = signatures
-                .remove(&(dealer, recipient))
-                .expect("missing signature");
-            resolutions.push(wire::Resolution {
-                dealer,
-                share: share.serialize(),
-                signature,
-            });
-        }
+        // Broadcast commitments
         sender
             .send(
                 Recipients::All,
@@ -486,7 +307,6 @@ impl<E: Clock> Arbiter<E> {
                     round,
                     payload: Some(wire::dkg::Payload::Success(wire::Success {
                         dealers: result.commitments,
-                        resolutions,
                     })),
                 }
                 .encode_to_vec()

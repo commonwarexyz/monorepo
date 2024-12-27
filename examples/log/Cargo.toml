@@ -2,7 +2,7 @@
 name = "commonware-log"
 edition = "2021"
 publish = true
-version = "0.0.2"
+version = "0.0.3"
 license = "MIT OR Apache-2.0"
 description = "Commit to a secret log and agree to its hash."
 readme = "README.md"
@@ -30,3 +30,7 @@ chrono = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 serde_json = { workspace = true }
+
+[[bin]]
+name = "commonware-log"
+bench = false

@@ -2,7 +2,7 @@
 name = "commonware-vrf"
 edition = "2021"
 publish = true
-version = "0.0.13"
+version = "0.0.14"
 license = "MIT OR Apache-2.0"
 description = "Generate bias-resistant randomness with untrusted contributors using commonware-cryptography and commonware-p2p."
 readme = "README.md"
@@ -28,3 +28,7 @@ governor = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
+
+[[bin]]
+name = "commonware-vrf"
+bench = false

@@ -7,6 +7,7 @@ use commonware_cryptography::{
         dkg::{
             self,
             contributor::{Output, P0, P1},
+            utils::threshold,
         },
         primitives::{
             group::{self, Private},
@@ -28,12 +29,11 @@ use tracing::{debug, info, warn};
 pub struct Contributor<C: Scheme> {
     crypto: C,
     arbiter: PublicKey,
+    t: u32,
     contributors: Vec<PublicKey>,
     contributors_ordered: HashMap<PublicKey, u32>,
-    t: u32,
     rogue: bool,
     lazy: bool,
-    defiant: bool,
 
     signatures: mpsc::Sender<(u64, Output)>,
 }
@@ -43,10 +43,8 @@ impl<C: Scheme> Contributor<C> {
         crypto: C,
         arbiter: PublicKey,
         mut contributors: Vec<PublicKey>,
-        t: u32,
         rogue: bool,
         lazy: bool,
-        defiant: bool,
     ) -> (Self, mpsc::Receiver<(u64, Output)>) {
         contributors.sort();
         let contributors_ordered: HashMap<PublicKey, u32> = contributors
@@ -59,12 +57,11 @@ impl<C: Scheme> Contributor<C> {
             Self {
                 crypto,
                 arbiter,
+                t: threshold(contributors.len() as u32).unwrap(),
                 contributors,
                 contributors_ordered,
-                t,
                 rogue,
                 lazy,
-                defiant,
                 signatures: sender,
             },
             receiver,
@@ -165,7 +162,6 @@ impl<C: Scheme> Contributor<C> {
                 .map(|public| (public.clone(), previous.unwrap().share));
             let p0 = P0::new(
                 me.clone(),
-                self.t,
                 previous,
                 self.contributors.clone(),
                 self.contributors.clone(),
@@ -199,7 +195,6 @@ impl<C: Scheme> Contributor<C> {
             (
                 P1::new(
                     me.clone(),
-                    self.t,
                     public,
                     self.contributors.clone(),
                     self.contributors.clone(),
@@ -328,7 +323,7 @@ impl<C: Scheme> Contributor<C> {
                 }
 
                 let payload = payload(round, me_idx, &share_bytes);
-                let signature = self.crypto.sign(SHARE_NAMESPACE, &payload);
+                let signature = self.crypto.sign(Some(SHARE_NAMESPACE), &payload);
                 sender
                     .send(
                         Recipients::One(player.clone()),
@@ -370,110 +365,7 @@ impl<C: Scheme> Contributor<C> {
                     }
                     if s == self.arbiter {
                         match msg.payload {
-                            Some(wire::dkg::Payload::Missing(msg)) => {
-                                if !should_deal {
-                                    continue;
-                                }
-                                let shares = shares.clone().unwrap();
-                                for missing_share in msg.shares {
-                                    if missing_share.dealer != me_idx {
-                                        continue;
-                                    }
-                                    if self.defiant {
-                                        warn!(
-                                            round,
-                                            recipient = missing_share.share,
-                                            "ignoring missing share request"
-                                        );
-                                        continue;
-                                    }
-                                    let recipient = missing_share.share;
-                                    let share = match shares.get(recipient as usize) {
-                                        Some(share) => {
-                                            warn!(round, recipient, "revealing missing share");
-                                            share.serialize()
-                                        }
-                                        None => {
-                                            warn!("arbiter sent missing share request for invalid recipient");
-                                            continue;
-                                        }
-                                    };
-                                    let payload = payload(round, me_idx, &share);
-                                    let signature = self.crypto.sign(SHARE_NAMESPACE, &payload);
-                                    sender
-                                        .send(
-                                            Recipients::One(self.arbiter.clone()),
-                                            wire::Dkg {
-                                                round,
-                                                payload: Some(wire::dkg::Payload::Reveal(
-                                                    wire::Reveal { share, signature },
-                                                )),
-                                            }
-                                            .encode_to_vec()
-                                            .into(),
-                                            true,
-                                        )
-                                        .await
-                                        .expect("could not send reveal");
-                                }
-                                continue;
-                            }
                             Some(wire::dkg::Payload::Success(msg)) => {
-                                for resolution in msg.resolutions {
-                                    if resolution.dealer == me_idx {
-                                        continue;
-                                    }
-                                    let dealer =
-                                        match self.contributors.get(resolution.dealer as usize) {
-                                            Some(dealer) => dealer,
-                                            None => {
-                                                warn!(
-                                                    round,
-                                                    resolution.dealer,
-                                                    "received share resolution for invalid dealer"
-                                                );
-                                                return (round, None);
-                                            }
-                                        };
-                                    let payload =
-                                        payload(round, resolution.dealer, &resolution.share);
-                                    // The arbiter should have already verified the signature but we verify just in case!
-                                    if !C::verify(
-                                        SHARE_NAMESPACE,
-                                        &payload,
-                                        dealer,
-                                        &resolution.signature,
-                                    ) {
-                                        warn!(
-                                            round,
-                                            resolution.dealer,
-                                            "received share with invalid signature from arbiter"
-                                        );
-                                        return (round, None);
-                                    }
-                                    debug!(
-                                        round,
-                                        resolution.dealer, "received missing share resolution"
-                                    );
-                                    let share = match group::Share::deserialize(&resolution.share) {
-                                        Some(share) => share,
-                                        None => {
-                                            warn!(
-                                                round,
-                                                resolution.dealer,
-                                                "received invalid share from arbiter"
-                                            );
-                                            return (round, None);
-                                        }
-                                    };
-                                    if share.index != me_idx {
-                                        continue;
-                                    }
-                                    if let Err(e) = p2.share(dealer.clone(), share) {
-                                        warn!(round, resolution.dealer, error = ?e, "received invalid share from arbiter");
-                                        return (round, None);
-                                    }
-                                }
                                 break msg.dealers;
                             }
                             _ => {
@@ -505,7 +397,7 @@ impl<C: Scheme> Contributor<C> {
 
                     // Verify signature on incoming share
                     let payload = payload(round, *dealer as u32, &msg.share);
-                    if !C::verify(SHARE_NAMESPACE, &payload, &s, &msg.signature) {
+                    if !C::verify(Some(SHARE_NAMESPACE), &payload, &s, &msg.signature) {
                         warn!(round, dealer, "received invalid share signature");
                         continue;
                     }
@@ -588,9 +480,6 @@ impl<C: Scheme> Contributor<C> {
         }
         if self.lazy {
             warn!("running as lazy player");
-        }
-        if self.defiant {
-            warn!("running as defiant player");
         }
         let mut previous = None;
         loop {

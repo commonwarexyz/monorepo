@@ -1,7 +1,7 @@
 syntax = "proto3";
 package wire;
 
-// All messages that can be sent over DKG_CHANNEL. 
+// All messages that can be sent over DKG_CHANNEL.
 message DKG {
     uint64 round = 1;
     oneof payload {
@@ -11,8 +11,6 @@ message DKG {
         Share share = 5;
         Ack ack = 6;
         Complaint complaint = 7;
-        Missing missing = 8;
-        Reveal reveal = 9;
         Success success = 10;
         Abort abort = 11;
     }
@@ -50,34 +48,13 @@ message Complaint {
     bytes signature = 3;
 }
 
-message Request {
-    uint32 dealer = 1;
-    uint32 share = 2;
-}
-
-message Missing {
-    repeated Request shares = 1;
-}
-
-message Reveal {
-    bytes share = 2;
-    bytes signature = 3;
-}
-
-message Resolution {
-    uint32 dealer = 1;
-    bytes share = 2;
-    bytes signature = 3;
-}
-
 message Success {
     repeated uint32 dealers = 1;
-    repeated Resolution resolutions = 2;
 }
 
 message Abort {}
 
-// All messages that can be sent over VRF_CHANNEL. 
+// All messages that can be sent over VRF_CHANNEL.
 message VRF {
     uint64 round = 1;
     bytes signature = 2;

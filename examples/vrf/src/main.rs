@@ -4,7 +4,7 @@
 //! Distributed Key Generation (DKG) to generate a static public key, and then perform a proactive Resharing every 10
 //! seconds. After a successful DKG and/or Reshare, contributors generate partial signatures over the round number and
 //! gossip them to others in the group (again using commonware-p2p). These partial signatures, when aggregated, form
-//! a threshold signature that was not knowable by any contributor prior to collecting `t` partial signatures.
+//! a threshold signature that was not knowable by any contributor prior to collecting `f + 1` partial signatures.
 //!
 //! To demonstrate how malicious contributors are handled, the CLI also lets you behave as a "rogue" dealer that generates
 //! invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, and/or a "defiant" dealer that
@@ -14,24 +14,24 @@
 //!
 //! If a new contributor joins the group after a successful DKG, the new contributor will jump to "Phase 1" of the contributor
 //! state machine during the next Resharing. They will skip the generation of a commitment/shares and just wait for commitments
-//! and shares from online contributors to be distributed to them. As long as `t` contributors are online and honest at this time,
+//! and shares from online contributors to be distributed to them. As long as `2f + 1` contributors are online and honest at this time,
 //! the new contributor will be able to recover the group public polynomial and generate a share that can be used to generate valid
-//! partial signatures. They will also be able to participate (share commitment/shares) in future Resharings.
+//! partial signatures. They will also be able to participate (share commitment/shares) in future resharings.
 //!
 //! # Trust Assumptions
 //!
-//! In this example, the arbiter is trusted. It tracks commitments, acknowledgements, complaints, and reveals submitted
+//! In this example, the arbiter is trusted. It tracks commitments, acknowledgements, and complaints submitted
 //! by contributors. As alluded to in the arbiter docs, production deployments of the arbiter should be run by all
 //! contributors over a replicated log (commonly instantiated with a BFT consensus algorithm). This ensures that all
 //! correct contributors have the same view of the arbiter's state at the end of a round.
 //!
-//! _Following the release of `commonware-consensus`, this example will be updated to use the "replicated arbiter" approach._
+//! `2f + 1` contributors are assumed to be honest and online and any `f + 1` partial signatures can be used to construct
+//! a threshold signature. `f` contributors can behave arbitrarily and will not be able to interrupt a DKG, Resharing, or Threshold
+//! Signature. Incorrect contributors will be identified by the arbiter and reported at the end of each DKG/Resharing.
 //!
-//! `Threshold` contributors are assumed to be honest and online. `n-threshold` contributors can behave arbitrarily and
-//! will not be able to interrupt a DKG, Resharing, or Threshold Signature. Diverging contributors will be identified
-//! by the arbiter and reported at the end of a DKG/Resharing.
+//! # Usage (2 of 4 Threshold)
 //!
-//! # Usage (3 of 4 Threshold)
+//! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
 //!
 //! ## Arbiter
 //! ```bash
@@ -68,19 +68,11 @@
 //! ```bash
 //! cargo run --release -- --lazy --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 //! ```
-//!
-//! ## Contributor 4 (Lazy + Defiant)
-//!
-//! _Only share `t-1` shares. Don't post any requested shares to arbiter (commitment will be dropped)._
-//!
-//! ```bash
-//! cargo run --release -- --lazy --defiant --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
-//! ```
 
 mod handlers;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{bls12381::dkg::utils::max_reveals, Ed25519, Scheme};
+use commonware_cryptography::{bls12381::dkg::utils::threshold, Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -148,12 +140,6 @@ fn main() {
         .arg(Arg::new("lazy").long("lazy").num_args(0).help(
             "Configures whether the contributor distributes shares to everyone or just t-1 participants",
         ))
-        .arg(
-            Arg::new("defiant")
-                .long("defiant")
-                .num_args(0)
-                .help("Configures whether the contributor responds to reveal requests"),
-        )
         .get_matches();
 
     // Create logger
@@ -245,10 +231,9 @@ fn main() {
         }
 
         // Infer threshold
-        let threshold = quorum(contributors.len() as u32)
-            .expect("not enough contributors to form a threshold of 2f+1");
-        let max_reveals = max_reveals(threshold);
-        info!(threshold, max_reveals, "inferred threshold");
+        let threshold = threshold(contributors.len() as u32).expect("insufficient participants");
+        let quorum = quorum(contributors.len() as u32).expect("insufficient participants");
+        info!(threshold, quorum, "inferred parameters");
 
         // Check if I am the arbiter
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
@@ -257,7 +242,6 @@ fn main() {
             // Create contributor
             let rogue = matches.get_flag("rogue");
             let lazy = matches.get_flag("lazy");
-            let defiant = matches.get_flag("defiant");
             let (contributor_sender, contributor_receiver) = network.register(
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
@@ -265,15 +249,8 @@ fn main() {
                 COMPRESSION_LEVEL,
             );
             let arbiter = Ed25519::from_seed(*arbiter).public_key();
-            let (contributor, requests) = handlers::Contributor::new(
-                signer,
-                arbiter,
-                contributors.clone(),
-                threshold,
-                rogue,
-                lazy,
-                defiant,
-            );
+            let (contributor, requests) =
+                handlers::Contributor::new(signer, arbiter, contributors.clone(), rogue, lazy);
             runtime.spawn(
                 "contributor",
                 contributor.run(contributor_sender, contributor_receiver),

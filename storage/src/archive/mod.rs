@@ -30,7 +30,7 @@
 //! # Uniqueness
 //!
 //! `Archive` assumes all stored indexes and keys are unique. If the same key is associated with multiple
-//! `indices`, there is no guarantee which value will be returned. If the a key is written to an existing `index`,
+//! `indices`, there is no guarantee which value will be returned. If the key is written to an existing `index`,
 //! `Archive` will return an error.
 //!
 //! ## Conflicts
