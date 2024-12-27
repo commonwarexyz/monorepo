@@ -17,8 +17,8 @@ use blst::{
     blst_p1_affine, blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf,
     blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress, blst_p2, blst_p2_add_or_double,
     blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf,
-    blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_scalar, blst_scalar_fr_check,
-    blst_scalar_from_bendian, blst_scalar_from_fr, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian,
+    blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use rand::RngCore;
 use std::ptr;
@@ -225,6 +225,9 @@ impl Scalar {
             blst_keygen_v3(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
             blst_fr_from_scalar(&mut ret, &sc);
         }
+
+        // Zeroize the ikm buffer
+        ikm.zeroize();
         Self(ret)
     }
 
@@ -299,7 +302,16 @@ impl Element for Scalar {
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_scalar_fr_check(&scalar) {
+            // We use `blst_sk_check` instead of `blst_scalar_fr_check` because the former
+            // performs a non-zero check.
+            //
+            // The IETF BLS12-381 specification allows for zero scalars up to (inclusive) Draft 3
+            // but disallows them after.
+            //
+            // References:
+            // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
+            // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
+            if !blst_sk_check(&scalar) {
                 return None;
             }
             blst_fr_from_scalar(&mut ret, &scalar);
