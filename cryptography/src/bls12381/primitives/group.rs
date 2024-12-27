@@ -299,8 +299,15 @@ impl Element for Scalar {
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            // blst_scalar_fr_check is replaced by blst_sk_check as it enforces
-            // a non-zero scalar check.
+            // We use `blst_sk_check` instead of `blst_scalar_fr_check` because the former
+            // performs a non-zero check.
+            //
+            // The IETF BLS12-381 specification allows for zero scalars up to (inclusive) Draft 3
+            // but disallows them after.
+            //
+            // References:
+            // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
+            // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
             if !blst_sk_check(&scalar) {
                 return None;
             }
