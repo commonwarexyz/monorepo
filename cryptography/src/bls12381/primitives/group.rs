@@ -13,11 +13,11 @@
 use blst::{
     blst_bendian_from_scalar, blst_final_exp, blst_fp12, blst_fr, blst_fr_add, blst_fr_from_scalar,
     blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul, blst_fr_sub, blst_hash_to_g1,
-    blst_hash_to_g2, blst_keygen_v3, blst_miller_loop, blst_p1, blst_p1_add_or_double,
-    blst_p1_affine, blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf,
-    blst_p1_mult, blst_p1_to_affine, blst_p1_uncompress, blst_p2, blst_p2_add_or_double,
-    blst_p2_affine, blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf,
-    blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian,
+    blst_hash_to_g2, blst_keygen, blst_miller_loop, blst_p1, blst_p1_add_or_double, blst_p1_affine,
+    blst_p1_compress, blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult,
+    blst_p1_to_affine, blst_p1_uncompress, blst_p2, blst_p2_add_or_double, blst_p2_affine,
+    blst_p2_compress, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf, blst_p2_mult,
+    blst_p2_to_affine, blst_p2_uncompress, blst_scalar, blst_scalar_from_bendian,
     blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use rand::RngCore;
@@ -222,7 +222,7 @@ impl Scalar {
         let mut ret = blst_fr::default();
         unsafe {
             let mut sc = blst_scalar::default();
-            blst_keygen_v3(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
+            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
             blst_fr_from_scalar(&mut ret, &sc);
         }
 
