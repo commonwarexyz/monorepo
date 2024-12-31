@@ -65,9 +65,10 @@ impl Relay {
         } else {
             &mut self.low
         };
-        sender.send(wire::Data { channel, message })
-        .await
-        .map_err(|_| Error::MessageDropped)
+        sender
+            .send(wire::Data { channel, message })
+            .await
+            .map_err(|_| Error::MessageDropped)
     }
 }
 
