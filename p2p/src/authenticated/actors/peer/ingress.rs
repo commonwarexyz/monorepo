@@ -60,14 +60,12 @@ impl Relay {
         message: Bytes,
         priority: bool,
     ) -> Result<(), Error> {
-        if priority {
-            return self
-                .high
-                .send(wire::Data { channel, message })
-                .await
-                .map_err(|_| Error::MessageDropped);
-        }
-        self.low
+        let sender = if priority {
+            &mut self.high
+        } else {
+            &mut self.low
+        };
+        sender
             .send(wire::Data { channel, message })
             .await
             .map_err(|_| Error::MessageDropped)
