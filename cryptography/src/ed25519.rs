@@ -125,9 +125,9 @@ impl Scheme for Ed25519 {
     }
 }
 
+/// Test vectors sourced from https://datatracker.ietf.org/doc/html/rfc8032#section-7.1.
 #[cfg(test)]
 mod tests {
-    // Tests use the Ed25519 test vectors from https://datatracker.ietf.org/doc/html/rfc8032#section-7.1
     use super::*;
 
     fn test_sign_and_verify(

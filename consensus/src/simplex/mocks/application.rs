@@ -228,7 +228,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         // Generate the payload
         let payload_len = size_of::<u64>() + context.parent.1.len() + size_of::<u64>();
         let mut payload = Vec::with_capacity(payload_len);
-        payload.extend_from_slice(&context.view.to_be_bytes());
+        payload.put_u64(context.view);
         payload.extend_from_slice(&context.parent.1);
         payload.put_u64(self.runtime.gen::<u64>()); // Ensures we always have a unique payload
         self.hasher.update(&payload);
