@@ -13,11 +13,11 @@ pub enum Message {
 /// Note that its methods ignore errors returned by the internal [mpsc::Sender]
 /// and return the unit type.
 #[derive(Clone)]
-pub struct OutboundMailbox {
+pub struct Mailbox {
     sender: mpsc::Sender<Message>,
 }
 
-impl OutboundMailbox {
+impl Mailbox {
     pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
         Self { sender }
     }
@@ -28,11 +28,11 @@ impl OutboundMailbox {
         (Self { sender }, receiver)
     }
 
-    pub async fn send_bit_vec(&mut self, bit_vec: wire::BitVec) {
+    pub async fn bit_vec(&mut self, bit_vec: wire::BitVec) {
         let _ = self.sender.send(Message::BitVec { bit_vec }).await;
     }
 
-    pub async fn send_peers(&mut self, peers: wire::Peers) {
+    pub async fn peers(&mut self, peers: wire::Peers) {
         let _ = self.sender.send(Message::Peers { peers }).await;
     }
 
