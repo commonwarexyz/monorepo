@@ -9,9 +9,6 @@ pub enum Message {
     Kill,
 }
 
-/// A fire-and-forget message sender.
-/// Note that its methods ignore errors returned by the internal [mpsc::Sender]
-/// and return the unit type.
 #[derive(Clone)]
 pub struct Mailbox {
     sender: mpsc::Sender<Message>,
@@ -43,13 +40,13 @@ impl Mailbox {
 
 #[derive(Clone)]
 pub struct Relay {
-    low_priority: mpsc::Sender<wire::Data>,
-    high_priority: mpsc::Sender<wire::Data>,
+    low: mpsc::Sender<wire::Data>,
+    high: mpsc::Sender<wire::Data>,
 }
 
 impl Relay {
     pub fn new(low: mpsc::Sender<wire::Data>, high: mpsc::Sender<wire::Data>) -> Self {
-        Self { low_priority: low, high_priority: high }
+        Self { low, high }
     }
 
     /// content sends a message to the peer.
@@ -64,9 +61,9 @@ impl Relay {
         priority: bool,
     ) -> Result<(), Error> {
         let sender = if priority {
-            &mut self.high_priority
+            &mut self.high
         } else {
-            &mut self.low_priority
+            &mut self.low
         };
         sender.send(wire::Data { channel, message })
         .await
