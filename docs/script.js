@@ -115,6 +115,7 @@ function setExternalLinksToOpenInNewTab() {
 }
 
 function insertFooter() {
+    const currentYear = new Date().getFullYear();
     const footerHTML = `
     <div class="footer">
         <div class="socials">
@@ -122,7 +123,7 @@ function insertFooter() {
             <a href="https://github.com/commonwarexyz/monorepo/discussions">Discussions</a>
             <a href="https://x.com/commonwarexyz">X</a>
         </div>
-        &copy; 2024 Commonware, Inc. All rights reserved.
+        &copy; ${currentYear} Commonware, Inc. All rights reserved.
     </div>
     `
     document.getElementById('footer-placeholder').innerHTML = footerHTML;
