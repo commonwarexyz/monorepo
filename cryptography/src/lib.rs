@@ -6,7 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use rand::{CryptoRng, Rng};
+use rand::{CryptoRng, Rng, RngCore};
 
 pub mod bls12381;
 pub use bls12381::Bls12381;
@@ -122,6 +122,42 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     /// This function is typically used for testing and is not recommended
     /// for production use.
     fn random<R: Rng + CryptoRng>(rng: &mut R) -> Digest;
+}
+
+pub trait BatchScheme {
+    /// Create a new Batch
+    fn new() -> Self;
+
+    /// Append item to the batch
+    ///
+    /// The message should not be hashed prior to calling this function. If a particular scheme
+    /// requires a payload to be hashed before it is signed, it will be done internally.
+    ///
+    /// A namespace should be used to prevent replay attacks. It will be prepended to the message so
+    /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
+    /// a message on the network layer can't accidentally spend funds on the execution layer). See
+    /// [union_unique](commonware_utils::union_unique) for details
+    fn add(
+        &mut self,
+        namespace: Option<&[u8]>,
+        message: &[u8],
+        public_key: &PublicKey,
+        signature: &Signature,
+    ) -> Result<(), BatchError>;
+
+    /// Perform batch verification over the previously added items.
+    fn verify<R: RngCore + CryptoRng>(self, rng: R) -> bool;
+}
+
+#[derive(Debug, PartialEq)]
+pub enum BatchError {
+    InvalidItem,
+}
+
+impl From<ed25519_consensus::Error> for BatchError {
+    fn from(_value: ed25519_consensus::Error) -> Self {
+        BatchError::InvalidItem
+    }
 }
 
 #[cfg(test)]
