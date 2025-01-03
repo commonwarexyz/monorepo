@@ -35,38 +35,25 @@ pub struct Output {
     pub share: Share,
 }
 
-/// Generate shares and a commitment (optional).
+/// Generate shares and a commitment.
 pub struct P0 {
     me: PublicKey,
     threshold: u32,
     previous: Option<(poly::Public, Share)>,
-    concurrency: usize,
 
-    dealers_ordered: HashMap<PublicKey, u32>,
     recipients: Vec<PublicKey>,
     recipients_ordered: HashMap<PublicKey, u32>,
 }
 
 impl P0 {
-    /// Create a new dealer for a DKG/Resharing procedure (optional).
+    /// Create a new dealer for a DKG/Resharing procedure.
     ///
     /// If `me` is not in `dealers`, this will panic.
     pub fn new(
         me: PublicKey,
         previous: Option<(poly::Public, Share)>,
-        mut dealers: Vec<PublicKey>,
         mut recipients: Vec<PublicKey>,
-        concurrency: usize,
     ) -> Self {
-        dealers.sort();
-        let dealers_ordered = dealers
-            .iter()
-            .enumerate()
-            .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect::<HashMap<_, _>>();
-        if !dealers_ordered.contains_key(&me) {
-            panic!("me must be in dealers");
-        }
         recipients.sort();
         let recipients_ordered = recipients
             .iter()
@@ -77,17 +64,14 @@ impl P0 {
             me,
             threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
             previous,
-            concurrency,
 
-            dealers_ordered,
             recipients,
             recipients_ordered,
         }
     }
 
-    /// Construct commitment, shares, and optionally `P1` (if the dealer
-    /// is also a recipient).
-    pub fn finalize(self) -> (Option<P1>, poly::Public, Vec<Share>) {
+    /// Construct commitment, shares, and `P1`.
+    pub fn finalize(self) -> (P1, poly::Public, Vec<Share>) {
         // Generate shares and commitment
         let (public, share) = match self.previous {
             Some((public, share)) => (Some(public), Some(share)),
@@ -103,11 +87,8 @@ impl P0 {
                 me: self.me,
                 threshold: self.threshold,
                 previous: public,
-                concurrency: self.concurrency,
-                dealers_ordered: self.dealers_ordered,
                 recipients_ordered: self.recipients_ordered,
-                commitments: HashMap::new(),
-                valid: BTreeMap::new(),
+                acks: HashMap::new(),
             })
         } else {
             None
@@ -116,81 +97,46 @@ impl P0 {
     }
 }
 
-/// Track commitments and shares distributed by dealers.
+/// Track acks from recipients.
 pub struct P1 {
     me: PublicKey,
     threshold: u32,
     previous: Option<poly::Public>,
-    concurrency: usize,
 
-    dealers_ordered: HashMap<PublicKey, u32>,
     recipients_ordered: HashMap<PublicKey, u32>,
 
-    commitments: HashMap<PublicKey, poly::Public>,
-    valid: BTreeMap<u32, (poly::Public, Share)>,
+    acks: HashSet<u32>,
 }
 
 impl P1 {
-    /// Create a new contributor for a DKG/Resharing procedure.
-    pub fn new(
-        me: PublicKey,
-        previous: Option<poly::Public>,
-        mut dealers: Vec<PublicKey>,
-        mut recipients: Vec<PublicKey>,
-        concurrency: usize,
-    ) -> Self {
-        dealers.sort();
-        let dealers_ordered = dealers
-            .iter()
-            .enumerate()
-            .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect();
-        recipients.sort();
-        let recipients_ordered = recipients
-            .iter()
-            .enumerate()
-            .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect();
-        Self {
-            me,
-            threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
-            previous,
-            concurrency,
-
-            dealers_ordered,
-            recipients_ordered,
-
-            commitments: HashMap::new(),
-            valid: BTreeMap::new(),
-        }
-    }
-
-    /// Verify and track a commitment from a dealer.
-    pub fn commitment(&mut self, dealer: PublicKey, commitment: poly::Public) -> Result<(), Error> {
+    /// Track ack of a commitment from a player.
+    pub fn ack(&mut self, player: PublicKey, commitment: poly::Public) -> Result<(), Error> {
         // Ensure contributor is valid
-        let idx = match self.dealers_ordered.get(&dealer) {
+        let idx = match self.recipients_ordered.get(&player) {
             Some(contributor) => *contributor,
             None => return Err(Error::DealerInvalid),
         };
 
-        // Verify that commitment is valid
-        ops::verify_commitment(self.previous.as_ref(), idx, &commitment, self.threshold)?;
+        // TODO: Verify commitment matches
 
-        // TODO: error if duplicate commitment
+        // TODO: if not, should complain?
 
-        // Store commitment
-        self.commitments.insert(dealer, commitment);
+        // Store ack
+        self.acks.insert(idx);
         Ok(())
     }
 
     /// Return whether a commitment has been received from a dealer.
     pub fn has(&self, dealer: PublicKey) -> bool {
-        self.commitments.contains_key(&dealer)
+        let Some(idx) = self.recipients_ordered.get(&dealer) else {
+            return false;
+        };
+        self.acks.contains(idx)
     }
 
     /// Return the count of tracked commitments.
     pub fn count(&self) -> usize {
-        self.commitments.len()
+        self.acks.len()
     }
 
     /// If there exist at least `2f + 1` commitments, proceed to `P2`.
