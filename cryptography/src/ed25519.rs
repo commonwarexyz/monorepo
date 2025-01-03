@@ -41,6 +41,42 @@ pub struct Ed25519 {
     verifier: PublicKey,
 }
 
+fn parse_private_key(private_key: &PrivateKey) -> Option<ed25519_consensus::SigningKey> {
+    let private_key: [u8; SECRET_KEY_LENGTH] = match private_key.as_ref().try_into() {
+        Ok(key) => key,
+        Err(_) => return None,
+    };
+    Some(ed25519_consensus::SigningKey::from(private_key))
+}
+
+fn public_key_extract(public_key: &PublicKey) -> Option<[u8; PUBLIC_KEY_LENGTH]> {
+    let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
+        Ok(key) => key,
+        Err(_) => return None,
+    };
+    Some(public_key)
+}
+
+fn parse_public_key(public_key: &PublicKey) -> Option<ed25519_consensus::VerificationKey> {
+    let public_key = public_key_extract(public_key)?;
+    ed25519_consensus::VerificationKey::try_from(public_key).ok()
+}
+
+fn parse_public_key_bytes(
+    public_key: &PublicKey,
+) -> Option<ed25519_consensus::VerificationKeyBytes> {
+    let public_key = public_key_extract(public_key)?;
+    Some(ed25519_consensus::VerificationKeyBytes::from(public_key))
+}
+
+fn parse_signature(signature: &Signature) -> Option<ed25519_consensus::Signature> {
+    let signature: [u8; SIGNATURE_LENGTH] = match signature.as_ref().try_into() {
+        Ok(sig) => sig,
+        Err(_) => return None,
+    };
+    Some(ed25519_consensus::Signature::from(signature))
+}
+
 impl Scheme for Ed25519 {
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let signer = ed25519_consensus::SigningKey::new(r);
@@ -52,11 +88,7 @@ impl Scheme for Ed25519 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let private_key: [u8; SECRET_KEY_LENGTH] = match private_key.as_ref().try_into() {
-            Ok(key) => key,
-            Err(_) => return None,
-        };
-        let signer = ed25519_consensus::SigningKey::from(private_key);
+        let signer = parse_private_key(&private_key)?;
         let verifier = signer.verification_key();
         Some(Self {
             signer,
@@ -86,11 +118,7 @@ impl Scheme for Ed25519 {
     }
 
     fn validate(public_key: &PublicKey) -> bool {
-        let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
-            Ok(key) => key,
-            Err(_) => return false,
-        };
-        ed25519_consensus::VerificationKey::try_from(public_key).is_ok()
+        parse_public_key(public_key).is_some()
     }
 
     fn verify(
@@ -99,19 +127,12 @@ impl Scheme for Ed25519 {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
-            Ok(key) => key,
-            Err(_) => return false,
+        let Some(public_key) = parse_public_key(public_key) else {
+            return false;
         };
-        let public_key = match ed25519_consensus::VerificationKey::try_from(public_key) {
-            Ok(key) => key,
-            Err(_) => return false,
+        let Some(signature) = parse_signature(signature) else {
+            return false;
         };
-        let signature: [u8; SIGNATURE_LENGTH] = match signature.as_ref().try_into() {
-            Ok(sig) => sig,
-            Err(_) => return false,
-        };
-        let signature = ed25519_consensus::Signature::from(signature);
         match namespace {
             Some(namespace) => {
                 let payload = union_unique(namespace, message);
@@ -145,25 +166,22 @@ impl BatchScheme for Ed25519Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let public_key =
-            match ed25519_consensus::VerificationKeyBytes::try_from(public_key.as_ref()) {
-                Ok(key) => key,
-                Err(_) => return false,
-            };
-        let sig = match ed25519_consensus::Signature::try_from(signature.as_ref()) {
-            Ok(sig) => sig,
-            Err(_) => return false,
+        let Some(public_key) = parse_public_key_bytes(public_key) else {
+            return false;
+        };
+        let Some(signature) = parse_signature(signature) else {
+            return false;
         };
         let payload = match namespace {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
         };
-        let item = ed25519_consensus::batch::Item::from((public_key, sig, &payload));
+        let item = ed25519_consensus::batch::Item::from((public_key, signature, &payload));
         self.verifier.queue(item);
         true
     }
 
-    fn verify<R: RngCore + CryptoRng>(self, rng: R) -> bool {
+    fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool {
         self.verifier.verify(rng).is_ok()
     }
 }
@@ -174,13 +192,12 @@ mod tests {
     use super::*;
 
     fn test_sign_and_verify(
-        secret_key: PrivateKey,
+        private_key: PrivateKey,
         public_key: PublicKey,
         message: &[u8],
         signature: Signature,
     ) {
-        let pkey = PrivateKey::from(secret_key.to_vec());
-        let mut signer = <Ed25519 as Scheme>::from(pkey).unwrap();
+        let mut signer = <Ed25519 as Scheme>::from(private_key).unwrap();
         let computed_signature = signer.sign(None, message);
         assert_eq!(computed_signature, signature);
         assert!(Ed25519::verify(
@@ -265,38 +282,38 @@ mod tests {
 
     #[test]
     fn rfc8032_test_vector_1() {
-        let v1 = vector_1();
-        test_sign_and_verify(v1.0, v1.1, &v1.2, v1.3)
+        let (private_key, public_key, message, signature) = vector_1();
+        test_sign_and_verify(private_key, public_key, &message, signature)
     }
 
     // sanity check the test infra rejects bad signatures
     #[test]
     #[should_panic]
-    fn bad_signature_should_panic() {
-        let v1 = vector_1();
-        let mut bad_signature = v1.2.to_vec();
+    fn bad_signature() {
+        let (private_key, public_key, message, signature) = vector_1();
+        let mut bad_signature = signature.to_vec();
         bad_signature[3] = 0xff;
-        test_sign_and_verify(v1.0, v1.1, &v1.2, bad_signature.into());
+        test_sign_and_verify(private_key, public_key, &message, bad_signature.into());
     }
 
     // sanity check the test infra rejects non-matching messages
     #[test]
     #[should_panic]
-    fn different_message_should_panic() {
-        let v1 = vector_1();
+    fn different_message() {
+        let (private_key, public_key, _, signature) = vector_1();
         let different_message = b"this is a different message".to_vec();
-        test_sign_and_verify(v1.0, v1.1, &different_message, v1.3);
+        test_sign_and_verify(private_key, public_key, &different_message, signature);
     }
 
     #[test]
     fn rfc8032_test_vector_2() {
-        let v2 = vector_2();
-        test_sign_and_verify(v2.0, v2.1, &v2.2, v2.3)
+        let (private_key, public_key, message, signature) = vector_2();
+        test_sign_and_verify(private_key, public_key, &message, signature)
     }
 
     #[test]
     fn rfc8032_test_vector_3() {
-        let secret_key = commonware_utils::from_hex_formatted(
+        let private_key = commonware_utils::from_hex_formatted(
             "
             c5aa8df43f9f837bedb7442f31dcb7b1
             66d38535076f094b85ce3a2e0b4458f7
@@ -321,7 +338,7 @@ mod tests {
         )
         .unwrap();
         test_sign_and_verify(
-            secret_key.into(),
+            private_key.into(),
             public_key.into(),
             &message,
             signature.into(),
@@ -330,7 +347,7 @@ mod tests {
 
     #[test]
     fn rfc8032_test_vector_1024() {
-        let secret_key = commonware_utils::from_hex_formatted(
+        let private_key = commonware_utils::from_hex_formatted(
             "
             f5e5767cf153319517630f226876b86c
             8160cc583bc013744c6bf255f5cc0ee5
@@ -423,7 +440,7 @@ mod tests {
         )
         .unwrap();
         test_sign_and_verify(
-            secret_key.into(),
+            private_key.into(),
             public_key.into(),
             &message,
             signature.into(),
@@ -432,7 +449,7 @@ mod tests {
 
     #[test]
     fn rfc8032_test_vector_sha() {
-        let secret_key = commonware_utils::from_hex_formatted(
+        let private_key = commonware_utils::from_hex_formatted(
             "
             833fe62409237b9d62ec77587520911e
             9a759cec1d19755b7da901b96dca3d42
@@ -465,7 +482,7 @@ mod tests {
         )
         .unwrap();
         test_sign_and_verify(
-            secret_key.into(),
+            private_key.into(),
             public_key.into(),
             &message,
             signature.into(),
@@ -479,7 +496,7 @@ mod tests {
         let mut batch = Ed25519Batch::new();
         assert!(batch.add(None, &v1.2, &PublicKey::from(v1.1), &Signature::from(v1.3)));
         assert!(batch.add(None, &v2.2, &PublicKey::from(v2.1), &Signature::from(v2.3)));
-        assert!(batch.verify(rand::thread_rng()));
+        assert!(batch.verify(&mut rand::thread_rng()));
     }
 
     #[test]
@@ -492,7 +509,7 @@ mod tests {
         let mut batch = Ed25519Batch::new();
         assert!(batch.add(None, &v1.2, &v1.1, &v1.3));
         assert!(batch.add(None, &v2.2, &v2.1, &Signature::from(bad_signature)));
-        assert!(!batch.verify(rand::thread_rng()));
+        assert!(!batch.verify(&mut rand::thread_rng()));
     }
 
     #[test]
