@@ -44,11 +44,11 @@ impl Info {
         if self.dialer {
             result[0] = 0b10000000; // Set the first bit of the byte
         }
-        // The second byte is currently unused.
         if self.iter > 0 {
-            result[2..4].copy_from_slice(&self.iter.to_be_bytes());
+            result[1..3].copy_from_slice(&self.iter.to_be_bytes());
         }
-        result[4..].copy_from_slice(&self.seq.to_be_bytes());
+        result[3..11].copy_from_slice(&self.seq.to_be_bytes());
+        // The last byte is currently unused.
         result
     }
 }
@@ -67,8 +67,9 @@ mod tests {
         };
         let nonce = ni.encode();
         assert_eq!(nonce[0], 0b10000000);
-        assert_eq!(&nonce[2..4], &1u16.to_be_bytes());
-        assert_eq!(&nonce[4..], &1u64.to_be_bytes());
+        assert_eq!(&nonce[1..3], &1u16.to_be_bytes());
+        assert_eq!(&nonce[3..11], &1u64.to_be_bytes());
+        assert_eq!(&nonce[11],&0);
 
         // Test case 2: dialer is false
         let ni = Info {
@@ -78,8 +79,9 @@ mod tests {
         };
         let nonce = ni.encode();
         assert_eq!(nonce[0], 0b00000000);
-        assert_eq!(&nonce[2..4], &1u16.to_be_bytes());
-        assert_eq!(&nonce[4..], &1u64.to_be_bytes());
+        assert_eq!(&nonce[1..3], &1u16.to_be_bytes());
+        assert_eq!(&nonce[3..11], &1u64.to_be_bytes());
+        assert_eq!(&nonce[11],&0);
 
         // Test case 3: different iter and seq values
         let ni = Info {
@@ -89,8 +91,9 @@ mod tests {
         };
         let nonce = ni.encode();
         assert_eq!(nonce[0], 0b10000000);
-        assert_eq!(&nonce[2..4], &65535u16.to_be_bytes());
-        assert_eq!(&nonce[4..], &123456789u64.to_be_bytes());
+        assert_eq!(&nonce[1..3], &65535u16.to_be_bytes());
+        assert_eq!(&nonce[3..11], &123456789u64.to_be_bytes());
+        assert_eq!(&nonce[11],&0);
 
         // Test case 4: iter is 0
         let ni = Info {
@@ -100,8 +103,9 @@ mod tests {
         };
         let nonce = ni.encode();
         assert_eq!(nonce[0], 0b10000000);
-        assert_eq!(&nonce[2..4], &0u16.to_be_bytes());
-        assert_eq!(&nonce[4..], &123456789u64.to_be_bytes());
+        assert_eq!(&nonce[1..3], &0u16.to_be_bytes());
+        assert_eq!(&nonce[3..11], &123456789u64.to_be_bytes());
+        assert_eq!(&nonce[11],&0);
     }
 
     #[test]
