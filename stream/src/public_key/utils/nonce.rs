@@ -44,6 +44,7 @@ impl Info {
         if self.dialer {
             result[0] = 0b10000000; // Set the first bit of the byte
         }
+        // The second byte is currently unused.
         if self.iter > 0 {
             result[2..4].copy_from_slice(&self.iter.to_be_bytes());
         }
