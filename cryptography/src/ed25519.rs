@@ -24,7 +24,7 @@
 //! assert!(Ed25519::verify(namespace, msg, &signer.public_key(), &signature));
 //! ```
 
-use crate::{BatchError, BatchScheme, PrivateKey, PublicKey, Scheme, Signature};
+use crate::{BatchScheme, PrivateKey, PublicKey, Scheme, Signature};
 use commonware_utils::union_unique;
 use ed25519_consensus;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
@@ -144,16 +144,23 @@ impl BatchScheme for Ed25519Batch {
         message: &[u8],
         public_key: &PublicKey,
         signature: &Signature,
-    ) -> Result<(), BatchError> {
-        let public_key = ed25519_consensus::VerificationKeyBytes::try_from(public_key.as_ref())?;
-        let sig = ed25519_consensus::Signature::try_from(signature.as_ref())?;
+    ) -> bool {
+        let public_key =
+            match ed25519_consensus::VerificationKeyBytes::try_from(public_key.as_ref()) {
+                Ok(key) => key,
+                Err(_) => return false,
+            };
+        let sig = match ed25519_consensus::Signature::try_from(signature.as_ref()) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
         let payload = match namespace {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
         };
         let item = ed25519_consensus::batch::Item::from((public_key, sig, &payload));
         self.verifier.queue(item);
-        Ok(())
+        true
     }
 
     fn verify<R: RngCore + CryptoRng>(self, rng: R) -> bool {
@@ -470,10 +477,8 @@ mod tests {
         let v1 = vector_1();
         let v2 = vector_2();
         let mut batch = Ed25519Batch::new();
-        let mut res_add = batch.add(None, &v1.2, &PublicKey::from(v1.1), &Signature::from(v1.3));
-        assert!(res_add.is_ok());
-        res_add = batch.add(None, &v2.2, &PublicKey::from(v2.1), &Signature::from(v2.3));
-        assert!(res_add.is_ok());
+        assert!(batch.add(None, &v1.2, &PublicKey::from(v1.1), &Signature::from(v1.3)));
+        assert!(batch.add(None, &v2.2, &PublicKey::from(v2.1), &Signature::from(v2.3)));
         assert!(batch.verify(rand::thread_rng()));
     }
 
@@ -485,10 +490,8 @@ mod tests {
         bad_signature[3] = 0xff;
 
         let mut batch = Ed25519Batch::new();
-        let mut res_add = batch.add(None, &v1.2, &v1.1, &v1.3);
-        assert!(res_add.is_ok());
-        res_add = batch.add(None, &v2.2, &v2.1, &Signature::from(bad_signature));
-        assert!(res_add.is_ok());
+        assert!(batch.add(None, &v1.2, &v1.1, &v1.3));
+        assert!(batch.add(None, &v2.2, &v2.1, &Signature::from(bad_signature)));
         assert!(!batch.verify(rand::thread_rng()));
     }
 
@@ -498,7 +501,6 @@ mod tests {
         let mut invalid_signature = v1.3.to_vec();
         invalid_signature.push(0xff);
         let mut batch = Ed25519Batch::new();
-        let res_add = batch.add(None, &v1.2, &v1.1, &Signature::from(invalid_signature));
-        assert_eq!(res_add.unwrap_err(), BatchError::InvalidItem);
+        assert!(!batch.add(None, &v1.2, &v1.1, &Signature::from(invalid_signature)));
     }
 }

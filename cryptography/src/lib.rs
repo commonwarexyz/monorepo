@@ -143,21 +143,10 @@ pub trait BatchScheme {
         message: &[u8],
         public_key: &PublicKey,
         signature: &Signature,
-    ) -> Result<(), BatchError>;
+    ) -> bool;
 
     /// Perform batch verification over the previously added items.
     fn verify<R: RngCore + CryptoRng>(self, rng: R) -> bool;
-}
-
-#[derive(Debug, PartialEq)]
-pub enum BatchError {
-    InvalidItem,
-}
-
-impl From<ed25519_consensus::Error> for BatchError {
-    fn from(_value: ed25519_consensus::Error) -> Self {
-        BatchError::InvalidItem
-    }
 }
 
 #[cfg(test)]
