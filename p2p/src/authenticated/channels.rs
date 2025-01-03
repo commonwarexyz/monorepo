@@ -63,8 +63,7 @@ impl crate::Sender for Sender {
     ) -> Result<Vec<PublicKey>, Error> {
         // If compression is enabled, compress the message before sending.
         if let Some(level) = self.compression {
-            let compressed =
-                compress(&message, level).map_err(|_| Error::CompressionFailed)?;
+            let compressed = compress(&message, level).map_err(|_| Error::CompressionFailed)?;
             message = compressed.into();
         }
 
