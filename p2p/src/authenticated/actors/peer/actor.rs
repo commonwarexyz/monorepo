@@ -67,8 +67,7 @@ impl<E: Spawner + Clock + ReasonablyRealtime + Rng + CryptoRng> Actor<E> {
     fn validate_msg<V>(
         msg: Option<wire::Data>,
         rate_limits: &HashMap<u32, V>,
-    ) -> Result<wire::Data, Error>
-where {
+    ) -> Result<wire::Data, Error> {
         let data = match msg {
             Some(data) => data,
             None => return Err(Error::PeerDisconnected),
