@@ -56,15 +56,16 @@
 //!
 //! _If a complaint is received, disqualify the dealer._
 //!
-//! ### [Phase 1] Step 1: Finalize Commitments
+//! ### [Phase 1] Step 1: Finalize Commitments and Forward Reveals
 //!
-//! After `t_c` time has elapsed, select the `2f + 1` commitments with the least number of reveals.
+//! After `t_c` time has elapsed, select the `2f + 1` commitments with the least number of reveals (most acks).
 //!
-//! If there do not exist `2f + 1` valid commitments (computed from the previous set in the case of resharing), the
-//! arbiter will abort the protocol.
+//! If there do not exist `2f + 1` commitments, the arbiter will abort the protocol.
 //!
 //! The arbiter sends all selected commitments to all players (regardless of whether or not their commitment
-//! was selected). The arbiter will then recover the new group polynomial using said commitments.
+//! was selected) and any reveals required for a player to reconstruct their share.
+//!
+//! The arbiter will then recover the new group polynomial using said commitments.
 //!
 //! ## Dealer
 //!
@@ -76,10 +77,8 @@
 //!
 //! ### [Phase 1] Step 1: Distribute Shares and Collect Acks
 //!
-//! If a contributor
-//!
-//! After receiving commitments from the arbiter, the contributor verifies that the commitments are valid
-//! and distributes shares generated from the first step (if any) to all participants (ordered by participant identity).
+//! Distribute share to each player and the corresponding commitment. If the player is honest and connected, it will respond
+//! with a signed "ack".
 //!
 //! Periodically redistribute shares to all participants that have not yet broadcast an "ack".
 //!
@@ -101,9 +100,9 @@
 //! ### [Phase 1] Step 2: Recover Group Polynomial and Derive Share
 //!
 //! If the round is successful, the arbiter will forward the valid commitments to construct shares for the
-//! new group polynomial (which shares the same constant term if it is a reshare). Like the arbiter, the contributor
-//! will recover the group polynomial. Unlike above, the contributor will also recover its new share of the secret
-//! (rather than just adding all shares together).
+//! new group polynomial (which shares the same constant term if it is a reshare) and any reveals. Like the arbiter,
+//! the player will recover the group polynomial. Unlike above, the player will also recover its new share of the secret (incorporating
+//! any reveals if necessary).
 //!
 //! # Example
 //!
