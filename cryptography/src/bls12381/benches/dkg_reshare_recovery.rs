@@ -29,7 +29,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
         for i in 0..n {
             let me = contributors[i as usize].clone();
             let p0 =
-                dkg::contributor::P0::new(me, None, contributors.clone(), contributors.clone(), 1);
+                dkg::dealer::P0::new(me, None, contributors.clone(), contributors.clone(), 1);
             let (p1, commitment, shares) = p0.finalize();
             contributor_shares.insert(i, (commitment.clone(), shares, p1.unwrap()));
             commitments.push(commitment);
@@ -107,7 +107,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                             for i in 0..n {
                                 let me = contributors[i as usize].clone();
                                 let share = outputs[i as usize].share;
-                                let p0 = dkg::contributor::P0::new(
+                                let p0 = dkg::dealer::P0::new(
                                     me,
                                     Some((group.clone(), share)),
                                     contributors.clone(),

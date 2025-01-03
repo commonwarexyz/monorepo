@@ -109,8 +109,9 @@
 //! For a complete example of how to instantiate this crate, checkout [commonware-vrf](https://docs.rs/commonware-vrf).
 
 pub mod arbiter;
-pub mod contributor;
+pub mod dealer;
 pub mod ops;
+pub mod player;
 pub mod utils;
 
 use thiserror::Error;
@@ -165,7 +166,7 @@ mod tests {
     use utils::threshold;
 
     use super::*;
-    use crate::bls12381::dkg::{arbiter, contributor};
+    use crate::bls12381::dkg::{arbiter, dealer};
     use crate::bls12381::primitives::group::Private;
     use crate::{Ed25519, Scheme};
     use std::collections::HashMap;
@@ -184,7 +185,7 @@ mod tests {
         let mut contributor_cons = HashMap::new();
         for con in &contributors {
             let me = con.clone();
-            let p0 = contributor::P0::new(
+            let p0 = dealer::P0::new(
                 me,
                 None,
                 contributors.clone(),
@@ -302,7 +303,7 @@ mod tests {
         let mut reshare_contributor_shares = HashMap::new();
         for contributor in contributors.iter() {
             let output = results.get(contributor).unwrap();
-            let p0 = contributor::P0::new(
+            let p0 = dealer::P0::new(
                 contributor.clone(),
                 Some((output.public.clone(), output.share)),
                 reshare_dealers.clone(),
@@ -316,7 +317,7 @@ mod tests {
 
         let mut reshare_contributor_cons = HashMap::new();
         for con in &reshare_recipients {
-            let p1 = contributor::P1::new(
+            let p1 = dealer::P1::new(
                 con.clone(),
                 Some(output.public.clone()),
                 reshare_dealers.clone(),
@@ -491,7 +492,7 @@ mod tests {
         let mut contributor_cons = HashMap::new();
         for con in &contributors {
             // Generate private key
-            let p0 = contributor::P0::new(
+            let p0 = dealer::P0::new(
                 con.clone(),
                 None,
                 contributors.clone(),
@@ -591,7 +592,7 @@ mod tests {
         let mut contributor_cons = HashMap::new();
         for con in &contributors {
             let me = con.clone();
-            let p0 = contributor::P0::new(
+            let p0 = dealer::P0::new(
                 me,
                 None,
                 contributors.clone(),

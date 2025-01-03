@@ -2,13 +2,13 @@
 
 use commonware_utils::max_faults;
 
-/// Assuming that `n = 3f + 1`, compute the maximum threshold `f + 1`
+/// Assuming that `n = 3f + 1`, compute the maximum threshold `2f + 1`
 /// that can be supported.
 ///
 /// If the value of `n` is too small to tolerate any faults, this function returns `None`.
 pub fn threshold(n: u32) -> Option<u32> {
     let f = max_faults(n)?;
-    Some(f + 1)
+    Some((2 * f) + 1)
 }
 
 #[cfg(test)]

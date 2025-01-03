@@ -25,7 +25,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                         let mut commitments = HashMap::new();
                         for i in 0..n {
                             let me = contributors[i as usize].clone();
-                            let p0 = dkg::contributor::P0::new(
+                            let p0 = dkg::dealer::P0::new(
                                 me,
                                 None,
                                 contributors.clone(),

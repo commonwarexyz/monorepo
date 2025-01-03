@@ -6,7 +6,7 @@ use commonware_cryptography::{
     bls12381::{
         dkg::{
             self,
-            contributor::{Output, P0, P1},
+            dealer::{Output, P0, P1},
             utils::threshold,
         },
         primitives::{
