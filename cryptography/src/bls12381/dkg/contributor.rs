@@ -116,7 +116,7 @@ impl P0 {
     }
 }
 
-/// Track commitments distributed by dealers.
+/// Track commitments and shares distributed by dealers.
 pub struct P1 {
     me: PublicKey,
     threshold: u32,
@@ -175,6 +175,8 @@ impl P1 {
 
         // Verify that commitment is valid
         ops::verify_commitment(self.previous.as_ref(), idx, &commitment, self.threshold)?;
+
+        // TODO: error if duplicate commitment
 
         // Store commitment
         self.commitments.insert(dealer, commitment);
