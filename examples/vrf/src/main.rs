@@ -237,7 +237,7 @@ fn main() {
 
         // Check if I am the arbiter
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
-        const COMPRESSION_LEVEL: Option<u8> = Some(3);
+        const COMPRESSION_LEVEL: Option<i8> = Some(3);
         if let Some(arbiter) = matches.get_one::<u64>("arbiter") {
             // Create contributor
             let rogue = matches.get_flag("rogue");

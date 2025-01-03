@@ -548,7 +548,7 @@ mod tests {
         });
     }
 
-    fn test_message_too_large(compression: Option<u8>) {
+    fn test_message_too_large(compression: Option<i8>) {
         // Configure test
         let base_port = 3000;
         let n: usize = 2;

@@ -13,7 +13,7 @@ use zstd::bulk::{compress, decompress};
 pub struct Sender {
     channel: Channel,
     max_size: usize,
-    compression: Option<u8>,
+    compression: Option<i8>,
     messenger: Messenger,
 }
 
@@ -21,7 +21,7 @@ impl Sender {
     pub(super) fn new(
         channel: Channel,
         max_size: usize,
-        compression: Option<u8>,
+        compression: Option<i8>,
         messenger: Messenger,
     ) -> Self {
         Self {
@@ -148,7 +148,7 @@ impl Channels {
         channel: Channel,
         rate: governor::Quota,
         backlog: usize,
-        compression: Option<u8>,
+        compression: Option<i8>,
     ) -> (Sender, Receiver) {
         let (sender, receiver) = mpsc::channel(backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {
