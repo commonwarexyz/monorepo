@@ -43,7 +43,6 @@ use crate::bls12381::{
 };
 use crate::PublicKey;
 use commonware_utils::{max_faults, quorum};
-use itertools::Itertools;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Gather commitments from all contributors.
