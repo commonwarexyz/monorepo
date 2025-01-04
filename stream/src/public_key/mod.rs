@@ -52,18 +52,18 @@
 //! x25519 secret is then used to create a ChaCha20-Poly1305 cipher for encrypting all messages exchanged with the peer.
 //!
 //! ChaCha20-Poly1305 nonces (12 bytes) are constructed such that the first bit indicates whether the sender is a dialer (1) or
-//! dialee (0). The rest of the first byte (next 7 bits) and next byte (all 8 bits) are unused (set to 0). The next 2 bytes
-//! are a `u16` iterator and the final 8 bytes are a `u64` sequence number. When the sequence reaches `u64::MAX`, the iterator
-//! is incremented and the sequence is reset to 0. This technique provides each sender with a channel duration of `2^80` frames
+//! dialee (0). The rest of the first byte (next 7 bits) is unused (set to 0). The next 2 bytes are a `u16` iterator.
+//! The next 8 bytes are a `u64` sequence number. When the sequence reaches `u64::MAX`, the iterator is incremented and the
+//! sequence is reset to 0. This technique provides each sender with a channel duration of `2^80` frames
 //! (and automatically terminates when this number of frames has been sent). In the blockchain context, validators often maintain
 //! long-lived connections with each other and avoiding connection re-establishment (to reset iterator/sequence with a new cipher)
-//! is desirable.
+//! is desirable. The final byte is unused (set to 0).
 //!
 //! ```text
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
 //! | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |10 |11 |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
-//! | D | U |It(u16)|         Sequence(u64)         |
+//! | D |It(u16)|         Sequence(u64)         | U |
 //! +---+---+---+---+---+---+---+---+---+---+---+---+
 //!
 //! D = Dialer/Dialee, U = Unused, It = Iterator
