@@ -15,13 +15,12 @@
 //! not provided by the contributor because this authorization function is highly dependent on
 //! the context in which the contributor is being used.
 
-use commonware_utils::quorum;
-
 use crate::bls12381::{
     dkg::{ops, Error},
     primitives::{group::Share, poly},
 };
 use crate::PublicKey;
+use commonware_utils::quorum;
 use std::collections::{HashMap, HashSet};
 
 /// Dealer output of a DKG/Resharing procedure.
@@ -81,7 +80,7 @@ impl P0 {
         // Store ack
         match self.acks.insert(idx) {
             true => Ok(()),
-            false => return Err(Error::DuplicateAck),
+            false => Err(Error::DuplicateAck),
         }
     }
 

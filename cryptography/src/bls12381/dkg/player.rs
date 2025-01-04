@@ -30,7 +30,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 #[derive(Clone)]
 pub struct Output {
     pub public: poly::Public,
-    pub commitments: Vec<poly::Public>,
     pub share: Share,
 }
 
@@ -94,27 +93,26 @@ impl P0 {
             None => return Err(Error::DealerInvalid),
         };
 
+        // Check that share is valid
+        if share.index != self.recipients_ordered[&self.me] {
+            return Err(Error::MisdirectedShare);
+        }
+
         // If already have commitment from dealer, check if matches
         if let Some((existing_commitment, existing_share)) = self.shares.get(&idx) {
             if existing_commitment != &commitment {
                 return Err(Error::MismatchedCommitment);
             }
-            // TODO: may be a valid share but for wrong recipient...should rethink this given we aren't tracking complaints
             if existing_share != &share {
                 return Err(Error::MismatchedShare);
             }
-
-            // Duplicate received
             return Err(Error::DuplicateShare);
         }
 
         // Verify that commitment is valid
         ops::verify_commitment(self.previous.as_ref(), idx, &commitment, self.threshold)?;
 
-        // Check that share is valid
-        if share.index != self.recipients_ordered[&self.me] {
-            return Err(Error::MisdirectedShare);
-        }
+        // Verify that share is valid
         ops::verify_share(
             self.previous.as_ref(),
             idx,
@@ -134,7 +132,7 @@ impl P0 {
         let Some(dealer) = self.dealers_ordered.get(&dealer) else {
             return false;
         };
-        self.shares.contains_key(&dealer)
+        self.shares.contains_key(dealer)
     }
 
     /// Return the count of tracked commitments.
@@ -190,14 +188,12 @@ impl P0 {
 
         // Construct secret
         let mut public = poly::Public::zero();
-        let mut t_commitments = Vec::new();
         let mut secret = group::Private::zero();
         match self.previous {
             None => {
                 // Add all valid commitments/shares
                 for share in self.shares.values() {
                     public.add(&share.0);
-                    t_commitments.push(share.0.clone());
                     secret.add(&share.1.private);
                 }
             }
@@ -212,7 +208,6 @@ impl P0 {
                     .iter()
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
                     .collect();
-                t_commitments = commitments.values().cloned().collect();
                 public =
                     ops::recover_public(&previous, commitments, self.threshold, self.concurrency)?;
 
@@ -235,7 +230,6 @@ impl P0 {
         // Return the public polynomial and share
         Ok(Output {
             public,
-            commitments: t_commitments,
             share: Share {
                 index: self.recipients_ordered[&self.me],
                 private: secret,

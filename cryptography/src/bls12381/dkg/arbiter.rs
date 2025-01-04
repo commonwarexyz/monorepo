@@ -43,7 +43,7 @@ use crate::bls12381::{
 };
 use crate::PublicKey;
 use commonware_utils::{max_faults, quorum};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Output of the DKG/Resharing procedure.
 #[derive(Clone)]
@@ -143,9 +143,10 @@ impl P0 {
         }
 
         // Ensure acks valid range and >= threshold
+        let recipients_len = self.recipients.len() as u32;
         let mut active = HashSet::new();
         for ack in &acks {
-            if *ack as usize >= self.recipients.len() {
+            if *ack >= recipients_len {
                 self.disqualified.insert(dealer);
                 return Err(Error::PlayerInvalid);
             }
@@ -154,7 +155,7 @@ impl P0 {
 
         // Ensure reveals less than max_faults and for recipients not yet ack'd
         let reveals_len = reveals.len();
-        let max_faults = max_faults(self.recipients.len() as u32).unwrap() as usize;
+        let max_faults = max_faults(recipients_len).unwrap() as usize;
         if reveals_len > max_faults {
             self.disqualified.insert(dealer);
             return Err(Error::TooManyReveals);
@@ -162,7 +163,7 @@ impl P0 {
 
         // Check reveals
         for share in &reveals {
-            if share.index as usize >= self.recipients.len() {
+            if share.index >= recipients_len {
                 self.disqualified.insert(dealer);
                 return Err(Error::PlayerInvalid);
             }
@@ -178,7 +179,7 @@ impl P0 {
                 &commitment,
                 self.recipient_threshold,
                 share.index,
-                &share,
+                share,
             )?;
 
             // Record active
