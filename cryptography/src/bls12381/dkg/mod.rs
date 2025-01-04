@@ -60,7 +60,7 @@
 //!
 //! ### [Phase 1] Step 1: Finalize Commitments and Forward Reveals
 //!
-//! After `t_c` time has elapsed, select the `2f + 1` commitments with the least number of reveals (most acks).
+//! After `t` time has elapsed, select the `2f + 1` commitments with the least number of reveals (most acks).
 //!
 //! If there do not exist `2f + 1` commitments, the arbiter will abort the protocol.
 //!
@@ -86,8 +86,8 @@
 //!
 //! ### [Phase 2] Step 2: Register Commitment, Acks, and Reveals
 //!
-//! After `t_a` time has elapsed, the dealer sends its commitment, any acks it collected, and up to `f` reveals
-//! to the arbiter.
+//! After `t/2` time has elapsed, the dealer sends its commitment, any acks it collected, and up to `f` reveals
+//! to the arbiter. This gives `t/2` time to reach arbiter.
 //!
 //! ## Player
 //!
