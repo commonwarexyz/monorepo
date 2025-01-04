@@ -60,14 +60,12 @@ pub struct P0 {
     recipient_threshold: u32,
     concurrency: usize,
 
-    dealers: Vec<PublicKey>,
-    dealers_ordered: HashMap<PublicKey, u32>,
+    dealers: HashMap<PublicKey, u32>,
 
     recipients: Vec<PublicKey>,
-    recipients_ordered: HashMap<PublicKey, u32>,
 
-    commitments: BTreeMap<PublicKey, (poly::Public, Vec<u32>, Vec<Share>)>,
-    reveals: BTreeMap<usize, Vec<PublicKey>>,
+    commitments: BTreeMap<u32, (poly::Public, Vec<u32>, Vec<Share>)>,
+    reveals: BTreeMap<usize, Vec<u32>>,
     disqualified: HashSet<PublicKey>,
 }
 
@@ -86,22 +84,15 @@ impl P0 {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         recipients.sort();
-        let recipients_ordered = recipients
-            .iter()
-            .enumerate()
-            .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect();
         Self {
             dealer_threshold: quorum(dealers.len() as u32).expect("insufficient dealers"),
             recipient_threshold: quorum(recipients.len() as u32).expect("insufficient recipients"),
             previous,
             concurrency,
 
-            dealers,
-            dealers_ordered,
+            dealers: dealers_ordered,
 
             recipients,
-            recipients_ordered,
 
             commitments: BTreeMap::new(),
             reveals: BTreeMap::new(),
@@ -130,13 +121,13 @@ impl P0 {
         }
 
         // Find the index of the contributor
-        let idx = match self.dealers_ordered.get(&dealer) {
+        let idx = match self.dealers.get(&dealer) {
             Some(idx) => *idx,
             None => return Err(Error::ContributorInvalid),
         };
 
         // Check if commitment already exists
-        if self.commitments.contains_key(&dealer) {
+        if self.commitments.contains_key(&idx) {
             return Err(Error::DuplicateCommitment);
         }
 
@@ -195,9 +186,8 @@ impl P0 {
         }
 
         // Record acks and reveals
-        self.commitments
-            .insert(dealer.clone(), (commitment, acks, reveals));
-        self.reveals.entry(reveals_len).or_default().push(dealer);
+        self.commitments.insert(idx, (commitment, acks, reveals));
+        self.reveals.entry(reveals_len).or_default().push(idx);
         Ok(())
     }
 
@@ -207,7 +197,8 @@ impl P0 {
     pub fn finalize(mut self) -> (Result<Output, Error>, HashSet<PublicKey>) {
         // Drop commitments from disqualified contributors
         for disqualified in self.disqualified.iter() {
-            self.commitments.remove(disqualified);
+            let idx = self.dealers.get(disqualified).unwrap();
+            self.commitments.remove(idx);
         }
 
         // Ensure we have enough commitments to proceed
@@ -218,10 +209,9 @@ impl P0 {
         // Select best `2f + 1` commitments (sorted by fewest reveals)
         let mut selected = Vec::new();
         for (_, dealers) in self.reveals.iter() {
-            for dealer in dealers {
-                if let Some(commitment) = self.commitments.get(dealer) {
-                    let idx = self.dealers_ordered.get(dealer).unwrap();
-                    selected.push((*idx, commitment));
+            for dealer_idx in dealers {
+                if let Some(commitment) = self.commitments.get(dealer_idx) {
+                    selected.push((*dealer_idx, commitment));
                     if selected.len() == self.dealer_threshold as usize {
                         break;
                     }
