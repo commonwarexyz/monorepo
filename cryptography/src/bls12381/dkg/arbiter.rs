@@ -49,7 +49,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// Gather commitments from all contributors.
 pub struct P0 {
     previous: Option<poly::Public>,
-    threshold: u32,
+    dealer_threshold: u32,
+    recipient_threshold: u32,
     concurrency: usize,
 
     dealers: Vec<PublicKey>,
@@ -83,7 +84,8 @@ impl P0 {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
-            threshold: quorum(recipients.len() as u32).expect("insufficient participants"),
+            dealer_threshold: quorum(dealers.len() as u32).expect("insufficient dealers"),
+            recipient_threshold: quorum(recipients.len() as u32).expect("insufficient recipients"),
             previous,
             concurrency,
 
@@ -128,7 +130,12 @@ impl P0 {
         }
 
         // Verify the commitment is valid
-        match ops::verify_commitment(self.previous.as_ref(), idx, &commitment, self.threshold) {
+        match ops::verify_commitment(
+            self.previous.as_ref(),
+            idx,
+            &commitment,
+            self.recipient_threshold,
+        ) {
             Ok(()) => {
                 self.commitments.insert(dealer, commitment);
             }
@@ -171,7 +178,7 @@ impl P0 {
                 self.previous.as_ref(),
                 idx,
                 &commitment,
-                self.threshold,
+                self.recipient_threshold,
                 share.index,
                 &share,
             )?;
@@ -194,7 +201,7 @@ impl P0 {
         }
 
         // Ensure we have enough commitments to proceed
-        if self.commitments.len() < self.threshold {
+        if self.commitments.len() < self.dealer_threshold {
             return (None, self.disqualified);
         }
 
@@ -209,8 +216,12 @@ impl P0 {
                     let commitment = self.commitments.get(dealer).unwrap();
                     commitments.insert(*idx, commitment.clone());
                 }
-                match ops::recover_public(&previous, commitments, self.threshold, self.concurrency)
-                {
+                match ops::recover_public(
+                    &previous,
+                    commitments,
+                    self.recipient_threshold,
+                    self.concurrency,
+                ) {
                     Ok(public) => public,
                     Err(e) => return (Err(e), self.disqualified),
                 }
@@ -222,7 +233,7 @@ impl P0 {
                     let commitment = self.commitments.get(dealer).unwrap();
                     commitments.push(commitment.clone());
                 }
-                match ops::construct_public(commitments, self.threshold) {
+                match ops::construct_public(commitments, self.recipient_threshold) {
                     Ok(public) => public,
                     Err(e) => return (Err(e), self.disqualified),
                 }
