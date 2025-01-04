@@ -99,6 +99,7 @@ impl P0 {
             if existing_commitment != &commitment {
                 return Err(Error::MismatchedCommitment);
             }
+            // TODO: may be a valid share but for wrong recipient...should rethink this given we aren't tracking complaints
             if existing_share != &share {
                 return Err(Error::MismatchedShare);
             }
