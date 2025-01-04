@@ -335,6 +335,42 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
             }
         }
 
+        // Send commitment to arbiter
+        if let Some((p0, commitment, serialized_commitment, shares, acks)) = dealer_obj {
+            let mut ack_vec = Vec::with_capacity(acks.len());
+            let mut reveals = Vec::new();
+            for idx in 0..self.contributors.len() as u32 {
+                match acks.get(&idx) {
+                    Some(signature) => {
+                        ack_vec.push(wire::Ack {
+                            public_key: idx,
+                            signature: signature.clone(),
+                        });
+                    }
+                    None => {
+                        reveals.push(shares[idx as usize].serialize());
+                    }
+                }
+            }
+            sender
+                .send(
+                    Recipients::One(self.arbiter.clone()),
+                    wire::Dkg {
+                        round,
+                        payload: Some(wire::dkg::Payload::Commitment(wire::Commitment {
+                            commitment: serialized_commitment,
+                            acks: ack_vec,
+                            reveals,
+                        })),
+                    }
+                    .encode_to_vec()
+                    .into(),
+                    true,
+                )
+                .await
+                .expect("could not send commitment");
+        }
+
         if !p1.has(me.clone()) && should_deal {
             warn!(round, "commitment is missing from arbiter");
             should_deal = false;
