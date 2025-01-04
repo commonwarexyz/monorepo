@@ -45,6 +45,14 @@ use crate::PublicKey;
 use commonware_utils::{max_faults, quorum};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+/// Output of the DKG/Resharing procedure.
+#[derive(Clone)]
+pub struct Output {
+    pub public: poly::Public,
+    pub commitments: HashMap<u32, poly::Public>,
+    pub reveals: HashMap<u32, Vec<Share>>,
+}
+
 /// Gather commitments from all contributors.
 pub struct P0 {
     previous: Option<poly::Public>,
@@ -58,7 +66,8 @@ pub struct P0 {
     recipients: Vec<PublicKey>,
     recipients_ordered: HashMap<PublicKey, u32>,
 
-    commitments: BTreeMap<PublicKey, poly::Public>,
+    commitments: BTreeMap<PublicKey, (poly::Public, Vec<u32>, Vec<Share>)>,
+    reveals: BTreeMap<usize, Vec<PublicKey>>,
     disqualified: HashSet<PublicKey>,
 }
 
@@ -95,13 +104,14 @@ impl P0 {
             recipients_ordered,
 
             commitments: BTreeMap::new(),
+            reveals: BTreeMap::new(),
             disqualified: HashSet::new(),
         }
     }
 
-    /// Disqualify a contributor from the DKG for external reason (i.e. sending invalid messages).
-    pub fn disqualify(&mut self, contributor: PublicKey) {
-        self.disqualified.insert(contributor);
+    /// Disqualify a participant from the DKG for external reason (i.e. sending invalid messages).
+    pub fn disqualify(&mut self, participant: PublicKey) {
+        self.disqualified.insert(participant);
     }
 
     /// Verify and track a commitment from a dealer.
@@ -113,6 +123,8 @@ impl P0 {
         reveals: Vec<Share>,
     ) -> Result<(), Error> {
         // Check if contributor is disqualified
+        //
+        // If disqualified, ignore future messages to avoid unnecessary processing.
         if self.disqualified.contains(&dealer) {
             return Err(Error::ContributorDisqualified);
         }
@@ -129,47 +141,43 @@ impl P0 {
         }
 
         // Verify the commitment is valid
-        match ops::verify_commitment(
+        if let Err(e) = ops::verify_commitment(
             self.previous.as_ref(),
             idx,
             &commitment,
             self.recipient_threshold,
         ) {
-            Ok(()) => {
-                self.commitments.insert(dealer, commitment);
-            }
-            Err(e) => {
-                self.disqualified.insert(dealer);
-                return Err(e);
-            }
+            self.disqualified.insert(dealer);
+            return Err(e);
         }
 
         // Ensure acks valid range and >= threshold
         let mut active = HashSet::new();
-        for ack in acks {
-            if ack as usize >= self.recipients.len() {
+        for ack in &acks {
+            if *ack as usize >= self.recipients.len() {
                 self.disqualified.insert(dealer);
-                return Err(Error::AckInvalid);
+                return Err(Error::PlayerInvalid);
             }
             active.insert(ack);
         }
 
         // Ensure reveals less than max_faults and for recipients not yet ack'd
-        let max_faults = max_faults(self.recipients.len() as u32).unwrap();
-        if reveals.len() > max_faults {
+        let reveals_len = reveals.len();
+        let max_faults = max_faults(self.recipients.len() as u32).unwrap() as usize;
+        if reveals_len > max_faults {
             self.disqualified.insert(dealer);
-            return Err(Error::RevealsTooMany);
+            return Err(Error::TooManyReveals);
         }
 
         // Check reveals
-        for reveal in reveals {
-            if reveal.index as usize >= self.recipients.len() {
+        for share in &reveals {
+            if share.index as usize >= self.recipients.len() {
                 self.disqualified.insert(dealer);
-                return Err(Error::RevealInvalid);
+                return Err(Error::PlayerInvalid);
             }
-            if active.contains(&reveal.index) {
+            if active.contains(&share.index) {
                 self.disqualified.insert(dealer);
-                return Err(Error::RevealAcked);
+                return Err(Error::PlayerInvalid);
             }
 
             // Verify share
@@ -183,37 +191,53 @@ impl P0 {
             )?;
 
             // Record active
-            active.insert(reveal.index);
+            active.insert(&share.index);
         }
 
         // Record acks and reveals
-        self.commitments.insert(dealer, (commitment, acks, reveals));
+        self.commitments
+            .insert(dealer.clone(), (commitment, acks, reveals));
+        self.reveals.entry(reveals_len).or_default().push(dealer);
+        Ok(())
     }
 
     /// If we are prepared, proceed to `P1`.
     ///
     /// Return the disqualified contributors.
-    pub fn finalize(mut self) -> (Option<Output>, HashSet<PublicKey>) {
+    pub fn finalize(mut self) -> (Result<Output, Error>, HashSet<PublicKey>) {
         // Drop commitments from disqualified contributors
         for disqualified in self.disqualified.iter() {
             self.commitments.remove(disqualified);
         }
 
         // Ensure we have enough commitments to proceed
-        if self.commitments.len() < self.dealer_threshold {
-            return (None, self.disqualified);
+        if self.commitments.len() < self.dealer_threshold as usize {
+            return (Err(Error::InsufficientDealings), self.disqualified);
         }
 
         // Select best `2f + 1` commitments (sorted by fewest reveals)
+        let mut selected = Vec::new();
+        for (_, dealers) in self.reveals.iter() {
+            for dealer in dealers {
+                if let Some(commitment) = self.commitments.get(dealer) {
+                    let idx = self.dealers_ordered.get(dealer).unwrap();
+                    selected.push((*idx, commitment));
+                    if selected.len() == self.dealer_threshold as usize {
+                        break;
+                    }
+                }
+            }
+            if selected.len() == self.dealer_threshold as usize {
+                break;
+            }
+        }
 
         // Recover group
         let public = match self.previous {
             Some(previous) => {
                 let mut commitments = BTreeMap::new();
-                for idx in &threshold_commitments {
-                    let dealer = self.dealers.get(*idx as usize).unwrap();
-                    let commitment = self.commitments.get(dealer).unwrap();
-                    commitments.insert(*idx, commitment.clone());
+                for (dealer_idx, (commitment, _, _)) in &selected {
+                    commitments.insert(*dealer_idx, commitment.clone());
                 }
                 match ops::recover_public(
                     &previous,
@@ -227,9 +251,7 @@ impl P0 {
             }
             None => {
                 let mut commitments = Vec::new();
-                for idx in &threshold_commitments {
-                    let dealer = self.dealers.get(*idx as usize).unwrap();
-                    let commitment = self.commitments.get(dealer).unwrap();
+                for (_, (commitment, _, _)) in &selected {
                     commitments.push(commitment.clone());
                 }
                 match ops::construct_public(commitments, self.recipient_threshold) {
@@ -240,9 +262,16 @@ impl P0 {
         };
 
         // Generate output
+        let mut commitments = HashMap::new();
+        let mut reveals = HashMap::new();
+        for (dealer_idx, (commitment, _, shares)) in selected {
+            commitments.insert(dealer_idx, commitment.clone());
+            reveals.insert(dealer_idx, shares.clone());
+        }
         let output = Output {
             public,
-            commitments: threshold_commitments.into_iter().collect(),
+            commitments,
+            reveals,
         };
 
         // Return output

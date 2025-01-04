@@ -153,10 +153,6 @@ pub enum Error {
     MissingCommitment,
     #[error("too many commitments")]
     TooManyCommitments,
-    #[error("self-ack")]
-    SelfAck,
-    #[error("self-complaint")]
-    SelfComplaint,
     #[error("duplicate commitment")]
     DuplicateCommitment,
     #[error("duplicate share")]
@@ -167,17 +163,17 @@ pub enum Error {
     MismatchedCommitment,
     #[error("mismatched share")]
     MismatchedShare,
+    #[error("too many reveals")]
+    TooManyReveals,
 }
 
 #[cfg(test)]
 mod tests {
-    use commonware_utils::quorum;
-    use utils::threshold;
-
     use super::*;
     use crate::bls12381::dkg::{arbiter, dealer};
     use crate::bls12381::primitives::group::Private;
     use crate::{Ed25519, Scheme};
+    use commonware_utils::quorum;
     use std::collections::HashMap;
 
     fn run_dkg_and_reshare(n_0: u32, dealers_0: u32, n_1: u32, dealers_1: u32, concurrency: usize) {
