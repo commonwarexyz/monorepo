@@ -24,7 +24,7 @@ use crate::bls12381::{
 };
 use crate::PublicKey;
 use commonware_utils::quorum;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 /// Output of a DKG/Resharing procedure.
 #[derive(Clone)]
@@ -35,13 +35,12 @@ pub struct Output {
 
 /// Track commitments and shares distributed by dealers.
 pub struct P0 {
-    me: PublicKey,
+    me: u32,
     threshold: u32,
     previous: Option<poly::Public>,
     concurrency: usize,
 
     dealers_ordered: HashMap<PublicKey, u32>,
-    recipients_ordered: HashMap<PublicKey, u32>,
 
     shares: HashMap<u32, (poly::Public, Share)>,
 }
@@ -62,19 +61,18 @@ impl P0 {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         recipients.sort();
-        let recipients_ordered = recipients
+        let recipients_ordered: HashMap<PublicKey, u32> = recipients
             .iter()
             .enumerate()
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
-            me,
+            me: recipients_ordered[&me],
             threshold: quorum(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
 
             dealers_ordered,
-            recipients_ordered,
 
             shares: HashMap::new(),
         }
@@ -94,7 +92,7 @@ impl P0 {
         };
 
         // Check that share is valid
-        if share.index != self.recipients_ordered[&self.me] {
+        if share.index != self.me {
             return Err(Error::MisdirectedShare);
         }
 
@@ -144,8 +142,8 @@ impl P0 {
     /// the new group public polynomial and our share.
     pub fn finalize(
         mut self,
-        commitments: Vec<u32>,
-        reveals: HashMap<u32, (poly::Public, Share)>,
+        commitments: HashMap<u32, poly::Public>,
+        reveals: HashMap<u32, Share>,
     ) -> Result<Output, Error> {
         // Ensure commitments equals required commitment count
         if commitments.len() != self.threshold as usize {
@@ -153,18 +151,19 @@ impl P0 {
         }
 
         // Store reveals
-        for (idx, (commitment, share)) in reveals {
+        for (idx, share) in reveals {
             // Verify that commitment is valid
-            ops::verify_commitment(self.previous.as_ref(), idx, &commitment, self.threshold)?;
+            let commitment = commitments.get(&idx).ok_or(Error::MissingCommitment)?;
+            ops::verify_commitment(self.previous.as_ref(), idx, commitment, self.threshold)?;
 
             // Check that share is valid
-            if share.index != self.recipients_ordered[&self.me] {
+            if share.index != self.me {
                 return Err(Error::MisdirectedShare);
             }
             ops::verify_share(
                 self.previous.as_ref(),
                 idx,
-                &commitment,
+                commitment,
                 self.threshold,
                 share.index,
                 &share,
@@ -172,19 +171,19 @@ impl P0 {
 
             // Store commitment
             // TODO: log if commitment already exists (then never got ack'd somehow)
-            self.shares.insert(idx, (commitment, share));
+            self.shares.insert(idx, (commitment.clone(), share));
         }
 
-        // Ensure we have all required shares
-        for dealer in &commitments {
+        // Ensure we have all required shares (should never happen if arbiter is correct)
+        for dealer in commitments.keys() {
             if !self.shares.contains_key(dealer) {
                 return Err(Error::MissingShare);
             }
         }
 
         // Remove all valid not in commitments
-        let commitments: HashSet<_> = commitments.into_iter().collect();
-        self.shares.retain(|dealer, _| commitments.contains(dealer));
+        self.shares
+            .retain(|dealer, _| commitments.contains_key(dealer));
 
         // Construct secret
         let mut public = poly::Public::zero();
@@ -231,7 +230,7 @@ impl P0 {
         Ok(Output {
             public,
             share: Share {
-                index: self.recipients_ordered[&self.me],
+                index: self.me,
                 private: secret,
             },
         })

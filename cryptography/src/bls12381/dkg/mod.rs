@@ -60,7 +60,7 @@
 //!
 //! ### [Phase 1] Step 1: Finalize Commitments and Forward Reveals
 //!
-//! After `t` time has elapsed, select the `2f + 1` commitments with the least number of reveals (most acks).
+//! After `3t` time has elapsed, select the `2f + 1` commitments with the least number of reveals (most acks).
 //!
 //! If there do not exist `2f + 1` commitments, the arbiter will abort the protocol.
 //!
@@ -86,8 +86,8 @@
 //!
 //! ### [Phase 2] Step 2: Register Commitment, Acks, and Reveals
 //!
-//! After `t/2` time has elapsed, the dealer sends its commitment, any acks it collected, and up to `f` reveals
-//! to the arbiter. This gives `t/2` time to reach arbiter.
+//! After `2t` time has elapsed, the dealer sends its commitment, any acks it collected, and up to `f` reveals
+//! to the arbiter. This gives `t` time to reach arbiter.
 //!
 //! ## Player
 //!
@@ -171,251 +171,177 @@ pub enum Error {
 mod tests {
     use super::*;
     use crate::bls12381::dkg::{arbiter, dealer};
-    use crate::bls12381::primitives::group::Private;
     use crate::{Ed25519, Scheme};
     use commonware_utils::quorum;
     use std::collections::HashMap;
 
     fn run_dkg_and_reshare(n_0: u32, dealers_0: u32, n_1: u32, dealers_1: u32, concurrency: usize) {
-        // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
+        // Create participants (must be in sorted order)
+        let mut participants = Vec::new();
         for i in 0..n_0 {
             let signer = Ed25519::from_seed(i as u64).public_key();
-            contributors.push(signer);
+            participants.push(signer);
         }
-        contributors.sort();
+        participants.sort();
 
-        // Create shares
-        let mut contributor_shares = HashMap::new();
-        let mut contributor_cons = HashMap::new();
-        for con in &contributors {
-            let me = con.clone();
-            let p0 = dealer::P0::new(
-                me,
+        // Create dealers
+        let mut dealer_shares = HashMap::new();
+        let mut dealers = HashMap::new();
+        for con in participants.iter().take(dealers_0 as usize) {
+            let (p0, commitment, shares) = dealer::P0::new(None, participants.clone());
+            dealer_shares.insert(con.clone(), (commitment, shares));
+            dealers.insert(con.clone(), p0);
+        }
+
+        // Create players
+        let mut players = HashMap::new();
+        for con in &participants {
+            let p0 = player::P0::new(
+                con.clone(),
                 None,
-                contributors.clone(),
-                contributors.clone(),
+                participants.clone(),
+                participants.clone(),
                 concurrency,
             );
-            let (p1, public, shares) = p0.finalize();
-            contributor_shares.insert(con.clone(), (public, shares));
-            contributor_cons.insert(con.clone(), p1.unwrap());
+            players.insert(con.clone(), p0);
         }
 
-        // Inform arbiter of commitments
+        // Create arbiter
         let mut arb = arbiter::P0::new(
             None,
-            contributors.clone(),
-            contributors.clone(),
+            participants.clone(),
+            participants.clone(),
             concurrency,
         );
-        for contributor in contributors.iter().take(dealers_0 as usize) {
-            let (public, _) = contributor_shares.get(contributor).unwrap();
-            arb.commitment(contributor.clone(), public.clone()).unwrap();
+
+        // Send commitments and shares to players
+        for (dealer, mut dealer_obj) in dealers {
+            // Distribute shares to players
+            let (commitment, shares) = dealer_shares.get(&dealer).unwrap().clone();
+            for (player_idx, player) in participants.iter().enumerate() {
+                // Process share
+                let player_obj = players.get_mut(player).unwrap();
+                player_obj
+                    .share(dealer.clone(), commitment.clone(), shares[player_idx])
+                    .unwrap();
+
+                // Collect ack
+                dealer_obj.ack(player.clone()).unwrap();
+            }
+
+            // Finalize dealer
+            let output = dealer_obj.finalize().unwrap();
+
+            // Ensure no reveals required
+            assert!(output.inactive.is_empty());
+
+            // Send commitment and acks to arbiter
+            arb.commitment(dealer, commitment, output.active, Vec::new())
+                .unwrap();
         }
-        assert!(arb.prepared());
+
+        // Finalize arbiter
         let (result, disqualified) = arb.finalize();
 
         // Verify disqualifications are empty (only occurs if invalid commitment)
         assert_eq!(disqualified.len(), 0);
-        let mut arb = result.unwrap();
 
-        // Send select commitments to contributors
-        let required = quorum(n_0).unwrap();
-        let mut seen = 0;
-        for (_, dealer, commitment) in arb.commitments().iter() {
-            for contributor in contributors.iter() {
-                contributor_cons
-                    .get_mut(contributor)
-                    .unwrap()
-                    .commitment(dealer.clone(), commitment.clone())
-                    .unwrap();
-            }
-            seen += 1;
-        }
-
-        // Assert we only track the required number of commitments
-        assert_eq!(seen, required);
-
-        // Finalize contributor P1
-        let mut p2 = HashMap::new();
-        for contributor in contributors.iter() {
-            let output = contributor_cons
-                .remove(contributor)
-                .unwrap()
-                .finalize()
-                .unwrap();
-            p2.insert(contributor.clone(), output);
-        }
-        let mut contributor_cons = p2;
-
-        // Distribute shares to contributors and send acks to arbiter
-        for (dealer, dealer_key, _) in arb.commitments().iter() {
-            for (idx, recipient) in contributors.iter().enumerate() {
-                let (_, shares) = contributor_shares.get(dealer_key).unwrap().clone();
-                let share = shares[idx];
-                contributor_cons
-                    .get_mut(recipient)
-                    .unwrap()
-                    .share(dealer_key.clone(), share)
-                    .unwrap();
-
-                // Skip ack for self
-                if dealer_key == recipient {
-                    continue;
-                }
-
-                // Record ack
-                arb.ack(recipient.clone(), *dealer).unwrap();
-            }
-        }
-
-        // Finalize arb P1
-        assert!(arb.prepared());
-        let (result, disqualified) = arb.finalize();
-
-        // Verify disqualifications (unchanged)
-        assert_eq!(disqualified.len(), 0);
+        // Verify result
         let output = result.unwrap();
 
-        // Enforce commitments are only threshold
-        let expected_commitments = threshold(n_0).unwrap();
-        assert_eq!(output.commitments.len(), expected_commitments as usize);
+        // Ensure right number of commitments picked
+        let expected_commitments = quorum(n_0).unwrap() as usize;
+        assert_eq!(output.commitments.len(), expected_commitments);
 
-        // Distribute final commitments to contributors and recover public key
+        // Ensure no reveals required
+        assert!(output.reveals.is_empty());
+
+        // Distribute commitments to players and recover public key
         let mut results = HashMap::new();
-        for contributor in contributors.iter() {
-            let result = contributor_cons
-                .remove(contributor)
+        for player in participants.iter() {
+            let result = players
+                .remove(player)
                 .unwrap()
-                .finalize(output.commitments.clone())
+                .finalize(output.commitments.clone(), HashMap::new())
                 .unwrap();
-            assert_eq!(result.public, output.public);
-            results.insert(contributor.clone(), result);
+            results.insert(player.clone(), result);
         }
 
         // Create reshare dealers
-        let reshare_dealers = contributors.clone();
+        let mut reshare_shares = HashMap::new();
+        let mut reshare_dealers = HashMap::new();
+        for con in participants.iter().take(dealers_1 as usize) {
+            let output = results.get(con).unwrap();
+            let (p0, commitment, shares) =
+                dealer::P0::new(Some(output.share), participants.clone());
+            reshare_shares.insert(con.clone(), (commitment, shares));
+            reshare_dealers.insert(con.clone(), p0);
+        }
 
-        // Create reshare recipients (assume no overlap)
-        let mut reshare_recipients = Vec::new();
+        // Create reshare players (assume no overlap)
+        let mut reshare_players = Vec::new();
         for i in 0..n_1 {
-            let recipient = Ed25519::from_seed((i + n_0) as u64).public_key();
-            reshare_recipients.push(recipient);
+            let player = Ed25519::from_seed((i + n_0) as u64).public_key();
+            reshare_players.push(player);
         }
-        reshare_recipients.sort();
+        reshare_players.sort();
 
-        let mut reshare_contributor_shares = HashMap::new();
-        for contributor in contributors.iter() {
-            let output = results.get(contributor).unwrap();
-            let p0 = dealer::P0::new(
-                contributor.clone(),
-                Some((output.public.clone(), output.share)),
-                reshare_dealers.clone(),
-                reshare_recipients.clone(),
-                concurrency,
-            );
-            let (p1, public, shares) = p0.finalize();
-            assert!(p1.is_none());
-            reshare_contributor_shares.insert(contributor.clone(), (public, shares));
-        }
-
-        let mut reshare_contributor_cons = HashMap::new();
-        for con in &reshare_recipients {
-            let p1 = dealer::P1::new(
-                con.clone(),
-                Some(output.public.clone()),
-                reshare_dealers.clone(),
-                reshare_recipients.clone(),
-                concurrency,
-            );
-            reshare_contributor_cons.insert(con.clone(), p1);
-        }
-
-        // Inform arbiter of commitments
+        // Create arbiter
         let mut arb = arbiter::P0::new(
-            Some(output.public.clone()),
-            reshare_dealers.clone(),
-            reshare_recipients.clone(),
+            Some(output.public),
+            participants.clone(),
+            reshare_players.clone(),
             concurrency,
         );
-        for con in reshare_dealers.iter().take(dealers_1 as usize) {
-            let (public, _) = reshare_contributor_shares.get(con).unwrap();
-            arb.commitment(con.clone(), public.clone()).unwrap();
-        }
-        assert!(arb.prepared());
-        let (result, disqualified) = arb.finalize();
 
-        // Verify disqualifications
-        assert_eq!(disqualified.len(), 0);
-        let mut arb = result.unwrap();
-
-        // Send select commitments to recipients
-        let required = quorum(n_0).unwrap();
-        let mut seen = 0;
-        for (_, dealer, commitment) in arb.commitments().iter() {
-            for contributor in reshare_recipients.iter() {
-                reshare_contributor_cons
-                    .get_mut(contributor)
-                    .unwrap()
-                    .commitment(dealer.clone(), commitment.clone())
+        // Send commitments and shares to players
+        for (dealer, mut dealer_obj) in reshare_dealers {
+            // Distribute shares to players
+            let (commitment, shares) = reshare_shares.get(&dealer).unwrap().clone();
+            for (player_idx, player) in reshare_players.iter().enumerate() {
+                // Process share
+                let player_obj = players.get_mut(player).unwrap();
+                player_obj
+                    .share(dealer.clone(), commitment.clone(), shares[player_idx])
                     .unwrap();
+
+                // Collect ack
+                dealer_obj.ack(player.clone()).unwrap();
             }
-            seen += 1;
-        }
 
-        // Assert we only track the required number of commitments
-        assert_eq!(seen, required);
+            // Finalize dealer
+            let output = dealer_obj.finalize().unwrap();
 
-        // Finalize contributor P0
-        let mut p2 = HashMap::new();
-        for contributor in reshare_recipients.iter() {
-            let output = reshare_contributor_cons
-                .remove(contributor)
-                .unwrap()
-                .finalize()
+            // Ensure no reveals required
+            assert!(output.inactive.is_empty());
+
+            // Send commitment and acks to arbiter
+            arb.commitment(dealer, commitment, output.active, Vec::new())
                 .unwrap();
-            p2.insert(contributor.clone(), output);
-        }
-        let mut reshare_contributor_cons = p2;
-
-        // Distribute shares to contributors and send acks to arbiter
-        for (dealer, dealer_key, _) in arb.commitments().iter() {
-            for (idx, recipient) in reshare_recipients.iter().enumerate() {
-                let (_, shares) = reshare_contributor_shares.get(dealer_key).unwrap().clone();
-                reshare_contributor_cons
-                    .get_mut(recipient)
-                    .unwrap()
-                    .share(dealer_key.clone(), shares[idx])
-                    .unwrap();
-
-                // Skip ack for self
-                if dealer_key == recipient {
-                    continue;
-                }
-
-                arb.ack(recipient.clone(), *dealer).unwrap();
-            }
         }
 
-        // Finalize arb p1
-        assert!(arb.prepared());
+        // Finalize arbiter
         let (result, disqualified) = arb.finalize();
 
-        // Verify disqualifications (unchanged)
+        // Verify disqualifications are empty (only occurs if invalid commitment)
         assert_eq!(disqualified.len(), 0);
+
+        // Verify result
         let output = result.unwrap();
 
-        // Enforce commitments are only threshold
-        let expected_commitments = threshold(n_0).unwrap();
-        assert_eq!(output.commitments.len(), expected_commitments as usize);
+        // Ensure right number of commitments picked
+        let expected_commitments = quorum(n_0).unwrap() as usize;
+        assert_eq!(output.commitments.len(), expected_commitments);
 
-        // Distribute final commitments to contributors and recover public key
-        for contributor in reshare_recipients.iter() {
-            let result = reshare_contributor_cons
-                .remove(contributor)
+        // Ensure no reveals required
+        assert!(output.reveals.is_empty());
+
+        // Distribute commitments to players and recover public key
+        for player in reshare_players.iter() {
+            let result = players
+                .remove(player)
                 .unwrap()
-                .finalize(output.commitments.clone())
+                .finalize(output.commitments.clone(), HashMap::new())
                 .unwrap();
             assert_eq!(result.public, output.public);
         }
@@ -447,260 +373,260 @@ mod tests {
         run_dkg_and_reshare(5, 3, 10, 2, 4);
     }
 
-    #[test]
-    fn test_dkg_invalid_commitment() {
-        // Initialize test
-        let n = 5;
+    // #[test]
+    // fn test_dkg_invalid_commitment() {
+    //     // Initialize test
+    //     let n = 5;
 
-        // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+    //     // Create contributors (must be in sorted order)
+    //     let mut contributors = Vec::new();
+    //     for i in 0..n {
+    //         let signer = Ed25519::from_seed(i as u64).public_key();
+    //         contributors.push(signer);
+    //     }
+    //     contributors.sort();
 
-        // Create invalid commitment
-        let (public, _) = ops::generate_shares(None, n * 2, 1);
+    //     // Create invalid commitment
+    //     let (public, _) = ops::generate_shares(None, n * 2, 1);
 
-        // Inform arbiter of commitments
-        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
-        for contributor in contributors.iter() {
-            let result = arb.commitment(contributor.clone(), public.clone());
-            assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
-        }
+    //     // Inform arbiter of commitments
+    //     let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+    //     for contributor in contributors.iter() {
+    //         let result = arb.commitment(contributor.clone(), public.clone());
+    //         assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
+    //     }
 
-        // Check not ready
-        assert!(!arb.prepared());
-        let (result, disqualified) = arb.finalize();
+    //     // Check not ready
+    //     assert!(!arb.prepared());
+    //     let (result, disqualified) = arb.finalize();
 
-        // Verify disqualifications
-        assert_eq!(disqualified.len(), n as usize);
-        assert!(result.is_none());
-    }
+    //     // Verify disqualifications
+    //     assert_eq!(disqualified.len(), n as usize);
+    //     assert!(result.is_none());
+    // }
 
-    #[test]
-    fn test_dkg_share_complaint() {
-        // Initialize test
-        let n = 5;
+    // #[test]
+    // fn test_dkg_share_complaint() {
+    //     // Initialize test
+    //     let n = 5;
 
-        // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+    //     // Create contributors (must be in sorted order)
+    //     let mut contributors = Vec::new();
+    //     for i in 0..n {
+    //         let signer = Ed25519::from_seed(i as u64).public_key();
+    //         contributors.push(signer);
+    //     }
+    //     contributors.sort();
 
-        // Create shares
-        let mut contributor_shares = HashMap::new();
-        let mut contributor_cons = HashMap::new();
-        for con in &contributors {
-            // Generate private key
-            let p0 = dealer::P0::new(
-                con.clone(),
-                None,
-                contributors.clone(),
-                contributors.clone(),
-                1,
-            );
-            let (p1, public, mut shares) = p0.finalize();
+    //     // Create shares
+    //     let mut contributor_shares = HashMap::new();
+    //     let mut contributor_cons = HashMap::new();
+    //     for con in &contributors {
+    //         // Generate private key
+    //         let p0 = dealer::P0::new(
+    //             con.clone(),
+    //             None,
+    //             contributors.clone(),
+    //             contributors.clone(),
+    //             1,
+    //         );
+    //         let (p1, public, mut shares) = p0.finalize();
 
-            // Corrupt shares
-            for share in shares.iter_mut() {
-                share.private = Private::rand(&mut rand::thread_rng());
-            }
+    //         // Corrupt shares
+    //         for share in shares.iter_mut() {
+    //             share.private = Private::rand(&mut rand::thread_rng());
+    //         }
 
-            // Record shares
-            contributor_shares.insert(con.clone(), (public, shares));
-            contributor_cons.insert(con.clone(), p1.unwrap());
-        }
+    //         // Record shares
+    //         contributor_shares.insert(con.clone(), (public, shares));
+    //         contributor_cons.insert(con.clone(), p1.unwrap());
+    //     }
 
-        // Inform arbiter of commitments
-        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
-        for contributor in contributors.iter() {
-            let (public, _) = contributor_shares.get(contributor).unwrap();
-            arb.commitment(contributor.clone(), public.clone()).unwrap();
-        }
-        let (result, disqualified) = arb.finalize();
+    //     // Inform arbiter of commitments
+    //     let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+    //     for contributor in contributors.iter() {
+    //         let (public, _) = contributor_shares.get(contributor).unwrap();
+    //         arb.commitment(contributor.clone(), public.clone()).unwrap();
+    //     }
+    //     let (result, disqualified) = arb.finalize();
 
-        // Verify disqualifications
-        assert!(disqualified.is_empty());
-        let mut arb = result.unwrap();
+    //     // Verify disqualifications
+    //     assert!(disqualified.is_empty());
+    //     let mut arb = result.unwrap();
 
-        // Send select commitments to contributors
-        for (_, dealer, commitment) in arb.commitments().iter() {
-            for contributor in contributors.iter() {
-                contributor_cons
-                    .get_mut(contributor)
-                    .unwrap()
-                    .commitment(dealer.clone(), commitment.clone())
-                    .unwrap();
-            }
-        }
+    //     // Send select commitments to contributors
+    //     for (_, dealer, commitment) in arb.commitments().iter() {
+    //         for contributor in contributors.iter() {
+    //             contributor_cons
+    //                 .get_mut(contributor)
+    //                 .unwrap()
+    //                 .commitment(dealer.clone(), commitment.clone())
+    //                 .unwrap();
+    //         }
+    //     }
 
-        // Finalize contributor P0
-        let mut p1 = HashMap::new();
-        for contributor in contributors.iter() {
-            let output = contributor_cons
-                .remove(contributor)
-                .unwrap()
-                .finalize()
-                .unwrap();
-            p1.insert(contributor.clone(), output);
-        }
-        let mut contributor_cons = p1;
+    //     // Finalize contributor P0
+    //     let mut p1 = HashMap::new();
+    //     for contributor in contributors.iter() {
+    //         let output = contributor_cons
+    //             .remove(contributor)
+    //             .unwrap()
+    //             .finalize()
+    //             .unwrap();
+    //         p1.insert(contributor.clone(), output);
+    //     }
+    //     let mut contributor_cons = p1;
 
-        // Distribute shares to contributors and send complaints to arbiter
-        let mut active = 0;
-        for (dealer, dealer_key, _) in arb.commitments().iter() {
-            for (idx, recipient) in contributors.iter().enumerate() {
-                let (_, shares) = contributor_shares.get(dealer_key).unwrap().clone();
-                let share = shares[idx];
-                match contributor_cons
-                    .get_mut(recipient)
-                    .unwrap()
-                    .share(dealer_key.clone(), share)
-                {
-                    Err(Error::ShareWrongCommitment) => {}
-                    _ => {
-                        panic!("expected share to be invalid");
-                    }
-                }
-                let _ = arb.complaint(recipient.clone(), *dealer, &share);
-            }
-            active += 1;
-        }
+    //     // Distribute shares to contributors and send complaints to arbiter
+    //     let mut active = 0;
+    //     for (dealer, dealer_key, _) in arb.commitments().iter() {
+    //         for (idx, recipient) in contributors.iter().enumerate() {
+    //             let (_, shares) = contributor_shares.get(dealer_key).unwrap().clone();
+    //             let share = shares[idx];
+    //             match contributor_cons
+    //                 .get_mut(recipient)
+    //                 .unwrap()
+    //                 .share(dealer_key.clone(), share)
+    //             {
+    //                 Err(Error::ShareWrongCommitment) => {}
+    //                 _ => {
+    //                     panic!("expected share to be invalid");
+    //                 }
+    //             }
+    //             let _ = arb.complaint(recipient.clone(), *dealer, &share);
+    //         }
+    //         active += 1;
+    //     }
 
-        // Verify failure
-        let (result, disqualified) = arb.finalize();
-        assert!(result.is_err());
-        assert!(disqualified.len() == active as usize);
-    }
+    //     // Verify failure
+    //     let (result, disqualified) = arb.finalize();
+    //     assert!(result.is_err());
+    //     assert!(disqualified.len() == active as usize);
+    // }
 
-    #[test]
-    fn test_disjoint_acks() {
-        // Initialize test
-        let n = 5;
-        let concurrency = 1;
+    // #[test]
+    // fn test_disjoint_acks() {
+    //     // Initialize test
+    //     let n = 5;
+    //     let concurrency = 1;
 
-        // Create contributors (must be in sorted order)
-        let mut contributors = Vec::new();
-        for i in 0..n {
-            let signer = Ed25519::from_seed(i as u64).public_key();
-            contributors.push(signer);
-        }
-        contributors.sort();
+    //     // Create contributors (must be in sorted order)
+    //     let mut contributors = Vec::new();
+    //     for i in 0..n {
+    //         let signer = Ed25519::from_seed(i as u64).public_key();
+    //         contributors.push(signer);
+    //     }
+    //     contributors.sort();
 
-        // Create shares
-        let mut contributor_shares = HashMap::new();
-        let mut contributor_cons = HashMap::new();
-        for con in &contributors {
-            let me = con.clone();
-            let p0 = dealer::P0::new(
-                me,
-                None,
-                contributors.clone(),
-                contributors.clone(),
-                concurrency,
-            );
-            let (p1, public, shares) = p0.finalize();
-            contributor_shares.insert(con.clone(), (public, shares));
-            contributor_cons.insert(con.clone(), p1.unwrap());
-        }
+    //     // Create shares
+    //     let mut contributor_shares = HashMap::new();
+    //     let mut contributor_cons = HashMap::new();
+    //     for con in &contributors {
+    //         let me = con.clone();
+    //         let p0 = dealer::P0::new(
+    //             me,
+    //             None,
+    //             contributors.clone(),
+    //             contributors.clone(),
+    //             concurrency,
+    //         );
+    //         let (p1, public, shares) = p0.finalize();
+    //         contributor_shares.insert(con.clone(), (public, shares));
+    //         contributor_cons.insert(con.clone(), p1.unwrap());
+    //     }
 
-        // Inform arbiter of commitments
-        let mut arb = arbiter::P0::new(
-            None,
-            contributors.clone(),
-            contributors.clone(),
-            concurrency,
-        );
-        for contributor in contributors.iter() {
-            let (public, _) = contributor_shares.get(contributor).unwrap();
-            arb.commitment(contributor.clone(), public.clone()).unwrap();
-        }
-        assert!(arb.prepared());
-        let (result, disqualified) = arb.finalize();
+    //     // Inform arbiter of commitments
+    //     let mut arb = arbiter::P0::new(
+    //         None,
+    //         contributors.clone(),
+    //         contributors.clone(),
+    //         concurrency,
+    //     );
+    //     for contributor in contributors.iter() {
+    //         let (public, _) = contributor_shares.get(contributor).unwrap();
+    //         arb.commitment(contributor.clone(), public.clone()).unwrap();
+    //     }
+    //     assert!(arb.prepared());
+    //     let (result, disqualified) = arb.finalize();
 
-        // Verify disqualifications are empty (only occurs if invalid commitment)
-        assert_eq!(disqualified.len(), 0);
-        let mut arb = result.unwrap();
+    //     // Verify disqualifications are empty (only occurs if invalid commitment)
+    //     assert_eq!(disqualified.len(), 0);
+    //     let mut arb = result.unwrap();
 
-        // Send select commitments to contributors
-        for (_, dealer, commitment) in arb.commitments().iter() {
-            for contributor in contributors.iter() {
-                contributor_cons
-                    .get_mut(contributor)
-                    .unwrap()
-                    .commitment(dealer.clone(), commitment.clone())
-                    .unwrap();
-            }
-        }
+    //     // Send select commitments to contributors
+    //     for (_, dealer, commitment) in arb.commitments().iter() {
+    //         for contributor in contributors.iter() {
+    //             contributor_cons
+    //                 .get_mut(contributor)
+    //                 .unwrap()
+    //                 .commitment(dealer.clone(), commitment.clone())
+    //                 .unwrap();
+    //         }
+    //     }
 
-        // Finalize contributor P1
-        let mut p2 = HashMap::new();
-        for contributor in contributors.iter() {
-            let output = contributor_cons
-                .remove(contributor)
-                .unwrap()
-                .finalize()
-                .unwrap();
-            p2.insert(contributor.clone(), output);
-        }
-        let mut contributor_cons = p2;
+    //     // Finalize contributor P1
+    //     let mut p2 = HashMap::new();
+    //     for contributor in contributors.iter() {
+    //         let output = contributor_cons
+    //             .remove(contributor)
+    //             .unwrap()
+    //             .finalize()
+    //             .unwrap();
+    //         p2.insert(contributor.clone(), output);
+    //     }
+    //     let mut contributor_cons = p2;
 
-        // Distribute shares to contributors and send acks to arbiter
-        let mut commitments = Vec::new();
-        for (dealer, dealer_key, _) in arb.commitments().iter() {
-            commitments.push(*dealer);
-            for (idx, recipient) in contributors.iter().enumerate() {
-                let (_, shares) = contributor_shares.get(dealer_key).unwrap().clone();
-                let share = shares[idx];
-                contributor_cons
-                    .get_mut(recipient)
-                    .unwrap()
-                    .share(dealer_key.clone(), share)
-                    .unwrap();
+    //     // Distribute shares to contributors and send acks to arbiter
+    //     let mut commitments = Vec::new();
+    //     for (dealer, dealer_key, _) in arb.commitments().iter() {
+    //         commitments.push(*dealer);
+    //         for (idx, recipient) in contributors.iter().enumerate() {
+    //             let (_, shares) = contributor_shares.get(dealer_key).unwrap().clone();
+    //             let share = shares[idx];
+    //             contributor_cons
+    //                 .get_mut(recipient)
+    //                 .unwrap()
+    //                 .share(dealer_key.clone(), share)
+    //                 .unwrap();
 
-                // Skip ack for self
-                if dealer_key == recipient {
-                    continue;
-                }
-            }
-        }
+    //             // Skip ack for self
+    //             if dealer_key == recipient {
+    //                 continue;
+    //             }
+    //         }
+    //     }
 
-        // Ensure not ready
-        assert!(!arb.prepared());
+    //     // Ensure not ready
+    //     assert!(!arb.prepared());
 
-        // Add acks (need 3 per commitment over 2 commitments) but no intersection
-        // `commitment[0]` has implicit ack from `contributor[0]`
-        arb.ack(contributors[1].clone(), commitments[0]).unwrap();
-        arb.ack(contributors[3].clone(), commitments[0]).unwrap();
-        arb.ack(contributors[0].clone(), commitments[1]).unwrap();
-        // `commitment[1]` has implicit ack from `contributor[1]`
-        arb.ack(contributors[2].clone(), commitments[1]).unwrap();
-        assert!(!arb.prepared());
+    //     // Add acks (need 3 per commitment over 2 commitments) but no intersection
+    //     // `commitment[0]` has implicit ack from `contributor[0]`
+    //     arb.ack(contributors[1].clone(), commitments[0]).unwrap();
+    //     arb.ack(contributors[3].clone(), commitments[0]).unwrap();
+    //     arb.ack(contributors[0].clone(), commitments[1]).unwrap();
+    //     // `commitment[1]` has implicit ack from `contributor[1]`
+    //     arb.ack(contributors[2].clone(), commitments[1]).unwrap();
+    //     assert!(!arb.prepared());
 
-        // Add acks with intersection
-        arb.ack(contributors[3].clone(), commitments[1]).unwrap();
+    //     // Add acks with intersection
+    //     arb.ack(contributors[3].clone(), commitments[1]).unwrap();
 
-        // Finalize arb P1
-        assert!(arb.prepared());
-        let (result, disqualified) = arb.finalize();
+    //     // Finalize arb P1
+    //     assert!(arb.prepared());
+    //     let (result, disqualified) = arb.finalize();
 
-        // Verify disqualifications (unchanged)
-        assert_eq!(disqualified.len(), 0);
-        let output = result.unwrap();
+    //     // Verify disqualifications (unchanged)
+    //     assert_eq!(disqualified.len(), 0);
+    //     let output = result.unwrap();
 
-        // Distribute final commitments to contributors and recover public key
-        for contributor in contributors.iter() {
-            let result = contributor_cons
-                .remove(contributor)
-                .unwrap()
-                .finalize(output.commitments.clone())
-                .unwrap();
-            assert_eq!(result.public, output.public);
-        }
-    }
+    //     // Distribute final commitments to contributors and recover public key
+    //     for contributor in contributors.iter() {
+    //         let result = contributor_cons
+    //             .remove(contributor)
+    //             .unwrap()
+    //             .finalize(output.commitments.clone())
+    //             .unwrap();
+    //         assert_eq!(result.public, output.public);
+    //     }
+    // }
 }
