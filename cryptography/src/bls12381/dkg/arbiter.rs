@@ -37,7 +37,6 @@
 //! not provided by the Arbiter because this authorization function is highly dependent on
 //! the context in which the contributor is being used.
 
-use super::utils::threshold;
 use crate::bls12381::{
     dkg::{ops, Error},
     primitives::{group::Share, poly},
@@ -84,7 +83,7 @@ impl P0 {
             .map(|(i, pk)| (pk.clone(), i as u32))
             .collect();
         Self {
-            threshold: threshold(recipients.len() as u32).expect("insufficient participants"),
+            threshold: quorum(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
 

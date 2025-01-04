@@ -112,7 +112,6 @@ pub mod arbiter;
 pub mod dealer;
 pub mod ops;
 pub mod player;
-pub mod utils;
 
 use thiserror::Error;
 
@@ -136,6 +135,8 @@ pub enum Error {
     PublicKeyInterpolationFailed,
     #[error("dealer is invalid")]
     DealerInvalid,
+    #[error("player invalid")]
+    PlayerInvalid,
     #[error("missing share")]
     MissingShare,
     #[error("commitment disqualified")]
@@ -156,8 +157,14 @@ pub enum Error {
     SelfComplaint,
     #[error("duplicate commitment")]
     DuplicateCommitment,
+    #[error("duplicate share")]
+    DuplicateShare,
     #[error("duplicate ack")]
     DuplicateAck,
+    #[error("mismatched commitment")]
+    MismatchedCommitment,
+    #[error("mismatched share")]
+    MismatchedShare,
 }
 
 #[cfg(test)]
