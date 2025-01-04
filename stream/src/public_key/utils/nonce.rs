@@ -69,7 +69,7 @@ mod tests {
         assert_eq!(nonce[0], 0b10000000);
         assert_eq!(&nonce[1..3], &1u16.to_be_bytes());
         assert_eq!(&nonce[3..11], &1u64.to_be_bytes());
-        assert_eq!(&nonce[11],&0);
+        assert_eq!(&nonce[11], &0);
 
         // Test case 2: dialer is false
         let ni = Info {
@@ -81,7 +81,7 @@ mod tests {
         assert_eq!(nonce[0], 0b00000000);
         assert_eq!(&nonce[1..3], &1u16.to_be_bytes());
         assert_eq!(&nonce[3..11], &1u64.to_be_bytes());
-        assert_eq!(&nonce[11],&0);
+        assert_eq!(&nonce[11], &0);
 
         // Test case 3: different iter and seq values
         let ni = Info {
@@ -93,7 +93,7 @@ mod tests {
         assert_eq!(nonce[0], 0b10000000);
         assert_eq!(&nonce[1..3], &65535u16.to_be_bytes());
         assert_eq!(&nonce[3..11], &123456789u64.to_be_bytes());
-        assert_eq!(&nonce[11],&0);
+        assert_eq!(&nonce[11], &0);
 
         // Test case 4: iter is 0
         let ni = Info {
@@ -105,7 +105,7 @@ mod tests {
         assert_eq!(nonce[0], 0b10000000);
         assert_eq!(&nonce[1..3], &0u16.to_be_bytes());
         assert_eq!(&nonce[3..11], &123456789u64.to_be_bytes());
-        assert_eq!(&nonce[11],&0);
+        assert_eq!(&nonce[11], &0);
     }
 
     #[test]
