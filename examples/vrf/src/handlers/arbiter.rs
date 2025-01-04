@@ -64,7 +64,7 @@ impl<E: Clock> Arbiter<E> {
     ) -> (Option<poly::Public>, HashSet<PublicKey>) {
         // Create a new round
         let start = self.runtime.current();
-        let t_commitment = start + self.dkg_phase_timeout;
+        let t = start + 3 * self.dkg_phase_timeout;
 
         // Send round start message to players
         let mut group = None;
@@ -93,7 +93,7 @@ impl<E: Clock> Arbiter<E> {
         let mut p0 = P0::new(previous, self.players.clone(), self.players.clone(), 1);
         loop {
             select! {
-                _ = self.runtime.sleep_until(t_commitment) => {
+                _ = self.runtime.sleep_until(t) => {
                     debug!("commitment phase timed out");
                     break
                 },
