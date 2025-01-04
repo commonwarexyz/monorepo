@@ -1,4 +1,4 @@
-use super::{utils::codec::recv_frame, wire, x25519};
+use super::{utils::codec::recv_frame, wire, x25519, Config};
 use crate::Error;
 use bytes::{BufMut, Bytes};
 use commonware_cryptography::{PublicKey, Scheme};
@@ -128,27 +128,21 @@ pub struct IncomingHandshake<Si: Sink, St: Stream> {
 }
 
 impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
-    #[allow(clippy::too_many_arguments)]
     pub async fn verify<E: Clock + Spawner, C: Scheme>(
         runtime: &E,
-        crypto: &C,
-        namespace: &[u8],
-        max_message_size: usize,
-        synchrony_bound: Duration,
-        max_handshake_age: Duration,
-        handshake_timeout: Duration,
+        config: &Config<C>,
         sink: Si,
         mut stream: St,
     ) -> Result<Self, Error> {
         // Set handshake deadline
-        let deadline = runtime.current() + handshake_timeout;
+        let deadline = runtime.current() + config.handshake_timeout;
 
         // Wait for up to handshake timeout for response
         let msg = select! {
             _ = runtime.sleep_until(deadline) => {
                 return Err(Error::HandshakeTimeout);
             },
-            result = recv_frame(&mut stream, max_message_size) => {
+            result = recv_frame(&mut stream, config.max_message_size) => {
                 result.map_err(|_| Error::RecvFailed)?
             },
         };
@@ -156,10 +150,10 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
         // Verify handshake message from peer
         let handshake = Handshake::verify(
             runtime,
-            crypto,
-            namespace,
-            synchrony_bound,
-            max_handshake_age,
+            &config.crypto,
+            &config.namespace,
+            config.synchrony_bound,
+            config.max_handshake_age,
             msg,
         )?;
         Ok(Self {
@@ -175,7 +169,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::public_key::utils::codec::send_frame;
+    use crate::public_key::{utils::codec::send_frame, Config};
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, mocks, Runner};
     use x25519_dalek::PublicKey;
@@ -281,15 +275,19 @@ mod tests {
                     .unwrap();
             });
 
+            let config = &Config{
+                crypto: recipient,
+                namespace: TEST_NAMESPACE.into(),
+                max_message_size: ONE_MEGABYTE,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(5)
+            };
+
             // Call the verify function
             let result = IncomingHandshake::verify(
                 &runtime,
-                &recipient,
-                TEST_NAMESPACE,
-                ONE_MEGABYTE,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
+                config,
                 sink,
                 stream,
             )
@@ -332,15 +330,18 @@ mod tests {
                     .unwrap();
             });
 
+            let config = &Config{
+                crypto: Ed25519::from_seed(2),
+                namespace: TEST_NAMESPACE.into(),
+                max_message_size: ONE_MEGABYTE,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(5),
+                handshake_timeout: Duration::from_secs(5)
+            };
             // Call the verify function
             let result = IncomingHandshake::verify(
                 &runtime,
-                &Ed25519::from_seed(2),
-                TEST_NAMESPACE,
-                ONE_MEGABYTE,
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
+                config,
                 sink,
                 stream,
             )
@@ -367,15 +368,19 @@ mod tests {
                     .unwrap();
             });
 
+            let config = &Config{
+                crypto: Ed25519::from_seed(0),
+                namespace: TEST_NAMESPACE.into(),
+                max_message_size: ONE_MEGABYTE,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_secs(1)
+            };
+
             // Call the verify function
             let result = IncomingHandshake::verify(
                 &runtime,
-                &Ed25519::from_seed(0),
-                TEST_NAMESPACE,
-                ONE_MEGABYTE,
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-                Duration::from_secs(1),
+                config,
                 sink,
                 stream,
             )
@@ -421,15 +426,19 @@ mod tests {
                 }
             });
 
+            let config = &Config{
+                crypto: recipient,
+                namespace: TEST_NAMESPACE.into(),
+                max_message_size: ONE_MEGABYTE,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_secs(1)
+            };
+
             // Call the verify function
             let result = IncomingHandshake::verify(
                 &runtime,
-                &recipient,
-                TEST_NAMESPACE,
-                ONE_MEGABYTE,
-                Duration::from_secs(1),
-                Duration::from_secs(1),
-                Duration::from_secs(1),
+                config,
                 sink,
                 stream,
             )
