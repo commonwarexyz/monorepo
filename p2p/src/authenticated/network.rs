@@ -137,7 +137,7 @@ impl<
         channel: Channel,
         rate: Quota,
         backlog: usize,
-        compression: Option<u8>,
+        compression: Option<i32>,
     ) -> (channels::Sender, channels::Receiver) {
         self.channels.register(channel, rate, backlog, compression)
     }
