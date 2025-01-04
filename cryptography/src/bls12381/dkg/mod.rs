@@ -267,17 +267,6 @@ mod tests {
             results.insert(player.clone(), result);
         }
 
-        // Create reshare dealers
-        let mut reshare_shares = HashMap::new();
-        let mut reshare_dealers = HashMap::new();
-        for con in participants.iter().take(dealers_1 as usize) {
-            let output = results.get(con).unwrap();
-            let (p0, commitment, shares) =
-                dealer::P0::new(Some(output.share), participants.clone());
-            reshare_shares.insert(con.clone(), (commitment, shares));
-            reshare_dealers.insert(con.clone(), p0);
-        }
-
         // Create reshare players (assume no overlap)
         let mut reshare_players = Vec::new();
         for i in 0..n_1 {
@@ -285,6 +274,30 @@ mod tests {
             reshare_players.push(player);
         }
         reshare_players.sort();
+
+        // Create reshare dealers
+        let mut reshare_shares = HashMap::new();
+        let mut reshare_dealers = HashMap::new();
+        for con in participants.iter().take(dealers_1 as usize) {
+            let output = results.get(con).unwrap();
+            let (p0, commitment, shares) =
+                dealer::P0::new(Some(output.share), reshare_players.clone());
+            reshare_shares.insert(con.clone(), (commitment, shares));
+            reshare_dealers.insert(con.clone(), p0);
+        }
+
+        // Create reshare player objects
+        let mut reshare_player_objs = HashMap::new();
+        for con in &reshare_players {
+            let p0 = player::P0::new(
+                con.clone(),
+                Some(output.public.clone()),
+                participants.clone(),
+                reshare_players.clone(),
+                concurrency,
+            );
+            reshare_player_objs.insert(con.clone(), p0);
+        }
 
         // Create arbiter
         let mut arb = arbiter::P0::new(
@@ -300,7 +313,7 @@ mod tests {
             let (commitment, shares) = reshare_shares.get(&dealer).unwrap().clone();
             for (player_idx, player) in reshare_players.iter().enumerate() {
                 // Process share
-                let player_obj = players.get_mut(player).unwrap();
+                let player_obj = reshare_player_objs.get_mut(player).unwrap();
                 player_obj
                     .share(dealer.clone(), commitment.clone(), shares[player_idx])
                     .unwrap();
@@ -338,13 +351,15 @@ mod tests {
 
         // Distribute commitments to players and recover public key
         for player in reshare_players.iter() {
-            let result = players
+            let result = reshare_player_objs
                 .remove(player)
                 .unwrap()
                 .finalize(output.commitments.clone(), HashMap::new())
                 .unwrap();
             assert_eq!(result.public, output.public);
         }
+
+        // TODO: test that can sign with threshold key
     }
 
     #[test]

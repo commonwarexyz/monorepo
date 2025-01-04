@@ -257,6 +257,9 @@ impl P0 {
         let mut reveals = HashMap::new();
         for (dealer_idx, (commitment, _, shares)) in selected {
             commitments.insert(dealer_idx, commitment.clone());
+            if shares.is_empty() {
+                continue;
+            }
             reveals.insert(dealer_idx, shares.clone());
         }
         let output = Output {

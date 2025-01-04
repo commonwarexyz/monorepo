@@ -36,7 +36,8 @@ pub struct Output {
 /// Track commitments and shares distributed by dealers.
 pub struct P0 {
     me: u32,
-    threshold: u32,
+    dealer_threshold: u32,
+    player_threshold: u32,
     previous: Option<poly::Public>,
     concurrency: usize,
 
@@ -68,7 +69,8 @@ impl P0 {
             .collect();
         Self {
             me: recipients_ordered[&me],
-            threshold: quorum(recipients.len() as u32).expect("insufficient participants"),
+            dealer_threshold: quorum(dealers.len() as u32).expect("insufficient dealers"),
+            player_threshold: quorum(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
 
@@ -108,14 +110,19 @@ impl P0 {
         }
 
         // Verify that commitment is valid
-        ops::verify_commitment(self.previous.as_ref(), idx, &commitment, self.threshold)?;
+        ops::verify_commitment(
+            self.previous.as_ref(),
+            idx,
+            &commitment,
+            self.player_threshold,
+        )?;
 
         // Verify that share is valid
         ops::verify_share(
             self.previous.as_ref(),
             idx,
             &commitment,
-            self.threshold,
+            self.player_threshold,
             share.index,
             &share,
         )?;
@@ -146,7 +153,7 @@ impl P0 {
         reveals: HashMap<u32, Share>,
     ) -> Result<Output, Error> {
         // Ensure commitments equals required commitment count
-        if commitments.len() != self.threshold as usize {
+        if commitments.len() != self.dealer_threshold as usize {
             return Err(Error::TooManyCommitments);
         }
 
@@ -154,7 +161,12 @@ impl P0 {
         for (idx, share) in reveals {
             // Verify that commitment is valid
             let commitment = commitments.get(&idx).ok_or(Error::MissingCommitment)?;
-            ops::verify_commitment(self.previous.as_ref(), idx, commitment, self.threshold)?;
+            ops::verify_commitment(
+                self.previous.as_ref(),
+                idx,
+                commitment,
+                self.player_threshold,
+            )?;
 
             // Check that share is valid
             if share.index != self.me {
@@ -164,7 +176,7 @@ impl P0 {
                 self.previous.as_ref(),
                 idx,
                 commitment,
-                self.threshold,
+                self.player_threshold,
                 share.index,
                 &share,
             )?;
@@ -174,16 +186,12 @@ impl P0 {
             self.shares.insert(idx, (commitment.clone(), share));
         }
 
-        // Ensure we have all required shares (should never happen if arbiter is correct)
-        for dealer in commitments.keys() {
-            if !self.shares.contains_key(dealer) {
-                return Err(Error::MissingShare);
-            }
-        }
-
-        // Remove all valid not in commitments
+        // Remove all shares not in commitments
         self.shares
             .retain(|dealer, _| commitments.contains_key(dealer));
+        if self.shares.len() != self.dealer_threshold as usize {
+            return Err(Error::MissingShare);
+        }
 
         // Construct secret
         let mut public = poly::Public::zero();
@@ -207,8 +215,12 @@ impl P0 {
                     .iter()
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
                     .collect();
-                public =
-                    ops::recover_public(&previous, commitments, self.threshold, self.concurrency)?;
+                public = ops::recover_public(
+                    &previous,
+                    commitments,
+                    self.player_threshold,
+                    self.concurrency,
+                )?;
 
                 // Recover share via interpolation
                 let shares = self
@@ -219,7 +231,7 @@ impl P0 {
                         value: share.private,
                     })
                     .collect::<Vec<_>>();
-                secret = match poly::Private::recover(self.threshold, shares) {
+                secret = match poly::Private::recover(self.dealer_threshold, shares) {
                     Ok(share) => share,
                     Err(_) => return Err(Error::ShareInterpolationFailed),
                 };
