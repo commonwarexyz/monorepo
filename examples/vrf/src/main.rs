@@ -72,7 +72,7 @@
 mod handlers;
 
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{bls12381::dkg::utils::threshold, Ed25519, Scheme};
+use commonware_cryptography::{Ed25519, Scheme};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -231,9 +231,8 @@ fn main() {
         }
 
         // Infer threshold
-        let threshold = threshold(contributors.len() as u32).expect("insufficient participants");
-        let quorum = quorum(contributors.len() as u32).expect("insufficient participants");
-        info!(threshold, quorum, "inferred parameters");
+        let threshold = quorum(contributors.len() as u32).expect("insufficient participants");
+        info!(threshold, "inferred parameters");
 
         // Check if I am the arbiter
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
