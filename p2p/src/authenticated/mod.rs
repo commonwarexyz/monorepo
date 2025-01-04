@@ -149,7 +149,7 @@
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
-//!     const COMPRESSION_LEVEL: Option<u8> = Some(3);
+//!     const COMPRESSION_LEVEL: Option<i32> = Some(3);
 //!     let (sender, receiver) = network.register(
 //!         0,
 //!         Quota::per_second(NonZeroU32::new(1).unwrap()),
