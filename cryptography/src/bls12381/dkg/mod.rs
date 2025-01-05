@@ -635,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reveal_wrong_share() {
+    fn test_reveal_corrupt_share() {
         // Initialize test
         let n = 5;
 
