@@ -453,6 +453,119 @@ mod tests {
     }
 
     #[test]
+    fn test_mismatched_commitment() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+
+        // Create unrelated commitment of correct degree
+        let t = quorum(n).unwrap();
+        let (other_commitment, _) = ops::generate_shares(None, n, t);
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send valid commitment to player
+        player
+            .share(contributors[0].clone(), commitment, shares[0])
+            .unwrap();
+
+        // Send alternative commitment to player
+        let result = player.share(contributors[0].clone(), other_commitment, shares[0]);
+        assert!(matches!(result, Err(Error::MismatchedCommitment)));
+    }
+
+    #[test]
+    fn test_mismatched_share() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+
+        // Create unrelated commitment of correct degree
+        let t = quorum(n).unwrap();
+        let (_, other_shares) = ops::generate_shares(None, n, t);
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send valid share to player
+        player
+            .share(contributors[0].clone(), commitment.clone(), shares[0])
+            .unwrap();
+
+        // Send alternative share to player
+        let result = player.share(contributors[0].clone(), commitment, other_shares[0]);
+        assert!(matches!(result, Err(Error::MismatchedShare)));
+    }
+
+    #[test]
+    fn test_duplicate_share() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send valid share to player
+        player
+            .share(contributors[0].clone(), commitment.clone(), shares[0])
+            .unwrap();
+
+        // Send alternative share to player
+        let result = player.share(contributors[0].clone(), commitment, shares[0]);
+        assert!(matches!(result, Err(Error::DuplicateShare)));
+    }
+
+    #[test]
     fn test_invalid_commitment_degree() {
         // Initialize test
         let n = 5;
