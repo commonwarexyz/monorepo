@@ -150,7 +150,10 @@ impl P0 {
                 self.disqualified.insert(dealer);
                 return Err(Error::PlayerInvalid);
             }
-            active.insert(ack);
+            if !active.insert(ack) {
+                self.disqualified.insert(dealer);
+                return Err(Error::DuplicateAck);
+            }
         }
 
         // Ensure reveals less than max_faults and for recipients not yet ack'd
