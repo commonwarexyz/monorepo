@@ -796,11 +796,20 @@ mod tests {
         // Add commitment to arbiter
         let result = arb.commitment(
             contributors[0].clone(),
-            commitment,
+            commitment.clone(),
             vec![0, 1, 2, 3],
             Vec::new(),
         );
         assert!(matches!(result, Err(Error::TooFewActive)));
+
+        // Add valid commitment to arbiter after disqualified
+        let result = arb.commitment(
+            contributors[0].clone(),
+            commitment,
+            vec![0, 1, 2, 3, 4],
+            Vec::new(),
+        );
+        assert!(matches!(result, Err(Error::ContributorDisqualified)));
     }
 
     #[test]
