@@ -171,6 +171,10 @@ pub enum Error {
 mod tests {
     use super::*;
     use crate::bls12381::dkg::{arbiter, dealer};
+    use crate::bls12381::primitives::ops::{
+        partial_sign_proof_of_possession, threshold_signature_recover, verify_proof_of_possession,
+    };
+    use crate::bls12381::primitives::poly::public;
     use crate::{Ed25519, Scheme};
     use commonware_utils::quorum;
     use std::collections::HashMap;
@@ -243,8 +247,8 @@ mod tests {
         // Finalize arbiter
         let (result, disqualified) = arb.finalize();
 
-        // Verify disqualifications are empty (only occurs if invalid commitment)
-        assert_eq!(disqualified.len(), 0);
+        // Verify disqualifications are empty (only occurs if invalid commitment or missing)
+        assert_eq!(disqualified.len(), (n_0 - dealers_0) as usize);
 
         // Verify result
         let output = result.unwrap();
@@ -257,15 +261,26 @@ mod tests {
         assert!(output.reveals.is_empty());
 
         // Distribute commitments to players and recover public key
-        let mut results = HashMap::new();
+        let mut outputs = HashMap::new();
         for player in contributors.iter() {
             let result = players
                 .remove(player)
                 .unwrap()
                 .finalize(output.commitments.clone(), HashMap::new())
                 .unwrap();
-            results.insert(player.clone(), result);
+            outputs.insert(player.clone(), result);
         }
+
+        // Test that can generate proof-of-possession
+        let t = quorum(n_0).unwrap();
+        let partials = outputs
+            .values()
+            .map(|s| partial_sign_proof_of_possession(&s.public, &s.share))
+            .collect::<Vec<_>>();
+        let signature =
+            threshold_signature_recover(t, partials).expect("unable to recover signature");
+        let public_key = public(&outputs.iter().next().unwrap().1.public);
+        verify_proof_of_possession(&public_key, &signature).expect("invalid proof of possession");
 
         // Create reshare players (assume no overlap)
         let mut reshare_players = Vec::new();
@@ -279,7 +294,7 @@ mod tests {
         let mut reshare_shares = HashMap::new();
         let mut reshare_dealers = HashMap::new();
         for con in contributors.iter().take(dealers_1 as usize) {
-            let output = results.get(con).unwrap();
+            let output = outputs.get(con).unwrap();
             let (p0, commitment, shares) =
                 dealer::P0::new(Some(output.share), reshare_players.clone());
             reshare_shares.insert(con.clone(), (commitment, shares));
@@ -337,7 +352,7 @@ mod tests {
         let (result, disqualified) = arb.finalize();
 
         // Verify disqualifications are empty (only occurs if invalid commitment)
-        assert_eq!(disqualified.len(), 0);
+        assert_eq!(disqualified.len(), (n_0 - dealers_1) as usize);
 
         // Verify result
         let output = result.unwrap();
@@ -350,6 +365,7 @@ mod tests {
         assert!(output.reveals.is_empty());
 
         // Distribute commitments to players and recover public key
+        let mut outputs = Vec::new();
         for player in reshare_players.iter() {
             let result = reshare_player_objs
                 .remove(player)
@@ -357,9 +373,19 @@ mod tests {
                 .finalize(output.commitments.clone(), HashMap::new())
                 .unwrap();
             assert_eq!(result.public, output.public);
+            outputs.push(result);
         }
 
-        // TODO: test that can sign with threshold key
+        // Test that can generate proof-of-possession
+        let t = quorum(n_1).unwrap();
+        let partials = outputs
+            .iter()
+            .map(|s| partial_sign_proof_of_possession(&s.public, &s.share))
+            .collect::<Vec<_>>();
+        let signature =
+            threshold_signature_recover(t, partials).expect("unable to recover signature");
+        let public_key = public(&outputs[0].public);
+        verify_proof_of_possession(&public_key, &signature).expect("invalid proof of possession");
     }
 
     #[test]
