@@ -68,8 +68,6 @@ impl P0 {
     }
 
     /// Track ack from a player.
-    ///
-    /// TODO: signature should be over commitment (otherwise will get rejected by arbiter).
     pub fn ack(&mut self, player: PublicKey) -> Result<(), Error> {
         // Ensure player is valid
         let idx = match self.players.get(&player) {
@@ -82,19 +80,6 @@ impl P0 {
             true => Ok(()),
             false => Err(Error::DuplicateAck),
         }
-    }
-
-    /// Return whether an ack has been received from a player.
-    pub fn has(&self, player: PublicKey) -> bool {
-        let Some(idx) = self.players.get(&player) else {
-            return false;
-        };
-        self.acks.contains(idx)
-    }
-
-    /// Return the count of acks.
-    pub fn count(&self) -> usize {
-        self.acks.len()
     }
 
     /// If there exist at least `2f + 1` acks, finalize.
@@ -114,6 +99,8 @@ impl P0 {
                 inactive.push(player);
             }
         }
+        active.sort();
+        inactive.sort();
         Some(Output { active, inactive })
     }
 }

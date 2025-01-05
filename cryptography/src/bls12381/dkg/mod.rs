@@ -997,4 +997,83 @@ mod tests {
         );
         assert!(matches!(result, Err(Error::PlayerInvalid)));
     }
+
+    #[test]
+    fn test_dealer_acks() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (mut dealer, _, _) = dealer::P0::new(None, contributors.clone());
+
+        // Ack all players
+        for player in &contributors {
+            dealer.ack(player.clone()).unwrap();
+        }
+
+        // Finalize dealer
+        let output = dealer.finalize().unwrap();
+        assert_eq!(output.active, vec![0, 1, 2, 3, 4]);
+        assert!(output.inactive.is_empty());
+    }
+
+    #[test]
+    fn test_dealer_inactive() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (mut dealer, _, _) = dealer::P0::new(None, contributors.clone());
+
+        // Ack all players
+        for player in contributors.iter().take(4) {
+            dealer.ack(player.clone()).unwrap();
+        }
+
+        // Finalize dealer
+        let output = dealer.finalize().unwrap();
+        assert_eq!(output.active, vec![0, 1, 2, 3]);
+        assert_eq!(output.inactive, vec![4]);
+    }
+
+    #[test]
+    fn test_dealer_insufficient() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (mut dealer, _, _) = dealer::P0::new(None, contributors.clone());
+
+        // Ack all players
+        for player in contributors.iter().take(2) {
+            dealer.ack(player.clone()).unwrap();
+        }
+
+        // Finalize dealer
+        assert!(dealer.finalize().is_none());
+    }
 }

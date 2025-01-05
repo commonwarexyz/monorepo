@@ -132,19 +132,6 @@ impl P0 {
         Ok(())
     }
 
-    /// Return whether a commitment has been received from a dealer.
-    pub fn has(&self, dealer: PublicKey) -> bool {
-        let Some(dealer) = self.dealers_ordered.get(&dealer) else {
-            return false;
-        };
-        self.shares.contains_key(dealer)
-    }
-
-    /// Return the count of tracked commitments.
-    pub fn count(&self) -> usize {
-        self.shares.len()
-    }
-
     /// If we are tracking shares for all provided `commitments`, recover
     /// the new group public polynomial and our share.
     pub fn finalize(
