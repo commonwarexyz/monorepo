@@ -14,6 +14,7 @@ pub mod ed25519;
 pub use ed25519::Ed25519;
 pub mod sha256;
 pub use sha256::Sha256;
+pub mod secp256r1;
 
 /// Byte array representing an arbitrary private key.
 pub type PrivateKey = Bytes;
