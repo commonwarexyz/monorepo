@@ -169,6 +169,8 @@ pub enum Error {
     TooFewActive,
     #[error("ack and reveal")]
     AckAndReveal,
+    #[error("invalid commitments")]
+    InvalidCommitments,
 }
 
 #[cfg(test)]
@@ -1122,5 +1124,246 @@ mod tests {
         let player = Ed25519::from_seed(n as u64).public_key();
         let result = dealer.ack(player.clone());
         assert!(matches!(result, Err(Error::PlayerInvalid)));
+    }
+
+    #[test]
+    fn test_player_reveals() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send shares to player
+        let mut commitments = HashMap::new();
+        for (i, con) in contributors.iter().enumerate().take(2) {
+            let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+            player
+                .share(con.clone(), commitment.clone(), shares[0])
+                .unwrap();
+            commitments.insert(i as u32, commitment);
+        }
+
+        // Finalize player with reveal
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+        commitments.insert(2, commitment);
+        let mut reveals = HashMap::new();
+        reveals.insert(2, shares[0]);
+        player.finalize(commitments, reveals).unwrap();
+    }
+
+    #[test]
+    fn test_player_missing_reveal() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send shares to player
+        let mut commitments = HashMap::new();
+        for (i, con) in contributors.iter().enumerate().take(2) {
+            let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+            player
+                .share(con.clone(), commitment.clone(), shares[0])
+                .unwrap();
+            commitments.insert(i as u32, commitment);
+        }
+
+        // Finalize player with reveal
+        let (_, commitment, _) = dealer::P0::new(None, contributors.clone());
+        commitments.insert(2, commitment);
+        let result = player.finalize(commitments, HashMap::new());
+        assert!(matches!(result, Err(Error::MissingShare)));
+    }
+
+    #[test]
+    fn test_player_insufficient_commitments() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send shares to player
+        let mut commitments = HashMap::new();
+        for (i, con) in contributors.iter().enumerate().take(2) {
+            let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+            player
+                .share(con.clone(), commitment.clone(), shares[0])
+                .unwrap();
+            commitments.insert(i as u32, commitment);
+        }
+
+        // Finalize player with reveal
+        let result = player.finalize(commitments, HashMap::new());
+        assert!(matches!(result, Err(Error::InvalidCommitments)));
+    }
+
+    #[test]
+    fn test_player_misdirected_reveal() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send shares to player
+        let mut commitments = HashMap::new();
+        for (i, con) in contributors.iter().enumerate().take(2) {
+            let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+            player
+                .share(con.clone(), commitment.clone(), shares[0])
+                .unwrap();
+            commitments.insert(i as u32, commitment);
+        }
+
+        // Finalize player with reveal
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+        commitments.insert(2, commitment);
+        let mut reveals = HashMap::new();
+        reveals.insert(2, shares[1]);
+        let result = player.finalize(commitments, reveals);
+        assert!(matches!(result, Err(Error::MisdirectedShare)));
+    }
+
+    #[test]
+    fn test_player_invalid_commitment() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send shares to player
+        let mut commitments = HashMap::new();
+        for (i, con) in contributors.iter().enumerate().take(2) {
+            let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+            player
+                .share(con.clone(), commitment.clone(), shares[0])
+                .unwrap();
+            commitments.insert(i as u32, commitment);
+        }
+
+        // Finalize player with reveal
+        let (commitment, shares) = ops::generate_shares(None, n, 1);
+        commitments.insert(2, commitment);
+        let mut reveals = HashMap::new();
+        reveals.insert(2, shares[0]);
+        let result = player.finalize(commitments, reveals);
+        assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
+    }
+
+    #[test]
+    fn test_player_invalid_reveal() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send shares to player
+        let mut commitments = HashMap::new();
+        for (i, con) in contributors.iter().enumerate().take(2) {
+            let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+            player
+                .share(con.clone(), commitment.clone(), shares[0])
+                .unwrap();
+            commitments.insert(i as u32, commitment);
+        }
+
+        // Finalize player with reveal
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+        commitments.insert(2, commitment);
+        let mut reveals = HashMap::new();
+        let mut share = shares[1];
+        share.index = 0;
+        reveals.insert(2, share);
+        let result = player.finalize(commitments, reveals);
+        assert!(matches!(result, Err(Error::ShareWrongCommitment)));
     }
 }

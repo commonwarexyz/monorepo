@@ -141,7 +141,7 @@ impl P0 {
     ) -> Result<Output, Error> {
         // Ensure commitments equals required commitment count
         if commitments.len() != self.dealer_threshold as usize {
-            return Err(Error::TooManyCommitments);
+            return Err(Error::InvalidCommitments);
         }
 
         // Store reveals
@@ -169,7 +169,6 @@ impl P0 {
             )?;
 
             // Store commitment
-            // TODO: log if commitment already exists (then never got ack'd somehow)
             self.shares.insert(idx, (commitment.clone(), share));
         }
 
