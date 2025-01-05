@@ -169,7 +169,7 @@ impl P0 {
             }
             if active.contains(&share.index) {
                 self.disqualified.insert(dealer);
-                return Err(Error::PlayerInvalid);
+                return Err(Error::AckAndReveal);
             }
 
             // Verify share
@@ -184,6 +184,12 @@ impl P0 {
 
             // Record active
             active.insert(&share.index);
+        }
+
+        // Active must be equal to active
+        if active.len() != recipients_len as usize {
+            self.disqualified.insert(dealer);
+            return Err(Error::TooFewActive);
         }
 
         // Record acks and reveals

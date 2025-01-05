@@ -165,6 +165,10 @@ pub enum Error {
     MismatchedShare,
     #[error("too many reveals")]
     TooManyReveals,
+    #[error("too few active")]
+    TooFewActive,
+    #[error("ack and reveal")]
+    AckAndReveal,
 }
 
 #[cfg(test)]
@@ -479,5 +483,154 @@ mod tests {
         // Send invalid commitment to player
         let result = player.share(contributors[0].clone(), public, shares[0]);
         assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
+    }
+
+    #[test]
+    fn test_reveal() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+
+        // Create arbiter
+        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Add commitment to arbiter
+        arb.commitment(
+            contributors[0].clone(),
+            commitment,
+            vec![0, 1, 2, 3],
+            vec![shares[4]],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_reveal_duplicate_player() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+
+        // Create arbiter
+        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Add commitment to arbiter
+        let result = arb.commitment(
+            contributors[0].clone(),
+            commitment,
+            vec![0, 1, 2, 3],
+            vec![shares[3]],
+        );
+        assert!(matches!(result, Err(Error::AckAndReveal)));
+    }
+
+    #[test]
+    fn test_insufficient_active() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, _) = dealer::P0::new(None, contributors.clone());
+
+        // Create arbiter
+        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Add commitment to arbiter
+        let result = arb.commitment(
+            contributors[0].clone(),
+            commitment,
+            vec![0, 1, 2, 3],
+            Vec::new(),
+        );
+        assert!(matches!(result, Err(Error::TooFewActive)));
+    }
+
+    #[test]
+    fn test_too_many_reveals() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+
+        // Create arbiter
+        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Add commitment to arbiter
+        let result = arb.commitment(
+            contributors[0].clone(),
+            commitment,
+            vec![0, 1, 2],
+            vec![shares[3], shares[4]],
+        );
+        assert!(matches!(result, Err(Error::TooManyReveals)));
+    }
+
+    #[test]
+    fn test_incorrect_reveal() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, _) = dealer::P0::new(None, contributors.clone());
+
+        // Create invalid shares
+        let t = quorum(n).unwrap();
+        let (_, shares) = ops::generate_shares(None, n, t);
+
+        // Create arbiter
+        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Add commitment to arbiter
+        let result = arb.commitment(
+            contributors[0].clone(),
+            commitment,
+            vec![0, 1, 2, 3],
+            vec![shares[4]],
+        );
+        assert!(matches!(result, Err(Error::ShareWrongCommitment)));
     }
 }
