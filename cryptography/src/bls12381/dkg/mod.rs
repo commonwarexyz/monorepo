@@ -68,6 +68,8 @@
 //! delivered), this construction can be used to maintain a `2f + 1` threshold (over `3f + 1` total participants where any
 //! `f` are Byzantine).
 //!
+//! If the network is sycnrhonous, the revealed shares will never allow for deriving a share for an honest player.
+//!
 //! If the network is not synchronous and `2f + 1` commitments are still posted by time `3t`, the threshold for generating
 //! a valid threshold signature may fall as low as `f + 1` (TODO: is this not the same if all byzantine nodes participating...what we really mean to say is that `f` revealed may be from honest players). To see how this could be, consider the case where
 //! there is a network partition such that `f` honest players are in one partition and `f + 1` honest + `f` Byzantine players
