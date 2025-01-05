@@ -50,5 +50,5 @@ cargo run --release -- --lazy --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --par
 _Forge acknowledgements from contributors._
 
 ```bash
-cargo run --release -- --forge --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
+cargo run --release -- --forger --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 ```
