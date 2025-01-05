@@ -68,10 +68,18 @@
 //! delivered), this construction can be used to maintain a `2f + 1` threshold (over `3f + 1` total participants where any
 //! `f` are Byzantine).
 //!
-//! If the network is not synchronous and `2f + 1` commitments are still posted by time `3t`, the number of honest players
+//! If the network is not synchronous and `2f + 1` commitments are still posted by time `3t`, the threshold for generating
+//! a valid threshold signature may fall as low as `f + 1` (TODO: is this not the same if all byzantine nodes participating...what we really mean to say is that `f` revealed may be from honest players). To see how this could be, consider the case where
+//! there is a network partition such that `f` honest players are in one partition and `f + 1` honest + `f` Byzantine players
+//! are in another. The `2f + 1` in the same partition post commitments by time `3t` (revealing the same `f` shares for
+//! the same `f` honest players). Anyone can now derive these `f` fully-revealed shares (and use them to generate a partial
+//! signature with any other `f + 1` shares). When the network is synchronous, this is not a concern ...
+//!
+//!
+//! number of honest players
 //! required to generate a valid threshold signature may be as low as `1` (rather than `f + 1`). To see how this could be,
-//! consider the worst case where all `2f + 1` posted commitments reveal shares for the same `f` players (and all reveals are for
-//! honest players). This means a colluding Byzantine adversary will have access to their acknowledged `f` shares and the
+//! consider the worst case where all `2f + 1` posted commitments reveal shares for the same `f` players (and all reveals
+//! are for honest players). This means a colluding Byzantine adversary will have access to their acknowledged `f` shares and the
 //! revealed `f` shares (`2f`). With a single partial signature from an honest player, the adversary can recover a valid
 //! threshold signature.
 //!
