@@ -13,7 +13,7 @@ use zstd::bulk::{compress, decompress};
 pub struct Sender {
     channel: Channel,
     max_size: usize,
-    compression: Option<u8>,
+    compression: Option<i32>,
     messenger: Messenger,
 }
 
@@ -21,7 +21,7 @@ impl Sender {
     pub(super) fn new(
         channel: Channel,
         max_size: usize,
-        compression: Option<u8>,
+        compression: Option<i32>,
         messenger: Messenger,
     ) -> Self {
         Self {
@@ -63,8 +63,7 @@ impl crate::Sender for Sender {
     ) -> Result<Vec<PublicKey>, Error> {
         // If compression is enabled, compress the message before sending.
         if let Some(level) = self.compression {
-            let compressed =
-                compress(&message, level as i32).map_err(|_| Error::CompressionFailed)?;
+            let compressed = compress(&message, level).map_err(|_| Error::CompressionFailed)?;
             message = compressed.into();
         }
 
@@ -148,7 +147,7 @@ impl Channels {
         channel: Channel,
         rate: governor::Quota,
         backlog: usize,
-        compression: Option<u8>,
+        compression: Option<i32>,
     ) -> (Sender, Receiver) {
         let (sender, receiver) = mpsc::channel(backlog);
         if self.receivers.insert(channel, (rate, sender)).is_some() {

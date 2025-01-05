@@ -239,7 +239,7 @@ fn main() {
 
         // Check if I am the arbiter
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
-        const COMPRESSION_LEVEL: Option<u8> = Some(3);
+        const COMPRESSION_LEVEL: Option<i32> = Some(3);
         const DKG_FREQUENCY: Duration = Duration::from_secs(10);
         const DKG_PHASE_TIMEOUT: Duration = Duration::from_secs(1);
         if let Some(arbiter) = matches.get_one::<u64>("arbiter") {
