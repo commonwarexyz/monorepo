@@ -20,10 +20,10 @@
 //! acknowledgements from players. Players receive shares from dealers, validate them, and send acknowledgements
 //! back to dealers. It is possible to be both a dealer and a player in the protocol.
 //!
-//! Whether or not the protocol succeeds (aborts if `2f + 1` commitments are not posted by time `3t`), the dealers
-//! that did not post valid commitments/acks/reveals are identified and returned. If the protocol succeeds, any
-//! dealers that did not post valid commitments/acks/reveals are identified (and still returned). It is expected
-//! that the set of participants would punish/exclude "bad" dealers prior to a future round (to eventually make progress).
+//! Whether or not the protocol succeeds, the dealers that did not post valid commitments/acks/reveals are
+//! identified and returned. If the protocol succeeds, any dealers that did not post valid commitments/acks/reveals
+//! are identified (and still returned). It is expected that the set of participants would punish/exclude
+//! "bad" dealers prior to a future round (to eventually make progress).
 //!
 //! # Specification
 //!
@@ -64,10 +64,31 @@
 //!
 //! # Synchrony Assumption
 //!
-//! In the synchronous network model (where a message between any 2 participants may take up to `t` time
-//! to be delivered), this construction can maintain a `2f + 1` threshold over `3f + 1` total participants
-//! (where any `f` participants in a given round are Byzantine). If the network is not synchronous and `2f + 1`
-//! participants post a valid commitment,
+//! In the synchronous network model (where a message between any 2 participants takes up to `t` time to be
+//! delivered), this construction can be used to maintain a `2f + 1` threshold (over `3f + 1` total participants where any
+//! `f` are Byzantine).
+//!
+//! If the network is not synchronous and `2f + 1` commitments are still posted by time `3t`, the number of honest players
+//! required to generate a valid threshold signature may be as low as `1` (rather than `f + 1`). To see how this could be,
+//! consider the worst case where all `2f + 1` posted commitments reveal shares for the same `f` players (and all reveals are for
+//! honest players). This means a colluding Byzantine adversary will have access to their acknowledged `f` shares and the
+//! revealed `f` shares (`2f`). With a single partial signature from an honest player, the adversary can recover a valid
+//! threshold signature.
+//!
+//! If the network is not synchronous and `2f + 1` commitments are not posted to the arbiter by time `3t`, the round
+//! will abort and should be rerun.
+//!
+//! ## Future Work: Dropping the Synchrony Assumption?
+//!
+//! It is possible to design a DKG that can maintain a `2f + 1` (over `3f + 1` total participants where any `f` are Byzantine)
+//! that doesn't require a synchrony assumption to ensure `f + 1` honest players are always required to generate a threshold signature.
+//! However, known constructions that satisfy this requirement have thus far required both Zero-Knowledge Proofs (ZKPs) and broadcasting
+//! encrypted shares publicly ([Groth21](https://eprint.iacr.org/2021/339), [Kate23](https://eprint.iacr.org/2023/451)).
+//!
+//! In the future, it may make sense to deprecate this interactive construction in favor of one of these non-interactive approaches.
+//! As of January 2025, however, these constructions are still considered novel (less than 2-3 years in production and require stronger
+//! cryptographic assumptions), don't scale to hundreds of participants (unless dealers have powerful hardware), and provide adversaries
+//! the opportunity to brute force encrypted shares (even if honest players are online).
 //!
 //! # Example
 //!
