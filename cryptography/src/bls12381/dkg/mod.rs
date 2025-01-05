@@ -90,6 +90,13 @@
 //! cryptographic assumptions), don't scale to hundreds of participants (unless dealers have powerful hardware), and provide adversaries
 //! the opportunity to brute force encrypted shares (even if honest players are online).
 //!
+//! # Tracking Complaints
+//!
+//! This crate does not provide an integrated mechanism for tracking complaints from players (of malicious dealers). However, it is
+//! possible to implement your own mechanism and to manually disqualify dealers from a round in the arbiter. This decision was made
+//! because the mechanism for communicating commitments/shares/acknowledgements is highly dependent on the context in which this construction
+//! is used.
+//!
 //! # Example
 //!
 //! For a complete example of how to instantiate this crate, checkout [commonware-vrf](https://docs.rs/commonware-vrf).
