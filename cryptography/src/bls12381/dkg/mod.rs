@@ -1101,4 +1101,26 @@ mod tests {
         let result = dealer.ack(player.clone());
         assert!(matches!(result, Err(Error::DuplicateAck)));
     }
+
+    #[test]
+    fn test_dealer_invalid_player() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (mut dealer, _, _) = dealer::P0::new(None, contributors.clone());
+
+        // Ack invalid player
+        let player = Ed25519::from_seed(n as u64).public_key();
+        let result = dealer.ack(player.clone());
+        assert!(matches!(result, Err(Error::PlayerInvalid)));
+    }
 }
