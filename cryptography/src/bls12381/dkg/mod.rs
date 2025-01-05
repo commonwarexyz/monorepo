@@ -633,4 +633,37 @@ mod tests {
         );
         assert!(matches!(result, Err(Error::ShareWrongCommitment)));
     }
+
+    #[test]
+    fn test_reveal_wrong_share() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+
+        // Create arbiter
+        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Swap share value
+        let mut share = shares[3];
+        share.index = 4;
+
+        // Add commitment to arbiter
+        let result = arb.commitment(
+            contributors[0].clone(),
+            commitment,
+            vec![0, 1, 2, 3],
+            vec![share],
+        );
+        assert!(matches!(result, Err(Error::ShareWrongCommitment)));
+    }
 }
