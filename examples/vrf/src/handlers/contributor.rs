@@ -15,12 +15,13 @@ use commonware_runtime::Clock;
 use commonware_utils::{hex, quorum};
 use futures::{channel::mpsc, SinkExt};
 use prost::Message;
+use rand::Rng;
 use std::{collections::HashMap, time::Duration};
 use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
 /// or deviate as a rogue, lazy, or defiant participant.
-pub struct Contributor<E: Clock, C: Scheme> {
+pub struct Contributor<E: Clock + Rng, C: Scheme> {
     runtime: E,
     crypto: C,
     dkg_phase_timeout: Duration,
@@ -28,14 +29,14 @@ pub struct Contributor<E: Clock, C: Scheme> {
     t: u32,
     contributors: Vec<PublicKey>,
     contributors_ordered: HashMap<PublicKey, u32>,
-    rogue: bool,
+    corrupt: bool,
     lazy: bool,
     forger: bool,
 
     signatures: mpsc::Sender<(u64, player::Output)>,
 }
 
-impl<E: Clock, C: Scheme> Contributor<E, C> {
+impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         runtime: E,
@@ -43,7 +44,7 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
         dkg_phase_timeout: Duration,
         arbiter: PublicKey,
         mut contributors: Vec<PublicKey>,
-        rogue: bool,
+        corrupt: bool,
         lazy: bool,
         forger: bool,
     ) -> (Self, mpsc::Receiver<(u64, player::Output)>) {
@@ -63,7 +64,7 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
                 t: quorum(contributors.len() as u32).unwrap(),
                 contributors,
                 contributors_ordered,
-                rogue,
+                corrupt,
                 lazy,
                 forger,
 
@@ -190,9 +191,10 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
             let mut sent = 0;
             for (idx, player) in self.contributors.iter().enumerate() {
                 // Send to self
+                let share = shares[idx];
                 if idx == me_idx as usize {
                     player_obj
-                        .share(me.clone(), commitment.clone(), shares[me_idx as usize])
+                        .share(me.clone(), commitment.clone(), share)
                         .unwrap();
                     p0.ack(me.clone()).unwrap();
                     let payload = payload(round, &me, serialized_commitment);
@@ -202,10 +204,37 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
                 }
 
                 // Send to others
+                let mut serialized_share = shares[idx].serialize();
+                if self.forger {
+                    // If we are a forger, don't send any shares and instead create fake signatures.
+                    let _ = p0.ack(player.clone());
+                    let mut signature = vec![0u8; C::len().1];
+                    self.runtime.fill_bytes(&mut signature);
+                    acks.insert(idx as u32, signature.into());
+                    warn!(
+                        round,
+                        player = hex(player),
+                        "not sending share because forger"
+                    );
+                    continue;
+                }
+                if self.corrupt {
+                    // If we are corrupt, randomly modify the share.
+                    serialized_share = group::Share {
+                        index: share.index,
+                        private: group::Scalar::rand(&mut self.runtime),
+                    }
+                    .serialize();
+                    warn!(round, player = hex(player), "modified share");
+                }
                 if self.lazy && sent == self.t - 1 {
                     // This will still lead to the commitment being used (>= t acks) because
                     // the dealer has already acked.
-                    warn!(round, "not sending share because lazy");
+                    warn!(
+                        round,
+                        player = hex(player),
+                        "not sending share because lazy"
+                    );
                     continue;
                 }
                 sender
@@ -215,7 +244,7 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
                             round,
                             payload: Some(wire::dkg::Payload::Share(wire::Share {
                                 commitment: serialized_commitment.clone(),
-                                share: shares[idx].serialize(),
+                                share: serialized_share,
                             })),
                         }
                         .encode_to_vec()
@@ -224,7 +253,7 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
                     )
                     .await
                     .expect("could not send share");
-                debug!(round, recipient = hex(player), "sent share");
+                debug!(round, player = hex(player), "sent share");
                 sent += 1;
             }
         }
@@ -261,6 +290,11 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
                                         let Some((p0, _, commitment, _, acks)) = &mut dealer_obj else {
                                             continue;
                                         };
+
+                                        // Skip if forger
+                                        if self.forger {
+                                            continue;
+                                        }
 
                                         // Verify index matches
                                         let Some(player) = self.contributors.get(msg.public_key as usize) else {
@@ -446,11 +480,14 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
     }
 
     pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
-        if self.rogue {
-            warn!("running as rogue player");
+        if self.corrupt {
+            warn!("running as corrupt player");
         }
         if self.lazy {
             warn!("running as lazy player");
+        }
+        if self.forger {
+            warn!("running as forger player");
         }
         let mut previous = None;
         loop {

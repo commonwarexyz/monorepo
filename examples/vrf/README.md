@@ -29,12 +29,12 @@ cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participan
 cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3,4  --arbiter 0 --contributors 1,2,3,4
 ```
 
-## Contributor 4 (Rogue)
+## Contributor 4 (Corrupt)
 
 _Send invalid shares to other contributors._
 
 ```bash
-cargo run --release -- --rogue --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
+cargo run --release -- --corrupt --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 ```
 
 ## Contributor 4 (Lazy)

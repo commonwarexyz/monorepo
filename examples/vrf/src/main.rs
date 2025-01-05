@@ -241,7 +241,7 @@ fn main() {
         const DKG_PHASE_TIMEOUT: Duration = Duration::from_secs(1);
         if let Some(arbiter) = matches.get_one::<u64>("arbiter") {
             // Create contributor
-            let rogue = matches.get_flag("rogue");
+            let corrupt = matches.get_flag("corrupt");
             let lazy = matches.get_flag("lazy");
             let forger = matches.get_flag("forger");
             let (contributor_sender, contributor_receiver) = network.register(
@@ -257,7 +257,7 @@ fn main() {
                 DKG_PHASE_TIMEOUT,
                 arbiter,
                 contributors.clone(),
-                rogue,
+                corrupt,
                 lazy,
                 forger,
             );
