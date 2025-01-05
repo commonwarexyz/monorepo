@@ -1,110 +1,73 @@
 //! Distributed Key Generation (DKG) and Resharing protocol for the BLS12-381 curve.
 //!
 //! This crate implements an interactive Distributed Key Generation (DKG) and Resharing protocol
-//! for the BLS12-381 curve.
-//!
-//!
-//! TODO: fix (shares only posted during reveal), no ZK
-//!
-//! TODO: No complaints (more work to track the complaints than they are worth)
-//!
-//! Unlike many other constructions, this scheme only requires
-//! contributors to publicly post shares during a "forced reveal" (when a given dealer
-//! does not distribute a share required for a party to recover their secret). Outside of this
-//! reveal, all shares are communicated directly between a dealer and recipient over an
-//! encrypted channel (which can be instantiated with <https://docs.rs/commonware-p2p>).
+//! for the BLS12-381 curve. Unlike other constructions, this construction does not require encrypted
+//! shares to be publicly broadcast to complete a DKG/Reshare. Shares, instead, are sent directly
+//! between dealers and players over an encrypted channel (which can be instantiated
+//! with [commonware-p2p](https://docs.rs/commonware-p2p)).
 //!
 //! The DKG is based on the "Joint-Feldman" construction from "Secure Distributed Key
-//! Generation for Discrete-Log Based Cryptosystems" (GJKR99) and resharing is based
-//! on the construction provided in "Redistributing secret shares to new access structures
+//! Generation for Discrete-Log Based Cryptosystems" (GJKR99) and Resharing is based
+//! on the construction described in "Redistributing secret shares to new access structures
 //! and its applications" (Desmedt97).
 //!
-//! # Protocol
+//! # Overview
 //!
-//! The protocol has three types of contributors: arbiter, dealer, and player. The arbiter
-//! serves as an orchestrator that collects commitments, acks, complaints, and reveals from
-//! all contributors and replicates them to other contributors. The arbiter can be implemented as
-//! a standalone process or by some consensus protocol. Dealers are the contributors
-//! that deal shares and commitments to players in the protocol. It is possible to be both a dealer and a
-//! player in the protocol.
+//! The protocol has three types of participants: arbiters, dealers, and players. The arbiter
+//! serves as an orchestrator that collects commitments, acknowledgements, and reveals from
+//! dealers/players and replicates them to all dealers/players. The arbiter can be implemented as
+//! a standalone process or by some consensus protocol. Dealers generate commitments/shares and collect
+//! acknowledgements from players. Players receive shares from dealers, validate them, and send acknowledgements
+//! back to dealers. It is possible to be both a dealer and a player in the protocol.
 //!
-//! The protocol can maintain a `2f + 1` threshold (over `3f + 1` contributors) under a
-//! synchronous network model (where messages may be delayed up to time `t` between any 2 contributors)
-//! across any reshare where `2f + 1` contributors are honest.
+//! Whether or not the protocol succeeds (aborts if `2f + 1` commitments are not posted by time `3t`), the dealers
+//! that did not post valid commitments/acks/reveals are identified and returned. If the protocol succeeds, any
+//! dealers that did not post valid commitments/acks/reveals are identified (and still returned). It is expected
+//! that the set of participants would punish/exclude "bad" dealers prior to a future round (to eventually make progress).
 //!
-//! Whether or not the protocol succeeds (may need to retry during periods of network instability), all contributors
-//! that violate the protocol will be identified and returned. If the protocol succeeds, the contributions of any
-//! contributors that violated the protocol are excluded (and still returned). It is expected that the set of
-//! contributors would punish/exclude "bad" contributors prior to a future round (to eventually make progress).
+//! # Specification
 //!
-//! ## Arbiter
+//! ## [Dealer] Step 0: Generate Commitment and Shares
 //!
-//! ### [Phase 0] Step 0: Collect Commitments, Acks, and Reveals
+//! Generate commitment and shares. If it is a DKG, the commitment is a random polynomial of degree `2f`. If it
+//! is a reshare, the commitment must be consistent with the previous group polynomial.
 //!
-//! An "ack" is a message indicating that a given contributor has received a valid
-//! share from a contributor (does not include encrypted or plaintext share material). A "complaint" is a
-//! signed share from a given contributor that is invalid (signing is external to this implementation).
-//! If the complaint is valid, the dealer that sent it is disqualified. If the complaint is invalid
-//! (it is a valid share), the recipient is disqualified. Because all shares must be signed by the dealer
-//! that generates them and this signature is over the plaintext share, there is no need to have a
-//! "justification" phase where said dealer must "defend" itself.
+//! ## [Dealer] Step 1: Distribute Commitment and Shares
 //!
-//! Listen for commitments, acks, and reveals from dealers. If any such is received, verify all signatures on acks,
-//! that reveals are valid, and that there exist no more than `f` reveals.
+//! Distribute generated commitment and corresponding shares to each player over an encrypted channel.
 //!
-//! If the arbiter is instantiated with a polynomial (from a previous DKG/Reshare), it will enforce all
-//! generated commitments are consistent with said polynomial. The arbiter, lastly, enforces that the
-//! degree of each commitment is `2f`.
+//! ## [Player] Step 3: Verify Share and Send Acknowledgement
 //!
-//! _If a complaint is received, disqualify the dealer._
+//! Verify incoming share against provided commitment (additionally comparing the commitment to the previous group
+//! polynomial, if reshare). If the share is valid, send an acknowledgement back to the dealer.
 //!
-//! ### [Phase 1] Step 1: Finalize Commitments and Forward Reveals
+//! To protect against a dealer sending different commitments to different players, players must sign this
+//! acknowledgement over `(dealer, commitment)`.
 //!
-//! After `3t` time has elapsed, select the `2f + 1` commitments with the least number of reveals (most acks).
+//! ## [Dealer] Step 4: Collect Acknowledgements and Send to Arbiter
 //!
-//! If there do not exist `2f + 1` commitments, the arbiter will abort the protocol.
+//! Collect acknowledgements from players. After time `2t`, check to see if at least `2f + 1` acknowledgements have
+//! been received (including self, if a player as well). If so, send the commitment, acknowledgements, and unencrypted
+//! shares of players that did not send an acknowledgement to the arbiter. If not, exit.
 //!
-//! The arbiter sends all selected commitments to all players (regardless of whether or not their commitment
-//! was selected) and any reveals required for a player to reconstruct their share.
+//! ## [Arbiter] Step 5: Select Commitments and Forward Reveals
 //!
-//! The arbiter will then recover the new group polynomial using said commitments.
+//! After time `3t`, select the `2f + 1` commitments with the least number of reveals (most acknowledgements). Send
+//! these `2f + 1` commitments (and any reveals associated with each) to all players. If there do not exist `2f + 1`
+//! commitments with at least `2f + 1` acknowledgements, exit.
 //!
-//! ## Dealer
+//! ## [Player] Step 6: Recover Group Polynomial and Derive Share
 //!
-//! ### [Phase 0] Step 0: Generate Shares and Commitment
+//! If the round is successful, each player will receive `2f + 1` commitments and any shares associated with said
+//! commitments they did not acknowledge (or that the dealer said they didn't acknowledge). With this, they can recover
+//! the new group polynomial and derive their share of the secret.
 //!
-//! Generate shares and a commitment. If it is a DKG, the commitment is a random polynomial
-//! with degree of `2f`. If it is a reshare, the commitment must be consistent with the previous
-//! group polynomial.
+//! # Synchrony Assumption
 //!
-//! ### [Phase 1] Step 1: Distribute Shares and Collect Acks
-//!
-//! Distribute share to each player and the corresponding commitment. If the player is honest and connected, it will respond
-//! with a signed "ack".
-//!
-//! Periodically redistribute shares to all contributors that have not yet broadcast an "ack".
-//!
-//! ### [Phase 2] Step 2: Register Commitment, Acks, and Reveals
-//!
-//! After `2t` time has elapsed, the dealer sends its commitment, any acks it collected, and up to `f` reveals
-//! to the arbiter. This gives `t` time to reach arbiter.
-//!
-//! ## Player
-//!
-//! ### [Phase 0] Step 0: Listen for Commitments and Shares
-//!
-//! ### [Phase 0] Step 1: Submit Acks/Complaints
-//!
-//! After receiving a share from a dealer, the contributor will send an "ack" to the
-//! dealer if the share is valid (confirmed against commitment) or a "complaint" if the dealer broadcasts multiple commitments
-//! or the share is invalid.
-//!
-//! ### [Phase 1] Step 2: Recover Group Polynomial and Derive Share
-//!
-//! If the round is successful, the arbiter will forward the valid commitments to construct shares for the
-//! new group polynomial (which shares the same constant term if it is a reshare) and any reveals. Like the arbiter,
-//! the player will recover the group polynomial. Unlike above, the player will also recover its new share of the secret (incorporating
-//! any reveals if necessary).
+//! In the synchronous network model (where a message between any 2 participants may take up to `t` time
+//! to be delivered), this construction can maintain a `2f + 1` threshold over `3f + 1` total participants
+//! (where any `f` participants in a given round are Byzantine). If the network is not synchronous and `2f + 1`
+//! participants post a valid commitment,
 //!
 //! # Example
 //!
