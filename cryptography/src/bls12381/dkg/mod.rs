@@ -817,6 +817,38 @@ mod tests {
     }
 
     #[test]
+    fn test_manual_disqualify() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, _) = Dealer::new(None, contributors.clone());
+
+        // Create arbiter
+        let mut arb = Arbiter::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Disqualify dealer
+        arb.disqualify(contributors[0].clone());
+
+        // Add valid commitment to arbiter after disqualified
+        let result = arb.commitment(
+            contributors[0].clone(),
+            commitment,
+            vec![0, 1, 2, 3, 4],
+            Vec::new(),
+        );
+        assert!(matches!(result, Err(Error::ContributorDisqualified)));
+    }
+
+    #[test]
     fn test_too_many_reveals() {
         // Initialize test
         let n = 5;
