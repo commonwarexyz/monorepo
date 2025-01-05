@@ -566,6 +566,74 @@ mod tests {
     }
 
     #[test]
+    fn test_misdirected_share() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send misdirected share to player
+        let result = player.share(contributors[0].clone(), commitment.clone(), shares[1]);
+        assert!(matches!(result, Err(Error::MisdirectedShare)));
+    }
+
+    #[test]
+    fn test_invalid_dealer() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send share from invalid dealer
+        let dealer = Ed25519::from_seed(n as u64).public_key();
+        let result = player.share(dealer.clone(), commitment.clone(), shares[0]);
+        assert!(matches!(result, Err(Error::DealerInvalid)));
+
+        // Create arbiter
+        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Send commitment from invalid dealer
+        let result = arb.commitment(dealer, commitment, vec![0, 1, 2, 3], Vec::new());
+        assert!(matches!(result, Err(Error::DealerInvalid)));
+    }
+
+    #[test]
     fn test_invalid_commitment_degree() {
         // Initialize test
         let n = 5;

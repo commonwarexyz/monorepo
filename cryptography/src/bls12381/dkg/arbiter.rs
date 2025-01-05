@@ -123,7 +123,7 @@ impl P0 {
         // Find the index of the contributor
         let idx = match self.dealers.get(&dealer) {
             Some(idx) => *idx,
-            None => return Err(Error::ContributorInvalid),
+            None => return Err(Error::DealerInvalid),
         };
 
         // Check if commitment already exists
