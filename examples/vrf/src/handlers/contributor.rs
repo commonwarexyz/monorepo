@@ -4,7 +4,7 @@ use crate::handlers::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::{dealer, player},
+        dkg::{player::Output, Dealer, Player},
         primitives::{group, poly},
     },
     PublicKey, Scheme,
@@ -33,7 +33,7 @@ pub struct Contributor<E: Clock + Rng, C: Scheme> {
     lazy: bool,
     forger: bool,
 
-    signatures: mpsc::Sender<(u64, player::Output)>,
+    signatures: mpsc::Sender<(u64, Output)>,
 }
 
 impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
@@ -47,7 +47,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         corrupt: bool,
         lazy: bool,
         forger: bool,
-    ) -> (Self, mpsc::Receiver<(u64, player::Output)>) {
+    ) -> (Self, mpsc::Receiver<(u64, Output)>) {
         contributors.sort();
         let contributors_ordered: HashMap<PublicKey, u32> = contributors
             .iter()
@@ -76,10 +76,10 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
 
     async fn run_round(
         &mut self,
-        previous: Option<&player::Output>,
+        previous: Option<&Output>,
         sender: &mut impl Sender,
         receiver: &mut impl Receiver,
-    ) -> (u64, Option<player::Output>) {
+    ) -> (u64, Option<Output>) {
         // Configure me
         let me = self.crypto.public_key();
         let me_idx = *self.contributors_ordered.get(&me).unwrap();
@@ -164,10 +164,10 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         // Create dealer
         let mut dealer_obj = if should_deal {
             let previous = previous.map(|previous| previous.share);
-            let (p0, commitment, shares) = dealer::P0::new(previous, self.contributors.clone());
+            let (dealer, commitment, shares) = Dealer::new(previous, self.contributors.clone());
             let serialized_commitment = commitment.serialize();
             Some((
-                p0,
+                dealer,
                 commitment,
                 serialized_commitment,
                 shares,
@@ -178,7 +178,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         };
 
         // Create player
-        let mut player_obj = player::P0::new(
+        let mut player_obj = Player::new(
             me.clone(),
             public.clone(),
             self.contributors.clone(),
@@ -187,7 +187,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         );
 
         // Distribute shares
-        if let Some((p0, commitment, serialized_commitment, shares, acks)) = &mut dealer_obj {
+        if let Some((dealer, commitment, serialized_commitment, shares, acks)) = &mut dealer_obj {
             let mut sent = 0;
             for (idx, player) in self.contributors.iter().enumerate() {
                 // Send to self
@@ -196,7 +196,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     player_obj
                         .share(me.clone(), commitment.clone(), share)
                         .unwrap();
-                    p0.ack(me.clone()).unwrap();
+                    dealer.ack(me.clone()).unwrap();
                     let payload = payload(round, &me, serialized_commitment);
                     let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
                     acks.insert(me_idx, signature);
@@ -207,7 +207,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 let mut serialized_share = shares[idx].serialize();
                 if self.forger {
                     // If we are a forger, don't send any shares and instead create fake signatures.
-                    let _ = p0.ack(player.clone());
+                    let _ = dealer.ack(player.clone());
                     let mut signature = vec![0u8; C::len().1];
                     self.runtime.fill_bytes(&mut signature);
                     acks.insert(idx as u32, signature.into());
@@ -291,7 +291,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                 match msg.payload {
                                     Some(wire::dkg::Payload::Ack(msg)) => {
                                         // Skip if not dealing
-                                        let Some((p0, _, commitment, _, acks)) = &mut dealer_obj else {
+                                        let Some((dealer, _, commitment, _, acks)) = &mut dealer_obj else {
                                             continue;
                                         };
 
@@ -317,7 +317,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                         }
 
                                         // Store ack
-                                        let _ = p0.ack(s);
+                                        let _ = dealer.ack(s);
                                         acks.insert(msg.public_key, msg.signature);
 
                                     },

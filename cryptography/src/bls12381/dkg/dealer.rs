@@ -31,14 +31,14 @@ pub struct Output {
 }
 
 /// Track acks from recipients.
-pub struct P0 {
+pub struct Dealer {
     threshold: u32,
     players: HashMap<PublicKey, u32>,
 
     acks: HashSet<u32>,
 }
 
-impl P0 {
+impl Dealer {
     /// Create a new dealer for a DKG/Resharing procedure.
     pub fn new(
         share: Option<Share>,

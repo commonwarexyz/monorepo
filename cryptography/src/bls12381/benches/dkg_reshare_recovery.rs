@@ -1,5 +1,5 @@
 use commonware_cryptography::{
-    bls12381::dkg::{dealer, player},
+    bls12381::dkg::{Dealer, Player},
     Ed25519, Scheme,
 };
 use commonware_utils::quorum;
@@ -23,21 +23,21 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
         // Create players
         let mut players = Vec::with_capacity(n);
         for con in &contributors {
-            let p0 = player::P0::new(
+            let player = Player::new(
                 con.clone(),
                 None,
                 contributors.clone(),
                 contributors.clone(),
                 1,
             );
-            players.push(p0);
+            players.push(player);
         }
 
         // Create commitments and send shares to players
         let t = quorum(n as u32).unwrap();
         let mut commitments = HashMap::new();
         for (dealer_idx, dealer) in contributors.iter().take(t as usize).enumerate() {
-            let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
+            let (_, commitment, shares) = Dealer::new(None, contributors.clone());
             for (player_idx, player) in players.iter_mut().enumerate() {
                 player
                     .share(dealer.clone(), commitment.clone(), shares[player_idx])
@@ -64,7 +64,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                         || {
                             // Create player
                             let me = contributors[0].clone();
-                            let mut p0 = player::P0::new(
+                            let mut player = Player::new(
                                 me.clone(),
                                 Some(outputs[0].public.clone()),
                                 contributors.clone(),
@@ -76,12 +76,13 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                             let mut commitments = HashMap::new();
                             for (idx, dealer) in contributors.iter().take(t as usize).enumerate() {
                                 let (_, commitment, shares) =
-                                    dealer::P0::new(Some(outputs[idx].share), contributors.clone());
-                                p0.share(dealer.clone(), commitment.clone(), shares[0])
+                                    Dealer::new(Some(outputs[idx].share), contributors.clone());
+                                player
+                                    .share(dealer.clone(), commitment.clone(), shares[0])
                                     .unwrap();
                                 commitments.insert(idx as u32, commitment);
                             }
-                            (p0, commitments)
+                            (player, commitments)
                         },
                         |(player, commitments)| {
                             black_box(player.finalize(commitments, HashMap::new()).unwrap());

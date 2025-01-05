@@ -1,4 +1,4 @@
-use commonware_cryptography::bls12381::dkg::{dealer, player};
+use commonware_cryptography::bls12381::dkg::{Dealer, Player};
 use commonware_cryptography::Ed25519;
 use commonware_cryptography::Scheme;
 use commonware_utils::quorum;
@@ -23,7 +23,7 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
 
                     // Create player
                     let me = contributors[0].clone();
-                    let mut p0 = player::P0::new(
+                    let mut player = Player::new(
                         me.clone(),
                         None,
                         contributors.clone(),
@@ -34,12 +34,13 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                     // Create commitments and send shares to player
                     let mut commitments = HashMap::new();
                     for (idx, dealer) in contributors.iter().take(t as usize).enumerate() {
-                        let (_, commitment, shares) = dealer::P0::new(None, contributors.clone());
-                        p0.share(dealer.clone(), commitment.clone(), shares[0])
+                        let (_, commitment, shares) = Dealer::new(None, contributors.clone());
+                        player
+                            .share(dealer.clone(), commitment.clone(), shares[0])
                             .unwrap();
                         commitments.insert(idx as u32, commitment);
                     }
-                    (p0, commitments)
+                    (player, commitments)
                 },
                 |(player, commitments)| {
                     black_box(player.finalize(commitments, HashMap::new()).unwrap());

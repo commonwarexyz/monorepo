@@ -54,7 +54,7 @@ pub struct Output {
 }
 
 /// Gather commitments from all contributors.
-pub struct P0 {
+pub struct Arbiter {
     previous: Option<poly::Public>,
     dealer_threshold: u32,
     recipient_threshold: u32,
@@ -69,7 +69,7 @@ pub struct P0 {
     disqualified: HashSet<PublicKey>,
 }
 
-impl P0 {
+impl Arbiter {
     /// Create a new arbiter for a DKG/Resharing procedure.
     pub fn new(
         previous: Option<poly::Public>,

@@ -34,7 +34,7 @@ pub struct Output {
 }
 
 /// Track commitments and shares distributed by dealers.
-pub struct P0 {
+pub struct Player {
     me: u32,
     dealer_threshold: u32,
     player_threshold: u32,
@@ -46,7 +46,7 @@ pub struct P0 {
     shares: HashMap<u32, (poly::Public, Share)>,
 }
 
-impl P0 {
+impl Player {
     /// Create a new player for a DKG/Resharing procedure.
     pub fn new(
         me: PublicKey,

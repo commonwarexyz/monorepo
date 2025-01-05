@@ -4,7 +4,7 @@ use crate::handlers::{
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::arbiter::P0,
+        dkg,
         primitives::{
             group::{self, Element},
             poly,
@@ -90,7 +90,8 @@ impl<E: Clock> Arbiter<E> {
             .expect("failed to send start message");
 
         // Collect commitments
-        let mut p0 = P0::new(previous, self.players.clone(), self.players.clone(), 1);
+        let mut arbiter =
+            dkg::Arbiter::new(previous, self.players.clone(), self.players.clone(), 1);
         loop {
             select! {
                 _ = self.runtime.sleep_until(t) => {
@@ -104,7 +105,7 @@ impl<E: Clock> Arbiter<E> {
                             let msg = match wire::Dkg::decode(msg) {
                                 Ok(msg) => msg,
                                 Err(_) => {
-                                    p0.disqualify(sender);
+                                    arbiter.disqualify(sender);
                                     continue;
                                 }
                             };
@@ -123,7 +124,7 @@ impl<E: Clock> Arbiter<E> {
                             let commitment = match poly::Public::deserialize(&msg.commitment, self.t) {
                                 Some(commitment) => commitment,
                                 None => {
-                                    p0.disqualify(sender);
+                                    arbiter.disqualify(sender);
                                     continue;
                                 }
                             };
@@ -144,7 +145,7 @@ impl<E: Clock> Arbiter<E> {
                                 acks.push(ack.public_key);
                             }
                             if disqualify {
-                                p0.disqualify(sender);
+                                arbiter.disqualify(sender);
                                 continue;
                             }
 
@@ -161,14 +162,14 @@ impl<E: Clock> Arbiter<E> {
                                 reveals.push(share);
                             }
                             if disqualify {
-                                p0.disqualify(sender);
+                                arbiter.disqualify(sender);
                                 continue;
                             }
 
                             // Check dealer commitment
                             //
                             // Any faults here will be considered as a disqualification.
-                            let _ = p0.commitment(sender, commitment, acks, reveals);
+                            let _ = arbiter.commitment(sender, commitment, acks, reveals);
                         },
                         Err(err) => {
                             warn!(round, ?err, "failed to receive commitment");
@@ -179,8 +180,8 @@ impl<E: Clock> Arbiter<E> {
             }
         }
 
-        // Finalize P0
-        let (result, disqualified) = p0.finalize();
+        // Finalize
+        let (result, disqualified) = arbiter.finalize();
         let output = match result {
             Ok(output) => output,
             Err(e) => {
