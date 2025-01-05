@@ -1076,4 +1076,29 @@ mod tests {
         // Finalize dealer
         assert!(dealer.finalize().is_none());
     }
+
+    #[test]
+    fn test_dealer_duplicate_ack() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (mut dealer, _, _) = dealer::P0::new(None, contributors.clone());
+
+        // Ack player
+        let player = contributors[0].clone();
+        dealer.ack(player.clone()).unwrap();
+
+        // Ack player (again)
+        let result = dealer.ack(player.clone());
+        assert!(matches!(result, Err(Error::DuplicateAck)));
+    }
 }
