@@ -712,6 +712,55 @@ mod tests {
     }
 
     #[test]
+    fn test_arbiter_reveals() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create arbiter
+        let mut arb = Arbiter::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Create dealers
+        let mut commitments = Vec::with_capacity(n);
+        let mut reveals = Vec::with_capacity(n);
+        for con in &contributors {
+            // Create dealer
+            let (_, commitment, shares) = Dealer::new(None, contributors.clone());
+            commitments.push(commitment.clone());
+            reveals.push(shares[4]);
+
+            // Add commitment to arbiter
+            arb.commitment(con.clone(), commitment, vec![0, 1, 2, 3], vec![shares[4]])
+                .unwrap();
+        }
+
+        // Finalize arbiter
+        let (result, _) = arb.finalize();
+        let output = result.unwrap();
+
+        // Ensure commitments and reveals are correct
+        assert_eq!(output.commitments.len(), 3);
+        for (dealer_idx, commitment) in commitments.iter().enumerate().take(3) {
+            let dealer_idx = dealer_idx as u32;
+            assert_eq!(output.commitments.get(&dealer_idx).unwrap(), commitment);
+            assert_eq!(
+                output.reveals.get(&dealer_idx).unwrap()[0],
+                reveals[dealer_idx as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn test_arbiter_best() {}
+
+    #[test]
     fn test_duplicate_commitment() {
         // Initialize test
         let n = 5;
