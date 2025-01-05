@@ -9,7 +9,7 @@
 //! TODO: No complaints (more work to track the complaints than they are worth)
 //!
 //! Unlike many other constructions, this scheme only requires
-//! participants to publicly post shares during a "forced reveal" (when a given dealer
+//! contributors to publicly post shares during a "forced reveal" (when a given dealer
 //! does not distribute a share required for a party to recover their secret). Outside of this
 //! reveal, all shares are communicated directly between a dealer and recipient over an
 //! encrypted channel (which can be instantiated with <https://docs.rs/commonware-p2p>).
@@ -21,15 +21,15 @@
 //!
 //! # Protocol
 //!
-//! The protocol has three types of participants: arbiter, dealer, and player. The arbiter
+//! The protocol has three types of contributors: arbiter, dealer, and player. The arbiter
 //! serves as an orchestrator that collects commitments, acks, complaints, and reveals from
-//! all participants and replicates them to other participants. The arbiter can be implemented as
-//! a standalone process or by some consensus protocol. Dealers are the participants
+//! all contributors and replicates them to other contributors. The arbiter can be implemented as
+//! a standalone process or by some consensus protocol. Dealers are the contributors
 //! that deal shares and commitments to players in the protocol. It is possible to be both a dealer and a
 //! player in the protocol.
 //!
-//! The protocol can maintain a `2f + 1` threshold (over `3f + 1` participants) under a
-//! synchronous network model (where messages may be delayed up to time `t` between any 2 participants)
+//! The protocol can maintain a `2f + 1` threshold (over `3f + 1` contributors) under a
+//! synchronous network model (where messages may be delayed up to time `t` between any 2 contributors)
 //! across any reshare where `2f + 1` contributors are honest.
 //!
 //! Whether or not the protocol succeeds (may need to retry during periods of network instability), all contributors
@@ -82,7 +82,7 @@
 //! Distribute share to each player and the corresponding commitment. If the player is honest and connected, it will respond
 //! with a signed "ack".
 //!
-//! Periodically redistribute shares to all participants that have not yet broadcast an "ack".
+//! Periodically redistribute shares to all contributors that have not yet broadcast an "ack".
 //!
 //! ### [Phase 2] Step 2: Register Commitment, Acks, and Reveals
 //!
@@ -176,31 +176,31 @@ mod tests {
     use std::collections::HashMap;
 
     fn run_dkg_and_reshare(n_0: u32, dealers_0: u32, n_1: u32, dealers_1: u32, concurrency: usize) {
-        // Create participants (must be in sorted order)
-        let mut participants = Vec::new();
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
         for i in 0..n_0 {
             let signer = Ed25519::from_seed(i as u64).public_key();
-            participants.push(signer);
+            contributors.push(signer);
         }
-        participants.sort();
+        contributors.sort();
 
         // Create dealers
         let mut dealer_shares = HashMap::new();
         let mut dealers = HashMap::new();
-        for con in participants.iter().take(dealers_0 as usize) {
-            let (p0, commitment, shares) = dealer::P0::new(None, participants.clone());
+        for con in contributors.iter().take(dealers_0 as usize) {
+            let (p0, commitment, shares) = dealer::P0::new(None, contributors.clone());
             dealer_shares.insert(con.clone(), (commitment, shares));
             dealers.insert(con.clone(), p0);
         }
 
         // Create players
         let mut players = HashMap::new();
-        for con in &participants {
+        for con in &contributors {
             let p0 = player::P0::new(
                 con.clone(),
                 None,
-                participants.clone(),
-                participants.clone(),
+                contributors.clone(),
+                contributors.clone(),
                 concurrency,
             );
             players.insert(con.clone(), p0);
@@ -209,8 +209,8 @@ mod tests {
         // Create arbiter
         let mut arb = arbiter::P0::new(
             None,
-            participants.clone(),
-            participants.clone(),
+            contributors.clone(),
+            contributors.clone(),
             concurrency,
         );
 
@@ -218,7 +218,7 @@ mod tests {
         for (dealer, mut dealer_obj) in dealers {
             // Distribute shares to players
             let (commitment, shares) = dealer_shares.get(&dealer).unwrap().clone();
-            for (player_idx, player) in participants.iter().enumerate() {
+            for (player_idx, player) in contributors.iter().enumerate() {
                 // Process share
                 let player_obj = players.get_mut(player).unwrap();
                 player_obj
@@ -258,7 +258,7 @@ mod tests {
 
         // Distribute commitments to players and recover public key
         let mut results = HashMap::new();
-        for player in participants.iter() {
+        for player in contributors.iter() {
             let result = players
                 .remove(player)
                 .unwrap()
@@ -278,7 +278,7 @@ mod tests {
         // Create reshare dealers
         let mut reshare_shares = HashMap::new();
         let mut reshare_dealers = HashMap::new();
-        for con in participants.iter().take(dealers_1 as usize) {
+        for con in contributors.iter().take(dealers_1 as usize) {
             let output = results.get(con).unwrap();
             let (p0, commitment, shares) =
                 dealer::P0::new(Some(output.share), reshare_players.clone());
@@ -292,7 +292,7 @@ mod tests {
             let p0 = player::P0::new(
                 con.clone(),
                 Some(output.public.clone()),
-                participants.clone(),
+                contributors.clone(),
                 reshare_players.clone(),
                 concurrency,
             );
@@ -302,7 +302,7 @@ mod tests {
         // Create arbiter
         let mut arb = arbiter::P0::new(
             Some(output.public),
-            participants.clone(),
+            contributors.clone(),
             reshare_players.clone(),
             concurrency,
         );
