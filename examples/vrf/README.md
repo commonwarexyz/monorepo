@@ -29,7 +29,7 @@ cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participan
 cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3,4  --arbiter 0 --contributors 1,2,3,4
 ```
 
-// TODO: fix modes
+// TODO: fix modes (replace lazy with extra reveals?)
 
 ## Contributor 4 (Rogue)
 
