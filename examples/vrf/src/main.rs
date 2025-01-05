@@ -243,6 +243,7 @@ fn main() {
             // Create contributor
             let rogue = matches.get_flag("rogue");
             let lazy = matches.get_flag("lazy");
+            let forger = matches.get_flag("forger");
             let (contributor_sender, contributor_receiver) = network.register(
                 handlers::DKG_CHANNEL,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
@@ -258,6 +259,7 @@ fn main() {
                 contributors.clone(),
                 rogue,
                 lazy,
+                forger,
             );
             runtime.spawn(
                 "contributor",

@@ -30,11 +30,13 @@ pub struct Contributor<E: Clock, C: Scheme> {
     contributors_ordered: HashMap<PublicKey, u32>,
     rogue: bool,
     lazy: bool,
+    forger: bool,
 
     signatures: mpsc::Sender<(u64, player::Output)>,
 }
 
 impl<E: Clock, C: Scheme> Contributor<E, C> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         runtime: E,
         crypto: C,
@@ -43,6 +45,7 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
         mut contributors: Vec<PublicKey>,
         rogue: bool,
         lazy: bool,
+        forger: bool,
     ) -> (Self, mpsc::Receiver<(u64, player::Output)>) {
         contributors.sort();
         let contributors_ordered: HashMap<PublicKey, u32> = contributors
@@ -62,6 +65,8 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
                 contributors_ordered,
                 rogue,
                 lazy,
+                forger,
+
                 signatures: sender,
             },
             receiver,
@@ -182,18 +187,25 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
 
         // Distribute shares
         if let Some((p0, commitment, serialized_commitment, shares, acks)) = &mut dealer_obj {
-            // Send to self
-            player_obj
-                .share(me.clone(), commitment.clone(), shares[me_idx as usize])
-                .unwrap();
-            p0.ack(me.clone()).unwrap();
-            let payload = payload(round, &me, serialized_commitment);
-            let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
-            acks.insert(me_idx, signature);
-
-            // Send to others
+            let mut sent = 0;
             for (idx, player) in self.contributors.iter().enumerate() {
+                // Send to self
                 if idx == me_idx as usize {
+                    player_obj
+                        .share(me.clone(), commitment.clone(), shares[me_idx as usize])
+                        .unwrap();
+                    p0.ack(me.clone()).unwrap();
+                    let payload = payload(round, &me, serialized_commitment);
+                    let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
+                    acks.insert(me_idx, signature);
+                    continue;
+                }
+
+                // Send to others
+                if self.lazy && sent == self.t - 1 {
+                    // This will still lead to the commitment being used (>= t acks) because
+                    // the dealer has already acked.
+                    warn!(round, "not sending share because lazy");
                     continue;
                 }
                 sender
@@ -212,6 +224,8 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
                     )
                     .await
                     .expect("could not send share");
+                debug!(round, recipient = hex(player), "sent share");
+                sent += 1;
             }
         }
 

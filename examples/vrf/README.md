@@ -45,7 +45,7 @@ _Only send `t-1` shares._
 cargo run --release -- --lazy --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 ```
 
-## Contributor 4 (Forge)
+## Contributor 4 (Forger)
 
 _Forge acknowledgements from contributors._
 
