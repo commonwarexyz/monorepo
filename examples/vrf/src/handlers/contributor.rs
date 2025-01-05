@@ -237,7 +237,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     );
                     continue;
                 }
-                sender
+                let success = sender
                     .send(
                         Recipients::One(player.clone()),
                         wire::Dkg {
@@ -253,8 +253,12 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     )
                     .await
                     .expect("could not send share");
-                debug!(round, player = hex(player), "sent share");
-                sent += 1;
+                if success.is_empty() {
+                    warn!(round, player = hex(player), "failed to send share");
+                } else {
+                    debug!(round, player = hex(player), "sent share");
+                    sent += 1;
+                }
             }
         }
 
@@ -394,6 +398,12 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     }
                 }
             }
+            debug!(
+                round,
+                acks = ack_vec.len(),
+                reveals = reveals.len(),
+                "sending commitment to arbiter"
+            );
             sender
                 .send(
                     Recipients::One(self.arbiter.clone()),
@@ -443,6 +453,12 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     };
 
                     // Handle success
+                    debug!(
+                        round,
+                        commitments = msg.commitments.len(),
+                        reveals = msg.reveals.len(),
+                        "finalizing round"
+                    );
                     let mut commitments = HashMap::new();
                     for (idx, commitment) in msg.commitments {
                         let commitment = match poly::Public::deserialize(&commitment, self.t) {
@@ -453,6 +469,9 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                             }
                         };
                         commitments.insert(idx, commitment);
+                    }
+                    if should_deal && !commitments.contains_key(&me_idx) {
+                        warn!(round, "commitment not included");
                     }
                     let mut reveals = HashMap::new();
                     for (idx, share) in msg.reveals {

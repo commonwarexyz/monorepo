@@ -132,13 +132,16 @@ fn main() {
                 .help("contributors"),
         )
         .arg(
-            Arg::new("rogue")
-                .long("rogue")
+            Arg::new("corrupt")
+                .long("corrupt")
                 .num_args(0)
-                .help("Configures whether the contributor is a rogue contributor"),
+                .help("Configures whether the contributor is a corrupt contributor"),
         )
         .arg(Arg::new("lazy").long("lazy").num_args(0).help(
             "Configures whether the contributor distributes shares to everyone or just t-1 participants",
+        ))
+        .arg(Arg::new("forger").long("forger").num_args(0).help(
+            "Configures whether the contributor forges a signature for all players",
         ))
         .get_matches();
 
