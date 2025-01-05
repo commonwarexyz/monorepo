@@ -415,7 +415,41 @@ mod tests {
     }
 
     #[test]
-    fn test_dkg_invalid_commitment() {
+    fn test_invalid_commitment() {
+        // Initialize test
+        let n = 5;
+
+        // Create contributors (must be in sorted order)
+        let mut contributors = Vec::new();
+        for i in 0..n {
+            let signer = Ed25519::from_seed(i as u64).public_key();
+            contributors.push(signer);
+        }
+        contributors.sort();
+
+        // Create dealer
+        let (_, _, shares) = dealer::P0::new(None, contributors.clone());
+
+        // Create unrelated commitment of correct degree
+        let t = quorum(n).unwrap();
+        let (public, _) = ops::generate_shares(None, n, t);
+
+        // Create player
+        let mut player = player::P0::new(
+            contributors[0].clone(),
+            None,
+            contributors.clone(),
+            contributors.clone(),
+            1,
+        );
+
+        // Send invalid commitment to player
+        let result = player.share(contributors[0].clone(), public, shares[0]);
+        assert!(matches!(result, Err(Error::ShareWrongCommitment)));
+    }
+
+    #[test]
+    fn test_invalid_commitment_degree() {
         // Initialize test
         let n = 5;
 
