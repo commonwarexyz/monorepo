@@ -64,7 +64,7 @@ impl<E: Clock> Arbiter<E> {
     ) -> (Option<poly::Public>, HashSet<PublicKey>) {
         // Create a new round
         let start = self.runtime.current();
-        let t = start + 3 * self.dkg_phase_timeout;
+        let t = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
 
         // Send round start message to players
         let mut group = None;
