@@ -481,7 +481,19 @@ mod tests {
         );
 
         // Send invalid commitment to player
-        let result = player.share(contributors[0].clone(), public, shares[0]);
+        let result = player.share(contributors[0].clone(), public.clone(), shares[0]);
+        assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
+
+        // Create arbiter
+        let mut arb = arbiter::P0::new(None, contributors.clone(), contributors.clone(), 1);
+
+        // Send invalid commitment to arbiter
+        let result = arb.commitment(
+            contributors[0].clone(),
+            public,
+            vec![0, 1, 2, 3, 4],
+            Vec::new(),
+        );
         assert!(matches!(result, Err(Error::CommitmentWrongDegree)));
     }
 
