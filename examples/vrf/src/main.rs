@@ -237,6 +237,8 @@ fn main() {
         // Check if I am the arbiter
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
         const COMPRESSION_LEVEL: Option<u8> = Some(3);
+        const DKG_FREQUENCY: Duration = Duration::from_secs(10);
+        const DKG_PHASE_TIMEOUT: Duration = Duration::from_secs(1);
         if let Some(arbiter) = matches.get_one::<u64>("arbiter") {
             // Create contributor
             let rogue = matches.get_flag("rogue");
@@ -248,8 +250,15 @@ fn main() {
                 COMPRESSION_LEVEL,
             );
             let arbiter = Ed25519::from_seed(*arbiter).public_key();
-            let (contributor, requests) =
-                handlers::Contributor::new(signer, arbiter, contributors.clone(), rogue, lazy);
+            let (contributor, requests) = handlers::Contributor::new(
+                runtime.clone(),
+                signer,
+                DKG_PHASE_TIMEOUT,
+                arbiter,
+                contributors.clone(),
+                rogue,
+                lazy,
+            );
             runtime.spawn(
                 "contributor",
                 contributor.run(contributor_sender, contributor_receiver),
@@ -279,8 +288,8 @@ fn main() {
             );
             let arbiter = handlers::Arbiter::new(
                 runtime.clone(),
-                Duration::from_secs(10),
-                Duration::from_secs(5),
+                DKG_FREQUENCY,
+                DKG_PHASE_TIMEOUT,
                 contributors,
                 threshold,
             );

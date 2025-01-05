@@ -184,14 +184,10 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
         if let Some((p0, commitment, serialized_commitment, shares, acks)) = &mut dealer_obj {
             // Send to self
             player_obj
-                .share(
-                    me.clone(),
-                    commitment.clone(),
-                    shares[me_idx as usize].clone(),
-                )
+                .share(me.clone(), commitment.clone(), shares[me_idx as usize])
                 .unwrap();
             p0.ack(me.clone()).unwrap();
-            let payload = payload(round, &me, &serialized_commitment);
+            let payload = payload(round, &me, serialized_commitment);
             let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
             acks.insert(me_idx, signature);
 
@@ -262,14 +258,14 @@ impl<E: Clock, C: Scheme> Contributor<E, C> {
                                         }
 
                                         // Verify signature on incoming ack
-                                        let payload = payload(round, &me, &commitment);
+                                        let payload = payload(round, &me, commitment);
                                         if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &msg.signature) {
                                             warn!(round, sender = hex(&s), "received invalid ack signature");
                                             continue;
                                         }
 
                                         // Store ack
-                                        p0.ack(s);
+                                        let _ = p0.ack(s);
                                         acks.insert(msg.public_key, msg.signature);
 
                                     },

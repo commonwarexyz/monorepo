@@ -202,6 +202,14 @@ impl P0 {
             self.commitments.remove(idx);
         }
 
+        // Add any dealers we haven't heard from to disqualified
+        for (dealer, idx) in &self.dealers {
+            if self.commitments.contains_key(idx) {
+                continue;
+            }
+            self.disqualified.insert(dealer.clone());
+        }
+
         // Ensure we have enough commitments to proceed
         if self.commitments.len() < self.dealer_threshold as usize {
             return (Err(Error::InsufficientDealings), self.disqualified);
