@@ -6,52 +6,45 @@ message DKG {
     uint64 round = 1;
     oneof payload {
         Start start = 2;
-        Commitment commitment = 3;
-        Commitments commitments = 4;
-        Share share = 5;
-        Ack ack = 6;
-        Complaint complaint = 7;
-        Success success = 10;
-        Abort abort = 11;
+        Share share = 3;
+        Ack ack = 4;
+        Commitment commitment = 5;
+        Success success = 6;
+        Abort abort = 7;
     }
 }
 
+// Send by arbiter to start DKG
 message Start {
     optional bytes group = 1;
 }
 
+// Sent by dealer to player
+message Share {
+    bytes commitment = 1;
+    bytes share = 2;
+}
+
+// Sent by player to dealer
+message Ack {
+    uint32 public_key = 1;
+    bytes signature = 2; // over round + dealer + commitment
+}
+
+// Sent by dealer to arbiter after collecting acks from players
 message Commitment {
     bytes commitment = 1;
+    repeated Ack acks = 2;
+    repeated bytes reveals = 3;
 }
 
-message Dealer {
-    uint32 dealer = 1;
-    bytes commitment = 2;
-}
-
-message Commitments {
-    repeated Dealer dealers = 1;
-}
-
-message Share {
-    bytes share = 1;
-    bytes signature = 2;
-}
-
-message Ack {
-    uint32 dealer = 1;
-}
-
-message Complaint {
-    uint32 dealer = 1;
-    bytes share = 2;
-    bytes signature = 3;
-}
-
+// Sent by arbiter to a player if round is successful
 message Success {
-    repeated uint32 dealers = 1;
+    map<uint32, bytes> commitments = 1;
+    map<uint32, bytes> reveals = 2;
 }
 
+// Sent by arbiter to all players if round is unsuccessful
 message Abort {}
 
 // All messages that can be sent over VRF_CHANNEL.

@@ -4,7 +4,7 @@ External contributors are encouraged to submit issues and pull requests to this 
 
 The Commonware Library provides reliable and high-performance primitives and contributions that do not advance these goals may not be accepted. This could include (but is not limited to) replacing code with external dependencies, implementing optional functionality, and/or introducing algorithms that substantially increase complexity to provide marginal performance improvements. On the other hand, adding more tests and benchmarks is almost always welcome!
 
-## Style
+# Style
 
 This repository uses the default cargo and clippy formatting rules for `.rs` files, treating warnings as errors. To check linting, run:
 
@@ -17,6 +17,16 @@ To fix linting automatically, run:
 
 ```bash
 $ cargo fmt --all
+```
+
+# Releases
+
+Releases are automatically published to `cargo` by [GitHub Actions](.github/workflows/publish.yml) whenever a version update is merged into the `main` branch.
+
+To increment the patch version of all crates (and update the corresponding minimum required version in `workspace.dependencies`), run:
+
+```bash
+./scripts/bump_versions.sh
 ```
 
 # Licensing and Copyright

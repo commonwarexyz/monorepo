@@ -1,50 +1,53 @@
 use crate::handlers::{
-    utils::{payload, public_hex, SHARE_NAMESPACE},
+    utils::{payload, public_hex, ACK_NAMESPACE},
     wire,
 };
 use commonware_cryptography::{
     bls12381::{
-        dkg::{
-            self,
-            contributor::{Output, P0, P1},
-            utils::threshold,
-        },
-        primitives::{
-            group::{self, Private},
-            poly,
-        },
+        dkg::{player::Output, Dealer, Player},
+        primitives::{group, poly},
     },
     PublicKey, Scheme,
 };
+use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_utils::hex;
+use commonware_runtime::Clock;
+use commonware_utils::{hex, quorum};
 use futures::{channel::mpsc, SinkExt};
 use prost::Message;
-use rand::rngs::OsRng;
-use std::collections::HashMap;
+use rand::Rng;
+use std::{collections::HashMap, time::Duration};
 use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
-/// or deviate as a rogue, lazy, or defiant participant.
-pub struct Contributor<C: Scheme> {
+/// or deviate as a rogue, lazy, or forger.
+pub struct Contributor<E: Clock + Rng, C: Scheme> {
+    runtime: E,
     crypto: C,
+    dkg_phase_timeout: Duration,
     arbiter: PublicKey,
     t: u32,
     contributors: Vec<PublicKey>,
     contributors_ordered: HashMap<PublicKey, u32>,
-    rogue: bool,
+
+    corrupt: bool,
     lazy: bool,
+    forger: bool,
 
     signatures: mpsc::Sender<(u64, Output)>,
 }
 
-impl<C: Scheme> Contributor<C> {
+impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        runtime: E,
         crypto: C,
+        dkg_phase_timeout: Duration,
         arbiter: PublicKey,
         mut contributors: Vec<PublicKey>,
-        rogue: bool,
+        corrupt: bool,
         lazy: bool,
+        forger: bool,
     ) -> (Self, mpsc::Receiver<(u64, Output)>) {
         contributors.sort();
         let contributors_ordered: HashMap<PublicKey, u32> = contributors
@@ -55,13 +58,18 @@ impl<C: Scheme> Contributor<C> {
         let (sender, receiver) = mpsc::channel(32);
         (
             Self {
+                runtime,
                 crypto,
+                dkg_phase_timeout,
                 arbiter,
-                t: threshold(contributors.len() as u32).unwrap(),
+                t: quorum(contributors.len() as u32).unwrap(),
                 contributors,
                 contributors_ordered,
-                rogue,
+
+                corrupt,
                 lazy,
+                forger,
+
                 signatures: sender,
             },
             receiver,
@@ -155,183 +163,90 @@ impl<C: Scheme> Contributor<C> {
             "starting round"
         );
 
-        // Send commitment to arbiter
-        let (mut p1, shares) = if should_deal {
-            let previous = public
-                .as_ref()
-                .map(|public| (public.clone(), previous.unwrap().share));
-            let p0 = P0::new(
-                me.clone(),
-                previous,
-                self.contributors.clone(),
-                self.contributors.clone(),
-                1,
-            );
-            let (p1, commitment, shares) = p0.finalize();
-            let mut p1 = p1.unwrap();
-            if let Err(e) = p1.commitment(me.clone(), commitment.clone()) {
-                warn!(round, error = ?e, "failed to add our commitment");
-                return (round, None);
-            }
-            sender
-                .send(
-                    Recipients::One(self.arbiter.clone()),
-                    wire::Dkg {
-                        round,
-                        payload: Some(wire::dkg::Payload::Commitment(wire::Commitment {
-                            commitment: commitment.serialize(),
-                        })),
-                    }
-                    .encode_to_vec()
-                    .into(),
-                    true,
-                )
-                .await
-                .expect("could not send commitment");
-            debug!(round, "sent commitment");
-
-            (p1, Some(shares))
+        // Create dealer
+        let mut dealer_obj = if should_deal {
+            let previous = previous.map(|previous| previous.share);
+            let (dealer, commitment, shares) = Dealer::new(previous, self.contributors.clone());
+            let serialized_commitment = commitment.serialize();
+            Some((
+                dealer,
+                commitment,
+                serialized_commitment,
+                shares,
+                HashMap::new(),
+            ))
         } else {
-            (
-                P1::new(
-                    me.clone(),
-                    public,
-                    self.contributors.clone(),
-                    self.contributors.clone(),
-                    1,
-                ),
-                None,
-            )
+            None
         };
 
-        // Wait for other commitments
-        loop {
-            match receiver.recv().await {
-                Ok((sender, msg)) => {
-                    if sender != self.arbiter {
-                        debug!("dropping messages until receive commitments from arbiter");
-                        continue;
-                    }
-                    let msg = match wire::Dkg::decode(msg) {
-                        Ok(msg) => msg,
-                        Err(_) => {
-                            warn!("received invalid message from arbiter");
-                            return (round, None);
-                        }
-                    };
-                    if msg.round != round {
-                        warn!(
-                            round,
-                            msg_round = msg.round,
-                            "received commitments round does not match expected"
-                        );
-                        return (round, None);
-                    }
-                    let msg = match msg.payload {
-                        Some(wire::dkg::Payload::Commitments(msg)) => msg,
-                        _ => {
-                            return (round, None);
-                        }
-                    };
+        // Create player
+        let mut player_obj = Player::new(
+            me.clone(),
+            public.clone(),
+            self.contributors.clone(),
+            self.contributors.clone(),
+            1,
+        );
 
-                    // Compile commitments
-                    for commitment in msg.dealers {
-                        let dealer = commitment.dealer;
-                        let dealer = match self.contributors.get(dealer as usize) {
-                            Some(dealer) => dealer,
-                            None => {
-                                warn!(
-                                    round,
-                                    dealer,
-                                    "received commitment of invalid contributor from arbiter"
-                                );
-                                return (round, None);
-                            }
-                        };
-                        let commitment =
-                            match poly::Public::deserialize(&commitment.commitment, self.t) {
-                                Some(commitment) => commitment,
-                                None => {
-                                    warn!("received invalid commitment from player");
-                                    return (round, None);
-                                }
-                            };
-
-                        // Verify commitment is on public
-                        if let Err(e) = p1.commitment(dealer.clone(), commitment) {
-                            warn!(round, dealer = hex(dealer), error = ?e, "received invalid commitment");
-                            return (round, None);
-                        }
-                    }
-                    break;
-                }
-                Err(err) => {
-                    debug!(?err, "did not receive commitments");
-                    return (round, None);
-                }
-            }
-        }
-        if !p1.has(me.clone()) && should_deal {
-            warn!(round, "commitment is missing from arbiter");
-            should_deal = false;
-        }
-
-        // Exit if not enough commitments
-        let commitments = p1.count();
-        let mut p2 = match p1.finalize() {
-            Some(p2) => {
-                info!(
-                    round,
-                    commitments, "received sufficient commitments from arbiter"
-                );
-                p2
-            }
-            None => {
-                warn!(round, commitments, "insufficient commitments");
-                return (round, None);
-            }
-        };
-
-        // Send shares to other contributors
-        let mut shares_sent = 0;
-        if should_deal {
-            let shares = shares.clone().unwrap();
+        // Distribute shares
+        if let Some((dealer, commitment, serialized_commitment, shares, acks)) = &mut dealer_obj {
+            let mut sent = 0;
             for (idx, player) in self.contributors.iter().enumerate() {
+                // Send to self
                 let share = shares[idx];
                 if idx == me_idx as usize {
-                    if let Err(e) = p2.share(me.clone(), share) {
-                        warn!(round, error = ?e, "failed to add our share");
-                        return (round, None);
-                    }
+                    player_obj
+                        .share(me.clone(), commitment.clone(), share)
+                        .unwrap();
+                    dealer.ack(me.clone()).unwrap();
+                    let payload = payload(round, &me, serialized_commitment);
+                    let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
+                    acks.insert(me_idx, signature);
                     continue;
                 }
-                let mut share_bytes = share.serialize();
 
-                // Tweak behavior depending on role
-                if self.rogue {
-                    // If we are rogue, randomly modify the share.
-                    share_bytes = group::Share {
+                // Send to others
+                let mut serialized_share = shares[idx].serialize();
+                if self.forger {
+                    // If we are a forger, don't send any shares and instead create fake signatures.
+                    let _ = dealer.ack(player.clone());
+                    let mut signature = vec![0u8; C::len().1];
+                    self.runtime.fill_bytes(&mut signature);
+                    acks.insert(idx as u32, signature.into());
+                    warn!(
+                        round,
+                        player = hex(player),
+                        "not sending share because forger"
+                    );
+                    continue;
+                }
+                if self.corrupt {
+                    // If we are corrupt, randomly modify the share.
+                    serialized_share = group::Share {
                         index: share.index,
-                        private: Private::rand(&mut OsRng),
+                        private: group::Scalar::rand(&mut self.runtime),
                     }
                     .serialize();
-                    warn!(round, player = idx, "modified share");
+                    warn!(round, player = hex(player), "modified share");
                 }
-                if self.lazy && shares_sent == self.t - 1 {
-                    warn!(round, recipient = idx, "not sending share beause lazy");
+                if self.lazy && sent == self.t - 1 {
+                    // This will still lead to the commitment being used (>= t acks) because
+                    // the dealer has already acked.
+                    warn!(
+                        round,
+                        player = hex(player),
+                        "not sending share because lazy"
+                    );
                     continue;
                 }
-
-                let payload = payload(round, me_idx, &share_bytes);
-                let signature = self.crypto.sign(Some(SHARE_NAMESPACE), &payload);
-                sender
+                let success = sender
                     .send(
                         Recipients::One(player.clone()),
                         wire::Dkg {
                             round,
                             payload: Some(wire::dkg::Payload::Share(wire::Share {
-                                share: share_bytes,
-                                signature,
+                                commitment: serialized_commitment.clone(),
+                                share: serialized_share,
                             })),
                         }
                         .encode_to_vec()
@@ -340,13 +255,181 @@ impl<C: Scheme> Contributor<C> {
                     )
                     .await
                     .expect("could not send share");
-                debug!(round, player = idx, "sent share");
-                shares_sent += 1;
+                if success.is_empty() {
+                    warn!(round, player = hex(player), "failed to send share");
+                } else {
+                    debug!(round, player = hex(player), "sent share");
+                    sent += 1;
+                }
             }
         }
 
-        // Send acks to arbiter when receive shares from other contributors
-        let dealers = loop {
+        // Respond to commitments and wait for acks
+        let t = self.runtime.current() + 2 * self.dkg_phase_timeout;
+        loop {
+            select! {
+                    _ = self.runtime.sleep_until(t) => {
+                        debug!(round, "ack timeout");
+                        break;
+                    },
+                    result = receiver.recv() => {
+                        match result {
+                            Ok((s, msg)) => {
+                                let msg = match wire::Dkg::decode(msg) {
+                                    Ok(msg) => msg,
+                                    Err(_) => {
+                                        warn!("received invalid message from arbiter");
+                                        return (round, None);
+                                    }
+                                };
+                                if msg.round != round {
+                                    warn!(
+                                        round,
+                                        msg_round = msg.round,
+                                        "received commitments round does not match expected"
+                                    );
+                                    return (round, None);
+                                }
+                                match msg.payload {
+                                    Some(wire::dkg::Payload::Ack(msg)) => {
+                                        // Skip if not dealing
+                                        let Some((dealer, _, commitment, _, acks)) = &mut dealer_obj else {
+                                            continue;
+                                        };
+
+                                        // Skip if forger
+                                        if self.forger {
+                                            continue;
+                                        }
+
+                                        // Verify index matches
+                                        let Some(player) = self.contributors.get(msg.public_key as usize) else {
+                                            continue;
+                                        };
+                                        if player != &s {
+                                            warn!(round, "received ack with wrong index");
+                                            continue;
+                                        }
+
+                                        // Verify signature on incoming ack
+                                        let payload = payload(round, &me, commitment);
+                                        if !C::verify(Some(ACK_NAMESPACE), &payload, &s, &msg.signature) {
+                                            warn!(round, sender = hex(&s), "received invalid ack signature");
+                                            continue;
+                                        }
+
+                                        // Store ack
+                                        if let Err(e) = dealer.ack(s.clone()) {
+                                            warn!(round, error = ?e, sender = hex(&s), "failed to record ack");
+                                            continue;
+                                        }
+                                        acks.insert(msg.public_key, msg.signature);
+
+                                    },
+                                    Some(wire::dkg::Payload::Share(msg)) => {
+                                        // Deserialize commitment
+                                        let commitment = match poly::Public::deserialize(&msg.commitment, self.t) {
+                                            Some(commitment) => commitment,
+                                            None => {
+                                                warn!(round, "received invalid commitment");
+                                                continue;
+                                            }
+                                        };
+
+                                        // Deserialize share
+                                        let share = match group::Share::deserialize(&msg.share) {
+                                            Some(share) => share,
+                                            None => {
+                                                warn!(round, "received invalid share");
+                                                continue;
+                                            }
+                                        };
+
+                                        // Store share
+                                        if let Err(e) = player_obj.share(s.clone(), commitment, share){
+                                            warn!(round, error = ?e, "failed to store share");
+                                            continue;
+                                        }
+
+                                        // Send ack
+                                        let payload = payload(round, &s, &msg.commitment);
+                                        let signature = self.crypto.sign(Some(ACK_NAMESPACE), &payload);
+                                        sender
+                                            .send(
+                                                Recipients::One(s),
+                                                wire::Dkg {
+                                                    round,
+                                                    payload: Some(wire::dkg::Payload::Ack(wire::Ack {
+                                                        public_key: me_idx,
+                                                        signature,
+                                                    })),
+                                                }
+                                                .encode_to_vec()
+                                                .into(),
+                                                true,
+                                            )
+                                            .await
+                                            .expect("could not send ack");
+                                    },
+                                    _ => {
+                                        // Useless message
+                                        continue;
+                                    }
+                                };
+                            }
+                            Err(e) => {
+                                debug!(round, error = ?e, "unable to read message");
+                                return (round, None);
+                            }
+                        }
+                    }
+            }
+        }
+
+        // Send commitment to arbiter
+        if let Some((_, _, serialized_commitment, shares, acks)) = dealer_obj {
+            let mut ack_vec = Vec::with_capacity(acks.len());
+            let mut reveals = Vec::new();
+            for idx in 0..self.contributors.len() as u32 {
+                match acks.get(&idx) {
+                    Some(signature) => {
+                        ack_vec.push(wire::Ack {
+                            public_key: idx,
+                            signature: signature.clone(),
+                        });
+                    }
+                    None => {
+                        reveals.push(shares[idx as usize].serialize());
+                    }
+                }
+            }
+            debug!(
+                round,
+                acks = ack_vec.len(),
+                reveals = reveals.len(),
+                "sending commitment to arbiter"
+            );
+            sender
+                .send(
+                    Recipients::One(self.arbiter.clone()),
+                    wire::Dkg {
+                        round,
+                        payload: Some(wire::dkg::Payload::Commitment(wire::Commitment {
+                            commitment: serialized_commitment,
+                            acks: ack_vec,
+                            reveals,
+                        })),
+                    }
+                    .encode_to_vec()
+                    .into(),
+                    true,
+                )
+                .await
+                .expect("could not send commitment");
+        }
+
+        // Wait for message from arbiter
+        loop {
             match receiver.recv().await {
                 Ok((s, msg)) => {
                     let msg = match wire::Dkg::decode(msg) {
@@ -363,123 +446,76 @@ impl<C: Scheme> Contributor<C> {
                         );
                         return (round, None);
                     }
-                    if s == self.arbiter {
-                        match msg.payload {
-                            Some(wire::dkg::Payload::Success(msg)) => {
-                                break msg.dealers;
-                            }
-                            _ => {
-                                return (round, None);
-                            }
-                        }
-                    }
-                    let dealer = match self.contributors_ordered.get(&s) {
-                        Some(dealer) => dealer,
-                        None => {
-                            warn!(round, "received share from invalid player");
-                            continue;
-                        }
-                    };
-                    let msg = match msg.payload {
-                        Some(wire::dkg::Payload::Share(msg)) => msg,
-                        _ => {
-                            warn!(round, "received unexpected message from player");
-                            continue;
-                        }
-                    };
-                    let share = match group::Share::deserialize(&msg.share) {
-                        Some(share) => share,
-                        None => {
-                            warn!(round, dealer, "received invalid share");
-                            continue;
-                        }
-                    };
-
-                    // Verify signature on incoming share
-                    let payload = payload(round, *dealer as u32, &msg.share);
-                    if !C::verify(Some(SHARE_NAMESPACE), &payload, &s, &msg.signature) {
-                        warn!(round, dealer, "received invalid share signature");
+                    if s != self.arbiter {
                         continue;
                     }
+                    let msg = match msg.payload {
+                        Some(wire::dkg::Payload::Success(msg)) => msg,
+                        Some(wire::dkg::Payload::Abort(_)) => {
+                            warn!(round, "received abort message");
+                            return (round, None);
+                        }
+                        _ => {
+                            warn!(round, "received unexpected message");
+                            return (round, None);
+                        }
+                    };
 
-                    // Store share
-                    match p2.share(s, share) {
-                        Ok(_) => {
-                            // Send share ack
-                            sender
-                                .send(
-                                    Recipients::One(self.arbiter.clone()),
-                                    wire::Dkg {
-                                        round,
-                                        payload: Some(wire::dkg::Payload::Ack(wire::Ack {
-                                            dealer: *dealer as u32,
-                                        })),
-                                    }
-                                    .encode_to_vec()
-                                    .into(),
-                                    true,
-                                )
-                                .await
-                                .expect("could not send ack");
-                            debug!(round, dealer, "sent ack");
-                        }
-                        Err(dkg::Error::ShareWrongCommitment)
-                        | Err(dkg::Error::CommitmentWrongDegree) => {
-                            warn!(round, dealer, "received invalid share");
-
-                            // Send complaint
-                            sender
-                                .send(
-                                    Recipients::One(self.arbiter.clone()),
-                                    wire::Dkg {
-                                        round,
-                                        payload: Some(wire::dkg::Payload::Complaint(
-                                            wire::Complaint {
-                                                dealer: *dealer as u32,
-                                                share: msg.share,
-                                                signature: msg.signature,
-                                            },
-                                        )),
-                                    }
-                                    .encode_to_vec()
-                                    .into(),
-                                    true,
-                                )
-                                .await
-                                .expect("could not send complaint");
-                            warn!(round, dealer, "sent complaint");
-                        }
-                        Err(e) => {
-                            // Some errors may occur if the share is sent to the wrong participant (but it may still
-                            // be correct).
-                            warn!(round, dealer, error=?e, "received invalid share");
-                        }
+                    // Handle success
+                    debug!(
+                        round,
+                        commitments = msg.commitments.len(),
+                        reveals = msg.reveals.len(),
+                        "finalizing round"
+                    );
+                    let mut commitments = HashMap::new();
+                    for (idx, commitment) in msg.commitments {
+                        let commitment = match poly::Public::deserialize(&commitment, self.t) {
+                            Some(commitment) => commitment,
+                            None => {
+                                warn!(round, "received invalid commitment");
+                                continue;
+                            }
+                        };
+                        commitments.insert(idx, commitment);
                     }
+                    if should_deal && !commitments.contains_key(&me_idx) {
+                        warn!(round, "commitment not included");
+                    }
+                    let mut reveals = HashMap::new();
+                    for (idx, share) in msg.reveals {
+                        let share = match group::Share::deserialize(&share) {
+                            Some(share) => share,
+                            None => {
+                                warn!(round, "received invalid share");
+                                continue;
+                            }
+                        };
+                        reveals.insert(idx, share);
+                    }
+                    let Ok(output) = player_obj.finalize(commitments, reveals) else {
+                        warn!(round, "failed to finalize round");
+                        return (round, None);
+                    };
+                    return (round, Some(output));
                 }
-                Err(err) => {
-                    debug!(?err, "did not receive shares");
+                Err(e) => {
+                    debug!(error = ?e, "unable to read message");
                     return (round, None);
                 }
-            };
-        };
-
-        // Construct new public + share
-        let output = match p2.finalize(dealers) {
-            Ok(output) => Some(output),
-            Err(e) => {
-                warn!(round, error = ?e, "failed to finalize round");
-                None
             }
-        };
-        (round, output)
+        }
     }
 
     pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
-        if self.rogue {
-            warn!("running as rogue player");
+        if self.corrupt {
+            warn!("running as corrupt");
         }
         if self.lazy {
-            warn!("running as lazy player");
+            warn!("running as lazy");
+        }
+        if self.forger {
+            warn!("running as forger");
         }
         let mut previous = None;
         loop {
@@ -492,12 +528,7 @@ impl<C: Scheme> Contributor<C> {
                     continue;
                 }
                 Some(output) => {
-                    info!(
-                        round,
-                        participants = output.commitments.len(),
-                        public = public_hex(&output.public),
-                        "round complete"
-                    );
+                    info!(round, public = public_hex(&output.public), "round success");
 
                     // Generate signature over round
                     self.signatures.send((round, output.clone())).await.unwrap();

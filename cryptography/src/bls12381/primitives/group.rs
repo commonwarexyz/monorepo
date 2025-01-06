@@ -174,7 +174,7 @@ fn bits(scalar: &blst_scalar) -> usize {
 }
 
 /// A share of a threshold signing key.
-#[derive(Clone, PartialEq, Copy)]
+#[derive(Debug, Clone, PartialEq, Copy)]
 pub struct Share {
     /// The share's index in the polynomial.
     pub index: u32,
