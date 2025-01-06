@@ -65,7 +65,6 @@ pub struct Arbiter {
     recipients: Vec<PublicKey>,
 
     commitments: BTreeMap<u32, (poly::Public, Vec<u32>, Vec<Share>)>,
-    reveals: BTreeMap<usize, Vec<u32>>,
     disqualified: HashSet<PublicKey>,
 }
 
@@ -95,7 +94,6 @@ impl Arbiter {
             recipients,
 
             commitments: BTreeMap::new(),
-            reveals: BTreeMap::new(),
             disqualified: HashSet::new(),
         }
     }
@@ -197,7 +195,6 @@ impl Arbiter {
 
         // Record acks and reveals
         self.commitments.insert(idx, (commitment, acks, reveals));
-        self.reveals.entry(reveals_len).or_default().push(idx);
         Ok(())
     }
 
@@ -229,21 +226,13 @@ impl Arbiter {
             return (Err(Error::InsufficientDealings), self.disqualified);
         }
 
-        // Select best `2f + 1` commitments (sorted by fewest reveals)
-        let mut selected = Vec::new();
-        for (_, dealers) in self.reveals.iter() {
-            for dealer_idx in dealers {
-                if let Some(commitment) = self.commitments.get(dealer_idx) {
-                    selected.push((*dealer_idx, commitment));
-                    if selected.len() == self.dealer_threshold as usize {
-                        break;
-                    }
-                }
-            }
-            if selected.len() == self.dealer_threshold as usize {
-                break;
-            }
-        }
+        // If there exist more than `2f + 1` commitments, take the first `2f + 1`
+        // sorted by dealer index.
+        let selected = self
+            .commitments
+            .into_iter()
+            .take(self.dealer_threshold as usize)
+            .collect::<Vec<_>>();
 
         // Recover group
         let public = match self.previous {
