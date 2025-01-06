@@ -233,6 +233,9 @@ mod tests {
             concurrency,
         );
 
+        // Check ready
+        assert!(!arb.ready());
+
         // Send commitments and shares to players
         for (dealer, mut dealer_obj) in dealers {
             // Distribute shares to players
@@ -258,6 +261,9 @@ mod tests {
             arb.commitment(dealer, commitment, output.active, Vec::new())
                 .unwrap();
         }
+
+        // Check ready
+        assert!(arb.ready());
 
         // Finalize arbiter
         let (result, disqualified) = arb.finalize();
@@ -337,6 +343,9 @@ mod tests {
             concurrency,
         );
 
+        // Check ready
+        assert!(!arb.ready());
+
         // Send commitments and shares to players
         for (dealer, mut dealer_obj) in reshare_dealers {
             // Distribute shares to players
@@ -362,6 +371,9 @@ mod tests {
             arb.commitment(dealer, commitment, output.active, Vec::new())
                 .unwrap();
         }
+
+        // Check ready
+        assert!(arb.ready());
 
         // Finalize arbiter
         let (result, disqualified) = arb.finalize();
