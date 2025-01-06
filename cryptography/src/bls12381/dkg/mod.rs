@@ -83,27 +83,28 @@
 //! for any Byzantine player to derive any honest player's share, this claim holds.
 //!
 //! If the network is not synchronous, however, Byzantine players can collude to generate a threshold signature with the
-//! participation of a single honest player (rather than `f + 1`) and `f + 1` honest players will be able to derive
+//! participation of a single honest player (rather than `f + 1`) and `f + 1` honest players will each be able to derive
 //! the shared secret. To see how this could be, consider a network where `f` honest participants are in one partition and
 //! (`f + 1` honest and `f` Byzantine participants) are in another. All `f` Byzantine players acknowledge dealings from the
 //! `f + 1` honest dealers. Participants in the second partition will complete a round and all the reveals will belong to the
 //! same set of `f` honest players (that are in the first partition). A colluding Byzantine adversary will then have access to
 //! their acknowledged `f` shares and the revealed `f` shares (requiring only the participation of a single honest player that
 //! was in their partition to generate a valid threshold signature). If the Byzantine adversary reveals all of their (still
-//! private) shares at this time, the `f + 1` honest players that were in the second partition will each be able to derive the
-//! shared secret (using their private share and the `2f` public shares).
+//! private) shares at this time, each of the `f + 1` honest players that were in the second partition will be able to derive
+//! the shared secret without collusion (using their private share and the `2f` public shares). It will not be possible for any
+//! external observer, however, to recover the shared secret.
 //!
 //! ## Future Work: Dropping the Synchrony Assumption?
 //!
-//! It is possible to design a DKG that can maintain a `2f + 1` (over `3f + 1` total participants where any `f` are Byzantine)
-//! that doesn't require a synchrony assumption to ensure `f + 1` honest players are always required to generate a threshold signature.
-//! However, known constructions that satisfy this requirement have thus far required both Zero-Knowledge Proofs (ZKPs) and broadcasting
-//! encrypted shares publicly ([Groth21](https://eprint.iacr.org/2021/339), [Kate23](https://eprint.iacr.org/2023/451)).
+//! It is possible to design a DKG/Resharing that can be used to maintain a shared secret where at least `f + 1` honest players
+//! must participate to generate any threshold signature that doesn't require a synchrony assumption. However, known constructions
+//! that satisfy this requirement require both broadcasting encrypted shares publicly and employing Zero-Knowledge Proofs (ZKPs) to
+//! attest that encrypted shares were generated correctly ([Groth21](https://eprint.iacr.org/2021/339), [Kate23](https://eprint.iacr.org/2023/451)).
 //!
 //! In the future, it may make sense to deprecate this interactive construction in favor of one of these non-interactive approaches.
-//! As of January 2025, however, these constructions are still considered novel (less than 2-3 years in production and require stronger
-//! cryptographic assumptions), don't scale to hundreds of participants (unless dealers have powerful hardware), and provide adversaries
-//! the opportunity to brute force encrypted shares (even if honest players are online).
+//! As of January 2025, however, these constructions are still considered novel (2-3 years in production), require stronger
+//! cryptographic assumptions, don't scale to hundreds of participants (unless dealers have powerful hardware), and provide adversaries
+//! the opportunity to brute force decrypt all shares (even if honest players are online).
 //!
 //! # Tracking Complaints
 //!
