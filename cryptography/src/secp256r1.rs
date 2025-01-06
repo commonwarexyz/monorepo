@@ -12,6 +12,7 @@ use p256::{
 use rand::{CryptoRng, Rng, SeedableRng};
 use std::borrow::Cow;
 
+const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 33;
 const SIGNATURE_LENGTH: usize = 64;
 
@@ -21,6 +22,9 @@ pub struct Secp256r1 {
     verifying_key: VerifyingKey,
 }
 
+/// Secp256r1 implementation of the `Scheme` trait.
+///
+/// Public Keys are exclusively handled in SEC1 Compressed format (33 bytes).
 impl Scheme for Secp256r1 {
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
         let signing_key = SigningKey::random(r);
@@ -32,7 +36,11 @@ impl Scheme for Secp256r1 {
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
-        let signing_key = match SigningKey::from_slice(private_key.as_ref()) {
+        let private_key: [u8; PRIVATE_KEY_LENGTH] = match private_key.as_ref().try_into() {
+            Ok(key) => key,
+            Err(_) => return None,
+        };
+        let signing_key = match SigningKey::from_slice(&private_key) {
             Ok(key) => key,
             Err(_) => return None,
         };
@@ -69,7 +77,11 @@ impl Scheme for Secp256r1 {
     }
 
     fn validate(public_key: &PublicKey) -> bool {
-        VerifyingKey::from_sec1_bytes(public_key).is_ok()
+        let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+        VerifyingKey::from_sec1_bytes(&public_key).is_ok()
     }
 
     fn verify(
@@ -78,7 +90,15 @@ impl Scheme for Secp256r1 {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let ecdsa_signature = match p256::ecdsa::Signature::from_slice(signature) {
+        let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+        let signature: [u8; SIGNATURE_LENGTH] = match signature.as_ref().try_into() {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+        let ecdsa_signature = match p256::ecdsa::Signature::from_slice(&signature) {
             Ok(sig) => sig,
             Err(_) => return false,
         };
@@ -86,7 +106,7 @@ impl Scheme for Secp256r1 {
             // reject not normalized signatures
             return false;
         }
-        let verifying_key = match VerifyingKey::from_sec1_bytes(public_key) {
+        let verifying_key = match VerifyingKey::from_sec1_bytes(&public_key) {
             Ok(key) => key,
             Err(_) => return false,
         };
@@ -107,26 +127,15 @@ impl Scheme for Secp256r1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-    use p256::EncodedPoint;
 
     fn parse_vector_keypair(private_key: &str, qx: &str, qy: &str) -> (PrivateKey, PublicKey) {
-        let uncompressed_public = parse_public_key_bytes(qx, qy);
-        let encoded_point = EncodedPoint::from_bytes(&uncompressed_public).unwrap();
-        let p256_public_key = p256::PublicKey::from_encoded_point(&encoded_point).unwrap();
-        let public_key: PublicKey = p256_public_key.to_encoded_point(true).to_bytes().into();
+        let public_key = parse_public_key_as_compressed(qx, qy);
         (
             commonware_utils::from_hex_formatted(private_key)
                 .unwrap()
                 .into(),
             public_key,
         )
-    }
-
-    fn parse_vector_public_key_validation(qx: &str, qy: &str) -> PublicKey {
-        let uncompressed_public = parse_public_key_bytes(qx, qy);
-        let public_key: PublicKey = uncompressed_public.to_vec().into();
-        public_key
     }
 
     fn parse_vector_sig_verification(
@@ -136,20 +145,10 @@ mod tests {
         s: &str,
         m: &str,
     ) -> (PublicKey, Signature, Vec<u8>) {
-        let public_key = parse_vector_public_key_validation(qx, qy);
+        let public_key = parse_public_key_as_compressed(qx, qy);
         let signature = parse_signature(r, s);
         let message = commonware_utils::from_hex_formatted(m).unwrap();
         (public_key, signature, message)
-    }
-
-    fn parse_public_key_bytes(qx: &str, qy: &str) -> Vec<u8> {
-        let mut uncompressed_public = vec![];
-        uncompressed_public.push(0x04);
-        uncompressed_public
-            .extend(commonware_utils::from_hex_formatted(&padding_odd_length_hexa(qx)).unwrap());
-        uncompressed_public
-            .extend(commonware_utils::from_hex_formatted(&padding_odd_length_hexa(qy)).unwrap());
-        uncompressed_public
     }
 
     fn parse_signature(r: &str, s: &str) -> Signature {
@@ -159,6 +158,19 @@ mod tests {
         let f2 = p256::FieldBytes::from_slice(&vec_s);
         let s = p256::ecdsa::Signature::from_scalars(*f1, *f2).unwrap();
         s.to_vec().into()
+    }
+
+    fn parse_public_key_as_compressed(qx: &str, qy: &str) -> PublicKey {
+        let qx = commonware_utils::from_hex_formatted(&padding_odd_length_hexa(qx)).unwrap();
+        let qy = commonware_utils::from_hex_formatted(&padding_odd_length_hexa(qy)).unwrap();
+        let mut compressed = Vec::with_capacity(qx.len() + 1);
+        if qy.last().unwrap() % 2 == 0 {
+            compressed.push(0x02);
+        } else {
+            compressed.push(0x03);
+        }
+        compressed.extend_from_slice(&qx);
+        compressed.into()
     }
 
     fn padding_odd_length_hexa(value: &str) -> String {
@@ -200,7 +212,7 @@ mod tests {
     fn test_public_key_validation() {
         let cases = [
             vector_public_key_validation_1(),
-            vector_public_key_validation_2(),
+            //vector_public_key_validation_2(), // y out of range
             vector_public_key_validation_3(),
             vector_public_key_validation_4(),
             vector_public_key_validation_5(),
@@ -209,7 +221,7 @@ mod tests {
             vector_public_key_validation_8(),
             vector_public_key_validation_9(),
             vector_public_key_validation_10(),
-            vector_public_key_validation_11(),
+            //vector_public_key_validation_11(), // point not on curve
             vector_public_key_validation_12(),
         ];
 
@@ -247,19 +259,19 @@ mod tests {
         for (index, test) in cases.iter().enumerate() {
             let (public_key, sig, message, exp_success) = test;
             let mut sig = sig.clone();
-            let exp_success = exp_success.clone();
+            let exp_success = *exp_success;
             if exp_success {
                 let ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
                 if ecdsa_signature.s().is_high().into() {
                     // Valid signatures not normalized must be considered invalid.
-                    assert!(!Secp256r1::verify(None, &message, &public_key, &sig));
+                    assert!(!Secp256r1::verify(None, message, public_key, &sig));
                     // Normalizing sig to test its validity.
                     if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
                         sig = normalized_sig.to_vec().into();
                     }
                 }
             }
-            let valid = Secp256r1::verify(None, &message, &public_key, &sig);
+            let valid = Secp256r1::verify(None, message, public_key, &sig);
             assert_eq!(
                 exp_success,
                 valid,
@@ -293,7 +305,7 @@ mod tests {
     #[test]
     fn test_scheme_private_key() {
         let private_key_hex = "519b423d715f8b581f4fa8ee59f4771a5b44c8130b4e3eacca54a56dda72b464";
-        let private_key: PrivateKey = commonware_utils::from_hex_formatted(&private_key_hex)
+        let private_key: PrivateKey = commonware_utils::from_hex_formatted(private_key_hex)
             .unwrap()
             .into();
         let signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
@@ -386,7 +398,7 @@ mod tests {
 
     fn vector_public_key_validation_1() -> (PublicKey, bool) {
         (
-            parse_vector_public_key_validation(
+            parse_public_key_as_compressed(
                 "e0f7449c5588f24492c338f2bc8f7865f755b958d48edb0f2d0056e50c3fd5b7",
                 "86d7e9255d0f4b6f44fa2cd6f8ba3c0aa828321d6d8cc430ca6284ce1d5b43a0",
             ),
@@ -394,49 +406,49 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_2() -> (PublicKey, bool) {
-        (
-            parse_vector_public_key_validation(
-                "d17c446237d9df87266ba3a91ff27f45abfdcb77bfd83536e92903efb861a9a9",
-                "1eabb6a349ce2cd447d777b6739c5fc066add2002d2029052c408d0701066231c",
-            ),
-            false,
-        )
-    }
+    //fn vector_public_key_validation_2() -> (PublicKey, bool) {
+    //    (
+    //        parse_public_key_as_compressed(
+    //            "d17c446237d9df87266ba3a91ff27f45abfdcb77bfd83536e92903efb861a9a9",
+    //            "1eabb6a349ce2cd447d777b6739c5fc066add2002d2029052c408d0701066231c",
+    //        ),
+    //        false, // y out of range
+    //    )
+    //}
 
     fn vector_public_key_validation_3() -> (PublicKey, bool) {
         (
-            parse_vector_public_key_validation(
+            parse_public_key_as_compressed(
                 "17875397ae87369365656d490e8ce956911bd97607f2aff41b56f6f3a61989826",
                 "980a3c4f61b9692633fbba5ef04c9cb546dd05cdec9fa8428b8849670e2fba92",
             ),
-            false,
+            false, // x out of range
         )
     }
 
     fn vector_public_key_validation_4() -> (PublicKey, bool) {
         (
-            parse_vector_public_key_validation(
+            parse_public_key_as_compressed(
                 "f2d1c0dc0852c3d8a2a2500a23a44813ccce1ac4e58444175b440469ffc12273",
                 "32bfe992831b305d8c37b9672df5d29fcb5c29b4a40534683e3ace23d24647dd",
             ),
-            false,
+            false, // point not on the curve
         )
     }
 
     fn vector_public_key_validation_5() -> (PublicKey, bool) {
         (
-            parse_vector_public_key_validation(
+            parse_public_key_as_compressed(
                 "10b0ca230fff7c04768f4b3d5c75fa9f6c539bea644dffbec5dc796a213061b58",
                 "f5edf37c11052b75f771b7f9fa050e353e464221fec916684ed45b6fead38205",
             ),
-            false,
+            false, // x out of range
         )
     }
 
     fn vector_public_key_validation_6() -> (PublicKey, bool) {
         (
-            parse_vector_public_key_validation(
+            parse_public_key_as_compressed(
                 "2c1052f25360a15062d204a056274e93cbe8fc4c4e9b9561134ad5c15ce525da",
                 "ced9783713a8a2a09eff366987639c625753295d9a85d0f5325e32dedbcada0b",
             ),
@@ -446,17 +458,17 @@ mod tests {
 
     fn vector_public_key_validation_7() -> (PublicKey, bool) {
         (
-            parse_vector_public_key_validation(
+            parse_public_key_as_compressed(
                 "a40d077a87dae157d93dcccf3fe3aca9c6479a75aa2669509d2ef05c7de6782f",
                 "503d86b87d743ba20804fd7e7884aa017414a7b5b5963e0d46e3a9611419ddf3",
             ),
-            false,
+            false, // point not on the curve
         )
     }
 
     fn vector_public_key_validation_8() -> (PublicKey, bool) {
         (
-            parse_vector_public_key_validation(
+            parse_public_key_as_compressed(
                 "2633d398a3807b1895548adbb0ea2495ef4b930f91054891030817df87d4ac0a",
                 "d6b2f738e3873cc8364a2d364038ce7d0798bb092e3dd77cbdae7c263ba618d2",
             ),
@@ -466,17 +478,17 @@ mod tests {
 
     fn vector_public_key_validation_9() -> (PublicKey, bool) {
         (
-            parse_vector_public_key_validation(
+            parse_public_key_as_compressed(
                 "14bf57f76c260b51ec6bbc72dbd49f02a56eaed070b774dc4bad75a54653c3d56",
                 "7a231a23bf8b3aa31d9600d888a0678677a30e573decd3dc56b33f365cc11236",
             ),
-            false,
+            false, // x out of range
         )
     }
 
     fn vector_public_key_validation_10() -> (PublicKey, bool) {
         (
-            parse_vector_public_key_validation(
+            parse_public_key_as_compressed(
                 "2fa74931ae816b426f484180e517f5050c92decfc8daf756cd91f54d51b302f1",
                 "5b994346137988c58c14ae2152ac2f6ad96d97decb33099bd8a0210114cd1141",
             ),
@@ -484,23 +496,23 @@ mod tests {
         )
     }
 
-    fn vector_public_key_validation_11() -> (PublicKey, bool) {
-        (
-            parse_vector_public_key_validation(
-                "f8c6dd3181a76aa0e36c2790bba47041acbe7b1e473ff71eee39a824dc595ff0",
-                "9c965f227f281b3072b95b8daf29e88b35284f3574462e268e529bbdc50e9e52",
-            ),
-            false,
-        )
-    }
+    // fn vector_public_key_validation_11() -> (PublicKey, bool) {
+    //     (
+    //         parse_public_key_as_compressed(
+    //             "f8c6dd3181a76aa0e36c2790bba47041acbe7b1e473ff71eee39a824dc595ff0",
+    //             "9c965f227f281b3072b95b8daf29e88b35284f3574462e268e529bbdc50e9e52",
+    //         ),
+    //         false, // point out of range
+    //     )
+    // }
 
     fn vector_public_key_validation_12() -> (PublicKey, bool) {
         (
-            parse_vector_public_key_validation(
+            parse_public_key_as_compressed(
                 "7a81a7e0b015252928d8b36e4ca37e92fdc328eb25c774b4f872693028c4be38",
                 "08862f7335147261e7b1c3d055f9a316e4cab7daf99cc09d1c647f5dd6e7d5bb",
             ),
-            false,
+            false, // point not on the curve
         )
     }
 
