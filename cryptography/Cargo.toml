@@ -39,3 +39,8 @@ portable = ["blst/portable"]
 name="bls12381"
 harness = false
 path = "src/bls12381/benches/bench.rs"
+
+[[bench]]
+name = "common"
+harness = false
+path = "benches/bench.rs"
