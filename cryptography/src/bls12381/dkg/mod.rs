@@ -52,6 +52,8 @@
 //!
 //! ## [Arbiter] Step 5: Select Commitments and Forward Reveals
 //!
+//! TODO: need to wait here? Should comment on hygeine if keep it.
+//!
 //! After time `3t`, select the `2f + 1` commitments with the least number of reveals (most acknowledgements). Send
 //! these `2f + 1` commitments (and any reveals associated with each) to all players. If there do not exist `2f + 1`
 //! commitments with at least `2f + 1` acknowledgements, exit.
