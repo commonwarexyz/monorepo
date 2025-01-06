@@ -29,7 +29,7 @@ fn benchmark_batch_verify_multiple_public_keys(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = ed25519_benches;
+    name = benches;
     config = Criterion::default().sample_size(10);
     targets = benchmark_batch_verify_multiple_public_keys
 }

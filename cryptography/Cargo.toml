@@ -41,6 +41,6 @@ harness = false
 path = "src/bls12381/benches/bench.rs"
 
 [[bench]]
-name = "common"
+name = "ed25519"
 harness = false
-path = "benches/bench.rs"
+path = "src/ed25519/benches/bench.rs"

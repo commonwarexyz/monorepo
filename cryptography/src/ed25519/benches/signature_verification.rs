@@ -36,7 +36,7 @@ fn benchmark_signature_verify(c: &mut Criterion) {
 }
 
 criterion_group! {
-    name = ed25519_benches;
+    name = benches;
     config = Criterion::default().sample_size(10);
     targets = benchmark_signature_verify
 }
