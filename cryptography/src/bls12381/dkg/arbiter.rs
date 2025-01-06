@@ -201,6 +201,11 @@ impl Arbiter {
         Ok(())
     }
 
+    /// Returns whether or not we are ready to finalize.
+    pub fn ready(&self) -> bool {
+        self.commitments.len() >= self.dealer_threshold as usize
+    }
+
     /// If we are prepared, proceed to `P1`.
     ///
     /// Return the disqualified contributors.

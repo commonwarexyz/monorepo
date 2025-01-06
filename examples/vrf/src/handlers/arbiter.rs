@@ -170,6 +170,12 @@ impl<E: Clock> Arbiter<E> {
                             //
                             // Any faults here will be considered as a disqualification.
                             let _ = arbiter.commitment(sender, commitment, acks, reveals);
+
+                            // If we are ready, break
+                            if arbiter.ready() {
+                                debug!("exiting before timeout with sufficient commitments");
+                                break;
+                            }
                         },
                         Err(err) => {
                             warn!(round, ?err, "failed to receive commitment");
