@@ -31,6 +31,7 @@
 //!
 //! * Let `t` be the maximum amount of time it takes for a message to be sent between any two participants.
 //! * Each participant has an encrypted channel to every other participant.
+//! * There exist `3f + 1` participants and at most `f` static Byzantine faults.
 //!
 //! ## [Dealer] Step 0: Generate Commitment and Shares
 //!
@@ -69,8 +70,15 @@
 //!
 //! # Synchrony Assumption
 //!
-//! Under synchrony, this construction can be used to maintain a `2f + 1` threshold (over `3f + 1` total participants
-//! where any `f` are Byzantine).
+//! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
+//! this construction can be used to maintain a `2f + 1` threshold where the construction of any threshold signature requires
+//! at least `f + 1` honest signers to participate. To see how this is true, first consider that in any successful round there
+//! must exist `2f + 1` commitments with at most `f` reveals. This implies that all participants must have acknowledged or have
+//! access to a revealed share for each of the `2f + 1` selected commitments (allowing them to derive their share). Next, consider
+//! that when the network is synchronous that all `2f + 1` honest players will send acknowledgements to honest dealers before
+//! `2t`. Because `2f + 1` commitments must be chosen, at least `f + 1` commitments must be from honest dealers (where no honest
+//! player share is revealed). Even if the remaining `f` commitments are from Byzantine dealers, there will not be enough
+//! dealings to recover the derived share of any honest player (at most `f` of `2f + 1` dealings publicly revealed).
 //!
 //! In the synchronous network model (where a message between any 2 participants takes up to `t` time to be
 //! delivered), this construction can be used to maintain a `2f + 1` threshold (over `3f + 1` total participants where any
