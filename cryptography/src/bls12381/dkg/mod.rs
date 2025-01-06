@@ -158,14 +158,6 @@ pub enum Error {
     PlayerInvalid,
     #[error("missing share")]
     MissingShare,
-    #[error("commitment disqualified")]
-    CommitmentDisqualified,
-    #[error("contributor disqualified")]
-    ContributorDisqualified,
-    #[error("contributor is invalid")]
-    ContributorInvalid,
-    #[error("complaint is invalid")]
-    ComplaintInvalid,
     #[error("missing commitment")]
     MissingCommitment,
     #[error("too many commitments")]
@@ -182,12 +174,14 @@ pub enum Error {
     MismatchedShare,
     #[error("too many reveals")]
     TooManyReveals,
-    #[error("too few active")]
-    TooFewActive,
-    #[error("ack and reveal")]
-    AckAndReveal,
+    #[error("incorrect active")]
+    IncorrectActive,
+    #[error("already active")]
+    AlreadyActive,
     #[error("invalid commitments")]
     InvalidCommitments,
+    #[error("dealer disqualified")]
+    DealerDisqualified,
 }
 
 #[cfg(test)]
@@ -850,7 +844,7 @@ mod tests {
             vec![0, 1, 2, 3],
             vec![shares[3]],
         );
-        assert!(matches!(result, Err(Error::AckAndReveal)));
+        assert!(matches!(result, Err(Error::AlreadyActive)));
     }
 
     #[test]
@@ -879,7 +873,7 @@ mod tests {
             vec![0, 1, 2, 3],
             Vec::new(),
         );
-        assert!(matches!(result, Err(Error::TooFewActive)));
+        assert!(matches!(result, Err(Error::IncorrectActive)));
 
         // Add valid commitment to arbiter after disqualified
         let result = arb.commitment(
@@ -888,7 +882,7 @@ mod tests {
             vec![0, 1, 2, 3, 4],
             Vec::new(),
         );
-        assert!(matches!(result, Err(Error::ContributorDisqualified)));
+        assert!(matches!(result, Err(Error::DealerDisqualified)));
     }
 
     #[test]
@@ -920,7 +914,7 @@ mod tests {
             vec![0, 1, 2, 3, 4],
             Vec::new(),
         );
-        assert!(matches!(result, Err(Error::ContributorDisqualified)));
+        assert!(matches!(result, Err(Error::DealerDisqualified)));
     }
 
     #[test]
@@ -1044,7 +1038,7 @@ mod tests {
             vec![0, 1, 2, 2],
             Vec::new(),
         );
-        assert!(matches!(result, Err(Error::DuplicateAck)));
+        assert!(matches!(result, Err(Error::AlreadyActive)));
     }
 
     #[test]

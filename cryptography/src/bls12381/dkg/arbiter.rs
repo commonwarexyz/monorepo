@@ -117,7 +117,7 @@ impl Arbiter {
         //
         // If disqualified, ignore future messages to avoid unnecessary processing.
         if self.disqualified.contains(&dealer) {
-            return Err(Error::ContributorDisqualified);
+            return Err(Error::DealerDisqualified);
         }
 
         // Find the index of the dealer
@@ -155,7 +155,7 @@ impl Arbiter {
             // Ensure index not already active
             if !active.insert(ack) {
                 self.disqualified.insert(dealer);
-                return Err(Error::DuplicateAck);
+                return Err(Error::AlreadyActive);
             }
         }
 
@@ -178,7 +178,7 @@ impl Arbiter {
             // Ensure index not already active
             if active.contains(&share.index) {
                 self.disqualified.insert(dealer);
-                return Err(Error::AckAndReveal);
+                return Err(Error::AlreadyActive);
             }
 
             // Verify share
@@ -198,7 +198,7 @@ impl Arbiter {
         // Active must be equal to number of players
         if active.len() != players_len as usize {
             self.disqualified.insert(dealer);
-            return Err(Error::TooFewActive);
+            return Err(Error::IncorrectActive);
         }
 
         // Record acks and reveals
