@@ -377,8 +377,8 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                     }
                                 };
                             }
-                            Err(err) => {
-                                debug!(?err, "did not receive ack");
+                            Err(e) => {
+                                debug!(round, error = ?e, "unable to read message");
                                 return (round, None);
                             }
                         }
@@ -499,8 +499,8 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     };
                     return (round, Some(output));
                 }
-                Err(err) => {
-                    debug!(?err, "did not receive success message");
+                Err(e) => {
+                    debug!(error = ?e, "unable to read message");
                     return (round, None);
                 }
             }

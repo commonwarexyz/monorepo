@@ -184,8 +184,8 @@ impl<E: Clock> Arbiter<E> {
                                 break;
                             }
                         },
-                        Err(err) => {
-                            warn!(round, ?err, "failed to receive commitment");
+                        Err(e) => {
+                            warn!(round, error = ?e, "unable to read message");
                             break;
                         }
                     };
