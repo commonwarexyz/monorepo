@@ -1,19 +1,5 @@
-//! Participants in a DKG/Resharing procedure that hold a share of the secret.
-//!
-//! # Tracking Invalidity
-//!
-//! Unlike the arbiter, the contributor does not track invalidity and requires
-//! the arbiter to notify it of such things. This prevents the case where
-//! a malicious contributor disqualifies itself on one contributor before
-//! said contributors can inform the arbiter of the issue. This could prevent
-//! an honest contributor from recognizing a commitment as valid (that all other
-//! contributors have agreed upon).
-//!
-//! # Warning
-//!
-//! It is up to the developer to authorize interaction with the contributor. This is purposely
-//! not provided by the contributor because this authorization function is highly dependent on
-//! the context in which the contributor is being used.
+//! Participants in a DKG/Resharing procedure that receive dealings from dealers
+//! and eventually maintain a share of a shared secret.
 
 use crate::bls12381::{
     dkg::{ops, Error},
@@ -29,11 +15,16 @@ use std::collections::{BTreeMap, HashMap};
 /// Output of a DKG/Resharing procedure.
 #[derive(Clone)]
 pub struct Output {
+    /// The group polynomial output by the DKG/Resharing procedure.
     pub public: poly::Public,
+
+    /// The player's share of the shared secret that corresponds to
+    /// the group polynomial. Any `2f + 1` players can combine their
+    /// shares to recover the shared secret.
     pub share: Share,
 }
 
-/// Track commitments and shares distributed by dealers.
+/// Track commitments and dealings distributed by dealers.
 pub struct Player {
     me: u32,
     dealer_threshold: u32,
@@ -41,9 +32,9 @@ pub struct Player {
     previous: Option<poly::Public>,
     concurrency: usize,
 
-    dealers_ordered: HashMap<PublicKey, u32>,
+    dealers: HashMap<PublicKey, u32>,
 
-    shares: HashMap<u32, (poly::Public, Share)>,
+    dealings: HashMap<u32, (poly::Public, Share)>,
 }
 
 impl Player {
@@ -56,27 +47,29 @@ impl Player {
         concurrency: usize,
     ) -> Self {
         dealers.sort();
-        let dealers_ordered = dealers
+        let dealers = dealers
             .iter()
             .enumerate()
             .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect();
+            .collect::<HashMap<PublicKey, _>>();
         recipients.sort();
-        let recipients_ordered: HashMap<PublicKey, u32> = recipients
-            .iter()
-            .enumerate()
-            .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect();
+        let mut me_idx = None;
+        for (idx, recipient) in recipients.iter().enumerate() {
+            if recipient == &me {
+                me_idx = Some(idx);
+                break;
+            }
+        }
         Self {
-            me: recipients_ordered[&me],
+            me: me_idx.expect("player not in recipients") as u32,
             dealer_threshold: quorum(dealers.len() as u32).expect("insufficient dealers"),
             player_threshold: quorum(recipients.len() as u32).expect("insufficient participants"),
             previous,
             concurrency,
 
-            dealers_ordered,
+            dealers,
 
-            shares: HashMap::new(),
+            dealings: HashMap::new(),
         }
     }
 
@@ -88,7 +81,7 @@ impl Player {
         share: Share,
     ) -> Result<(), Error> {
         // Ensure dealer is valid
-        let idx = match self.dealers_ordered.get(&dealer) {
+        let dealer_idx = match self.dealers.get(&dealer) {
             Some(contributor) => *contributor,
             None => return Err(Error::DealerInvalid),
         };
@@ -99,7 +92,7 @@ impl Player {
         }
 
         // If already have commitment from dealer, check if matches
-        if let Some((existing_commitment, existing_share)) = self.shares.get(&idx) {
+        if let Some((existing_commitment, existing_share)) = self.dealings.get(&dealer_idx) {
             if existing_commitment != &commitment {
                 return Err(Error::MismatchedCommitment);
             }
@@ -112,7 +105,7 @@ impl Player {
         // Verify that commitment is valid
         ops::verify_commitment(
             self.previous.as_ref(),
-            idx,
+            dealer_idx,
             &commitment,
             self.player_threshold,
         )?;
@@ -120,15 +113,15 @@ impl Player {
         // Verify that share is valid
         ops::verify_share(
             self.previous.as_ref(),
-            idx,
+            dealer_idx,
             &commitment,
             self.player_threshold,
             share.index,
             &share,
         )?;
 
-        // Store share
-        self.shares.insert(idx, (commitment, share));
+        // Store dealings
+        self.dealings.insert(dealer_idx, (commitment, share));
         Ok(())
     }
 
@@ -140,7 +133,8 @@ impl Player {
         reveals: HashMap<u32, Share>,
     ) -> Result<Output, Error> {
         // Ensure commitments equals required commitment count
-        if commitments.len() != self.dealer_threshold as usize {
+        let dealer_threshold = self.dealer_threshold as usize;
+        if commitments.len() != dealer_threshold {
             return Err(Error::InvalidCommitments);
         }
 
@@ -168,14 +162,14 @@ impl Player {
                 &share,
             )?;
 
-            // Store commitment
-            self.shares.insert(idx, (commitment.clone(), share));
+            // Store dealing
+            self.dealings.insert(idx, (commitment.clone(), share));
         }
 
-        // Remove all shares not in commitments
-        self.shares
+        // Remove all dealings not in commitments
+        self.dealings
             .retain(|dealer, _| commitments.contains_key(dealer));
-        if self.shares.len() != self.dealer_threshold as usize {
+        if self.dealings.len() != dealer_threshold {
             return Err(Error::MissingShare);
         }
 
@@ -184,10 +178,10 @@ impl Player {
         let mut secret = group::Private::zero();
         match self.previous {
             None => {
-                // Add all valid commitments/shares
-                for share in self.shares.values() {
-                    public.add(&share.0);
-                    secret.add(&share.1.private);
+                // Add all valid commitments/dealings
+                for dealing in self.dealings.values() {
+                    public.add(&dealing.0);
+                    secret.add(&dealing.1.private);
                 }
             }
             Some(previous) => {
@@ -197,7 +191,7 @@ impl Player {
                 // to generate a threshold signature), this polynomial is required to verify
                 // dealings of future resharings.
                 let commitments: BTreeMap<u32, poly::Public> = self
-                    .shares
+                    .dealings
                     .iter()
                     .map(|(dealer, (commitment, _))| (*dealer, commitment.clone()))
                     .collect();
@@ -209,15 +203,15 @@ impl Player {
                 )?;
 
                 // Recover share via interpolation
-                let shares = self
-                    .shares
+                let dealings = self
+                    .dealings
                     .into_iter()
                     .map(|(dealer, (_, share))| Eval {
                         index: dealer,
                         value: share.private,
                     })
                     .collect::<Vec<_>>();
-                secret = match poly::Private::recover(self.dealer_threshold, shares) {
+                secret = match poly::Private::recover(self.dealer_threshold, dealings) {
                     Ok(share) => share,
                     Err(_) => return Err(Error::ShareInterpolationFailed),
                 };

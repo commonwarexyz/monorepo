@@ -77,6 +77,8 @@
 //!
 //! # Synchrony Assumption
 //!
+//! TODO: change to combine shared secret
+//!
 //! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
 //! this construction can be used to maintain a shared secret where at least `f + 1` honest players must participate to
 //! generate any threshold signature (`2f + 1` threshold where at most `f` players are Byzantine). To see how this is true,

@@ -2,19 +2,19 @@
 //!
 //! # Deployment Options
 //!
-//! ## Recommended: All Contributors Run the Arbiter
+//! ## Recommended: All Participants Run the Arbiter
 //!
-//! Each contributor should run its own instance of the arbiter over a replicated log (deterministic
-//! order of events across all contributors) of commitments, acknowledgements, and complaints.
-//! All correct contributors, when given the same log, will arrive at the same result (will recover
+//! Each participant should run its own instance of the arbiter over a replicated log (deterministic
+//! order of events across all dealers) of commitments, acknowledgements, and reveals.
+//! All correct participants, when given the same log, will arrive at the same result (will recover
 //! the same group polynomial and a share that can generate partial signatures over it). Using a
-//! replicated log allows us to provide both reliable broadcast (all honest contributors see all messages from
-//! all other honest contributors) and to enforce a "timeout" (using log index) for each phase of DKG/Resharing.
+//! replicated log allows us to provide both reliable broadcast (all honest dealers see all messages from
+//! all other honest dealers) and to enforce a "timeout" (using log index).
 //!
-//! ## Trusted Alternative: Standalone Process
+//! ## Alternative: Trusted Process
 //!
-//! It is possible to run the arbiter as a standalone process that contributors
-//! must trust to track commitments, acknowledgements, and complaints and then notify
+//! It is possible to run the arbiter as a standalone process that dealers
+//! must trust to track commitments, acknowledgements, and reveals and then notify
 //! all parties which commitments and shares to use to generate the group public key and shares.
 //!
 //! _For an example of this approach, refer to <https://docs.rs/commonware-vrf>._
@@ -23,19 +23,18 @@
 //!
 //! Submitting duplicate and/or unnecessary information (i.e. a dealer submitting the same commitment twice
 //! or submitting an acknowledgement for a disqualified dealer) will throw an error but not disqualify the
-//! contributor. It may not be possible for contributors to know the latest state of the arbiter when submitting
-//! information and penalizing them for this is not helpful (i.e. an acknowledgement may be inflight when another
-//! contributor submits a valid complaint).
+//! dealer. It may not be possible for dealers to know the latest state of the arbiter when submitting
+//! information and penalizing them for this is not helpful.
 //!
 //! Submitting invalid information (invalid commitment) qualifies as an attributable fault that disqualifies a
-//! dealer/recipient from a round of DKG/Resharing. A developer can additionally handle such a fault as they see
+//! dealer from a round of DKG/Resharing. A developer can additionally handle such a fault as they see
 //! fit (may warrant additional punishment).
 //!
 //! # Warning
 //!
 //! It is up to the developer to authorize interaction with the arbiter. This is purposely
-//! not provided by the Arbiter because this authorization function is highly dependent on
-//! the context in which the contributor is being used.
+//! not provided by the arbiter because this authorization function is highly dependent on
+//! the context in which the dealer is being used.
 
 use crate::bls12381::{
     dkg::{ops, Error},
@@ -48,21 +47,25 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// Output of the DKG/Resharing procedure.
 #[derive(Clone)]
 pub struct Output {
+    /// The group polynomial output by the DKG/Resharing procedure.
     pub public: poly::Public,
+
+    /// `2f + 1` commitments used to derive group polynomial.
     pub commitments: HashMap<u32, poly::Public>,
+
+    /// Reveals published by dealers of selected commitments.
     pub reveals: HashMap<u32, Vec<Share>>,
 }
 
-/// Gather commitments from all contributors.
+/// Gather commitments, acknowledgements, and reveals from all dealers.
 pub struct Arbiter {
     previous: Option<poly::Public>,
     dealer_threshold: u32,
-    recipient_threshold: u32,
+    player_threshold: u32,
     concurrency: usize,
 
     dealers: HashMap<PublicKey, u32>,
-
-    recipients: Vec<PublicKey>,
+    players: Vec<PublicKey>,
 
     commitments: BTreeMap<u32, (poly::Public, Vec<u32>, Vec<Share>)>,
     disqualified: HashSet<PublicKey>,
@@ -73,25 +76,24 @@ impl Arbiter {
     pub fn new(
         previous: Option<poly::Public>,
         mut dealers: Vec<PublicKey>,
-        mut recipients: Vec<PublicKey>,
+        mut players: Vec<PublicKey>,
         concurrency: usize,
     ) -> Self {
         dealers.sort();
-        let dealers_ordered = dealers
+        let dealers = dealers
             .iter()
             .enumerate()
             .map(|(i, pk)| (pk.clone(), i as u32))
-            .collect();
-        recipients.sort();
+            .collect::<HashMap<PublicKey, _>>();
+        players.sort();
         Self {
             dealer_threshold: quorum(dealers.len() as u32).expect("insufficient dealers"),
-            recipient_threshold: quorum(recipients.len() as u32).expect("insufficient recipients"),
+            player_threshold: quorum(players.len() as u32).expect("insufficient players"),
             previous,
             concurrency,
 
-            dealers: dealers_ordered,
-
-            recipients,
+            dealers,
+            players,
 
             commitments: BTreeMap::new(),
             disqualified: HashSet::new(),
@@ -103,7 +105,7 @@ impl Arbiter {
         self.disqualified.insert(participant);
     }
 
-    /// Verify and track a commitment from a dealer.
+    /// Verify and track a commitment, acknowledgements, and reveals collected by a dealer.
     pub fn commitment(
         &mut self,
         dealer: PublicKey,
@@ -111,14 +113,14 @@ impl Arbiter {
         acks: Vec<u32>,
         reveals: Vec<Share>,
     ) -> Result<(), Error> {
-        // Check if contributor is disqualified
+        // Check if dealer is disqualified
         //
         // If disqualified, ignore future messages to avoid unnecessary processing.
         if self.disqualified.contains(&dealer) {
             return Err(Error::ContributorDisqualified);
         }
 
-        // Find the index of the contributor
+        // Find the index of the dealer
         let idx = match self.dealers.get(&dealer) {
             Some(idx) => *idx,
             None => return Err(Error::DealerInvalid),
@@ -134,29 +136,32 @@ impl Arbiter {
             self.previous.as_ref(),
             idx,
             &commitment,
-            self.recipient_threshold,
+            self.player_threshold,
         ) {
             self.disqualified.insert(dealer);
             return Err(e);
         }
 
         // Ensure acks valid range and >= threshold
-        let recipients_len = self.recipients.len() as u32;
+        let players_len = self.players.len() as u32;
         let mut active = HashSet::new();
         for ack in &acks {
-            if *ack >= recipients_len {
+            // Ensure index is valid
+            if *ack >= players_len {
                 self.disqualified.insert(dealer);
                 return Err(Error::PlayerInvalid);
             }
+
+            // Ensure index not already active
             if !active.insert(ack) {
                 self.disqualified.insert(dealer);
                 return Err(Error::DuplicateAck);
             }
         }
 
-        // Ensure reveals less than max_faults and for recipients not yet ack'd
+        // Ensure reveals less than max_faults and for players not yet ack'd
         let reveals_len = reveals.len();
-        let max_faults = max_faults(recipients_len).unwrap() as usize;
+        let max_faults = max_faults(players_len).unwrap() as usize;
         if reveals_len > max_faults {
             self.disqualified.insert(dealer);
             return Err(Error::TooManyReveals);
@@ -164,10 +169,13 @@ impl Arbiter {
 
         // Check reveals
         for share in &reveals {
-            if share.index >= recipients_len {
+            // Ensure index is valid
+            if share.index >= players_len {
                 self.disqualified.insert(dealer);
                 return Err(Error::PlayerInvalid);
             }
+
+            // Ensure index not already active
             if active.contains(&share.index) {
                 self.disqualified.insert(dealer);
                 return Err(Error::AckAndReveal);
@@ -178,7 +186,7 @@ impl Arbiter {
                 self.previous.as_ref(),
                 idx,
                 &commitment,
-                self.recipient_threshold,
+                self.player_threshold,
                 share.index,
                 share,
             )?;
@@ -187,8 +195,8 @@ impl Arbiter {
             active.insert(&share.index);
         }
 
-        // Active must be equal to active
-        if active.len() != recipients_len as usize {
+        // Active must be equal to number of players
+        if active.len() != players_len as usize {
             self.disqualified.insert(dealer);
             return Err(Error::TooFewActive);
         }
@@ -203,11 +211,11 @@ impl Arbiter {
         self.commitments.len() >= self.dealer_threshold as usize
     }
 
-    /// If we are prepared, proceed to `P1`.
+    /// Recover the group polynomial and return `2f + 1` commitments and reveals from dealers.
     ///
-    /// Return the disqualified contributors.
+    /// Return the disqualified dealers.
     pub fn finalize(mut self) -> (Result<Output, Error>, HashSet<PublicKey>) {
-        // Drop commitments from disqualified contributors
+        // Drop commitments from disqualified dealers
         for disqualified in self.disqualified.iter() {
             let idx = self.dealers.get(disqualified).unwrap();
             self.commitments.remove(idx);
@@ -222,7 +230,8 @@ impl Arbiter {
         }
 
         // Ensure we have enough commitments to proceed
-        if self.commitments.len() < self.dealer_threshold as usize {
+        let dealer_threshold = self.dealer_threshold as usize;
+        if self.commitments.len() < dealer_threshold {
             return (Err(Error::InsufficientDealings), self.disqualified);
         }
 
@@ -231,7 +240,7 @@ impl Arbiter {
         let selected = self
             .commitments
             .into_iter()
-            .take(self.dealer_threshold as usize)
+            .take(dealer_threshold)
             .collect::<Vec<_>>();
 
         // Recover group
@@ -244,7 +253,7 @@ impl Arbiter {
                 match ops::recover_public(
                     &previous,
                     commitments,
-                    self.recipient_threshold,
+                    self.player_threshold,
                     self.concurrency,
                 ) {
                     Ok(public) => public,
@@ -256,7 +265,7 @@ impl Arbiter {
                 for (_, (commitment, _, _)) in &selected {
                     commitments.push(commitment.clone());
                 }
-                match ops::construct_public(commitments, self.recipient_threshold) {
+                match ops::construct_public(commitments, self.player_threshold) {
                     Ok(public) => public,
                     Err(e) => return (Err(e), self.disqualified),
                 }

@@ -1,19 +1,5 @@
-//! Participants in a DKG/Resharing procedure that hold a share of the secret.
-//!
-//! # Tracking Invalidity
-//!
-//! Unlike the arbiter, the contributor does not track invalidity and requires
-//! the arbiter to notify it of such things. This prevents the case where
-//! a malicious contributor disqualifies itself on one contributor before
-//! said contributors can inform the arbiter of the issue. This could prevent
-//! an honest contributor from recognizing a commitment as valid (that all other
-//! contributors have agreed upon).
-//!
-//! # Warning
-//!
-//! It is up to the developer to authorize interaction with the contributor. This is purposely
-//! not provided by the contributor because this authorization function is highly dependent on
-//! the context in which the contributor is being used.
+//! Participants in a DKG/Resharing procedure that distribute dealings
+//! to players and collect their acknowledgements.
 
 use crate::bls12381::{
     dkg::{ops, Error},
@@ -26,11 +12,15 @@ use std::collections::{HashMap, HashSet};
 /// Dealer output of a DKG/Resharing procedure.
 #[derive(Clone)]
 pub struct Output {
+    /// List of active players.
     pub active: Vec<u32>,
+
+    /// List of inactive players (that we need to send
+    /// a reveal for).
     pub inactive: Vec<u32>,
 }
 
-/// Track acks from recipients.
+/// Track acknowledgements from players.
 pub struct Dealer {
     threshold: u32,
     players: HashMap<PublicKey, u32>,
@@ -67,7 +57,7 @@ impl Dealer {
         )
     }
 
-    /// Track ack from a player.
+    /// Track acknowledgement from a player.
     pub fn ack(&mut self, player: PublicKey) -> Result<(), Error> {
         // Ensure player is valid
         let idx = match self.players.get(&player) {
