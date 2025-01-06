@@ -20,7 +20,7 @@ use std::{collections::HashMap, time::Duration};
 use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
-/// or deviate as a rogue, lazy, or defiant participant.
+/// or deviate as a rogue, lazy, or forger.
 pub struct Contributor<E: Clock + Rng, C: Scheme> {
     runtime: E,
     crypto: C,
@@ -29,6 +29,7 @@ pub struct Contributor<E: Clock + Rng, C: Scheme> {
     t: u32,
     contributors: Vec<PublicKey>,
     contributors_ordered: HashMap<PublicKey, u32>,
+
     corrupt: bool,
     lazy: bool,
     forger: bool,
@@ -64,6 +65,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 t: quorum(contributors.len() as u32).unwrap(),
                 contributors,
                 contributors_ordered,
+
                 corrupt,
                 lazy,
                 forger,

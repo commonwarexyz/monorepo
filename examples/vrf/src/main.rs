@@ -4,32 +4,31 @@
 //! Distributed Key Generation (DKG) to generate a static public key, and then perform a proactive Resharing every 10
 //! seconds. After a successful DKG and/or Reshare, contributors generate partial signatures over the round number and
 //! gossip them to others in the group (again using commonware-p2p). These partial signatures, when aggregated, form
-//! a threshold signature that was not knowable by any contributor prior to collecting `f + 1` partial signatures.
+//! a threshold signature that was not knowable by any contributor prior to collecting `2f + 1` partial signatures.
 //!
 //! To demonstrate how malicious contributors are handled, the CLI also lets you behave as a "rogue" dealer that generates
-//! invalid shares, a "lazy" dealer that doesn't distribute shares to other contributors, and/or a "defiant" dealer that
-//! doesn't respond to requests to reveal shares that weren't acknowledged by other contributors.
+//! invalid dealings, a "lazy" dealer only distributes `2f` dealings (force reveal `f`), and/or a "forger" dealer that
+//! forges a signature for all contributors.
 //!
 //! # Joining After a DKG
 //!
-//! If a new contributor joins the group after a successful DKG, the new contributor will jump to "Phase 1" of the contributor
-//! state machine during the next Resharing. They will skip the generation of a commitment/shares and just wait for commitments
-//! and shares from online contributors to be distributed to them. As long as `2f + 1` contributors are online and honest at this time,
+//! If a new contributor joins the group after a successful DKG, the new contributor will become a player during the next resharing
+//! (waiting for dealings on the previous group polynomial). As long as `2f + 1` contributors are online and honest at a time,
 //! the new contributor will be able to recover the group public polynomial and generate a share that can be used to generate valid
 //! partial signatures. They will also be able to participate (share commitment/shares) in future resharings.
 //!
 //! # Trust Assumptions
 //!
-//! In this example, the arbiter is trusted. It tracks commitments, acknowledgements, and complaints submitted
+//! In this example, the arbiter is trusted. It tracks commitments, acknowledgements, and reveals submitted
 //! by contributors. As alluded to in the arbiter docs, production deployments of the arbiter should be run by all
 //! contributors over a replicated log (commonly instantiated with a BFT consensus algorithm). This ensures that all
 //! correct contributors have the same view of the arbiter's state at the end of a round.
 //!
-//! `2f + 1` contributors are assumed to be honest and online and any `f + 1` partial signatures can be used to construct
+//! `2f + 1` contributors are assumed to be honest and online and any `2f + 1` partial signatures can be used to construct
 //! a threshold signature. `f` contributors can behave arbitrarily and will not be able to interrupt a DKG, Resharing, or Threshold
 //! Signature. Incorrect contributors will be identified by the arbiter and reported at the end of each DKG/Resharing.
 //!
-//! # Usage (2 of 4 Threshold)
+//! # Usage (3 of 4 Threshold)
 //!
 //! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
 //!
@@ -53,20 +52,28 @@
 //! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3,4  --arbiter 0 --contributors 1,2,3,4
 //! ```
 //!
-//! ## Contributor 4 (Rogue)
+//! ## Contributor 4 (Corrupt)
 //!
-//! _Send invalid shares to other contributors._
+//! _Send invalid dealings to contributors._
 //!
 //! ```bash
-//! cargo run --release -- --rogue --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
+//! cargo run --release -- --corrupt --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 //! ```
 //!
 //! ## Contributor 4 (Lazy)
 //!
-//! _Only share `t-1` shares. Post one share to arbiter to ensure commitment isn't dropped._
+//! _Only send `2f` dealings to contributors (force reveal `f`)._
 //!
 //! ```bash
 //! cargo run --release -- --lazy --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
+//! ```
+//!
+//! ## Contributor 4 (Forger)
+//!
+//! _Forge acknowledgements from contributors._
+//!
+//! ```bash
+//! cargo run --release -- --forger --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 //! ```
 
 mod handlers;
@@ -135,14 +142,20 @@ fn main() {
             Arg::new("corrupt")
                 .long("corrupt")
                 .num_args(0)
-                .help("Configures whether the contributor is a corrupt contributor"),
+                .help("Send invalid dealings to contributors"),
         )
-        .arg(Arg::new("lazy").long("lazy").num_args(0).help(
-            "Configures whether the contributor distributes shares to everyone or just t-1 participants",
-        ))
-        .arg(Arg::new("forger").long("forger").num_args(0).help(
-            "Configures whether the contributor forges a signature for all players",
-        ))
+        .arg(
+            Arg::new("lazy")
+                .long("lazy")
+                .num_args(0)
+                .help("Only send 2f dealings to contributors (force reveal f)"),
+        )
+        .arg(
+            Arg::new("forger")
+                .long("forger")
+                .num_args(0)
+                .help("Forge acknowledgements from contributors"),
+        )
         .get_matches();
 
     // Create logger
