@@ -319,7 +319,10 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                         }
 
                                         // Store ack
-                                        let _ = dealer.ack(s);
+                                        if let Err(e) = dealer.ack(s.clone()) {
+                                            warn!(round, error = ?e, sender = hex(&s), "failed to record ack");
+                                            continue;
+                                        }
                                         acks.insert(msg.public_key, msg.signature);
 
                                     },
@@ -344,7 +347,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
 
                                         // Store share
                                         if let Err(e) = player_obj.share(s.clone(), commitment, share){
-                                            warn!(round, error = ?e, "failed to add share");
+                                            warn!(round, error = ?e, "failed to store share");
                                             continue;
                                         }
 

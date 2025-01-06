@@ -64,7 +64,7 @@ impl<E: Clock> Arbiter<E> {
     ) -> (Option<poly::Public>, HashSet<PublicKey>) {
         // Create a new round
         let start = self.runtime.current();
-        let t = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
+        let timeout = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
 
         // Send round start message to players
         let mut group = None;
@@ -94,8 +94,8 @@ impl<E: Clock> Arbiter<E> {
             dkg::Arbiter::new(previous, self.players.clone(), self.players.clone(), 1);
         loop {
             select! {
-                _ = self.runtime.sleep_until(t) => {
-                    debug!("commitment phase timed out");
+                _ = self.runtime.sleep_until(timeout) => {
+                    warn!(round, "commitment phase timed out");
                     break
                 },
                 result = receiver.recv() => {
@@ -169,11 +169,14 @@ impl<E: Clock> Arbiter<E> {
                             // Check dealer commitment
                             //
                             // Any faults here will be considered as a disqualification.
-                            let _ = arbiter.commitment(sender, commitment, acks, reveals);
+                            if let Err(e) = arbiter.commitment(sender.clone(), commitment, acks, reveals) {
+                                warn!(round, error = ?e, sender = hex(&sender), "failed to process commitment");
+                                break;
+                            }
 
                             // If we are ready, break
                             if arbiter.ready() {
-                                debug!("exiting before timeout with sufficient commitments");
+                                debug!("collected sufficient commitments");
                                 break;
                             }
                         },
@@ -212,12 +215,12 @@ impl<E: Clock> Arbiter<E> {
         // Send commitments and reveals to all players
         info!(
             round,
-            // commitments = ?commitments.iter().map(|(_, pk, _)| hex(pk)).collect::<Vec<_>>(),
+            commitments = ?output.commitments.keys().map(|idx| hex(&self.players[*idx as usize])).collect::<Vec<_>>(),
             disqualified = ?disqualified
                 .iter()
                 .map(|pk| hex(pk))
                 .collect::<Vec<_>>(),
-            "ack phase complete"
+            "selected commitments"
         );
 
         // Broadcast commitments
