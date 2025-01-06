@@ -5,7 +5,7 @@
 
 Generate bias-resistant randomness with untrusted contributors using [commonware-cryptography](https://crates.io/crates/commonware-cryptography) and [commonware-p2p](https://crates.io/crates/commonware-p2p).
 
-# Usage (2 of 4 Threshold)
+# Usage (3 of 4 Threshold)
 
 _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
 
@@ -29,18 +29,26 @@ cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participan
 cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3,4  --arbiter 0 --contributors 1,2,3,4
 ```
 
-## Contributor 4 (Rogue)
+## Contributor 4 (Corrupt)
 
-_Send invalid shares to other contributors._
+_Send invalid dealings to contributors._
 
 ```bash
-cargo run --release -- --rogue --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
+cargo run --release -- --corrupt --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 ```
 
 ## Contributor 4 (Lazy)
 
-_Only share `t-1` shares. Post one share to arbiter to ensure commitment isn't dropped._
+_Only send `2f` dealings to contributors (force reveal `f`)._
 
 ```bash
 cargo run --release -- --lazy --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
+```
+
+## Contributor 4 (Forger)
+
+_Forge acknowledgements from contributors._
+
+```bash
+cargo run --release -- --forger --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
 ```
