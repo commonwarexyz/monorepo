@@ -27,6 +27,11 @@
 //!
 //! # Specification
 //!
+//! ## Assumptions
+//!
+//! * Let `t` be the maximum amount of time it takes for a message to be sent between any two participants.
+//! * Each participant has an encrypted channel to every other participant.
+//!
 //! ## [Dealer] Step 0: Generate Commitment and Shares
 //!
 //! Generate commitment and shares. If it is a DKG, the commitment is a random polynomial of degree `2f`. If it
@@ -63,6 +68,9 @@
 //! the new group polynomial and derive their share of the secret.
 //!
 //! # Synchrony Assumption
+//!
+//! Under synchrony, this construction can be used to maintain a `2f + 1` threshold (over `3f + 1` total participants
+//! where any `f` are Byzantine).
 //!
 //! In the synchronous network model (where a message between any 2 participants takes up to `t` time to be
 //! delivered), this construction can be used to maintain a `2f + 1` threshold (over `3f + 1` total participants where any
