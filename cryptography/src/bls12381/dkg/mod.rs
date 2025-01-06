@@ -77,11 +77,9 @@
 //!
 //! # Synchrony Assumption
 //!
-//! TODO: change to combine shared secret
-//!
 //! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
 //! this construction can be used to maintain a shared secret where at least `f + 1` honest players must participate to
-//! generate any threshold signature (`2f + 1` threshold where at most `f` players are Byzantine). To see how this is true,
+//! recover the shared secret (`2f + 1` threshold where at most `f` players are Byzantine). To see how this is true,
 //! first consider that in any successful round there must exist `2f + 1` commitments with at most `f` reveals. This implies
 //! that all players must have acknowledged or have access to a reveal for each of the `2f + 1` selected commitments (allowing
 //! them to derive their share). Next, consider that when the network is synchronous that all `2f + 1` honest players send
@@ -91,22 +89,22 @@
 //! `2f + 1` dealings publicly revealed). Given all `2f + 1` honest players have access to their shares and it is not possible
 //! for a Byzantine player to derive any honest player's share, this claim holds.
 //!
-//! If the network is not synchronous, however, Byzantine players can collude to generate a threshold signature with the
+//! If the network is not synchronous, however, Byzantine players can collude to recover a shared secret with the
 //! participation of a single honest player (rather than `f + 1`) and `f + 1` honest players will each be able to derive
-//! the shared secret. To see how this could be, consider a network where `f` honest participants are in one partition and
-//! (`f + 1` honest and `f` Byzantine participants) are in another. All `f` Byzantine players acknowledge dealings from the
-//! `f + 1` honest dealers. Participants in the second partition will complete a round and all the reveals will belong to the
-//! same set of `f` honest players (that are in the first partition). A colluding Byzantine adversary will then have access to
-//! their acknowledged `f` shares and the revealed `f` shares (requiring only the participation of a single honest player that
-//! was in their partition to generate a valid threshold signature). If the Byzantine adversary reveals all of their (still
-//! private) shares at this time, each of the `f + 1` honest players that were in the second partition will be able to derive
-//! the shared secret without collusion (using their private share and the `2f` public shares). It will not be possible for any
-//! external observer, however, to recover the shared secret.
+//! the shared secret (if the Byzantine players reveal their shares). To see how this could be, consider a network where
+//! `f` honest participants are in one partition and (`f + 1` honest and `f` Byzantine participants) are in another. All
+//! `f` Byzantine players acknowledge dealings from the `f + 1` honest dealers. Participants in the second partition will
+//! complete a round and all the reveals will belong to the same set of `f` honest players (that are in the first partition).
+//! A colluding Byzantine adversary will then have access to their acknowledged `f` shares and the revealed `f` shares
+//! (requiring only the participation of a single honest player that was in their partition to recover the shared secret).
+//! If the Byzantine adversary reveals all of their (still private) shares at this time, each of the `f + 1` honest players
+//! that were in the second partition will be able to derive the shared secret without collusion (using their private share
+//! and the `2f` public shares). It will not be possible for any external observer, however, to recover the shared secret.
 //!
 //! ## Future Work: Dropping the Synchrony Assumption?
 //!
 //! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
-//! must participate to generate any threshold signature that doesn't require a synchrony assumption (`2f + 1` threshold
+//! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
 //! where at most `f` players are Byzantine). However, known constructions that satisfy this requirement require both
 //! broadcasting encrypted dealings publicly and employing Zero-Knowledge Proofs (ZKPs) to attest that encrypted dealings
 //! were generated correctly ([Groth21](https://eprint.iacr.org/2021/339), [Kate23](https://eprint.iacr.org/2023/451)).
