@@ -33,40 +33,47 @@
 //! * Each participant has an encrypted channel to every other participant.
 //! * There exist `3f + 1` participants and at most `f` static Byzantine faults.
 //!
-//! ## [Dealer] Step 0: Generate Commitment and Shares
+//! ## [Arbiter] Step 0: Start Round
 //!
-//! Generate commitment and shares. If it is a DKG, the commitment is a random polynomial of degree `2f`. If it
-//! is a reshare, the commitment must be consistent with the previous group polynomial.
+//! Send a message to all participants to start a round. If this is a reshare, include the group polynomial from
+//! the last successful round.
 //!
-//! ## [Dealer] Step 1: Distribute Commitment and Shares
+//! ## [Dealer] Step 1: Generate Commitment and Dealings
 //!
-//! Distribute generated commitment and corresponding shares to each player over an encrypted channel.
+//! Upon receiving start message from arbiter, generate commitment and dealings. If it is a DKG, the commitment is
+//! a random polynomial of degree `2f`. If it is a reshare, the commitment must be consistent with the
+//! previous group polynomial.
 //!
-//! ## [Player] Step 3: Verify Share and Send Acknowledgement
+//! ## [Dealer] Step 2: Distribute Commitment and Dealings
 //!
-//! Verify incoming share against provided commitment (additionally comparing the commitment to the previous group
-//! polynomial, if reshare). If the share is valid, send an acknowledgement back to the dealer.
+//! Distribute generated commitment and corresponding dealings to each player over an encrypted channel.
+//!
+//! ## [Player] Step 3: Verify Dealing and Send Acknowledgement
+//!
+//! Verify incoming dealing against provided commitment (additionally comparing the commitment to the previous group
+//! polynomial, if reshare). If the dealing is valid, send an acknowledgement back to the dealer.
 //!
 //! To protect against a dealer sending different commitments to different players, players must sign this
 //! acknowledgement over `(dealer, commitment)`.
 //!
 //! ## [Dealer] Step 4: Collect Acknowledgements and Send to Arbiter
 //!
-//! Collect acknowledgements from players. After time `2t`, check to see if at least `2f + 1` acknowledgements have
-//! been received (including self, if a player as well). If so, send the commitment, acknowledgements, and unencrypted
-//! shares of players that did not send an acknowledgement to the arbiter. If not, exit.
+//! Collect acknowledgements from players. After `2t` has elapsed since Step 1 (up to `3t` from Step 0), check to
+//! see if at least `2f + 1` acknowledgements have been received (including self, if a player as well). If so, send the
+//! commitment, acknowledgements, and unencrypted dealings of players that did not send an acknowledgement to the
+//! arbiter. If not, exit.
 //!
 //! ## [Arbiter] Step 5: Select Commitments and Forward Reveals
 //!
 //! Select the first `2f + 1` commitments with at most `f` reveals. Forward these `2f + 1` commitments
 //! (and any reveals associated with each) to all players. If there do not exist `2f + 1` commitments with
-//! at most `f` reveals by time `3t`, exit.
+//! at most `f` reveals by time `4t`, exit.
 //!
 //! ## [Player] Step 6: Recover Group Polynomial and Derive Share
 //!
-//! If the round is successful, each player will receive `2f + 1` commitments and any shares associated with said
+//! If the round is successful, each player will receive `2f + 1` commitments and any dealings associated with said
 //! commitments they did not acknowledge (or that the dealer said they didn't acknowledge). With this, they can recover
-//! the new group polynomial and derive their share of the secret.
+//! the new group polynomial and derive their share of the secret. If this distribution is not received by time `5t`, exit.
 //!
 //! # Synchrony Assumption
 //!
@@ -80,7 +87,7 @@
 //! must be from honest dealers (where no honest player dealing is revealed). Even if the remaining `f` commitments are from
 //! Byzantine dealers, there will not be enough dealings to recover the derived share of any honest player (at most `f` of
 //! `2f + 1` dealings publicly revealed). Given all `2f + 1` honest players have access to their shares and it is not possible
-//! for any Byzantine player to derive any honest player's share, this claim holds.
+//! for a Byzantine player to derive any honest player's share, this claim holds.
 //!
 //! If the network is not synchronous, however, Byzantine players can collude to generate a threshold signature with the
 //! participation of a single honest player (rather than `f + 1`) and `f + 1` honest players will each be able to derive
@@ -96,26 +103,26 @@
 //!
 //! ## Future Work: Dropping the Synchrony Assumption?
 //!
-//! It is possible to design a DKG/Resharing that can be used to maintain a shared secret where at least `f + 1` honest players
-//! must participate to generate any threshold signature that doesn't require a synchrony assumption. However, known constructions
-//! that satisfy this requirement require both broadcasting encrypted shares publicly and employing Zero-Knowledge Proofs (ZKPs) to
-//! attest that encrypted shares were generated correctly ([Groth21](https://eprint.iacr.org/2021/339), [Kate23](https://eprint.iacr.org/2023/451)).
+//! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
+//! must participate to generate any threshold signature that doesn't require a synchrony assumption (`2f + 1` threshold
+//! where at most `f` players are Byzantine). However, known constructions that satisfy this requirement require both
+//! broadcasting encrypted dealings publicly and employing Zero-Knowledge Proofs (ZKPs) to attest that encrypted dealings
+//! were generated correctly ([Groth21](https://eprint.iacr.org/2021/339), [Kate23](https://eprint.iacr.org/2023/451)).
 //!
-//! In the future, it may make sense to deprecate this interactive construction in favor of one of these non-interactive approaches.
-//! As of January 2025, however, these constructions are still considered novel (2-3 years in production), require stronger
-//! cryptographic assumptions, don't scale to hundreds of participants (unless dealers have powerful hardware), and provide adversaries
-//! the opportunity to brute force decrypt all shares (even if honest players are online).
+//! As of January 2025, these constructions are still considered novel (2-3 years in production), require stronger
+//! cryptographic assumptions, don't scale to hundreds of participants (unless dealers have powerful hardware), and provide
+//! observers the opportunity to brute force decrypt shares (even if honest players are online).
 //!
 //! # Tracking Complaints
 //!
 //! This crate does not provide an integrated mechanism for tracking complaints from players (of malicious dealers). However, it is
-//! possible to implement your own mechanism and to manually disqualify dealers from a round in the arbiter. This decision was made
-//! because the mechanism for communicating commitments/shares/acknowledgements is highly dependent on the context in which this construction
-//! is used.
+//! possible to implement your own mechanism and to manually disqualify dealers from a given round in the arbiter. This decision was made
+//! because the mechanism for communicating commitments/shares/acknowledgements is highly dependent on the context in which this
+//! construction is used.
 //!
 //! # Example
 //!
-//! For a complete example of how to instantiate this crate, checkout [commonware-vrf](https://docs.rs/commonware-vrf).
+//! For a complete example of how to instantiate this crate, check out [commonware-vrf](https://docs.rs/commonware-vrf).
 
 pub mod arbiter;
 pub use arbiter::Arbiter;
