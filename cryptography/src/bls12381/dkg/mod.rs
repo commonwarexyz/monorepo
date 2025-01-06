@@ -68,6 +68,9 @@
 //! delivered), this construction can be used to maintain a `2f + 1` threshold (over `3f + 1` total participants where any
 //! `f` are Byzantine).
 //!
+//! Think of threshold as how many honest nodes required to produce a signature. In this environment, no way to prevent `f` from getting
+//! shares...so really we are trying to ensure it never takes less than `f + 1` honest players to generate a valid threshold signature.
+//!
 //! If the network is sycnrhonous, the revealed shares will never allow for deriving a share for an honest player.
 //!
 //! May be possible for a malicious player to impersonate an honest player. This is not possible under synchrony. TL;DR a share
