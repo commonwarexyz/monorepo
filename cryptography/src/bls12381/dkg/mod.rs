@@ -27,79 +27,102 @@
 //!
 //! # Specification
 //!
-//! ## [Dealer] Step 0: Generate Commitment and Shares
+//! ## Assumptions
 //!
-//! Generate commitment and shares. If it is a DKG, the commitment is a random polynomial of degree `2f`. If it
-//! is a reshare, the commitment must be consistent with the previous group polynomial.
+//! * Let `t` be the maximum amount of time it takes for a message to be sent between any two participants.
+//! * Each participant has an encrypted channel to every other participant.
+//! * There exist `3f + 1` participants and at most `f` static Byzantine faults.
 //!
-//! ## [Dealer] Step 1: Distribute Commitment and Shares
+//! ## [Arbiter] Step 0: Start Round
 //!
-//! Distribute generated commitment and corresponding shares to each player over an encrypted channel.
+//! Send a message to all participants to start a round. If this is a reshare, include the group polynomial from
+//! the last successful round.
 //!
-//! ## [Player] Step 3: Verify Share and Send Acknowledgement
+//! ## [Dealer] Step 1: Generate Commitment and Dealings
 //!
-//! Verify incoming share against provided commitment (additionally comparing the commitment to the previous group
-//! polynomial, if reshare). If the share is valid, send an acknowledgement back to the dealer.
+//! Upon receiving start message from arbiter, generate commitment and dealings. If it is a DKG, the commitment is
+//! a random polynomial of degree `2f`. If it is a reshare, the commitment must be consistent with the
+//! previous group polynomial.
+//!
+//! ## [Dealer] Step 2: Distribute Commitment and Dealings
+//!
+//! Distribute generated commitment and corresponding dealings to each player over an encrypted channel.
+//!
+//! ## [Player] Step 3: Verify Dealing and Send Acknowledgement
+//!
+//! Verify incoming dealing against provided commitment (additionally comparing the commitment to the previous group
+//! polynomial, if reshare). If the dealing is valid, send an acknowledgement back to the dealer.
 //!
 //! To protect against a dealer sending different commitments to different players, players must sign this
 //! acknowledgement over `(dealer, commitment)`.
 //!
 //! ## [Dealer] Step 4: Collect Acknowledgements and Send to Arbiter
 //!
-//! Collect acknowledgements from players. After time `2t`, check to see if at least `2f + 1` acknowledgements have
-//! been received (including self, if a player as well). If so, send the commitment, acknowledgements, and unencrypted
-//! shares of players that did not send an acknowledgement to the arbiter. If not, exit.
+//! Collect acknowledgements from players. After `2t` has elapsed since Step 1 (up to `3t` from Step 0), check to
+//! see if at least `2f + 1` acknowledgements have been received (including self, if a player as well). If so, send the
+//! commitment, acknowledgements, and unencrypted dealings of players that did not send an acknowledgement to the
+//! arbiter. If not, exit.
 //!
 //! ## [Arbiter] Step 5: Select Commitments and Forward Reveals
 //!
-//! After time `3t`, select the `2f + 1` commitments with the least number of reveals (most acknowledgements). Send
-//! these `2f + 1` commitments (and any reveals associated with each) to all players. If there do not exist `2f + 1`
-//! commitments with at least `2f + 1` acknowledgements, exit.
+//! Select the first `2f + 1` commitments with at most `f` reveals. Forward these `2f + 1` commitments
+//! (and any reveals associated with each) to all players. If there do not exist `2f + 1` commitments with
+//! at most `f` reveals by time `4t`, exit.
 //!
 //! ## [Player] Step 6: Recover Group Polynomial and Derive Share
 //!
-//! If the round is successful, each player will receive `2f + 1` commitments and any shares associated with said
+//! If the round is successful, each player will receive `2f + 1` commitments and any dealings associated with said
 //! commitments they did not acknowledge (or that the dealer said they didn't acknowledge). With this, they can recover
-//! the new group polynomial and derive their share of the secret.
+//! the new group polynomial and derive their share of the secret. If this distribution is not received by time `5t`, exit.
 //!
 //! # Synchrony Assumption
 //!
-//! In the synchronous network model (where a message between any 2 participants takes up to `t` time to be
-//! delivered), this construction can be used to maintain a `2f + 1` threshold (over `3f + 1` total participants where any
-//! `f` are Byzantine).
+//! Under synchrony (where `t` is the maximum amount of time it takes for a message to be sent between any two participants),
+//! this construction can be used to maintain a shared secret where at least `f + 1` honest players must participate to
+//! recover the shared secret (`2f + 1` threshold where at most `f` players are Byzantine). To see how this is true,
+//! first consider that in any successful round there must exist `2f + 1` commitments with at most `f` reveals. This implies
+//! that all players must have acknowledged or have access to a reveal for each of the `2f + 1` selected commitments (allowing
+//! them to derive their share). Next, consider that when the network is synchronous that all `2f + 1` honest players send
+//! acknowledgements to honest dealers before `2t`. Because `2f + 1` commitments must be chosen, at least `f + 1` commitments
+//! must be from honest dealers (where no honest player dealing is revealed). Even if the remaining `f` commitments are from
+//! Byzantine dealers, there will not be enough dealings to recover the derived share of any honest player (at most `f` of
+//! `2f + 1` dealings publicly revealed). Given all `2f + 1` honest players have access to their shares and it is not possible
+//! for a Byzantine player to derive any honest player's share, this claim holds.
 //!
-//! If the network is not synchronous and `2f + 1` commitments are still posted by time `3t`, the number of honest players
-//! required to generate a valid threshold signature may be as low as `1` (rather than `f + 1`). To see how this could be,
-//! consider the worst case where all `2f + 1` posted commitments reveal shares for the same `f` players (and all reveals are for
-//! honest players). This means a colluding Byzantine adversary will have access to their acknowledged `f` shares and the
-//! revealed `f` shares (`2f`). With a single partial signature from an honest player, the adversary can recover a valid
-//! threshold signature.
-//!
-//! If the network is not synchronous and `2f + 1` commitments are not posted to the arbiter by time `3t`, the round
-//! will abort and should be rerun.
+//! If the network is not synchronous, however, Byzantine players can collude to recover a shared secret with the
+//! participation of a single honest player (rather than `f + 1`) and `f + 1` honest players will each be able to derive
+//! the shared secret (if the Byzantine players reveal their shares). To see how this could be, consider a network where
+//! `f` honest participants are in one partition and (`f + 1` honest and `f` Byzantine participants) are in another. All
+//! `f` Byzantine players acknowledge dealings from the `f + 1` honest dealers. Participants in the second partition will
+//! complete a round and all the reveals will belong to the same set of `f` honest players (that are in the first partition).
+//! A colluding Byzantine adversary will then have access to their acknowledged `f` shares and the revealed `f` shares
+//! (requiring only the participation of a single honest player that was in their partition to recover the shared secret).
+//! If the Byzantine adversary reveals all of their (still private) shares at this time, each of the `f + 1` honest players
+//! that were in the second partition will be able to derive the shared secret without collusion (using their private share
+//! and the `2f` public shares). It will not be possible for any external observer, however, to recover the shared secret.
 //!
 //! ## Future Work: Dropping the Synchrony Assumption?
 //!
-//! It is possible to design a DKG that can maintain a `2f + 1` (over `3f + 1` total participants where any `f` are Byzantine)
-//! that doesn't require a synchrony assumption to ensure `f + 1` honest players are always required to generate a threshold signature.
-//! However, known constructions that satisfy this requirement have thus far required both Zero-Knowledge Proofs (ZKPs) and broadcasting
-//! encrypted shares publicly ([Groth21](https://eprint.iacr.org/2021/339), [Kate23](https://eprint.iacr.org/2023/451)).
+//! It is possible to design a DKG/Resharing scheme that maintains a shared secret where at least `f + 1` honest players
+//! must participate to recover the shared secret that doesn't require a synchrony assumption (`2f + 1` threshold
+//! where at most `f` players are Byzantine). However, known constructions that satisfy this requirement require both
+//! broadcasting encrypted dealings publicly and employing Zero-Knowledge Proofs (ZKPs) to attest that encrypted dealings
+//! were generated correctly ([Groth21](https://eprint.iacr.org/2021/339), [Kate23](https://eprint.iacr.org/2023/451)).
 //!
-//! In the future, it may make sense to deprecate this interactive construction in favor of one of these non-interactive approaches.
-//! As of January 2025, however, these constructions are still considered novel (less than 2-3 years in production and require stronger
-//! cryptographic assumptions), don't scale to hundreds of participants (unless dealers have powerful hardware), and provide adversaries
-//! the opportunity to brute force encrypted shares (even if honest players are online).
+//! As of January 2025, these constructions are still considered novel (2-3 years in production), require stronger
+//! cryptographic assumptions, don't scale to hundreds of participants (unless dealers have powerful hardware), and provide
+//! observers the opportunity to brute force decrypt shares (even if honest players are online).
 //!
 //! # Tracking Complaints
 //!
 //! This crate does not provide an integrated mechanism for tracking complaints from players (of malicious dealers). However, it is
-//! possible to implement your own mechanism and to manually disqualify dealers from a round in the arbiter. This decision was made
-//! because the mechanism for communicating commitments/shares/acknowledgements is highly dependent on the context in which this construction
-//! is used.
+//! possible to implement your own mechanism and to manually disqualify dealers from a given round in the arbiter. This decision was made
+//! because the mechanism for communicating commitments/shares/acknowledgements is highly dependent on the context in which this
+//! construction is used.
 //!
 //! # Example
 //!
-//! For a complete example of how to instantiate this crate, checkout [commonware-vrf](https://docs.rs/commonware-vrf).
+//! For a complete example of how to instantiate this crate, check out [commonware-vrf](https://docs.rs/commonware-vrf).
 
 pub mod arbiter;
 pub use arbiter::Arbiter;
@@ -135,14 +158,6 @@ pub enum Error {
     PlayerInvalid,
     #[error("missing share")]
     MissingShare,
-    #[error("commitment disqualified")]
-    CommitmentDisqualified,
-    #[error("contributor disqualified")]
-    ContributorDisqualified,
-    #[error("contributor is invalid")]
-    ContributorInvalid,
-    #[error("complaint is invalid")]
-    ComplaintInvalid,
     #[error("missing commitment")]
     MissingCommitment,
     #[error("too many commitments")]
@@ -159,12 +174,14 @@ pub enum Error {
     MismatchedShare,
     #[error("too many reveals")]
     TooManyReveals,
-    #[error("too few active")]
-    TooFewActive,
-    #[error("ack and reveal")]
-    AckAndReveal,
+    #[error("incorrect active")]
+    IncorrectActive,
+    #[error("already active")]
+    AlreadyActive,
     #[error("invalid commitments")]
     InvalidCommitments,
+    #[error("dealer disqualified")]
+    DealerDisqualified,
 }
 
 #[cfg(test)]
@@ -217,6 +234,9 @@ mod tests {
             concurrency,
         );
 
+        // Check ready
+        assert!(!arb.ready());
+
         // Send commitments and shares to players
         for (dealer, mut dealer_obj) in dealers {
             // Distribute shares to players
@@ -242,6 +262,9 @@ mod tests {
             arb.commitment(dealer, commitment, output.active, Vec::new())
                 .unwrap();
         }
+
+        // Check ready
+        assert!(arb.ready());
 
         // Finalize arbiter
         let (result, disqualified) = arb.finalize();
@@ -321,6 +344,9 @@ mod tests {
             concurrency,
         );
 
+        // Check ready
+        assert!(!arb.ready());
+
         // Send commitments and shares to players
         for (dealer, mut dealer_obj) in reshare_dealers {
             // Distribute shares to players
@@ -346,6 +372,9 @@ mod tests {
             arb.commitment(dealer, commitment, output.active, Vec::new())
                 .unwrap();
         }
+
+        // Check ready
+        assert!(arb.ready());
 
         // Finalize arbiter
         let (result, disqualified) = arb.finalize();
@@ -815,7 +844,7 @@ mod tests {
             vec![0, 1, 2, 3],
             vec![shares[3]],
         );
-        assert!(matches!(result, Err(Error::AckAndReveal)));
+        assert!(matches!(result, Err(Error::AlreadyActive)));
     }
 
     #[test]
@@ -844,7 +873,7 @@ mod tests {
             vec![0, 1, 2, 3],
             Vec::new(),
         );
-        assert!(matches!(result, Err(Error::TooFewActive)));
+        assert!(matches!(result, Err(Error::IncorrectActive)));
 
         // Add valid commitment to arbiter after disqualified
         let result = arb.commitment(
@@ -853,7 +882,7 @@ mod tests {
             vec![0, 1, 2, 3, 4],
             Vec::new(),
         );
-        assert!(matches!(result, Err(Error::ContributorDisqualified)));
+        assert!(matches!(result, Err(Error::DealerDisqualified)));
     }
 
     #[test]
@@ -885,7 +914,7 @@ mod tests {
             vec![0, 1, 2, 3, 4],
             Vec::new(),
         );
-        assert!(matches!(result, Err(Error::ContributorDisqualified)));
+        assert!(matches!(result, Err(Error::DealerDisqualified)));
     }
 
     #[test]
@@ -1009,7 +1038,7 @@ mod tests {
             vec![0, 1, 2, 2],
             Vec::new(),
         );
-        assert!(matches!(result, Err(Error::DuplicateAck)));
+        assert!(matches!(result, Err(Error::AlreadyActive)));
     }
 
     #[test]

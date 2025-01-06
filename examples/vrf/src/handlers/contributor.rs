@@ -20,7 +20,7 @@ use std::{collections::HashMap, time::Duration};
 use tracing::{debug, info, warn};
 
 /// A DKG/Resharing contributor that can be configured to behave honestly
-/// or deviate as a rogue, lazy, or defiant participant.
+/// or deviate as a rogue, lazy, or forger.
 pub struct Contributor<E: Clock + Rng, C: Scheme> {
     runtime: E,
     crypto: C,
@@ -29,6 +29,7 @@ pub struct Contributor<E: Clock + Rng, C: Scheme> {
     t: u32,
     contributors: Vec<PublicKey>,
     contributors_ordered: HashMap<PublicKey, u32>,
+
     corrupt: bool,
     lazy: bool,
     forger: bool,
@@ -64,6 +65,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                 t: quorum(contributors.len() as u32).unwrap(),
                 contributors,
                 contributors_ordered,
+
                 corrupt,
                 lazy,
                 forger,
@@ -317,7 +319,10 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                                         }
 
                                         // Store ack
-                                        let _ = dealer.ack(s);
+                                        if let Err(e) = dealer.ack(s.clone()) {
+                                            warn!(round, error = ?e, sender = hex(&s), "failed to record ack");
+                                            continue;
+                                        }
                                         acks.insert(msg.public_key, msg.signature);
 
                                     },
@@ -342,7 +347,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
 
                                         // Store share
                                         if let Err(e) = player_obj.share(s.clone(), commitment, share){
-                                            warn!(round, error = ?e, "failed to add share");
+                                            warn!(round, error = ?e, "failed to store share");
                                             continue;
                                         }
 
@@ -446,8 +451,12 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     }
                     let msg = match msg.payload {
                         Some(wire::dkg::Payload::Success(msg)) => msg,
+                        Some(wire::dkg::Payload::Abort(_)) => {
+                            warn!(round, "received abort message");
+                            return (round, None);
+                        }
                         _ => {
-                            warn!(round, "didn't receive success message");
+                            warn!(round, "received unexpected message");
                             return (round, None);
                         }
                     };
@@ -500,13 +509,13 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
 
     pub async fn run(mut self, mut sender: impl Sender, mut receiver: impl Receiver) {
         if self.corrupt {
-            warn!("running as corrupt player");
+            warn!("running as corrupt");
         }
         if self.lazy {
-            warn!("running as lazy player");
+            warn!("running as lazy");
         }
         if self.forger {
-            warn!("running as forger player");
+            warn!("running as forger");
         }
         let mut previous = None;
         loop {
@@ -519,7 +528,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                     continue;
                 }
                 Some(output) => {
-                    info!(round, public = public_hex(&output.public), "round complete");
+                    info!(round, public = public_hex(&output.public), "round success");
 
                     // Generate signature over round
                     self.signatures.send((round, output.clone())).await.unwrap();

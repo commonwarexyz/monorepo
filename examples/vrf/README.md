@@ -31,7 +31,7 @@ cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participan
 
 ## Contributor 4 (Corrupt)
 
-_Send invalid shares to other contributors._
+_Send invalid dealings to contributors._
 
 ```bash
 cargo run --release -- --corrupt --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
@@ -39,7 +39,7 @@ cargo run --release -- --corrupt --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --
 
 ## Contributor 4 (Lazy)
 
-_Only send `t-1` shares._
+_Only send `2f` dealings to contributors (force reveal `f`)._
 
 ```bash
 cargo run --release -- --lazy --bootstrappers 0@127.0.0.1:3000 --me 4@3004 --participants 0,1,2,3,4 --arbiter 0 --contributors 1,2,3,4
