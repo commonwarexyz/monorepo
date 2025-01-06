@@ -80,35 +80,13 @@
 //! player share is revealed). Even if the remaining `f` commitments are from Byzantine dealers, there will not be enough
 //! dealings to recover the derived share of any honest player (at most `f` of `2f + 1` dealings publicly revealed).
 //!
-//! In the synchronous network model (where a message between any 2 participants takes up to `t` time to be
-//! delivered), this construction can be used to maintain a `2f + 1` threshold (over `3f + 1` total participants where any
-//! `f` are Byzantine).
-//!
-//! Think of threshold as how many honest nodes required to produce a signature. In this environment, no way to prevent `f` from getting
-//! shares...so really we are trying to ensure it never takes less than `f + 1` honest players to generate a valid threshold signature.
-//!
-//! If the network is sycnrhonous, the revealed shares will never allow for deriving a share for an honest player.
-//!
-//! May be possible for a malicious player to impersonate an honest player. This is not possible under synchrony. TL;DR a share
-//! for an honest player should not be possible to derive...
-//!
-//! If the network is not synchronous and `2f + 1` commitments are still posted by time `3t`, the threshold for generating
-//! a valid threshold signature may fall as low as `f + 1` (TODO: is this not the same if all byzantine nodes participating...what we really mean to say is that `f` revealed may be from honest players). To see how this could be, consider the case where
-//! there is a network partition such that `f` honest players are in one partition and `f + 1` honest + `f` Byzantine players
-//! are in another. The `2f + 1` in the same partition post commitments by time `3t` (revealing the same `f` shares for
-//! the same `f` honest players). Anyone can now derive these `f` fully-revealed shares (and use them to generate a partial
-//! signature with any other `f + 1` shares). When the network is synchronous, this is not a concern ...
-//!
-//!
-//! number of honest players
-//! required to generate a valid threshold signature may be as low as `1` (rather than `f + 1`). To see how this could be,
-//! consider the worst case where all `2f + 1` posted commitments reveal shares for the same `f` players (and all reveals
-//! are for honest players). This means a colluding Byzantine adversary will have access to their acknowledged `f` shares and the
-//! revealed `f` shares (`2f`). With a single partial signature from an honest player, the adversary can recover a valid
-//! threshold signature.
-//!
-//! If the network is not synchronous and `2f + 1` commitments are not posted to the arbiter by time `3t`, the round
-//! will abort and should be rerun.
+//! If the network is not synchronous and `2f + 1` commitments are still posted by time `3t`, it is no longer guaranteed that
+//! at least `f + 1` honest players are required to generate a valid threshold signature. To see how this could be, consider a
+//! partitioned network where `f` honest participants are in one partition and (`f + 1` honest and `f` Byzantine participants)
+//! are in another and all `f` Byzantine participants acknowledge dealings from the `f + 1` honest dealers. It will be possible
+//! to complete a round in the second partition and all the reveals will belong to the same set of `f` honest players. A colluding
+//! Byzantine adversary will then have access to their acknowledged `f` shares and the revealed `f` shares (requiring only the
+//! participation of a single honest player to generate a valid threshold signature).
 //!
 //! ## Future Work: Dropping the Synchrony Assumption?
 //!
