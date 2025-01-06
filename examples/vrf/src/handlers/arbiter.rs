@@ -29,7 +29,7 @@ pub struct Arbiter<E: Clock> {
     dkg_frequency: Duration,
     dkg_phase_timeout: Duration,
 
-    players: Vec<PublicKey>,
+    contributors: Vec<PublicKey>,
     t: u32,
 }
 
@@ -40,17 +40,17 @@ impl<E: Clock> Arbiter<E> {
         runtime: E,
         dkg_frequency: Duration,
         dkg_phase_timeout: Duration,
-        mut players: Vec<PublicKey>,
+        mut contributors: Vec<PublicKey>,
         t: u32,
     ) -> Self {
-        players.sort();
+        contributors.sort();
         Self {
             runtime,
 
             dkg_frequency,
             dkg_phase_timeout,
 
-            players,
+            contributors,
             t,
         }
     }
@@ -66,7 +66,7 @@ impl<E: Clock> Arbiter<E> {
         let start = self.runtime.current();
         let timeout = start + 4 * self.dkg_phase_timeout; // start -> commitment/share -> ack -> arbiter
 
-        // Send round start message to players
+        // Send round start message to contributors
         let mut group = None;
         if let Some(previous) = &previous {
             group = Some(previous.serialize());
@@ -90,12 +90,16 @@ impl<E: Clock> Arbiter<E> {
             .expect("failed to send start message");
 
         // Collect commitments
-        let mut arbiter =
-            dkg::Arbiter::new(previous, self.players.clone(), self.players.clone(), 1);
+        let mut arbiter = dkg::Arbiter::new(
+            previous,
+            self.contributors.clone(),
+            self.contributors.clone(),
+            1,
+        );
         loop {
             select! {
                 _ = self.runtime.sleep_until(timeout) => {
-                    warn!(round, "commitment phase timed out");
+                    warn!(round, "timed out waiting for commitments");
                     break
                 },
                 result = receiver.recv() => {
@@ -133,7 +137,7 @@ impl<E: Clock> Arbiter<E> {
                             let mut disqualify = false;
                             let mut acks = Vec::new();
                             for ack in &msg.acks {
-                                let Some(public_key) = self.players.get(ack.public_key as usize) else {
+                                let Some(public_key) = self.contributors.get(ack.public_key as usize) else {
                                     disqualify = true;
                                     break;
                                 };
@@ -212,10 +216,10 @@ impl<E: Clock> Arbiter<E> {
             }
         };
 
-        // Send commitments and reveals to all players
+        // Send commitments and reveals to all contributors
         info!(
             round,
-            commitments = ?output.commitments.keys().map(|idx| hex(&self.players[*idx as usize])).collect::<Vec<_>>(),
+            commitments = ?output.commitments.keys().map(|idx| hex(&self.contributors[*idx as usize])).collect::<Vec<_>>(),
             disqualified = ?disqualified
                 .iter()
                 .map(|pk| hex(pk))
@@ -237,7 +241,7 @@ impl<E: Clock> Arbiter<E> {
                     .insert(dealer_idx, share.serialize());
             }
         }
-        for (player_idx, player) in self.players.iter().enumerate() {
+        for (player_idx, player) in self.contributors.iter().enumerate() {
             let reveals = reveals.remove(&(player_idx as u32)).unwrap_or_default();
             sender
                 .send(
