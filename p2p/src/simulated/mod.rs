@@ -91,8 +91,6 @@ pub enum Error {
     MessageTooLarge(usize),
     #[error("network closed")]
     NetworkClosed,
-    #[error("peer closed")]
-    PeerClosed,
     #[error("not valid to link self")]
     LinkingSelf,
     #[error("link missing")]
@@ -101,14 +99,24 @@ pub enum Error {
     InvalidSuccessRate(f64),
     #[error("channel already registered: {0}")]
     ChannelAlreadyRegistered(u32),
+    #[error("send_frame failed")]
+    SendFrameFailed,
+    #[error("recv_frame failed")]
+    RecvFrameFailed,
+    #[error("bind failed")]
+    BindFailed,
+    #[error("accept failed")]
+    AcceptFailed,
+    #[error("dial failed")]
+    DialFailed,
     #[error("peer missing")]
     PeerMissing,
     #[error("invalid connection definition: latency={0}, jitter={1}")]
     InvalidBehavior(f64, f64),
 }
 
-pub use ingress::Oracle;
-pub use network::{Config, Link, Network, Receiver, Sender};
+pub use ingress::{Link, Oracle};
+pub use network::{Config, Network, Receiver, Sender};
 
 #[cfg(test)]
 mod tests {
@@ -686,32 +694,6 @@ mod tests {
             let (sender, message) = receiver2.recv().await.unwrap();
             assert_eq!(sender, pk1);
             assert_eq!(message, msg1);
-
-            // Deregister agent
-            oracle.deregister(pk1.clone()).await.unwrap();
-            oracle.deregister(pk2.clone()).await.unwrap();
-
-            // Send messages
-            let msg1 = Bytes::from("attempt 2: hello from pk1");
-            let msg2 = Bytes::from("attempt 2: hello from pk2");
-            sender1
-                .send(Recipients::One(pk2.clone()), msg1.clone(), false)
-                .await
-                .unwrap();
-            sender2
-                .send(Recipients::One(pk1.clone()), msg2.clone(), false)
-                .await
-                .unwrap();
-
-            // Ensure receivers show network closed
-            let result = receiver1.recv().await;
-            assert!(matches!(result, Err(Error::PeerClosed)));
-            let result = receiver2.recv().await;
-            assert!(matches!(result, Err(Error::PeerClosed)));
-
-            // Remove non-existent agents
-            let result = oracle.deregister(pk1.clone()).await;
-            assert!(matches!(result, Err(Error::PeerMissing)));
         });
     }
 

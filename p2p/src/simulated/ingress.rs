@@ -1,4 +1,4 @@
-use super::{Error, Link, Receiver, Sender};
+use super::{Error, Receiver, Sender};
 use crate::Channel;
 use commonware_cryptography::PublicKey;
 use futures::{
@@ -14,22 +14,33 @@ pub enum Message {
         max_size: usize,
         result: oneshot::Sender<Result<(Sender, Receiver), Error>>,
     },
-    Deregister {
-        public_key: PublicKey,
-        result: oneshot::Sender<Result<(), Error>>,
-    },
     AddLink {
         sender: PublicKey,
         receiver: PublicKey,
         sampler: Normal<f64>,
         success_rate: f64,
-        result: oneshot::Sender<()>,
+        result: oneshot::Sender<Result<(), Error>>,
     },
     RemoveLink {
         sender: PublicKey,
         receiver: PublicKey,
         result: oneshot::Sender<Result<(), Error>>,
     },
+}
+
+/// Describes a connection between two peers.
+///
+/// Links are unidirectional (and must be set up in both directions
+/// for a bidirectional connection).
+pub struct Link {
+    /// Mean latency for the delivery of a message in milliseconds.
+    pub latency: f64,
+
+    /// Standard deviation of the latency for the delivery of a message in milliseconds.
+    pub jitter: f64,
+
+    /// Probability of a message being delivered successfully (in range \[0,1\]).
+    pub success_rate: f64,
 }
 
 /// Interface for modifying the simulated network.
@@ -62,21 +73,6 @@ impl Oracle {
                 public_key,
                 channel,
                 max_size,
-                result: sender,
-            })
-            .await
-            .map_err(|_| Error::NetworkClosed)?;
-        receiver.await.map_err(|_| Error::NetworkClosed)?
-    }
-
-    /// Deregister a peer from the network.
-    ///
-    /// If the peer is not registered, this will return an error.
-    pub async fn deregister(&mut self, public_key: PublicKey) -> Result<(), Error> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Message::Deregister {
-                public_key,
                 result: sender,
             })
             .await
@@ -121,7 +117,7 @@ impl Oracle {
             })
             .await
             .map_err(|_| Error::NetworkClosed)?;
-        r.await.map_err(|_| Error::NetworkClosed)
+        r.await.map_err(|_| Error::NetworkClosed)?
     }
 
     /// Remove a unidirectional link between two peers.
