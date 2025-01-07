@@ -444,7 +444,6 @@ dependencies = [
  "commonware-utils",
  "criterion",
  "ed25519-consensus",
- "itertools 0.13.0",
  "p256",
  "proptest",
  "prost-build",
