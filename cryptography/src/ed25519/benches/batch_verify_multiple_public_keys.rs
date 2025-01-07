@@ -8,7 +8,7 @@ fn benchmark_batch_verify_multiple_public_keys(c: &mut Criterion) {
     let mut msg = [0u8; 32];
     thread_rng().fill(&mut msg);
     for n_signers in [1, 10, 100, 1000, 10000].into_iter() {
-        c.bench_function(&format!("{}/n_pks={}", module_path!(), n_signers), |b| {
+        c.bench_function(&format!("{}/pks={}", module_path!(), n_signers), |b| {
             b.iter_batched(
                 || {
                     let mut batch = Ed25519Batch::new();

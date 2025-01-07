@@ -12,26 +12,23 @@ fn benchmark_batch_verify_multiple_messages(c: &mut Criterion) {
             thread_rng().fill(&mut msg);
             msgs.push(msg);
         }
-        c.bench_function(
-            &format!("{}/n_messages={}", module_path!(), n_messages),
-            |b| {
-                b.iter_batched(
-                    || {
-                        let mut batch = Ed25519Batch::new();
-                        let mut signer = Ed25519::new(&mut thread_rng());
-                        for msg in msgs.iter() {
-                            let sig = signer.sign(Some(namespace), msg);
-                            assert!(batch.add(Some(namespace), msg, &signer.public_key(), &sig));
-                        }
-                        batch
-                    },
-                    |batch| {
-                        black_box(batch.verify(&mut thread_rng()));
-                    },
-                    BatchSize::SmallInput,
-                );
-            },
-        );
+        c.bench_function(&format!("{}/msgs={}", module_path!(), n_messages), |b| {
+            b.iter_batched(
+                || {
+                    let mut batch = Ed25519Batch::new();
+                    let mut signer = Ed25519::new(&mut thread_rng());
+                    for msg in msgs.iter() {
+                        let sig = signer.sign(Some(namespace), msg);
+                        assert!(batch.add(Some(namespace), msg, &signer.public_key(), &sig));
+                    }
+                    batch
+                },
+                |batch| {
+                    black_box(batch.verify(&mut thread_rng()));
+                },
+                BatchSize::SmallInput,
+            );
+        });
     }
 }
 
