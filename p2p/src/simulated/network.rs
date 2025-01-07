@@ -8,7 +8,13 @@ use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{
+    deterministic::{Listener, Sink, Stream},
+    Clock,
+    Network as RNetwork,
+    Spawner,
+};
+use commonware_stream::public_key::utils::codec::{recv_frame, send_frame};
 use commonware_utils::hex;
 use futures::{
     channel::{mpsc, oneshot},
@@ -22,6 +28,7 @@ use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap},
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -37,15 +44,18 @@ type Task = (
 );
 
 /// Implementation of a simulated network.
-pub struct Network<E: Spawner + Rng + Clock> {
+pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> {
     runtime: E,
 
     ingress: mpsc::UnboundedReceiver<ingress::Message>,
 
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
-    links: HashMap<PublicKey, HashMap<PublicKey, (Normal<f64>, f64)>>,
-    peers: BTreeMap<PublicKey, HashMap<Channel, (usize, mpsc::UnboundedSender<Message>)>>,
+
+    links: HashMap<PublicKey, HashMap<PublicKey, (Sink, Normal<f64>, f64)>>,
+    peers: BTreeMap<PublicKey, HashMap<Channel, usize>>,
+    listeners: HashMap<PublicKey, (SocketAddr, Listener)>,
+    receivers: HashMap<PublicKey, Receiver>,
 
     received_messages: Family<metrics::Message, Counter>,
     sent_messages: Family<metrics::Message, Counter>,
@@ -72,7 +82,7 @@ pub struct Config {
     pub registry: Arc<Mutex<Registry>>,
 }
 
-impl<E: Spawner + Rng + Clock> Network<E> {
+impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
@@ -99,6 +109,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 receiver,
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
+                listeners: HashMap::new(),
                 received_messages,
                 sent_messages,
             },
@@ -106,7 +117,47 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         )
     }
 
-    fn handle_ingress(&mut self, message: ingress::Message) {
+    fn generate_ip(&mut self) -> SocketAddr {
+        let ip1 = self.runtime.next_u64();
+        let ip2 = self.runtime.next_u64();
+        SocketAddr::from(([
+            (ip1 >> 48) as u16,
+            (ip1 >> 32) as u16,
+            (ip1 >> 16) as u16,
+            ip1 as u16,
+            (ip2 >> 48) as u16,
+            (ip2 >> 32) as u16,
+            (ip2 >> 16) as u16,
+            ip2 as u16,
+        ], 0))
+    }
+
+    async fn get_receiver(&mut self, public_key: PublicKey) -> Result<Receiver, Error> {
+        // Check if receiver already exists
+        if let Some(receiver) = self.receivers.get(&public_key) {
+            return Ok(receiver.clone());
+        }
+
+        // Create receiver
+        let receiver = Receiver::new();
+        self.receivers.insert(public_key, receiver.clone());
+        Ok(receiver)
+    }
+
+    async fn get_listener(&mut self, public_key: PublicKey) -> Result<(SocketAddr, Listener), Error> {
+        // Check if listener already exists
+        if let Some((socket, listener)) = self.listeners.get(&public_key) {
+            return Ok((*socket, listener.clone()));
+        }
+
+        // Create listener
+        let socket = self.generate_ip();
+        let listener = self.runtime.bind(socket).await.map_err(Error::BindFailed)?;
+        self.listeners.insert(public_key, (socket, listener));
+        Ok((socket, listener))
+    }
+
+    async fn handle_ingress(&mut self, message: ingress::Message) {
         // Handle ingress message
         //
         // It is important to ensure that no failed receipt of a message will cause us to exit.
@@ -119,26 +170,26 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 result,
             } => {
                 // Ensure doesn't already exist
-                let entry = self.peers.entry(public_key.clone()).or_default();
-                if entry.get(&channel).is_some() {
+                if self.peers.contains_key(&public_key) {
                     if let Err(err) = result.send(Err(Error::ChannelAlreadyRegistered(channel))) {
                         error!(?err, "failed to send register err to oracle");
                     }
                     return;
                 }
-
+                
                 // Initialize agent channel
-                let (sender, receiver) = mpsc::unbounded();
-                entry.insert(channel, (max_size, sender));
+                let sender = Sender::new(
+                    self.runtime.clone(),
+                    public_key,
+                    channel,
+                    max_size,
+                    self.sender.clone(),
+                );
+                let receiver = Receiver::new(max_size);
+                entry.insert(channel, max_size);
                 let result = result.send(Ok((
-                    Sender::new(
-                        self.runtime.clone(),
-                        public_key,
-                        channel,
-                        max_size,
-                        self.sender.clone(),
-                    ),
-                    Receiver { receiver },
+                    ,
+                    Receiver::new(max_size),
                 )));
                 if let Err(err) = result {
                     error!(?err, "failed to send register ack to oracle");
@@ -162,10 +213,27 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 success_rate,
                 result,
             } => {
+                let (socket, listener) = match self.get_listener(receiver).await {
+                    Ok((socket, listener)) => (socket, listener),
+                    Err(err) => {
+                        if let Err(err) = result.send(Err(err)) {
+                            error!(?err, "failed to send add link err to oracle");
+                        }
+                        return;
+                    }
+                };
+
+                // Create connection by dialing and accepting
+                let (dial_result, accept_result) = futures::try_join!(
+                    self.runtime.dial(socket),
+                    listener.accept(),
+                );
+
                 self.links
                     .entry(sender)
                     .or_default()
-                    .insert(receiver, (sampler, success_rate));
+                    .insert(receiver, (sink, sampler, success_rate));
+
                 if let Err(err) = result.send(()) {
                     error!(?err, "failed to send add link ack to oracle");
                 }
@@ -221,29 +289,27 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             }
 
             // Determine if recipient exists
-            let sender = match self.peers.get(&recipient) {
-                Some(sender) => sender,
-                None => {
-                    trace!(
-                        recipient = hex(&recipient),
-                        reason = "no agent",
-                        "dropping message",
-                    );
-                    continue;
-                }
+            if !self.peers.contains_key(&recipient) {
+                trace!(
+                    recipient = hex(&recipient),
+                    reason = "no agent",
+                    "dropping message",
+                );
+                continue;
             };
 
             // Determine if there is a link between the sender and recipient
-            let link = match self
+            let (sink, sampler, success_rate) = match self
                 .links
                 .get(&origin)
-                .and_then(|links| links.get(&recipient))
+                .and_then(|cs| cs.get(&recipient))
             {
                 Some(link) => link,
                 None => {
                     trace!(
+                        origin = hex(&origin),
                         recipient = hex(&recipient),
-                        reason = "no link",
+                        reason = "no connection",
                         "dropping message",
                     );
                     continue;
@@ -257,8 +323,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 .inc();
 
             // Apply link settings
-            let delay = link.0.sample(&mut self.runtime);
-            let should_deliver = self.runtime.gen_bool(link.1);
+            let delay = sampler.sample(&mut self.runtime);
+            let should_deliver = self.runtime.gen_bool(*success_rate);
             trace!(
                 origin = hex(&origin),
                 recipient = hex(&recipient),
@@ -270,7 +336,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             self.runtime.spawn("messenger", {
                 let runtime = self.runtime.clone();
                 let recipient = recipient.clone();
-                let sender = sender.get(&channel).cloned();
+                let peer = self.peers.get(&recipient).and_then(|peers| peers.get(&channel));
                 let message = message.clone();
                 let mut acquired_sender = acquired_sender.clone();
                 let origin = origin.clone();
@@ -296,8 +362,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                     }
 
                     // Drop message if not listening on channel
-                    let (max_size, mut sender) = match sender {
-                        Some(sender) => sender,
+                    let (max_size, _) = match peer {
+                        Some(peer) => peer,
                         None => {
                             trace!(
                                 recipient = hex(&recipient),
@@ -309,21 +375,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                         }
                     };
 
-                    // Drop message if too large
-                    if message.len() > max_size {
-                        trace!(
-                            recipient = hex(&recipient),
-                            channel,
-                            size = message.len(),
-                            max_size,
-                            reason = "message too large",
-                            "dropping message",
-                        );
-                        return;
-                    }
-
                     // Send message
-                    if let Err(err) = sender.send((origin.clone(), message)).await {
+                    if let Err(err) = send_frame(&mut *sink, &message, *max_size).await {
                         // This can only happen if the receiver exited.
                         error!(
                             origin = hex(&origin),
@@ -372,7 +425,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                         None => break,
                     };
 
-                    self.handle_ingress(message);
+                    self.handle_ingress(message).await;
                 },
                 task = self.receiver.next() => {
                     // If receiver is closed, exit
@@ -473,15 +526,57 @@ impl crate::Sender for Sender {
 }
 
 /// Implementation of a [`crate::Receiver`] for the simulated network.
-#[derive(Debug)]
 pub struct Receiver {
-    receiver: mpsc::UnboundedReceiver<Message>,
+    max_size: usize,
+    inbox_send: mpsc::UnboundedSender<Message>,
+    inbox_recv: mpsc::UnboundedReceiver<Message>,
+}
+
+impl Receiver {
+    fn new (
+        max_size: usize,
+    ) -> Self {
+        let (sink, stream) = mpsc::unbounded();
+        Self {
+            max_size,
+            inbox_send: sink,
+            inbox_recv: stream,
+        }
+    }
+
+    async fn link(
+        &mut self,
+        runtime: impl Spawner,
+        from: PublicKey,
+        mut stream: Stream,
+    ) {
+        let max_size = self.max_size;
+        let mut inbox_send = self.inbox_send.clone();
+        runtime.spawn("receiver", async move {
+            loop {
+                // Wait for message
+                let data = recv_frame(&mut stream, max_size).await
+                    .map_err(|_| Error::NetworkClosed)
+                    .unwrap();
+                let message = (from.clone(), data);
+                inbox_send.send(message).await.map_err(|_| Error::NetworkClosed).unwrap();
+            }
+        });
+    }
 }
 
 impl crate::Receiver for Receiver {
     type Error = Error;
 
     async fn recv(&mut self) -> Result<Message, Error> {
-        self.receiver.next().await.ok_or(Error::PeerClosed)
+        self.inbox_recv.next().await.ok_or(Error::NetworkClosed)
+    }
+}
+
+impl std::fmt::Debug for Receiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Receiver")
+            .field("from", &hex(&self.from))
+            .finish()
     }
 }

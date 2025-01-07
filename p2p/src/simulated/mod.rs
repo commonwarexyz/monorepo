@@ -103,6 +103,8 @@ pub enum Error {
     ChannelAlreadyRegistered(u32),
     #[error("peer missing")]
     PeerMissing,
+    #[error("bind failed")]
+    BindFailed,
     #[error("invalid connection definition: latency={0}, jitter={1}")]
     InvalidBehavior(f64, f64),
 }
