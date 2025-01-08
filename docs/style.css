@@ -145,3 +145,30 @@ details.benchmark-set summary {
     list-style: none;
     /* Removes default disclosure triangle in some browsers */
 }
+
+/* For each graph's details element */
+details.benchmark-graph-details {
+    margin-left: 1em;
+    margin-bottom: 15px;
+    border: 1px solid #eee;
+    padding: 6px 8px;
+    border-radius: 4px;
+}
+
+details.benchmark-graph-details summary.benchmark-graph-title {
+    font-size: 1em;
+    font-weight: bold;
+    cursor: pointer;
+    outline: none;
+    list-style: none;
+    /* removes default disclosure marker in some browsers */
+}
+
+/* The canvas is hidden unless the <details> is open.
+   The default toggling behavior is automatic if you don't need animations. */
+.benchmark-chart {
+    display: block;
+    margin: 10px 0;
+    width: 100%;
+    max-width: 100%;
+}

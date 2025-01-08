@@ -121,21 +121,34 @@
 
             function renderAllChars(dataSets) {
                 function renderGraph(parent, name, dataset) {
+                    /*
+                     * Create a <details> wrapper for each individual graph.
+                     */
+                    const graphDetails = document.createElement('details');
+                    graphDetails.className = 'benchmark-graph-details';
+                    parent.appendChild(graphDetails);
+
+                    // <summary> that shows/hides the graph
+                    const summaryElem = document.createElement('summary');
+                    summaryElem.className = 'benchmark-graph-title';
+                    summaryElem.textContent = name;
+                    graphDetails.appendChild(summaryElem);
+
+                    // Create the <canvas> inside the <details>
                     const canvas = document.createElement('canvas');
                     canvas.className = 'benchmark-chart';
-                    parent.appendChild(canvas);
+                    graphDetails.appendChild(canvas);
 
                     const data = {
                         labels: dataset.map(d => d.commit.id.slice(0, 7)),
-                        datasets: [
-                            {
-                                label: name,
-                                data: dataset.map(d => d.bench.value),
-                                borderColor: '#0000ee',
-                                backgroundColor: '#0000ee' + '60'
-                            }
-                        ]
+                        datasets: [{
+                            label: name,
+                            data: dataset.map(d => d.bench.value),
+                            borderColor: '#0000ee',
+                            backgroundColor: '#0000ee' + '60'
+                        }]
                     };
+
                     const options = {
                         scales: {
                             xAxes: [{
@@ -154,15 +167,15 @@
                                 }
                             }]
                         },
-                        legend: {
-                            display: false,
-                        },
+                        legend: { display: false },
                         tooltips: {
                             callbacks: {
                                 afterTitle: items => {
                                     const { index } = items[0];
                                     const data = dataset[index];
-                                    return '\n' + data.commit.message + '\n\n' + data.commit.timestamp + ' committed by @' + data.commit.committer.username + '\n';
+                                    return '\n' + data.commit.message
+                                        + '\n\n' + data.commit.timestamp
+                                        + ' committed by @' + data.commit.committer.username + '\n';
                                 },
                                 label: item => {
                                     let label = item.value;
@@ -180,18 +193,13 @@
                             }
                         },
                         onClick: (_mouseEvent, activeElems) => {
-                            if (activeElems.length === 0) {
-                                return;
-                            }
+                            if (activeElems.length === 0) return;
                             const index = activeElems[0]._index;
                             const url = dataset[index].commit.url;
                             window.open(url, '_blank');
                         },
                         title: {
-                            display: true,
-                            text: name,
-                            fontSize: 16,
-                            fontStyle: 'bold',
+                            display: false,
                         },
                     };
 
