@@ -130,6 +130,14 @@ img {
     margin: 0 10px;
 }
 
+summary::-webkit-details-marker {
+    display: none;
+}
+
+summary {
+    list-style: none;
+}
+
 details.benchmark-set {
     margin-top: 20px;
     margin-bottom: 20px;
@@ -141,11 +149,12 @@ details.benchmark-set summary {
     font-size: 1.2em;
     font-weight: bold;
     cursor: pointer;
-    outline: none;
     overflow-wrap: anywhere;
     white-space: normal;
     max-width: 100%;
-    display: list-item;
+    list-style: none;
+    color: -webkit-link;
+    text-decoration: underline;
 }
 
 details.benchmark-graph-details {
@@ -164,7 +173,9 @@ details.benchmark-graph-details summary.benchmark-graph-title {
     overflow-wrap: anywhere;
     white-space: normal;
     max-width: 100%;
-    display: list-item;
+    list-style: none;
+    color: -webkit-link;
+    text-decoration: underline;
 }
 
 .benchmark-chart {
