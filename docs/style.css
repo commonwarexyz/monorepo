@@ -149,6 +149,7 @@ details.benchmark-set summary {
     font-size: 1.2em;
     font-weight: bold;
     cursor: pointer;
+    outline: none;
     overflow-wrap: anywhere;
     white-space: normal;
     max-width: 100%;
