@@ -143,6 +143,10 @@ details.benchmark-set summary {
     cursor: pointer;
     outline: none;
     list-style: none;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+    display: inline-block;
 }
 
 details.benchmark-graph-details {
@@ -159,6 +163,10 @@ details.benchmark-graph-details summary.benchmark-graph-title {
     cursor: pointer;
     outline: none;
     list-style: none;
+    overflow-wrap: anywhere;
+    white-space: normal;
+    max-width: 100%;
+    display: inline-block;
 }
 
 .benchmark-chart {
