@@ -145,6 +145,7 @@ details.benchmark-set summary {
     overflow-wrap: anywhere;
     white-space: normal;
     max-width: 100%;
+    display: list-item;
 }
 
 details.benchmark-graph-details {
@@ -163,6 +164,7 @@ details.benchmark-graph-details summary.benchmark-graph-title {
     overflow-wrap: anywhere;
     white-space: normal;
     max-width: 100%;
+    display: list-item;
 }
 
 .benchmark-chart {
