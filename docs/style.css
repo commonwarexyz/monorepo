@@ -46,7 +46,7 @@ body {
     font-style: italic;
 }
 
-.blog-meta {
+.meta {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
