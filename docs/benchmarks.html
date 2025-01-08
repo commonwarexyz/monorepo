@@ -118,11 +118,9 @@
                 }));
             }
 
-            function renderAllChars(dataSets) {
+            function renderAllCharts(dataSets) {
                 function renderGraph(parent, name, dataset) {
-                    /*
-                     * Create a <details> wrapper for each individual graph.
-                     */
+                    // Create a <details> wrapper for each individual graph.
                     const graphDetails = document.createElement('details');
                     graphDetails.className = 'benchmark-graph-details';
                     parent.appendChild(graphDetails);
@@ -138,6 +136,7 @@
                     canvas.className = 'benchmark-chart';
                     graphDetails.appendChild(canvas);
 
+                    // Create chart
                     const data = {
                         labels: dataset.map(d => d.commit.id.slice(0, 7)),
                         datasets: [{
@@ -147,7 +146,6 @@
                             backgroundColor: '#0000ee' + '60'
                         }]
                     };
-
                     const options = {
                         scales: {
                             xAxes: [{
@@ -201,7 +199,6 @@
                             display: false,
                         },
                     };
-
                     new Chart(canvas, {
                         type: 'line',
                         data,
@@ -235,7 +232,7 @@
                 }
             }
 
-            renderAllChars(init());
+            renderAllCharts(init());
         };
     </script>
     <script src="https://commonwarexyz.github.io/benchmarks/data.js" onload="setupBenchmark()"></script>
