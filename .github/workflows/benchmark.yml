@@ -60,6 +60,6 @@ jobs:
           github-token: ${{ secrets.BENCHMARKS_SECRET }}
           gh-repository: github.com/commonwarexyz/benchmarks
           gh-pages-branch: main
-          benchmark-data-dir-path: docs
+          benchmark-data-dir-path: '.'
           auto-push: true
 
