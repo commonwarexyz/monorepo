@@ -129,3 +129,19 @@ img {
 .footer .social-link {
     margin: 0 10px;
 }
+
+/* Styles for collapsible details */
+details.benchmark-set {
+    margin-bottom: 20px;
+    border: 1px solid #eee;
+    padding: 8px;
+    border-radius: 4px;
+}
+
+details.benchmark-set summary {
+    font-size: 1.2em;
+    cursor: pointer;
+    outline: none;
+    list-style: none;
+    /* Removes default disclosure triangle in some browsers */
+}

@@ -202,20 +202,21 @@
                     });
                 }
 
-                function renderBenchSet(name, benchSet, main) {
-                    const setElem = document.createElement('div');
-                    setElem.className = 'benchmark-set';
-                    main.appendChild(setElem);
+                function renderBenchSet(testName, benchSet, main) {
+                    const detailsElem = document.createElement('details');
+                    detailsElem.className = 'benchmark-set';
+                    main.appendChild(detailsElem);
 
-                    const nameElem = document.createElement('h1');
-                    nameElem.className = 'benchmark-title';
-                    nameElem.textContent = name;
-                    setElem.appendChild(nameElem);
+                    const summaryElem = document.createElement('summary');
+                    summaryElem.className = 'benchmark-title';
+                    summaryElem.textContent = testName;
+                    detailsElem.appendChild(summaryElem);
 
                     const graphsElem = document.createElement('div');
                     graphsElem.className = 'benchmark-graphs';
-                    setElem.appendChild(graphsElem);
+                    detailsElem.appendChild(graphsElem);
 
+                    // Render individual graphs within this test set
                     for (const [benchName, benches] of benchSet.entries()) {
                         renderGraph(graphsElem, benchName, benches)
                     }
