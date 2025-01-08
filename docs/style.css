@@ -130,29 +130,27 @@ img {
     margin: 0 10px;
 }
 
-/* Styles for collapsible details */
 details.benchmark-set {
+    margin-top: 20px;
     margin-bottom: 20px;
     border: 1px solid #eee;
     padding: 8px;
-    border-radius: 4px;
 }
 
 details.benchmark-set summary {
     font-size: 1.2em;
+    font-weight: bold;
     cursor: pointer;
     outline: none;
     list-style: none;
-    /* Removes default disclosure triangle in some browsers */
 }
 
-/* For each graph's details element */
 details.benchmark-graph-details {
-    margin-left: 1em;
+    margin-left: 15px;
+    margin-top: 15px;
     margin-bottom: 15px;
     border: 1px solid #eee;
-    padding: 6px 8px;
-    border-radius: 4px;
+    padding: 8px;
 }
 
 details.benchmark-graph-details summary.benchmark-graph-title {
@@ -161,14 +159,11 @@ details.benchmark-graph-details summary.benchmark-graph-title {
     cursor: pointer;
     outline: none;
     list-style: none;
-    /* removes default disclosure marker in some browsers */
 }
 
-/* The canvas is hidden unless the <details> is open.
-   The default toggling behavior is automatic if you don't need animations. */
 .benchmark-chart {
     display: block;
-    margin: 10px 0;
+    margin: 15px 0;
     width: 100%;
     max-width: 100%;
 }
