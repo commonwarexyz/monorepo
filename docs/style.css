@@ -46,7 +46,7 @@ body {
     font-style: italic;
 }
 
-.blog-meta {
+.meta {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -128,4 +128,42 @@ img {
 
 .footer .social-link {
     margin: 0 10px;
+}
+
+details.benchmark-set {
+    margin-top: 20px;
+    margin-bottom: 20px;
+    border: 1px solid #eee;
+    padding: 8px;
+}
+
+details.benchmark-set summary {
+    font-size: 1.2em;
+    font-weight: bold;
+    cursor: pointer;
+    outline: none;
+    list-style: none;
+}
+
+details.benchmark-graph-details {
+    margin-left: 15px;
+    margin-top: 15px;
+    margin-bottom: 15px;
+    border: 1px solid #eee;
+    padding: 8px;
+}
+
+details.benchmark-graph-details summary.benchmark-graph-title {
+    font-size: 1em;
+    font-weight: bold;
+    cursor: pointer;
+    outline: none;
+    list-style: none;
+}
+
+.benchmark-chart {
+    display: block;
+    margin: 15px 0;
+    width: 100%;
+    max-width: 100%;
 }

@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="icon" href="favicon.ico" type="image/x-icon">
+
+    <title>commonware > Benchmarks</title>
+    <meta name="description" content="Benchmarks for the Commonware Library.">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/benchmarks.html" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="commonware > Benchmarks" />
+    <meta property="og:title" content="commonware > Benchmarks" />
+    <meta property="og:description" content="Benchmarks for the Commonware Library." />
+    <meta property="og:image" content="https://commonware.xyz/card.png" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="benchmarks.commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/benchmarks.html" />
+    <meta property="twitter:title" content="commonware > Benchmarks" />
+    <meta property="twitter:description" content="Benchmarks for the Commonware Library." />
+    <meta property="twitter:image" content="https://commonware.xyz/card.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="@commonwarexyz" />
+    <meta property="twitter:creator:id" content="@commonwarexyz" />
+
+    <link rel="stylesheet" type="text/css" href="style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Benchmarks</h1>
+        <div class="meta">
+            <div class="date">Last Updated: <span id="last-update"></span></div>
+        </div>
+        <div id="main"></div>
+    </div>
+
+    <div id="footer-placeholder"></div>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.2/dist/Chart.min.js"></script>
+    <script>
+        'use strict';
+        function setupBenchmark() {
+            // Set Chart.js default font family
+            Chart.defaults.global.defaultFontFamily = 'Consolas, monospace';
+            Chart.defaults.global.defaultFontColor = "#000";
+
+            // Build cases
+            function init() {
+                function collectBenchesPerTestCase(entries) {
+                    const map = new Map();
+                    for (const entry of entries) {
+                        const { commit, date, tool, benches } = entry;
+                        for (const bench of benches) {
+                            const result = { commit, date, tool, bench };
+                            const arr = map.get(bench.name);
+                            if (arr === undefined) {
+                                map.set(bench.name, [result]);
+                            } else {
+                                arr.push(result);
+                            }
+                        }
+                    }
+                    return map;
+                }
+
+                const data = window.BENCHMARK_DATA;
+
+                // Render header
+                document.getElementById('last-update').textContent = new Date(data.lastUpdate).toString();
+
+                // Prepare data points for charts
+                return Object.keys(data.entries).map(name => ({
+                    name,
+                    dataSet: collectBenchesPerTestCase(data.entries[name]),
+                }));
+            }
+
+            function renderAllCharts(dataSets) {
+                function renderGraph(parent, name, dataset) {
+                    // Create a <details> wrapper for each individual graph.
+                    const graphDetails = document.createElement('details');
+                    graphDetails.className = 'benchmark-graph-details';
+                    parent.appendChild(graphDetails);
+
+                    // <summary> that shows/hides the graph
+                    const summaryElem = document.createElement('summary');
+                    summaryElem.className = 'benchmark-graph-title';
+                    summaryElem.textContent = name;
+                    graphDetails.appendChild(summaryElem);
+
+                    // Create the <canvas> inside the <details>
+                    const canvas = document.createElement('canvas');
+                    canvas.className = 'benchmark-chart';
+                    graphDetails.appendChild(canvas);
+
+                    // Create chart
+                    const data = {
+                        labels: dataset.map(d => d.commit.id.slice(0, 7)),
+                        datasets: [{
+                            label: name,
+                            data: dataset.map(d => d.bench.value),
+                            borderColor: '#0000ee',
+                            backgroundColor: '#0000ee' + '60'
+                        }]
+                    };
+                    const options = {
+                        scales: {
+                            xAxes: [{
+                                scaleLabel: {
+                                    display: true,
+                                    labelString: 'commit',
+                                },
+                            }],
+                            yAxes: [{
+                                scaleLabel: {
+                                    display: true,
+                                    labelString: dataset.length > 0 ? dataset[0].bench.unit : '',
+                                },
+                                ticks: {
+                                    beginAtZero: true,
+                                }
+                            }]
+                        },
+                        legend: { display: false },
+                        tooltips: {
+                            callbacks: {
+                                afterTitle: items => {
+                                    const { index } = items[0];
+                                    const data = dataset[index];
+                                    return '\n' + data.commit.message
+                                        + '\n\n' + data.commit.timestamp
+                                        + ' committed by @' + data.commit.committer.username + '\n';
+                                },
+                                label: item => {
+                                    let label = item.value;
+                                    const { range, unit } = dataset[item.index].bench;
+                                    label += ' ' + unit;
+                                    if (range) {
+                                        label += ' (' + range + ')';
+                                    }
+                                    return label;
+                                },
+                                afterLabel: item => {
+                                    const { extra } = dataset[item.index].bench;
+                                    return extra ? '\n' + extra : '';
+                                }
+                            }
+                        },
+                        onClick: (_mouseEvent, activeElems) => {
+                            if (activeElems.length === 0) return;
+                            const index = activeElems[0]._index;
+                            const url = dataset[index].commit.url;
+                            window.open(url, '_blank');
+                        },
+                        title: {
+                            display: false,
+                        },
+                    };
+                    new Chart(canvas, {
+                        type: 'line',
+                        data,
+                        options,
+                    });
+                }
+
+                function renderBenchSet(testName, benchSet, main) {
+                    const detailsElem = document.createElement('details');
+                    detailsElem.className = 'benchmark-set';
+                    main.appendChild(detailsElem);
+
+                    const summaryElem = document.createElement('summary');
+                    summaryElem.className = 'benchmark-title';
+                    summaryElem.textContent = testName;
+                    detailsElem.appendChild(summaryElem);
+
+                    const graphsElem = document.createElement('div');
+                    graphsElem.className = 'benchmark-graphs';
+                    detailsElem.appendChild(graphsElem);
+
+                    // Render individual graphs within this test set
+                    for (const [benchName, benches] of benchSet.entries()) {
+                        renderGraph(graphsElem, benchName, benches)
+                    }
+                }
+
+                const main = document.getElementById('main');
+                for (const { name, dataSet } of dataSets) {
+                    renderBenchSet(name, dataSet, main);
+                }
+            }
+
+            renderAllCharts(init());
+        };
+    </script>
+    <script src="https://commonwarexyz.github.io/benchmarks/data.js" onload="setupBenchmark()"></script>
+    <script src="shared.js"></script>
+    <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "07159b86f75b4af18e54dd0cda2fb4a7"}'></script>
+</body>
+
+</html>
