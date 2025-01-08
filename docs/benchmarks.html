@@ -72,16 +72,8 @@
     </div>
     <div class="content">
         <h1>Benchmarks</h1>
-        <div id="header" style="margin-bottom: 20px;">
-            <div>
-                <strong>Last Update:</strong> <span id="last-update"></span>
-            </div>
-            <div>
-                <strong>Repository:</strong> <a id="repository-link" rel="noopener"></a>
-            </div>
-            <div>
-                <strong>Data:</strong> <a id="data-link" href="https://github.com/commonwarexyz/benchmarks">https://github.com/commonwarexyz/benchmarks</a>
-            </div>
+        <div class="blog-meta">
+            <div class="date">Last Updated: <span id="last-update"></span></div>
         </div>
         <div id="main"></div>
     </div>
@@ -119,13 +111,6 @@
 
                 // Render header
                 document.getElementById('last-update').textContent = new Date(data.lastUpdate).toString();
-                const repoLink = document.getElementById('repository-link');
-                repoLink.href = data.repoUrl;
-                repoLink.textContent = data.repoUrl;
-                const dataLink = document.getElementById('data-link');
-                const dataUrl = "https://github.com/commonwarexyz/benchmarks";
-                dataLink.href = dataUrl;
-                dataLink.textContent = dataUrl;
 
                 // Prepare data points for charts
                 return Object.keys(data.entries).map(name => ({
