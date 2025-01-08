@@ -381,10 +381,10 @@ mod tests {
         let qx_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
         let qy_hex = "d0720dc691aa80096ba32fed1cb97c2b620690d06de0317b8618d5ce65eb728f";
 
-        let uncompressed_public_key = parse_public_key_as_uncompressed(&qx_hex, &qy_hex);
+        let uncompressed_public_key = parse_public_key_as_uncompressed(qx_hex, qy_hex);
         assert!(!Secp256r1::validate(&uncompressed_public_key));
 
-        let compressed_public_key = parse_public_key_as_compressed(&qx_hex, &qy_hex);
+        let compressed_public_key = parse_public_key_as_compressed(qx_hex, qy_hex);
         assert!(Secp256r1::validate(&compressed_public_key));
     }
 
@@ -401,7 +401,7 @@ mod tests {
         let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
         let signature = signer.sign(None, message);
 
-        let uncompressed_public_key = parse_public_key_as_uncompressed(&qx_hex, &qy_hex);
+        let uncompressed_public_key = parse_public_key_as_uncompressed(qx_hex, qy_hex);
         assert!(!Secp256r1::verify(
             None,
             message,
@@ -409,12 +409,33 @@ mod tests {
             &signature
         ));
 
-        let compressed_public_key = parse_public_key_as_compressed(&qx_hex, &qy_hex);
+        let compressed_public_key = parse_public_key_as_compressed(qx_hex, qy_hex);
         assert!(Secp256r1::verify(
             None,
             message,
             &compressed_public_key,
             &signature
+        ));
+    }
+
+    #[test]
+    fn test_scheme_verify_signature_too_long() {
+        let private_key: PrivateKey = commonware_utils::from_hex_formatted(
+            "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
+        )
+        .unwrap()
+        .into();
+        let message = b"sample";
+        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let signature = signer.sign(None, message);
+        let mut signature = signature.to_vec();
+        signature.push(0x01);
+
+        assert!(!Secp256r1::verify(
+            None,
+            message,
+            &signer.public_key(),
+            &signature.into()
         ));
     }
 
