@@ -93,6 +93,8 @@ pub enum Error {
     NetworkClosed,
     #[error("not valid to link self")]
     LinkingSelf,
+    #[error("link already exists")]
+    LinkExists,
     #[error("link missing")]
     LinkMissing,
     #[error("invalid success rate (must be in [0, 1]): {0}")]

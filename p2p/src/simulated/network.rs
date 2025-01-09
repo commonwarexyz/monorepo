@@ -26,7 +26,7 @@ use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap},
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -40,151 +40,6 @@ type Task = (
     Bytes,
     oneshot::Sender<Vec<PublicKey>>,
 );
-
-struct Mailbox {
-    // Map from channel to a tuple of max_size and the sender to the receiver for that channel
-    senders: Arc<Mutex<HashMap<Channel, mpsc::UnboundedSender<Message>>>>,
-
-    // Socket address of the peer
-    socket: SocketAddr,
-}
-
-impl Mailbox {
-    fn new<E: Rng + Spawner + RNetwork<Listener, Sink, Stream>>(
-        runtime: &mut E,
-        max_size: usize,
-    ) -> Self {
-        // Generate a random IP address
-        let ip1 = runtime.next_u64();
-        let ip2 = runtime.next_u64();
-        let socket = SocketAddr::from((
-            [
-                (ip1 >> 48) as u16,
-                (ip1 >> 32) as u16,
-                (ip1 >> 16) as u16,
-                ip1 as u16,
-                (ip2 >> 48) as u16,
-                (ip2 >> 32) as u16,
-                (ip2 >> 16) as u16,
-                ip2 as u16,
-            ],
-            0,
-        ));
-
-        // Spawn the listener, having it bind, and then accept in perpetuity
-        let senders: Arc<Mutex<HashMap<Channel, mpsc::UnboundedSender<Message>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        runtime.spawn("listener", {
-            let runtime = runtime.clone();
-            let senders = senders.clone();
-            async move {
-                let mut listener = runtime.bind(socket).await.unwrap();
-                loop {
-                    // Accept connection
-                    let (_, _, mut stream) = listener.accept().await.unwrap();
-
-                    // Take the first frame sent as the public key of the connector
-                    let dialer = match recv_frame(&mut stream, max_size).await {
-                        Ok(data) => data,
-                        Err(_) => {
-                            error!("failed to receive public key from dialee");
-                            continue;
-                        }
-                    };
-
-                    // Continue to read frames from the stream and send them to the mailbox
-                    runtime.spawn("receiver", {
-                        let senders = senders.clone();
-                        async move {
-                            while let Ok(data) = recv_frame(&mut stream, 1024).await {
-                                let channel = Channel::from_be_bytes(data[..4].try_into().unwrap());
-                                let message = data.slice(4..);
-                                let mut sender = match senders.lock().unwrap().get(&channel) {
-                                    Some(s) => s.clone(),
-                                    None => {
-                                        error!("failed to find sender for channel");
-                                        continue;
-                                    }
-                                };
-                                sender.send((dialer.clone(), message)).await.unwrap();
-                            }
-                        }
-                    });
-                }
-            }
-        });
-
-        Self { senders, socket }
-    }
-
-    fn register(&mut self, channel: Channel) -> Result<mpsc::UnboundedReceiver<Message>, Error> {
-        let mut senders = self.senders.lock().unwrap();
-
-        // Error if channel already exists
-        if senders.contains_key(&channel) {
-            return Err(Error::ChannelAlreadyRegistered(channel));
-        }
-
-        // Insert new channel
-        let (sender, receiver) = mpsc::unbounded();
-        senders.insert(channel, sender);
-        Ok(receiver)
-    }
-}
-
-#[derive(Clone)]
-struct Link {
-    sampler: Normal<f64>,
-    success_rate: f64,
-    inbox: mpsc::UnboundedSender<(Channel, Bytes)>,
-}
-
-impl Link {
-    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
-        runtime: &mut E,
-        dialer: PublicKey,
-        socket: SocketAddr,
-        sampler: Normal<f64>,
-        success_rate: f64,
-        max_size: usize,
-    ) -> Self {
-        let (inbox, mut outbox) = mpsc::unbounded();
-
-        runtime.spawn("sender", {
-            let runtime = runtime.clone();
-            async move {
-                // Dial the peer and handshake by sending it the dialer's public key
-                let (mut sink, _) = runtime.dial(socket).await.unwrap();
-                send_frame(&mut sink, &dialer, max_size).await.unwrap();
-
-                // For any item placed in the inbox, send it to the sink
-                loop {
-                    let (channel, message): (Channel, Bytes) = outbox.next().await.unwrap();
-                    let mut data = bytes::BytesMut::with_capacity(4 + message.len());
-                    data.extend_from_slice(&channel.to_be_bytes());
-                    data.extend_from_slice(&message);
-                    let data = data.freeze();
-                    send_frame(&mut sink, &data, max_size).await.unwrap();
-                }
-            }
-        });
-
-        Self {
-            sampler,
-            success_rate,
-            inbox,
-        }
-    }
-
-    async fn send(&self, channel: Channel, message: Bytes) -> Result<(), Error> {
-        let mut inbox = self.inbox.clone();
-        inbox
-            .send((channel, message))
-            .await
-            .map_err(|_| Error::NetworkClosed)?;
-        Ok(())
-    }
-}
 
 /// Configuration for the simulated network.
 pub struct Config {
@@ -200,6 +55,7 @@ pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> 
     runtime: E,
 
     max_size: usize,
+    next_addr: SocketAddr,
 
     ingress: mpsc::UnboundedReceiver<ingress::Message>,
 
@@ -207,7 +63,7 @@ pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> 
     receiver: mpsc::UnboundedReceiver<Task>,
 
     links: HashMap<(PublicKey, PublicKey), Link>,
-    peers: BTreeMap<PublicKey, Mailbox>,
+    peers: BTreeMap<PublicKey, Peer>,
 
     received_messages: Family<metrics::Message, Counter>,
     sent_messages: Family<metrics::Message, Counter>,
@@ -235,10 +91,11 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
         (
             Self {
                 runtime,
+                max_size: cfg.max_size,
+                next_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
                 ingress: oracle_receiver,
                 sender,
                 receiver,
-                max_size: cfg.max_size,
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
                 received_messages,
@@ -246,6 +103,12 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
             },
             Oracle::new(oracle_sender),
         )
+    }
+
+    fn get_next_socket(&mut self) -> SocketAddr {
+        let result = self.next_addr;
+        self.next_addr.set_port(self.next_addr.port() + 1);
+        result
     }
 
     fn handle_ingress(&mut self, message: ingress::Message) {
@@ -259,14 +122,19 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 channel,
                 result,
             } => {
-                // Get or create mailbox for peer
-                let mailbox = self
-                    .peers
-                    .entry(public_key.clone())
-                    .or_insert_with(|| Mailbox::new(&mut self.runtime, self.max_size));
+                // If peer does not exist, then create it.
+                if !self.peers.contains_key(&public_key) {
+                    let peer = Peer::new(
+                        &mut self.runtime.clone(),
+                        self.get_next_socket(),
+                        self.max_size,
+                    );
+                    self.peers.insert(public_key.clone(), peer);
+                }
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
-                let receiver = match mailbox.register(channel) {
+                let peer = self.peers.get_mut(&public_key).unwrap();
+                let receiver = match peer.register(channel) {
                     Ok(receiver) => Receiver { receiver },
                     Err(err) => {
                         let result = result.send(Err(err));
@@ -309,6 +177,14 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                         return;
                     }
                 };
+                let key = (sender.clone(), receiver);
+                if self.links.contains_key(&key) {
+                    let result = result.send(Err(Error::LinkExists));
+                    if let Err(err) = result {
+                        error!(?err, "failed to send add link err to oracle");
+                    }
+                    return;
+                }
 
                 let link = Link::new(
                     &mut self.runtime,
@@ -318,7 +194,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                     success_rate,
                     self.max_size,
                 );
-                self.links.insert((sender, receiver), link);
+                self.links.insert(key, link);
 
                 if let Err(err) = result.send(Ok(())) {
                     error!(?err, "failed to send add link ack to oracle");
@@ -496,10 +372,9 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
 /// Implementation of a [`crate::Sender`] for the simulated network.
 #[derive(Clone, Debug)]
 pub struct Sender {
+    me: PublicKey,
     channel: Channel,
     max_size: usize,
-
-    me: PublicKey,
     high: mpsc::UnboundedSender<Task>,
     low: mpsc::UnboundedSender<Task>,
 }
@@ -543,10 +418,9 @@ impl Sender {
 
         // Return sender
         Self {
+            me,
             channel,
             max_size,
-
-            me,
             high,
             low,
         }
@@ -589,5 +463,145 @@ impl crate::Receiver for Receiver {
 
     async fn recv(&mut self) -> Result<Message, Error> {
         self.receiver.next().await.ok_or(Error::NetworkClosed)
+    }
+}
+
+// A peer in the simulated network.
+// The peer can receive messages over any registered channel.
+struct Peer {
+    // Map from channel to a sender that can deliver messages to that channel
+    mailboxes: Arc<Mutex<HashMap<Channel, mpsc::UnboundedSender<Message>>>>,
+
+    // Socket address that the peer is listening on
+    socket: SocketAddr,
+}
+
+impl Peer {
+    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
+        runtime: &mut E,
+        socket: SocketAddr,
+        max_size: usize,
+    ) -> Self {
+        let result = Self {
+            mailboxes: Arc::new(Mutex::new(HashMap::new())),
+            socket,
+        };
+
+        // Continually listen for incoming connections on the socket
+        runtime.spawn("listener", {
+            let runtime = runtime.clone();
+            let mailboxes = result.mailboxes.clone();
+            async move {
+                while let Ok(mut listener) = runtime.bind(socket).await {
+                    let (_, _, mut stream) = listener.accept().await.unwrap();
+
+                    // Spawn a task for this connection
+                    runtime.spawn("receiver", {
+                        let mailboxes = mailboxes.clone();
+                        async move {
+                            // Receive dialer's public key as a handshake
+                            let dialer = match recv_frame(&mut stream, max_size).await {
+                                Ok(data) => data,
+                                Err(_) => {
+                                    error!("failed to receive public key from dialer");
+                                    return;
+                                }
+                            };
+
+                            // Continually receive messages from the dialer and send them to the appropriate mailbox
+                            while let Ok(data) = recv_frame(&mut stream, max_size).await {
+                                const C: usize = size_of::<Channel>();
+                                let channel = Channel::from_be_bytes(data[..C].try_into().unwrap());
+                                let message = data.slice(C..);
+                                let mut mailbox = match mailboxes.lock().unwrap().get(&channel) {
+                                    Some(s) => s.clone(),
+                                    None => {
+                                        error!("failed to find mailbox for channel");
+                                        continue;
+                                    }
+                                };
+                                mailbox.send((dialer.clone(), message)).await.unwrap();
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+        result
+    }
+
+    fn register(&mut self, channel: Channel) -> Result<mpsc::UnboundedReceiver<Message>, Error> {
+        let mut mailboxes = self.mailboxes.lock().unwrap();
+
+        // Error if channel already exists
+        if mailboxes.contains_key(&channel) {
+            return Err(Error::ChannelAlreadyRegistered(channel));
+        }
+
+        // Insert new channel
+        let (sender, receiver) = mpsc::unbounded();
+        mailboxes.insert(channel, sender);
+        Ok(receiver)
+    }
+}
+
+// A unidirectional link between two peers.
+// Messages can be sent over the link with a given latency, jitter, and success rate.
+#[derive(Clone)]
+struct Link {
+    sampler: Normal<f64>,
+    success_rate: f64,
+    inbox: mpsc::UnboundedSender<(Channel, Bytes)>,
+}
+
+impl Link {
+    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
+        runtime: &mut E,
+        dialer: PublicKey,
+        socket: SocketAddr,
+        sampler: Normal<f64>,
+        success_rate: f64,
+        max_size: usize,
+    ) -> Self {
+        let (inbox, mut outbox) = mpsc::unbounded();
+
+        // Spawn a task that will wait for messages to be sent to the link and then send them
+        // over the network.
+        runtime.spawn("sender", {
+            let runtime = runtime.clone();
+            async move {
+                // Dial the peer and handshake by sending it the dialer's public key
+                let (mut sink, _) = runtime.dial(socket).await.unwrap();
+                send_frame(&mut sink, &dialer, max_size).await.unwrap();
+
+                // For any item placed in the inbox, send it to the sink
+                loop {
+                    let (channel, message): (Channel, Bytes) = outbox.next().await.unwrap();
+                    let mut data =
+                        bytes::BytesMut::with_capacity(size_of::<Channel>() + message.len());
+                    data.extend_from_slice(&channel.to_be_bytes());
+                    data.extend_from_slice(&message);
+                    let data = data.freeze();
+                    send_frame(&mut sink, &data, max_size).await.unwrap();
+                }
+            }
+        });
+
+        Self {
+            sampler,
+            success_rate,
+            inbox,
+        }
+    }
+
+    // Send a message over the link.
+    async fn send(&self, channel: Channel, message: Bytes) -> Result<(), Error> {
+        let mut inbox = self.inbox.clone();
+        inbox
+            .send((channel, message))
+            .await
+            .map_err(|_| Error::NetworkClosed)?;
+        Ok(())
     }
 }
