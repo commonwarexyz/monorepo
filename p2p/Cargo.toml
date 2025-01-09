@@ -34,6 +34,7 @@ prost-build = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 
 [lib]
 bench = false

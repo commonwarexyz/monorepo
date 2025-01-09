@@ -29,7 +29,7 @@ rand = "0.8.5"
 rand_distr = "0.4.3"
 futures = "0.3.30"
 futures-util = "0.3.30"
-tokio = "1.40.0"
+tokio = { version = "1.40.0", features = ["full"] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
 prost = "0.13.2"
