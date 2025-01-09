@@ -221,6 +221,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -251,14 +252,10 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (voter_sender, voter_receiver) = oracle
-                    .register(validator.clone(), 0, 1024 * 1024)
-                    .await
-                    .unwrap();
-                let (backfiller_sender, backfiller_receiver) = oracle
-                    .register(validator.clone(), 1, 1024 * 1024)
-                    .await
-                    .unwrap();
+                let (voter_sender, voter_receiver) =
+                    oracle.register(validator.clone(), 0).await.unwrap();
+                let (backfiller_sender, backfiller_receiver) =
+                    oracle.register(validator.clone(), 1).await.unwrap();
 
                 // Link to all other validators
                 for other in validators.iter() {
@@ -469,6 +466,7 @@ mod tests {
                     runtime.clone(),
                     Config {
                         registry: Arc::new(Mutex::new(Registry::default())),
+                        max_size: 1024 * 1024,
                     },
                 );
 
@@ -500,11 +498,11 @@ mod tests {
                     let validator = scheme.public_key();
                     let partition = hex(&validator);
                     let (container_sender, container_receiver) = oracle
-                        .register(validator.clone(), 0, 1024 * 1024)
+                        .register(validator.clone(), 0)
                         .await
                         .unwrap();
                     let (vote_sender, vote_receiver) = oracle
-                        .register(validator.clone(), 1, 1024 * 1024)
+                        .register(validator.clone(), 1)
                         .await
                         .unwrap();
 
@@ -690,6 +688,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -725,14 +724,10 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (voter_sender, voter_receiver) = oracle
-                    .register(validator.clone(), 0, 1024 * 1024)
-                    .await
-                    .unwrap();
-                let (backfiller_sender, backfiller_receiver) = oracle
-                    .register(validator.clone(), 1, 1024 * 1024)
-                    .await
-                    .unwrap();
+                let (voter_sender, voter_receiver) =
+                    oracle.register(validator.clone(), 0).await.unwrap();
+                let (backfiller_sender, backfiller_receiver) =
+                    oracle.register(validator.clone(), 1).await.unwrap();
 
                 // Link to all other validators
                 for (idx_other, other) in validators.iter().enumerate() {
@@ -898,14 +893,9 @@ mod tests {
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
             let partition = hex(&validator);
-            let (container_sender, container_receiver) = oracle
-                .register(validator.clone(), 0, 1024 * 1024)
-                .await
-                .unwrap();
-            let (vote_sender, vote_receiver) = oracle
-                .register(validator.clone(), 1, 1024 * 1024)
-                .await
-                .unwrap();
+            let (container_sender, container_receiver) =
+                oracle.register(validator.clone(), 0).await.unwrap();
+            let (vote_sender, vote_receiver) = oracle.register(validator.clone(), 1).await.unwrap();
 
             // Restore network connections for online peers
             for (idx, scheme) in schemes.iter().enumerate() {
@@ -1044,6 +1034,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -1079,14 +1070,10 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (voter_sender, voter_receiver) = oracle
-                    .register(validator.clone(), 0, 1024 * 1024)
-                    .await
-                    .unwrap();
-                let (backfiller_sender, backfiller_receiver) = oracle
-                    .register(validator.clone(), 1, 1024 * 1024)
-                    .await
-                    .unwrap();
+                let (voter_sender, voter_receiver) =
+                    oracle.register(validator.clone(), 0).await.unwrap();
+                let (backfiller_sender, backfiller_receiver) =
+                    oracle.register(validator.clone(), 1).await.unwrap();
 
                 // Link to all other validators
                 for (idx_other, other) in validators.iter().enumerate() {
@@ -1250,6 +1237,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -1280,14 +1268,10 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (voter_sender, voter_receiver) = oracle
-                    .register(validator.clone(), 0, 1024 * 1024)
-                    .await
-                    .unwrap();
-                let (backfiller_sender, backfiller_receiver) = oracle
-                    .register(validator.clone(), 1, 1024 * 1024)
-                    .await
-                    .unwrap();
+                let (voter_sender, voter_receiver) =
+                    oracle.register(validator.clone(), 0).await.unwrap();
+                let (backfiller_sender, backfiller_receiver) =
+                    oracle.register(validator.clone(), 1).await.unwrap();
 
                 // Link to all other validators
                 for other in validators.iter() {
@@ -1459,6 +1443,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -1489,14 +1474,10 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (voter_sender, voter_receiver) = oracle
-                    .register(validator.clone(), 0, 1024 * 1024)
-                    .await
-                    .unwrap();
-                let (backfiller_sender, backfiller_receiver) = oracle
-                    .register(validator.clone(), 1, 1024 * 1024)
-                    .await
-                    .unwrap();
+                let (voter_sender, voter_receiver) =
+                    oracle.register(validator.clone(), 0).await.unwrap();
+                let (backfiller_sender, backfiller_receiver) =
+                    oracle.register(validator.clone(), 1).await.unwrap();
 
                 // Link to all other validators
                 for other in validators.iter() {
@@ -1664,6 +1645,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -1694,14 +1676,10 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (voter_sender, voter_receiver) = oracle
-                    .register(validator.clone(), 0, 1024 * 1024)
-                    .await
-                    .unwrap();
-                let (backfiller_sender, backfiller_receiver) = oracle
-                    .register(validator.clone(), 1, 1024 * 1024)
-                    .await
-                    .unwrap();
+                let (voter_sender, voter_receiver) =
+                    oracle.register(validator.clone(), 0).await.unwrap();
+                let (backfiller_sender, backfiller_receiver) =
+                    oracle.register(validator.clone(), 1).await.unwrap();
 
                 // Link to all other validators
                 for other in validators.iter() {
@@ -1938,6 +1916,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -1968,14 +1947,10 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (voter_sender, voter_receiver) = oracle
-                    .register(validator.clone(), 0, 1024 * 1024)
-                    .await
-                    .unwrap();
-                let (backfiller_sender, backfiller_receiver) = oracle
-                    .register(validator.clone(), 1, 1024 * 1024)
-                    .await
-                    .unwrap();
+                let (voter_sender, voter_receiver) =
+                    oracle.register(validator.clone(), 0).await.unwrap();
+                let (backfiller_sender, backfiller_receiver) =
+                    oracle.register(validator.clone(), 1).await.unwrap();
 
                 // Link to all other validators
                 for other in validators.iter() {
@@ -2135,6 +2110,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -2164,14 +2140,10 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (voter_sender, voter_receiver) = oracle
-                    .register(validator.clone(), 0, 1024 * 1024)
-                    .await
-                    .unwrap();
-                let (backfiller_sender, backfiller_receiver) = oracle
-                    .register(validator.clone(), 1, 1024 * 1024)
-                    .await
-                    .unwrap();
+                let (voter_sender, voter_receiver) =
+                    oracle.register(validator.clone(), 0).await.unwrap();
+                let (backfiller_sender, backfiller_receiver) =
+                    oracle.register(validator.clone(), 1).await.unwrap();
 
                 // Link to all other validators
                 for other in validators.iter() {
@@ -2346,6 +2318,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -2375,14 +2348,10 @@ mod tests {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
-                let (voter_sender, voter_receiver) = oracle
-                    .register(validator.clone(), 0, 1024 * 1024)
-                    .await
-                    .unwrap();
-                let (backfiller_sender, backfiller_receiver) = oracle
-                    .register(validator.clone(), 1, 1024 * 1024)
-                    .await
-                    .unwrap();
+                let (voter_sender, voter_receiver) =
+                    oracle.register(validator.clone(), 0).await.unwrap();
+                let (backfiller_sender, backfiller_receiver) =
+                    oracle.register(validator.clone(), 1).await.unwrap();
 
                 // Link to all other validators
                 for other in validators.iter() {

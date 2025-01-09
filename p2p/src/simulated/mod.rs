@@ -144,6 +144,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -155,8 +156,7 @@ mod tests {
             let (seen_sender, mut seen_receiver) = mpsc::channel(1024);
             for i in 0..size {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, mut receiver) =
-                    oracle.register(pk.clone(), 0, 1024 * 1024).await.unwrap();
+                let (sender, mut receiver) = oracle.register(pk.clone(), 0).await.unwrap();
                 agents.insert(pk, sender);
                 let mut agent_sender = seen_sender.clone();
                 runtime.spawn("agent_receiver", async move {
@@ -260,6 +260,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -270,7 +271,7 @@ mod tests {
             let mut agents = HashMap::new();
             for i in 0..10 {
                 let pk = Ed25519::from_seed(i as u64).public_key();
-                let (sender, _) = oracle.register(pk.clone(), 0, 1024 * 1024).await.unwrap();
+                let (sender, _) = oracle.register(pk.clone(), 0).await.unwrap();
                 agents.insert(pk, sender);
             }
 
@@ -300,6 +301,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -308,7 +310,7 @@ mod tests {
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
-            oracle.register(pk.clone(), 0, 1024 * 1024).await.unwrap();
+            oracle.register(pk.clone(), 0).await.unwrap();
 
             // Attempt to link self
             let result = oracle
@@ -337,6 +339,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -345,8 +348,8 @@ mod tests {
 
             // Register agents
             let pk = Ed25519::from_seed(0).public_key();
-            oracle.register(pk.clone(), 0, 1024 * 1024).await.unwrap();
-            let result = oracle.register(pk, 0, 1024 * 1024).await;
+            oracle.register(pk.clone(), 0).await.unwrap();
+            let result = oracle.register(pk, 0).await;
 
             // Confirm error is correct
             assert!(matches!(result, Err(Error::ChannelAlreadyRegistered(0))));
@@ -362,6 +365,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -371,8 +375,8 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
-            oracle.register(pk2.clone(), 0, 1024 * 1024).await.unwrap();
+            oracle.register(pk1.clone(), 0).await.unwrap();
+            oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Attempt to link with invalid success rate
             let result = oracle
@@ -401,6 +405,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -410,8 +415,8 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
-            oracle.register(pk2.clone(), 0, 1024 * 1024).await.unwrap();
+            oracle.register(pk1.clone(), 0).await.unwrap();
+            oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Attempt to link with invalid jitter
             let result = oracle
@@ -456,6 +461,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -465,14 +471,12 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) =
-                oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
-            let (mut sender2, mut receiver2) =
-                oracle.register(pk2.clone(), 0, 1024 * 1024).await.unwrap();
+            let (mut sender1, mut receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (mut sender2, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Register unused channels
-            let _ = oracle.register(pk1.clone(), 1, 1024 * 1024).await.unwrap();
-            let _ = oracle.register(pk2.clone(), 2, 1024 * 1024).await.unwrap();
+            let _ = oracle.register(pk1.clone(), 1).await.unwrap();
+            let _ = oracle.register(pk2.clone(), 2).await.unwrap();
 
             // Link agents
             oracle
@@ -531,6 +535,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -540,8 +545,8 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, _) = oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
-            let (_, mut receiver2) = oracle.register(pk2.clone(), 1, 1024 * 1024).await.unwrap();
+            let (mut sender1, _) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (_, mut receiver2) = oracle.register(pk2.clone(), 1).await.unwrap();
 
             // Link agents
             oracle
@@ -583,6 +588,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1,
                 },
             );
 
@@ -592,8 +598,8 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, _) = oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
-            let (_, mut receiver2) = oracle.register(pk2.clone(), 0, 1).await.unwrap();
+            let (mut sender1, _) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (_, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Link agents
             oracle
@@ -635,6 +641,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -644,10 +651,8 @@ mod tests {
             // Define agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) =
-                oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
-            let (mut sender2, mut receiver2) =
-                oracle.register(pk2.clone(), 0, 1024 * 1024).await.unwrap();
+            let (mut sender1, mut receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (mut sender2, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Link agents
             oracle
@@ -706,6 +711,7 @@ mod tests {
                 runtime.clone(),
                 Config {
                     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+                    max_size: 1024 * 1024,
                 },
             );
 
@@ -715,10 +721,8 @@ mod tests {
             // Register agents
             let pk1 = Ed25519::from_seed(0).public_key();
             let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, mut receiver1) =
-                oracle.register(pk1.clone(), 0, 1024 * 1024).await.unwrap();
-            let (mut sender2, mut receiver2) =
-                oracle.register(pk2.clone(), 0, 1024 * 1024).await.unwrap();
+            let (mut sender1, mut receiver1) = oracle.register(pk1.clone(), 0).await.unwrap();
+            let (mut sender2, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
 
             // Send messages
             let msg1 = Bytes::from("attempt 1: hello from pk1");

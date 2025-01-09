@@ -11,7 +11,6 @@ pub enum Message {
     Register {
         public_key: PublicKey,
         channel: Channel,
-        max_size: usize,
         result: oneshot::Sender<Result<(Sender, Receiver), Error>>,
     },
     AddLink {
@@ -65,14 +64,12 @@ impl Oracle {
         &mut self,
         public_key: PublicKey,
         channel: Channel,
-        max_size: usize,
     ) -> Result<(Sender, Receiver), Error> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Message::Register {
                 public_key,
                 channel,
-                max_size,
                 result: sender,
             })
             .await
