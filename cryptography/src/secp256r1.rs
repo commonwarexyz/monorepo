@@ -1,7 +1,27 @@
-//! secp256r1 implementation of the `Scheme` trait.
+//! Secp256r1 implementation of the `Scheme` trait.
 //!
-//! This implementation uses deterministic ECDSA signing as specified in
-//! [RFC 6979](https://datatracker.ietf.org/doc/html/rfc6979).
+//! This implementation operates over public keys in compressed form (SEC 1, Version 2.0, Section 2.3.3), generates
+//! deterministic signatures as specified in [RFC 6979](https://datatracker.ietf.org/doc/html/rfc6979), and enforces
+//! signatures are normalized according to [BIP 62](https://github.com/bitcoin/bips/blob/master/bip-0062.mediawiki#low-s-values-in-signatures).
+//!
+//! # Example
+//! ```rust
+//! use commonware_cryptography::{Scheme, Secp256r1};
+//! use rand::rngs::OsRng;
+//!
+//! // Generate a new private key
+//! let mut signer = Secp256r1::new(&mut OsRng);
+//!
+//! // Create a message to sign
+//! let namespace = Some(&b"demo"[..]);
+//! let msg = b"hello, world!";
+//!
+//! // Sign the message
+//! let signature = signer.sign(namespace, msg);
+//!
+//! // Verify the signature
+//! assert!(Secp256r1::verify(namespace, msg, &signer.public_key(), &signature));
+//! ```
 
 use crate::{PrivateKey, PublicKey, Scheme, Signature};
 use commonware_utils::union_unique;
@@ -16,26 +36,21 @@ use rand::{CryptoRng, Rng, SeedableRng};
 use std::borrow::Cow;
 
 const PRIVATE_KEY_LENGTH: usize = 32;
-const PUBLIC_KEY_LENGTH: usize = 33;
-const SIGNATURE_LENGTH: usize = 64;
-
-#[derive(Clone)]
-pub struct Secp256r1 {
-    signing_key: SigningKey,
-    verifying_key: VerifyingKey,
-}
+const PUBLIC_KEY_LENGTH: usize = 33; // Y-Parity || X
+const SIGNATURE_LENGTH: usize = 64; // R || S
 
 /// Secp256r1 implementation of the `Scheme` trait.
-///
-/// Public Keys are exclusively handled in SEC1 Compressed format (33 bytes).
+#[derive(Clone)]
+pub struct Secp256r1 {
+    signer: SigningKey,
+    verifier: VerifyingKey,
+}
+
 impl Scheme for Secp256r1 {
     fn new<R: CryptoRng + Rng>(r: &mut R) -> Self {
-        let signing_key = SigningKey::random(r);
-        let verifying_key = signing_key.verifying_key().to_owned();
-        Self {
-            signing_key,
-            verifying_key,
-        }
+        let signer = SigningKey::random(r);
+        let verifier = signer.verifying_key().to_owned();
+        Self { signer, verifier }
     }
 
     fn from(private_key: PrivateKey) -> Option<Self> {
@@ -43,15 +58,12 @@ impl Scheme for Secp256r1 {
             Ok(key) => key,
             Err(_) => return None,
         };
-        let signing_key = match SigningKey::from_slice(&private_key) {
+        let signer = match SigningKey::from_slice(&private_key) {
             Ok(key) => key,
             Err(_) => return None,
         };
-        let verifying_key = signing_key.verifying_key().to_owned();
-        Some(Self {
-            signing_key,
-            verifying_key,
-        })
+        let verifier = signer.verifying_key().to_owned();
+        Some(Self { signer, verifier })
     }
 
     fn from_seed(seed: u64) -> Self {
@@ -60,23 +72,23 @@ impl Scheme for Secp256r1 {
     }
 
     fn private_key(&self) -> PrivateKey {
-        self.signing_key.to_bytes().to_vec().into()
+        self.signer.to_bytes().to_vec().into()
     }
 
     fn public_key(&self) -> PublicKey {
-        self.verifying_key.to_encoded_point(true).to_bytes().into()
+        self.verifier.to_encoded_point(true).to_bytes().into()
     }
 
     fn sign(&mut self, namespace: Option<&[u8]>, message: &[u8]) -> Signature {
-        let sig: p256::ecdsa::Signature = match namespace {
-            Some(namespace) => self.signing_key.sign(&union_unique(namespace, message)),
-            None => self.signing_key.sign(message),
+        let signature: p256::ecdsa::Signature = match namespace {
+            Some(namespace) => self.signer.sign(&union_unique(namespace, message)),
+            None => self.signer.sign(message),
         };
-        let normalized = match sig.normalize_s() {
+        let signature = match signature.normalize_s() {
             Some(normalized) => normalized,
-            None => sig,
+            None => signature,
         };
-        normalized.to_vec().into()
+        signature.to_vec().into()
     }
 
     fn validate(public_key: &PublicKey) -> bool {
@@ -101,15 +113,15 @@ impl Scheme for Secp256r1 {
             Ok(sig) => sig,
             Err(_) => return false,
         };
-        let ecdsa_signature = match p256::ecdsa::Signature::from_slice(&signature) {
+        let signature = match p256::ecdsa::Signature::from_slice(&signature) {
             Ok(sig) => sig,
             Err(_) => return false,
         };
-        if ecdsa_signature.s().is_high().into() {
-            // reject not normalized signatures
+        if signature.s().is_high().into() {
+            // Reject any signatures with a `s` value in the upper half of the curve order.
             return false;
         }
-        let verifying_key = match VerifyingKey::from_sec1_bytes(&public_key) {
+        let verifier = match VerifyingKey::from_sec1_bytes(&public_key) {
             Ok(key) => key,
             Err(_) => return false,
         };
@@ -117,7 +129,7 @@ impl Scheme for Secp256r1 {
             Some(namespace) => Cow::Owned(union_unique(namespace, message)),
             None => Cow::Borrowed(message),
         };
-        verifying_key.verify(&payload, &ecdsa_signature).is_ok()
+        verifier.verify(&payload, &signature).is_ok()
     }
 
     fn len() -> (usize, usize) {
@@ -164,8 +176,8 @@ mod tests {
     }
 
     fn parse_public_key_as_compressed(qx: &str, qy: &str) -> PublicKey {
-        let qx = commonware_utils::from_hex_formatted(&padding_odd_length_hexa(qx)).unwrap();
-        let qy = commonware_utils::from_hex_formatted(&padding_odd_length_hexa(qy)).unwrap();
+        let qx = commonware_utils::from_hex_formatted(&padding_odd_length_hex(qx)).unwrap();
+        let qy = commonware_utils::from_hex_formatted(&padding_odd_length_hex(qy)).unwrap();
         let mut compressed = Vec::with_capacity(qx.len() + 1);
         if qy.last().unwrap() % 2 == 0 {
             compressed.push(0x02);
@@ -186,115 +198,11 @@ mod tests {
         uncompressed_public_key.into()
     }
 
-    fn padding_odd_length_hexa(value: &str) -> String {
+    fn padding_odd_length_hex(value: &str) -> String {
         if value.len() % 2 != 0 {
             return format!("0{}", value);
         }
         value.to_string()
-    }
-
-    #[test]
-    fn test_keypairs() {
-        let cases = [
-            vector_keypair_1(),
-            vector_keypair_2(),
-            vector_keypair_3(),
-            vector_keypair_4(),
-            vector_keypair_5(),
-            vector_keypair_6(),
-            vector_keypair_7(),
-            vector_keypair_8(),
-            vector_keypair_9(),
-            vector_keypair_10(),
-        ];
-
-        for (index, test) in cases.into_iter().enumerate() {
-            let (private_key, exp_public_key) = test;
-            let signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
-            assert_eq!(
-                exp_public_key,
-                signer.public_key(),
-                "vector_keypair_{}",
-                index + 1
-            );
-            assert!(signer.public_key().len() == PUBLIC_KEY_LENGTH);
-        }
-    }
-
-    #[test]
-    fn test_public_key_validation() {
-        // We use Compressed Public Keys (without y coordinate) whereas vectors
-        // are originally supposed to be tested using Uncompressed Public Keys (65 bytes).
-        // For this reason vector test 2 & 11 are deactivated
-        // - 2 expected Failure because of y coordinate out of range
-        // - 11 expected Failure because of y coordinate making point not on curve.
-        let cases = [
-            (1, vector_public_key_validation_1()),
-            (3, vector_public_key_validation_3()),
-            (4, vector_public_key_validation_4()),
-            (5, vector_public_key_validation_5()),
-            (6, vector_public_key_validation_6()),
-            (7, vector_public_key_validation_7()),
-            (8, vector_public_key_validation_8()),
-            (9, vector_public_key_validation_9()),
-            (10, vector_public_key_validation_10()),
-            (12, vector_public_key_validation_12()),
-        ];
-
-        for (n, test) in cases.iter() {
-            let (public_key, exp_valid) = test;
-            assert_eq!(
-                *exp_valid,
-                Secp256r1::validate(public_key),
-                "vector_public_key_validation_{}",
-                n
-            );
-        }
-    }
-
-    #[test]
-    fn test_signature_verification() {
-        let cases = [
-            vector_sig_verification_1(),
-            vector_sig_verification_2(),
-            vector_sig_verification_3(),
-            vector_sig_verification_4(),
-            vector_sig_verification_5(),
-            vector_sig_verification_6(),
-            vector_sig_verification_7(),
-            vector_sig_verification_8(),
-            vector_sig_verification_9(),
-            vector_sig_verification_10(),
-            vector_sig_verification_11(),
-            vector_sig_verification_12(),
-            vector_sig_verification_13(),
-            vector_sig_verification_14(),
-            vector_sig_verification_15(),
-        ];
-
-        for (index, test) in cases.iter().enumerate() {
-            let (public_key, sig, message, exp_success) = test;
-            let mut sig = sig.clone();
-            let exp_success = *exp_success;
-            if exp_success {
-                let ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
-                if ecdsa_signature.s().is_high().into() {
-                    // Valid signatures not normalized must be considered invalid.
-                    assert!(!Secp256r1::verify(None, message, public_key, &sig));
-                    // Normalizing sig to test its validity.
-                    if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
-                        sig = normalized_sig.to_vec().into();
-                    }
-                }
-            }
-            let valid = Secp256r1::verify(None, message, public_key, &sig);
-            assert_eq!(
-                exp_success,
-                valid,
-                "vector_signature_verification_{}",
-                index + 1
-            );
-        }
     }
 
     #[test]
@@ -335,8 +243,7 @@ mod tests {
         );
     }
 
-    // Test vector testing compliance over RFC 6979
-    // <https://tools.ietf.org/html/rfc6979#appendix-A.2.5>
+    // Ensure RFC6979 compliance (should also be tested by underlying library)
     #[test]
     fn test_rfc6979() {
         let private_key: PrivateKey = commonware_utils::from_hex_formatted(
@@ -437,6 +344,109 @@ mod tests {
             &signer.public_key(),
             &signature.into()
         ));
+    }
+
+    #[test]
+    fn test_keypairs() {
+        let cases = [
+            vector_keypair_1(),
+            vector_keypair_2(),
+            vector_keypair_3(),
+            vector_keypair_4(),
+            vector_keypair_5(),
+            vector_keypair_6(),
+            vector_keypair_7(),
+            vector_keypair_8(),
+            vector_keypair_9(),
+            vector_keypair_10(),
+        ];
+
+        for (index, test) in cases.into_iter().enumerate() {
+            let (private_key, exp_public_key) = test;
+            let signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+            assert_eq!(
+                exp_public_key,
+                signer.public_key(),
+                "vector_keypair_{}",
+                index + 1
+            );
+            assert!(signer.public_key().len() == PUBLIC_KEY_LENGTH);
+        }
+    }
+
+    #[test]
+    fn test_public_key_validation() {
+        // We use SEC 1-encoded public keys (only include y-parity) whereas vectors
+        // assume public keys are uncompressed (both x and y packed in encoding).
+        //
+        // For this reason, test vector 2 (y out of range) and 11 (y not on curve) are skipped.
+        let cases = [
+            (1, vector_public_key_validation_1()),
+            (3, vector_public_key_validation_3()),
+            (4, vector_public_key_validation_4()),
+            (5, vector_public_key_validation_5()),
+            (6, vector_public_key_validation_6()),
+            (7, vector_public_key_validation_7()),
+            (8, vector_public_key_validation_8()),
+            (9, vector_public_key_validation_9()),
+            (10, vector_public_key_validation_10()),
+            (12, vector_public_key_validation_12()),
+        ];
+
+        for (n, test) in cases.iter() {
+            let (public_key, exp_valid) = test;
+            assert_eq!(
+                *exp_valid,
+                Secp256r1::validate(public_key),
+                "vector_public_key_validation_{}",
+                n
+            );
+        }
+    }
+
+    #[test]
+    fn test_signature_verification() {
+        let cases = [
+            vector_sig_verification_1(),
+            vector_sig_verification_2(),
+            vector_sig_verification_3(),
+            vector_sig_verification_4(),
+            vector_sig_verification_5(),
+            vector_sig_verification_6(),
+            vector_sig_verification_7(),
+            vector_sig_verification_8(),
+            vector_sig_verification_9(),
+            vector_sig_verification_10(),
+            vector_sig_verification_11(),
+            vector_sig_verification_12(),
+            vector_sig_verification_13(),
+            vector_sig_verification_14(),
+            vector_sig_verification_15(),
+        ];
+
+        for (index, test) in cases.iter().enumerate() {
+            let (public_key, sig, message, exp_success) = test;
+            let mut sig = sig.clone();
+            let exp_success = *exp_success;
+            if exp_success {
+                let ecdsa_signature = p256::ecdsa::Signature::from_slice(&sig).unwrap();
+                if ecdsa_signature.s().is_high().into() {
+                    // Valid signatures not normalized must be considered invalid.
+                    assert!(!Secp256r1::verify(None, message, public_key, &sig));
+                    // Normalizing sig to test its validity.
+                    if let Some(normalized_sig) = ecdsa_signature.normalize_s() {
+                        sig = normalized_sig.to_vec().into();
+                    }
+                }
+            }
+            let valid = Secp256r1::verify(None, message, public_key, &sig);
+            assert_eq!(
+                exp_success,
+                valid,
+                "vector_signature_verification_{}",
+                index + 1
+            );
+        }
     }
 
     fn vector_keypair_1() -> (PrivateKey, PublicKey) {
