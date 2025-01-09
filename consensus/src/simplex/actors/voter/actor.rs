@@ -51,6 +51,7 @@ struct Round<
     supervisor: S,
     _crypto: PhantomData<C>,
 
+    seed: group::Signature,
     view: View,
     leader: PublicKey,
     leader_deadline: Option<SystemTime>,
@@ -81,18 +82,21 @@ struct Round<
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, H: Hasher, S: ThresholdSupervisor<Seed = group::Signature, Index = View>>
-    Round<C, H, S>
+impl<
+        C: Scheme,
+        H: Hasher,
+        S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    > Round<C, H, S>
 {
-    pub fn new(hasher: H, supervisor: S, view: View) -> Self {
-        let leader = supervisor
-            .leader(view, ())
-            .expect("unable to compute leader");
+    pub fn new(hasher: H, supervisor: S, seed: group::Signature, view: View) -> Self {
+        let leader =
+            ThresholdSupervisor::leader(&supervisor, seed, view).expect("unable to compute leader");
         Self {
             hasher,
             supervisor,
             _crypto: PhantomData,
 
+            seed,
             view,
             leader,
             leader_deadline: None,
@@ -466,7 +470,7 @@ pub struct Actor<
 impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
-        C: Scheme, // TODO: changing share over time (no longer a fixed value)
+        C: Scheme, // TODO: changing share over time (no longer a fixed value) -> need to determine which index we are in the identity
         H: Hasher,
         A: Automaton<Context = Context>,
         R: Relay,
