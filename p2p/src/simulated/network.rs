@@ -61,7 +61,6 @@ pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> 
 
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
-
     links: HashMap<(PublicKey, PublicKey), Link>,
     peers: BTreeMap<PublicKey, Peer>,
 
@@ -137,8 +136,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 let receiver = match peer.register(channel) {
                     Ok(receiver) => Receiver { receiver },
                     Err(err) => {
-                        let result = result.send(Err(err));
-                        if let Err(err) = result {
+                        if let Err(err) = result.send(Err(err)) {
                             error!(?err, "failed to send register err to oracle");
                         }
                         return;
@@ -154,9 +152,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                     self.sender.clone(),
                 );
 
-                // Return values via callback
-                let result = result.send(Ok((sender, receiver)));
-                if let Err(err) = result {
+                if let Err(err) = result.send(Ok((sender, receiver))) {
                     error!(?err, "failed to send register ack to oracle");
                 }
             }
@@ -170,8 +166,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 let peer = match self.peers.get(&sender) {
                     Some(peer) => peer,
                     None => {
-                        let result = result.send(Err(Error::PeerMissing));
-                        if let Err(err) = result {
+                        if let Err(err) = result.send(Err(Error::PeerMissing)) {
                             error!(?err, "failed to send add link err to oracle");
                         }
                         return;
@@ -179,8 +174,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 };
                 let key = (sender.clone(), receiver);
                 if self.links.contains_key(&key) {
-                    let result = result.send(Err(Error::LinkExists));
-                    if let Err(err) = result {
+                    if let Err(err) = result.send(Err(Error::LinkExists)) {
                         error!(?err, "failed to send add link err to oracle");
                     }
                     return;
@@ -290,6 +284,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 let runtime = self.runtime.clone();
                 let recipient = recipient.clone();
                 let message = message.clone();
+                let max_size = self.max_size;
                 let mut acquired_sender = acquired_sender.clone();
                 let origin = origin.clone();
                 let received_messages = self.received_messages.clone();
@@ -313,8 +308,30 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                         return;
                     }
 
+                    // Drop message if too large
+                    if message.len() > max_size {
+                        trace!(
+                            recipient = hex(&recipient),
+                            channel,
+                            size = message.len(),
+                            max_size,
+                            reason = "message too large",
+                            "dropping message",
+                        );
+                        return;
+                    }
+
                     // Send message
-                    link.send(channel, message).await.unwrap();
+                    if let Err(err) = link.send(channel, message).await {
+                        // This can only happen if the receiver exited.
+                        error!(
+                            origin = hex(&origin),
+                            recipient = hex(&recipient),
+                            ?err,
+                            "failed to send",
+                        );
+                        return;
+                    }
 
                     // Only record received messages that were successfully sent
                     received_messages
