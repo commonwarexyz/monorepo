@@ -209,6 +209,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             // It is possible we may have requested notarizations and nullifications for the same view (and only one may
             // exist). We should try to fetch both before trying to fetch the next view, or we may never ask for an existing
             // notarization or nullification.
+            let mut seeds = Vec::new();
             let mut notarizations = Vec::new();
             let mut nullifications = Vec::new();
             let mut inflight = Vec::new();
@@ -220,27 +221,30 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 inflight.push(entry.clone());
 
                 // Add to inflight
-                if entry.notarization {
-                    notarizations.push(entry.view);
-                } else {
-                    nullifications.push(entry.view);
+                match entry.task {
+                    Task::Seed => seeds.push(entry.view),
+                    Task::Notarization => notarizations.push(entry.view),
+                    Task::Nullification => nullifications.push(entry.view),
                 }
-                if notarizations.len() + nullifications.len() >= self.max_fetch_count {
+                if seeds.len() + notarizations.len() + nullifications.len() >= self.max_fetch_count
+                {
                     break;
                 }
             }
 
             // If nothing to do, return
-            if notarizations.is_empty() && nullifications.is_empty() {
+            if seeds.is_empty() && notarizations.is_empty() && nullifications.is_empty() {
                 return;
             }
 
             // Select next recipient
+            let seed_count = seeds.len();
             let notarization_count = notarizations.len();
             let nullification_count = nullifications.len();
             let mut msg = wire::Backfiller {
                 id: 0, // set once we have a request ID
                 payload: Some(wire::backfiller::Payload::Request(wire::Request {
+                    seeds,
                     notarizations,
                     nullifications,
                 })),
@@ -285,7 +289,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 self.inflight.add(request, inflight);
                 debug!(
                     peer = hex(&recipient),
-                    notarization_count, nullification_count, "sent request"
+                    seed_count, notarization_count, nullification_count, "sent request"
                 );
                 break;
             }
@@ -541,7 +545,16 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             let mut notarizations_found = BTreeSet::new();
                             let mut nullifications_found = BTreeSet::new();
                             for seed in response.seeds {
-                                unimplemented!("can't handle seeds yet");
+                                let view = seed.view;
+                                let entry = Entry { task: Task::Seed, view };
+                                if !self.required.contains(&entry) {
+                                    debug!(view, sender = hex(&s), "unnecessary seed");
+                                    continue;
+                                }
+                                unimplemented!("verify seed");
+                                self.required.remove(&entry);
+                                self.seeds.insert(view, seed.clone());
+                                seeds_found.insert(view);
                             }
 
                             // Parse notarizations
@@ -554,7 +567,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                         continue;
                                     },
                                 };
-                                let entry = Entry { notarization: true, view };
+                                let entry = Entry { task: Task::Notarization, view };
                                 if !self.required.contains(&entry) {
                                     debug!(view, sender = hex(&s), "unnecessary notarization");
                                     continue;
@@ -573,7 +586,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             // Parse nullifications
                             for nullification in response.nullifications {
                                 let view = nullification.view;
-                                let entry = Entry { notarization: false, view };
+                                let entry = Entry { task: Task::Nullification, view };
                                 if !self.required.contains(&entry) {
                                     debug!(view, sender = hex(&s), "unnecessary nullification");
                                     continue;
@@ -591,10 +604,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
 
                             // Update performance
                             let mut shuffle = false;
-                            if !notarizations_found.is_empty() || !nullifications_found.is_empty() {
+                            if !seeds_found.is_empty() || !notarizations_found.is_empty() || !nullifications_found.is_empty() {
                                 self.requester.resolve(request);
                                 debug!(
                                     sender = hex(&s),
+                                    seed_count = ?seeds_found.len(),
                                     notarization_count = notarizations_found.len(),
                                     nullification_count = ?nullifications_found.len(),
                                     "response useful",
