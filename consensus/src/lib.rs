@@ -133,14 +133,19 @@ pub trait Supervisor: Clone + Send + 'static {
     fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
 }
 
+/// TODO: move this to crypto
+pub type Threshold = u32;
+
 pub trait ThresholdSupervisor: Supervisor {
-    /// TODO: kept generic to allow using either G1/G2 or another scheme entirely
+    /// TODO: kept generic to allow using either Bls12381::{G1,G2} or another scheme entirely
     type Seed;
-    type Polynomial;
+    type Identity;
 
     /// Return the leader at a given index for the provided seed.
     fn leader(&self, seed: Self::Seed, index: Self::Index) -> Option<PublicKey>;
 
     /// TODO: used to verify incoming partial signatures and recover full signature
-    fn polynomial(&self, index: Self::Index) -> Option<(&Self::Polynomial, u32)>;
+    /// TODO: Across reshares the identity may change but not the public key (should
+    /// think of better wording here)
+    fn identity(&self, index: Self::Index) -> Option<(&Self::Identity, Threshold)>;
 }
