@@ -3,6 +3,7 @@ use bytes::{BufMut, Bytes};
 use commonware_cryptography::Digest;
 use commonware_utils::union;
 
+pub const SEED_SUFFIX: &[u8] = b"_SEED";
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
@@ -17,6 +18,14 @@ pub fn proposal_message(view: View, parent: View, payload: &Digest) -> Bytes {
 
 pub fn nullify_message(nullify: View) -> Bytes {
     nullify.to_be_bytes().to_vec().into()
+}
+
+pub fn seed_message(seed: View) -> Bytes {
+    seed.to_be_bytes().to_vec().into()
+}
+
+pub fn seed_namespace(namespace: &[u8]) -> Vec<u8> {
+    union(namespace, SEED_SUFFIX)
 }
 
 pub fn notarize_namespace(namespace: &[u8]) -> Vec<u8> {

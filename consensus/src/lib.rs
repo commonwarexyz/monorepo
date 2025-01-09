@@ -140,6 +140,7 @@ pub trait ThresholdSupervisor: Supervisor {
     /// TODO: kept generic to allow using either Bls12381::{G1,G2} or another scheme entirely
     type Seed;
     type Identity;
+    type Share;
 
     /// Return the leader at a given index for the provided seed.
     fn leader(&self, seed: Self::Seed, index: Self::Index) -> Option<PublicKey>;
@@ -148,4 +149,7 @@ pub trait ThresholdSupervisor: Supervisor {
     /// TODO: Across reshares the identity may change but not the public key (should
     /// think of better wording here)
     fn identity(&self, index: Self::Index) -> Option<(&Self::Identity, Threshold)>;
+
+    /// Returns share to sign with at the given index.
+    fn share(&self, index: Self::Index) -> Option<Self::Share>;
 }

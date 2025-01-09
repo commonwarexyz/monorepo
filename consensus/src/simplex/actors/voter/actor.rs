@@ -12,9 +12,9 @@ use crate::{
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Automaton, Committer, Relay, Supervisor,
+    Automaton, Relay, ThresholdCommitter, ThresholdSupervisor,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
+use commonware_cryptography::{bls12381::primitives::group, Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -42,7 +42,11 @@ type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<u32, wire::Finalize>)
 
 const GENESIS_VIEW: View = 0;
 
-struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
+struct Round<
+    C: Scheme,
+    H: Hasher,
+    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+> {
     hasher: H,
     supervisor: S,
     _crypto: PhantomData<C>,
@@ -77,7 +81,9 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, Seed = ()>> Round<C, H, S> {
+impl<C: Scheme, H: Hasher, S: ThresholdSupervisor<Seed = group::Signature, Index = View>>
+    Round<C, H, S>
+{
     pub fn new(hasher: H, supervisor: S, view: View) -> Self {
         let leader = supervisor
             .leader(view, ())
@@ -420,8 +426,8 @@ pub struct Actor<
     H: Hasher,
     A: Automaton<Context = Context>,
     R: Relay,
-    F: Committer,
-    S: Supervisor<Index = View>,
+    F: ThresholdCommitter<Seed = group::Signature>,
+    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
     runtime: E,
     crypto: C,
@@ -464,8 +470,9 @@ impl<
         H: Hasher,
         A: Automaton<Context = Context>,
         R: Relay,
-        F: Committer,
-        S: Supervisor<Seed = (), Index = View>, // TODO: can use participants to perform basic check + verify index associated with right participant before verification + track invalid signatures using partial and group polynomial (only way to verify correct signature) + Seed will just be seed signature (separate from notarization/finalization) + need polynomial threshold
+        F: ThresholdCommitter<Seed = group::Signature>,
+        S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+        // TODO: can use participants to perform basic check + verify index associated with right participant before verification + track invalid signatures using partial and group polynomial (only way to verify correct signature) + Seed will just be seed signature (separate from notarization/finalization) + need polynomial threshold
     > Actor<B, E, C, H, A, R, F, S>
 {
     pub fn new(
