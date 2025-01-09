@@ -509,9 +509,8 @@ impl Peer {
             let runtime = runtime.clone();
             let mailboxes = result.mailboxes.clone();
             async move {
-                while let Ok(mut listener) = runtime.bind(socket).await {
-                    let (_, _, mut stream) = listener.accept().await.unwrap();
-
+                let mut listener = runtime.bind(socket).await.unwrap();
+                while let Ok((_, _, mut stream)) = listener.accept().await {
                     // Spawn a task for this connection
                     runtime.spawn("receiver", {
                         let mailboxes = mailboxes.clone();
