@@ -15,6 +15,8 @@ pub use ed25519::Ed25519;
 pub use ed25519::Ed25519Batch;
 pub mod sha256;
 pub use sha256::Sha256;
+pub mod secp256r1;
+pub use secp256r1::Secp256r1;
 
 /// Byte array representing an arbitrary private key.
 pub type PrivateKey = Bytes;
@@ -355,6 +357,56 @@ mod tests {
     #[test]
     fn test_bls12381_len() {
         assert_eq!(Bls12381::len(), (48, 96));
+    }
+
+    #[test]
+    fn test_secp256r1_validate() {
+        test_validate::<Secp256r1>();
+    }
+
+    #[test]
+    fn test_secp256r1_validate_invalid_public_key() {
+        test_validate_invalid_public_key::<Secp256r1>();
+    }
+
+    #[test]
+    fn test_secp256r1_from_valid_private_key() {
+        test_from_valid_private_key::<Secp256r1>();
+    }
+
+    #[test]
+    fn test_secp256r1_sign_and_verify() {
+        test_sign_and_verify::<Secp256r1>();
+    }
+
+    #[test]
+    fn test_secp256r1_sign_and_verify_wrong_message() {
+        test_sign_and_verify_wrong_message::<Secp256r1>();
+    }
+
+    #[test]
+    fn test_secp256r1_sign_and_verify_wrong_namespace() {
+        test_sign_and_verify_wrong_namespace::<Secp256r1>();
+    }
+
+    #[test]
+    fn test_secp256r1_empty_vs_none_namespace() {
+        test_empty_vs_none_namespace::<Secp256r1>();
+    }
+
+    #[test]
+    fn test_secp256r1_signature_determinism() {
+        test_signature_determinism::<Secp256r1>();
+    }
+
+    #[test]
+    fn test_secp256r1_invalid_signature_length() {
+        test_invalid_signature_length::<Secp256r1>();
+    }
+
+    #[test]
+    fn test_secp256r1_len() {
+        assert_eq!(Secp256r1::len(), (33, 64));
     }
 
     fn test_hasher_multiple_runs<H: Hasher>() {
