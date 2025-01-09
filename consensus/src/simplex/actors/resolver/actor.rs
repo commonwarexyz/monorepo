@@ -29,17 +29,24 @@ use std::{
 };
 use tracing::{debug, warn};
 
+#[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
+enum Task {
+    Seed,
+    Notarization,
+    Nullification,
+}
+
 /// Entry in the required set.
 #[derive(Clone, Eq, PartialEq)]
 struct Entry {
-    notarization: bool,
+    task: Task,
     view: View,
 }
 
 impl Ord for Entry {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.view.cmp(&other.view) {
-            Ordering::Equal => self.notarization.cmp(&other.notarization),
+            Ordering::Equal => self.task.cmp(&other.task),
             ordering => ordering,
         }
     }
@@ -97,6 +104,7 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<In
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
 
+    seeds: BTreeMap<View, wire::Seed>,
     notarizations: BTreeMap<View, wire::Notarization>,
     nullifications: BTreeMap<View, wire::Nullification>,
     activity_timeout: u64,
@@ -159,6 +167,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 notarize_namespace: notarize_namespace(&cfg.namespace),
                 nullify_namespace: nullify_namespace(&cfg.namespace),
 
+                seeds: BTreeMap::new(),
                 notarizations: BTreeMap::new(),
                 nullifications: BTreeMap::new(),
                 activity_timeout: cfg.activity_timeout,
@@ -331,18 +340,28 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                         None => break,
                     };
                     match msg {
-                        Message::Fetch { notarizations, nullifications } => {
+                        Message::Fetch { seeds, notarizations, nullifications } => {
                             // Add to all outstanding required
+                            for view in seeds {
+                                self.required.insert(Entry { task: Task::Seed, view });
+                            }
                             for view in notarizations {
-                                self.required.insert(Entry { notarization: true, view });
+                                self.required.insert(Entry { task: Task::Notarization, view });
                             }
                             for view in nullifications {
-                                self.required.insert(Entry { notarization: false, view });
+                                self.required.insert(Entry { task: Task::Nullification, view });
                             }
-                            // TODO: add seed fetching (needed to select next leader/verify old blocks)
 
                             // Trigger fetch of new notarizations and nullifications as soon as possible
                             self.send(false, &mut sender).await;
+                        }
+                        Message::Seeded { seed } => {
+                            // If waiting for this seed, remove it
+                            self.required.remove(&Entry { task: Task::Seed, view: seed.view });
+
+                            // Add seed to cache
+                            self.seeds.insert(seed.view, seed);
+
                         }
                         Message::Notarized { notarization } => {
                             // Update current view
@@ -358,7 +377,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             self.requester.reconcile(validators);
 
                             // If waiting for this notarization, remove it
-                            self.required.remove(&Entry { notarization: true, view });
+                            self.required.remove(&Entry { task: Task::Notarization, view });
 
                             // Add notarization to cache
                             self.notarizations.insert(view, notarization);
@@ -377,7 +396,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             self.requester.reconcile(validators);
 
                             // If waiting for this nullification, remove it
-                            self.required.remove(&Entry { notarization: false, view });
+                            self.required.remove(&Entry { task: Task::Nullification, view });
 
                             // Add nullification to cache
                             self.nullifications.insert(view, nullification);
@@ -406,6 +425,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             //
                             // We keep some buffer of old messages around in case it helps other
                             // peers.
+                            self.seeds.retain(|k, _| *k >= min_view);
                             self.notarizations.retain(|k, _| *k >= min_view);
                             self.nullifications.retain(|k, _| *k >= min_view);
                         }
@@ -430,14 +450,28 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     match payload {
                         wire::backfiller::Payload::Request(request) => {
                             let mut populated_bytes = 0;
+                            let mut seeds_found = Vec::new();
                             let mut notarizations_found = Vec::new();
                             let mut nullifications_found = Vec::new();
 
                             // Ensure too many notarizations/nullifications aren't requested
-                            if request.notarizations.len() + request.nullifications.len() > self.max_fetch_count {
+                            if request.seeds.len() + request.notarizations.len() + request.nullifications.len() > self.max_fetch_count {
                                 warn!(sender = hex(&s), "request too large");
                                 self.requester.block(s.clone());
                                 continue;
+                            }
+
+                            // Populate seeds first
+                            for view in request.seeds {
+                                if let Some(seed) = self.seeds.get(&view) {
+                                    let size = seed.encoded_len();
+                                    if populated_bytes + size > self.max_fetch_size {
+                                        break;
+                                    }
+                                    populated_bytes += size;
+                                    seeds_found.push(seed.clone());
+                                    self.served.inc();
+                                }
                             }
 
                             // Populate notarizations first
@@ -471,6 +505,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             let response = wire::Backfiller {
                                 id: msg.id,
                                 payload: Some(wire::backfiller::Payload::Response(wire::Response {
+                                    seeds: seeds_found,
                                     notarizations: notarizations_found,
                                     nullifications: nullifications_found,
                                 })),
@@ -491,7 +526,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             self.inflight.clear(request.id);
 
                             // Ensure response isn't too big
-                            if response.notarizations.len() + response.nullifications.len() > self.max_fetch_count {
+                            if response.seeds.len() + response.notarizations.len() + response.nullifications.len() > self.max_fetch_count {
                                 // Block responder
                                 warn!(sender = hex(&s), "response too large");
                                 self.requester.block(s);
@@ -501,9 +536,15 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 continue;
                             }
 
-                            // Parse notarizations
+                            // Parse seeds
+                            let mut seeds_found = BTreeSet::new();
                             let mut notarizations_found = BTreeSet::new();
                             let mut nullifications_found = BTreeSet::new();
+                            for seed in response.seeds {
+                                unimplemented!("can't handle seeds yet");
+                            }
+
+                            // Parse notarizations
                             for notarization in response.notarizations {
                                 let view = match notarization.proposal.as_ref() {
                                     Some(proposal) => proposal.view,
