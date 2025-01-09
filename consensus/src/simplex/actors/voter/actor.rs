@@ -458,12 +458,12 @@ pub struct Actor<
 impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
-        C: Scheme,
+        C: Scheme, // TODO: changing share over time (no longer a fixed value)
         H: Hasher,
         A: Automaton<Context = Context>,
         R: Relay,
         F: Committer,
-        S: Supervisor<Seed = (), Index = View>,
+        S: Supervisor<Seed = (), Index = View>, // TODO: can use participants to perform basic check + verify index associated with right participant before verification + track invalid signatures using partial + group polynomial (only way to verify correct signature) + Seed will just be seed signature (separate from notarization/finalization)
     > Actor<B, E, C, H, A, R, F, S>
 {
     pub fn new(
