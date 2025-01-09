@@ -4,7 +4,10 @@ use super::{
     Context, View,
 };
 use crate::{Automaton, Relay, ThresholdCommitter, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::group, Hasher, Scheme};
+use commonware_cryptography::{
+    bls12381::primitives::{group, poly},
+    Hasher, Scheme,
+};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -22,7 +25,12 @@ pub struct Engine<
     A: Automaton<Context = Context>,
     R: Relay,
     F: ThresholdCommitter<Seed = group::Signature>,
-    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+    S: ThresholdSupervisor<
+        Seed = group::Signature,
+        Index = View,
+        Share = group::Share,
+        Identity = poly::Public,
+    >,
 > {
     runtime: E,
 
@@ -40,7 +48,12 @@ impl<
         A: Automaton<Context = Context>,
         R: Relay,
         F: ThresholdCommitter<Seed = group::Signature>,
-        S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+        S: ThresholdSupervisor<
+            Seed = group::Signature,
+            Index = View,
+            Share = group::Share,
+            Identity = poly::Public,
+        >,
     > Engine<B, E, C, H, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.

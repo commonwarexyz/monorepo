@@ -1,20 +1,21 @@
 use super::{wire, View};
 use crate::{
     simplex::encoder::{nullify_message, proposal_message},
-    Supervisor,
+    Supervisor, ThresholdSupervisor,
 };
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{
+    bls12381::primitives::{
+        self,
+        group::{self, Element},
+        ops, poly,
+    },
+    PublicKey, Scheme,
+};
 use commonware_utils::{hex, quorum};
 use std::collections::HashSet;
 use tracing::debug;
 
-pub fn threshold(validators: &[PublicKey]) -> Option<(u32, u32)> {
-    let len = validators.len() as u32;
-    let threshold = quorum(len).expect("not enough validators for a quorum");
-    Some((threshold, len))
-}
-
-pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
+pub fn verify_notarization<S: ThresholdSupervisor<Index = View, Identity = poly::Public>>(
     supervisor: &S,
     namespace: &[u8],
     notarization: &wire::Notarization,
@@ -28,82 +29,29 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
         }
     };
 
-    // Ensure finalization has valid number of signatures
-    let validators = match supervisor.participants(proposal.view) {
-        Some(validators) => validators,
-        None => {
-            debug!(
-                view = proposal.view,
-                reason = "unable to compute participants for view",
-                "dropping finalization"
-            );
-            return false;
-        }
-    };
-    let (threshold, count) = match threshold(validators) {
-        Some(participation) => participation,
-        None => {
-            debug!(
-                view = proposal.view,
-                reason = "unable to compute participants for view",
-                "dropping finalization"
-            );
-            return false;
-        }
-    };
-    if notarization.signatures.len() < threshold as usize {
+    // Get public key
+    let Some((polynomial, _)) = supervisor.identity(proposal.view) else {
         debug!(
-            threshold,
-            signatures = notarization.signatures.len(),
-            reason = "insufficient signatures",
+            view = proposal.view,
+            reason = "unable to get identity for view",
             "dropping notarization"
         );
         return false;
-    }
-    if notarization.signatures.len() > count as usize {
-        debug!(
-            threshold,
-            signatures = notarization.signatures.len(),
-            reason = "too many signatures",
-            "dropping notarization"
-        );
+    };
+    let public_key = poly::public(polynomial);
+
+    // Parse signature
+    let Some(signature) = group::Signature::deserialize(&notarization.signature) else {
+        debug!(reason = "invalid signature", "dropping notarization");
         return false;
-    }
+    };
 
     // Verify threshold notarization
     let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-    let mut seen = HashSet::new();
-    for signature in notarization.signatures.iter() {
-        // Get public key
-        let public_key = match validators.get(signature.public_key as usize) {
-            Some(public_key) => public_key,
-            None => {
-                debug!(
-                    view = proposal.view,
-                    signer = signature.public_key,
-                    reason = "invalid validator",
-                    "dropping finalization"
-                );
-                return false;
-            }
-        };
-
-        // Ensure we haven't seen this signature before
-        if seen.contains(&signature.public_key) {
-            debug!(
-                signer = hex(public_key),
-                reason = "duplicate signature",
-                "dropping notarization"
-            );
-            return false;
-        }
-        seen.insert(signature.public_key);
-
-        // Verify signature
-        if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
-            debug!(reason = "invalid signature", "dropping notarization");
-            return false;
-        }
+    if primitives::ops::verify_message(&public_key, Some(namespace), &message, &signature).is_err()
+    {
+        debug!(reason = "invalid signature", "dropping notarization");
+        return false;
     }
     debug!(view = proposal.view, "notarization verified");
     true
