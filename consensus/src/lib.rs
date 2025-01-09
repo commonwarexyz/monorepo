@@ -6,7 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_cryptography::{bls12381::primitives::poly, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::oneshot;
 use std::future::Future;
 
@@ -41,7 +41,18 @@ pub trait Automaton: Clone + Send + 'static {
         &mut self,
         context: Self::Context,
         payload: Digest,
-        // TODO: add seed here (will be seed from previous view that is always guaranteed to be available)
+    ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+}
+
+pub trait ThesholdAutomaton: Automaton {
+    type Seed;
+
+    /// Verify that supports seed
+    fn verify(
+        &mut self,
+        context: Self::Context,
+        payload: Digest,
+        seed: Self::Seed,
     ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 }
 
@@ -98,11 +109,8 @@ pub trait Supervisor: Clone + Send + 'static {
     /// Index is the type used to indicate the in-progress consensus decision.
     type Index;
 
-    /// Seed is a consensus artifact to use as randomness for leader selection.
-    type Seed;
-
     /// Return the leader at a given index for the provided seed.
-    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
+    fn leader(&self, index: Self::Index) -> Option<PublicKey>;
 
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.
@@ -116,6 +124,13 @@ pub trait Supervisor: Clone + Send + 'static {
 }
 
 pub trait ThresholdSupervisor: Supervisor {
+    /// TODO: kept generic to allow using either G1/G2 or another scheme entirely
+    type Seed;
+    type Polynomial;
+
+    /// Return the leader at a given index for the provided seed.
+    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
+
     /// TODO: used to verify incoming partial signatures and recover full signature
-    fn polynomial(&self, index: Self::Index) -> Option<(&poly::Public, u32)>;
+    fn polynomial(&self, index: Self::Index) -> Option<(&Self::Polynomial, u32)>;
 }
