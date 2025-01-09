@@ -6,7 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use rand::{CryptoRng, Rng, RngCore};
+use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 
 pub mod bls12381;
 pub use bls12381::Bls12381;
@@ -41,7 +41,10 @@ pub trait Scheme: Clone + Send + Sync + 'static {
     ///
     /// This function is insecure and should only be used for examples
     /// and testing.
-    fn from_seed(seed: u64) -> Self;
+    fn from_seed(seed: u64) -> Self {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        Self::new(&mut rng)
+    }
 
     /// Returns the serialized private key of the signer.
     fn private_key(&self) -> PrivateKey;
