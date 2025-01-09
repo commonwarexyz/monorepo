@@ -61,6 +61,7 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
     notaries: HashMap<u32, Digest>,
     notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
+    // TODO: store reconstructed signature
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
@@ -71,6 +72,7 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
     finalizers: HashMap<u32, Digest>,
     finalizes: HashMap<Digest, HashMap<u32, wire::Finalize>>,
+    // TODO: store reconstructed signature
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
