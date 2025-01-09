@@ -339,6 +339,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                             for view in nullifications {
                                 self.required.insert(Entry { notarization: false, view });
                             }
+                            // TODO: add seed fetching (needed to select next leader/verify old blocks)
 
                             // Trigger fetch of new notarizations and nullifications as soon as possible
                             self.send(false, &mut sender).await;

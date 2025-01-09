@@ -41,6 +41,7 @@ pub trait Automaton: Clone + Send + 'static {
         &mut self,
         context: Self::Context,
         payload: Digest,
+        // TODO: add seed here (will be seed from previous view that is always guaranteed to be available)
     ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 }
 
