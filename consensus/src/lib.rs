@@ -6,7 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{bls12381::primitives::poly, Digest, PublicKey};
 use futures::channel::oneshot;
 use std::future::Future;
 
@@ -112,4 +112,9 @@ pub trait Supervisor: Clone + Send + 'static {
 
     /// Report some activity observed by the consensus implementation.
     fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
+}
+
+pub trait ThresholdSupervisor: Supervisor {
+    /// TODO: used to verify incoming partial signatures and recover full signature
+    fn polynomial(&self, index: Self::Index) -> Option<(&poly::Public, u32)>;
 }

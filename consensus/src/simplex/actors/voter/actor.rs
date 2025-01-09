@@ -463,7 +463,7 @@ impl<
         A: Automaton<Context = Context>,
         R: Relay,
         F: Committer,
-        S: Supervisor<Seed = (), Index = View>, // TODO: can use participants to perform basic check + verify index associated with right participant before verification + track invalid signatures using partial + group polynomial (only way to verify correct signature) + Seed will just be seed signature (separate from notarization/finalization)
+        S: Supervisor<Seed = (), Index = View>, // TODO: can use participants to perform basic check + verify index associated with right participant before verification + track invalid signatures using partial and group polynomial (only way to verify correct signature) + Seed will just be seed signature (separate from notarization/finalization) + need polynomial threshold
     > Actor<B, E, C, H, A, R, F, S>
 {
     pub fn new(
@@ -515,6 +515,7 @@ impl<
 
                 genesis: None,
 
+                // TODO: need seed_namespace
                 notarize_namespace: notarize_namespace(&cfg.namespace),
                 nullify_namespace: nullify_namespace(&cfg.namespace),
                 finalize_namespace: finalize_namespace(&cfg.namespace),
