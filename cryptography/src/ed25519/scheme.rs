@@ -27,7 +27,7 @@
 use crate::{BatchScheme, PrivateKey, PublicKey, Scheme, Signature};
 use commonware_utils::union_unique;
 use ed25519_consensus;
-use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use rand::{CryptoRng, Rng, RngCore};
 use std::borrow::Cow;
 
 const SECRET_KEY_LENGTH: usize = 32;
@@ -94,11 +94,6 @@ impl Scheme for Ed25519 {
             signer,
             verifier: verifier.to_bytes().to_vec().into(),
         })
-    }
-
-    fn from_seed(seed: u64) -> Self {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        Self::new(&mut rng)
     }
 
     fn private_key(&self) -> PrivateKey {

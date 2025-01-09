@@ -24,7 +24,7 @@ use super::primitives::{
     ops,
 };
 use crate::{PrivateKey, PublicKey, Scheme, Signature};
-use rand::{CryptoRng, Rng, SeedableRng};
+use rand::{CryptoRng, Rng};
 
 /// BLS12-381 implementation of the `Scheme` trait.
 ///
@@ -53,11 +53,6 @@ impl Scheme for Bls12381 {
         let mut public = group::Public::one();
         public.mul(&private);
         Some(Self { private, public })
-    }
-
-    fn from_seed(seed: u64) -> Self {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        Self::new(&mut rng)
     }
 
     fn private_key(&self) -> PrivateKey {

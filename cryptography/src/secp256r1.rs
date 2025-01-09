@@ -32,7 +32,7 @@ use p256::{
     },
     elliptic_curve::scalar::IsHigh,
 };
-use rand::{CryptoRng, Rng, SeedableRng};
+use rand::{CryptoRng, Rng};
 use std::borrow::Cow;
 
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -64,11 +64,6 @@ impl Scheme for Secp256r1 {
         };
         let verifier = signer.verifying_key().to_owned();
         Some(Self { signer, verifier })
-    }
-
-    fn from_seed(seed: u64) -> Self {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        Self::new(&mut rng)
     }
 
     fn private_key(&self) -> PrivateKey {
