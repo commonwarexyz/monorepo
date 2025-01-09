@@ -44,18 +44,6 @@ pub trait Automaton: Clone + Send + 'static {
     ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 }
 
-pub trait ThesholdAutomaton: Automaton {
-    type Seed;
-
-    /// Verify that supports seed
-    fn verify(
-        &mut self,
-        context: Self::Context,
-        payload: Digest,
-        seed: Self::Seed,
-    ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
-}
-
 /// Relay is the interface responsible for broadcasting payloads to the network.
 ///
 /// The consensus engine is only aware of a payload's digest, not its contents. It is up
@@ -81,6 +69,28 @@ pub trait Committer: Clone + Send + 'static {
 
     /// Event indicating the container has been finalized.
     fn finalized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
+}
+
+/// TODO: we don't know what the seed will be for an item until after it is proposed/verified, so the seed
+/// can only be provided here.
+pub trait ThresholdCommitter: Committer {
+    type Seed;
+
+    /// Any valid parent will have prepared called on it by the time to propose, so the seed will
+    /// be available to perform computation.
+    fn prepared(
+        &mut self,
+        seed: Self::Seed,
+        proof: Proof,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
+
+    fn finalized(
+        &mut self,
+        seed: Self::Seed,
+        proof: Proof,
+        payload: Digest,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 /// Activity is specified by the underlying consensus implementation and can be interpreted if desired.
@@ -109,7 +119,7 @@ pub trait Supervisor: Clone + Send + 'static {
     /// Index is the type used to indicate the in-progress consensus decision.
     type Index;
 
-    /// Return the leader at a given index for the provided seed.
+    /// Return the leader at a given index.
     fn leader(&self, index: Self::Index) -> Option<PublicKey>;
 
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
@@ -129,7 +139,7 @@ pub trait ThresholdSupervisor: Supervisor {
     type Polynomial;
 
     /// Return the leader at a given index for the provided seed.
-    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
+    fn leader(&self, seed: Self::Seed, index: Self::Index) -> Option<PublicKey>;
 
     /// TODO: used to verify incoming partial signatures and recover full signature
     fn polynomial(&self, index: Self::Index) -> Option<(&Self::Polynomial, u32)>;
