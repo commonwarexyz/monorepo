@@ -597,7 +597,7 @@ mod tests {
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(10),
+                        nullify_retry: Duration::from_secs(1), // needs to be less than the shutdown time in order to make progress
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         max_fetch_count: 1,
@@ -1921,7 +1921,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     notarization_timeout: Duration::from_secs(2),
                     nullify_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: Duration::from_secs(2),
                     activity_timeout,
                     max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
