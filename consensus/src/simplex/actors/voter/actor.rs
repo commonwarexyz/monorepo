@@ -8,7 +8,7 @@ use crate::{
         },
         metrics,
         prover::Prover,
-        verifier::{threshold, verify_finalization, verify_notarization, verify_nullification},
+        verifier::{verify_finalization, verify_notarization, verify_nullification},
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
@@ -162,10 +162,10 @@ impl<
                 public_key,
                 previous_proposal.parent,
                 &previous_proposal.payload,
-                &previous_notarize.signature.as_ref().unwrap().signature,
+                &previous_notarize.partial_signature,
                 proposal.parent,
                 &proposal.payload,
-                &notarize.signature.as_ref().unwrap().signature,
+                &notarize.partial_signature,
             );
             self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
@@ -2129,6 +2129,16 @@ impl<
 
                     // Process message
                     match payload {
+                        wire::voter::Payload::Part(part) => {
+                            self.received_messages.get_or_create(&metrics::PeerMessage::part(&s)).inc();
+                            view = part.view;
+                            self.part(part).await;
+                        }
+                        wire::voter::Payload::Seed(seed) => {
+                            self.received_messages.get_or_create(&metrics::PeerMessage::seed(&s)).inc();
+                            view = seed.view;
+                            self.seed(seed).await;
+                        }
                         wire::voter::Payload::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
                             view = match &notarize.proposal {

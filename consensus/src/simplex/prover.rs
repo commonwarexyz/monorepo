@@ -1,13 +1,20 @@
 use super::{
     encoder::{
         finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
-        proposal_message,
+        proposal_message, seed_message, seed_namespace,
     },
     wire, View,
 };
 use crate::Proof;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme, Signature};
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group::{self, Element},
+        ops,
+        poly::{self, Eval},
+    },
+    Digest, Hasher, PublicKey, Scheme, Signature,
+};
 use commonware_utils::hex;
 use std::{collections::HashSet, marker::PhantomData};
 use tracing::debug;
@@ -21,6 +28,9 @@ pub struct Prover<C: Scheme, H: Hasher> {
     _crypto: PhantomData<C>,
     _hasher: PhantomData<H>,
 
+    public: group::Public,
+
+    seed_namespace: Vec<u8>,
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
@@ -28,32 +38,106 @@ pub struct Prover<C: Scheme, H: Hasher> {
 
 impl<C: Scheme, H: Hasher> Prover<C, H> {
     /// Create a new prover with the given signing `namespace`.
-    pub fn new(namespace: &[u8]) -> Self {
+    pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {
             _crypto: PhantomData,
             _hasher: PhantomData,
 
+            public,
+
+            seed_namespace: seed_namespace(namespace),
             notarize_namespace: notarize_namespace(namespace),
             nullify_namespace: nullify_namespace(namespace),
             finalize_namespace: finalize_namespace(namespace),
         }
     }
 
-    /// Serialize a proposal proof.
-    pub(crate) fn serialize_proposal(
-        proposal: &wire::Proposal,
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> Proof {
+    pub(crate) fn serialize_part(view: View, partial_signature: &Signature) -> Proof {
         // Setup proof
-        let len = 8 + 8 + proposal.payload.len() + public_key.len() + signature.len();
+        let len = 8 + partial_signature.len();
+
+        // Encode proof
+        let mut proof = Vec::with_capacity(len);
+        proof.put_u64(view);
+        proof.extend_from_slice(&partial_signature);
+        proof.into()
+    }
+
+    pub fn deserialize_part(&self, mut proof: Proof) -> Option<(View, Eval<group::Public>)> {
+        // Ensure proof is big enough
+         let len = 8 + //TODO: how to get poly::Eval length ahead of time?
+        if proof.len() != len {
+            return None;
+        }
+
+        // Decode proof
+        let view = proof.get_u64();
+        let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
+        let signature = group::Signature::deserialize(&signature)?;
+
+        // Verify signature
+        let message = seed_message(view);
+        if ops::verify_message(
+            &self.public,
+            Some(&self.seed_namespace),
+            &message,
+            &signature,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        Some(view)
+    }
+
+    pub(crate) fn serialize_seed(view: View, signature: &Signature) -> Proof {
+        // Setup proof
+        let len = 8 + group::SIGNATURE_LENGTH;
+
+        // Encode proof
+        let mut proof = Vec::with_capacity(len);
+        proof.put_u64(view);
+        proof.extend_from_slice(signature);
+        proof.into()
+    }
+
+    pub fn deserialize_seed(&self, mut proof: Proof) -> Option<View> {
+        // Ensure proof is big enough
+        let len = 8 + group::SIGNATURE_LENGTH;
+        if proof.len() != len {
+            return None;
+        }
+
+        // Decode proof
+        let view = proof.get_u64();
+        let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
+        let signature = group::Signature::deserialize(&signature)?;
+
+        // Verify signature
+        let message = seed_message(view);
+        if ops::verify_message(
+            &self.public,
+            Some(&self.seed_namespace),
+            &message,
+            &signature,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        Some(view)
+    }
+
+    /// Serialize a proposal proof.
+    pub(crate) fn serialize_proposal(proposal: &wire::Proposal, signature: &Signature) -> Proof {
+        // Setup proof
+        let len = 8 + 8 + proposal.payload.len() + signature.len();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
         proof.put_u64(proposal.view);
         proof.put_u64(proposal.parent);
         proof.extend_from_slice(&proposal.payload);
-        proof.extend_from_slice(public_key);
         proof.extend_from_slice(signature);
         proof.into()
     }
@@ -61,9 +145,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     /// Deserialize a proposal proof.
     fn deserialize_proposal(
         mut proof: Proof,
-        check_sig: bool,
         namespace: &[u8],
-    ) -> Option<(View, View, Digest, PublicKey)> {
+    ) -> Option<(View, View, Digest, poly::Eval<group::Public>)> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
@@ -100,82 +183,45 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     }
 
     /// Serialize an aggregation proof.
-    pub(crate) fn serialize_aggregation(
-        proposal: &wire::Proposal,
-        signatures: Vec<(&PublicKey, &Signature)>,
-    ) -> Proof {
+    pub(crate) fn serialize_threshold(proposal: &wire::Proposal, signature: &Signature) -> Proof {
         // Setup proof
-        let (public_key_len, signature_len) = C::len();
-        let len = 8
-            + 8
-            + proposal.payload.len()
-            + 4
-            + signatures.len() * (public_key_len + signature_len);
+        let len = 8 + 8 + proposal.payload.len() + group::SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
         proof.put_u64(proposal.view);
         proof.put_u64(proposal.parent);
         proof.extend_from_slice(&proposal.payload);
-        proof.put_u32(signatures.len() as u32);
-        for (public_key, signature) in signatures {
-            proof.extend_from_slice(public_key);
-            proof.extend_from_slice(signature);
-        }
+        proof.extend_from_slice(signature);
         proof.into()
     }
 
     /// Deserialize an aggregation proof.
-    fn deserialize_aggregation(
+    fn deserialize_threshold(
+        &self,
         mut proof: Proof,
-        max: u32,
-        check_sigs: bool,
         namespace: &[u8],
-    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
+    ) -> Option<(View, View, Digest)> {
         // Ensure proof prefix is big enough
         let digest_len = H::len();
-        let len = 8 + 8 + digest_len + 4;
+        let len = 8 + 8 + digest_len + group::SIGNATURE_LENGTH;
         if proof.len() < len {
             return None;
         }
 
-        // Decode proof prefix
+        // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
         let payload = proof.copy_to_bytes(digest_len);
-        let count = proof.get_u32();
-        if count > max {
-            return None;
-        }
-        let count = count as usize;
+        let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
+        let signature = group::Signature::deserialize(&signature)?;
+
+        // Verify signature
         let message = proposal_message(view, parent, &payload);
-
-        // Decode signatures
-        let (public_key_len, signature_len) = C::len();
-        if proof.remaining() != count * (public_key_len + signature_len) {
+        if ops::verify_message(&self.public, Some(namespace), &message, &signature).is_err() {
             return None;
         }
-        let mut seen = HashSet::with_capacity(count);
-        for _ in 0..count {
-            // Check if already saw public key
-            let public_key = proof.copy_to_bytes(public_key_len);
-            if seen.contains(&public_key) {
-                return None;
-            }
-            seen.insert(public_key.clone());
-
-            // Verify signature
-            let signature = proof.copy_to_bytes(signature_len);
-            if check_sigs {
-                if !C::validate(&public_key) {
-                    return None;
-                }
-                if !C::verify(Some(namespace), &message, &public_key, &signature) {
-                    return None;
-                }
-            }
-        }
-        Some((view, parent, payload, seen.into_iter().collect()))
+        Some((view, parent, payload))
     }
 
     /// Deserialize a notarize proof.
@@ -188,13 +234,8 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     }
 
     /// Deserialize a notarization proof.
-    pub fn deserialize_notarization(
-        &self,
-        proof: Proof,
-        max: u32,
-        check_sigs: bool,
-    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
-        Self::deserialize_aggregation(proof, max, check_sigs, &self.notarize_namespace)
+    pub fn deserialize_notarization(&self, proof: Proof) -> Option<(View, View, Digest)> {
+        self.deserialize_threshold(proof, &self.notarize_namespace)
     }
 
     /// Deserialize a finalize proof.
