@@ -24,8 +24,7 @@ use tracing::debug;
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover<C: Scheme, H: Hasher> {
-    _crypto: PhantomData<C>,
+pub struct Prover<H: Hasher> {
     _hasher: PhantomData<H>,
 
     public: group::Public,
@@ -36,11 +35,10 @@ pub struct Prover<C: Scheme, H: Hasher> {
     finalize_namespace: Vec<u8>,
 }
 
-impl<C: Scheme, H: Hasher> Prover<C, H> {
+impl<H: Hasher> Prover<H> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {
-            _crypto: PhantomData,
             _hasher: PhantomData,
 
             public,
@@ -222,7 +220,6 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn serialize_conflicting_proposal(
         view: View,
-        public_key: &PublicKey,
         parent_1: View,
         payload_1: &Digest,
         signature_1: &Signature,
@@ -232,14 +229,19 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     ) -> Proof {
         // Setup proof
         let digest_len = H::len();
-        let (public_key_len, signature_len) = C::len();
-        let len =
-            8 + public_key_len + 8 + digest_len + signature_len + 8 + digest_len + signature_len;
+        let len = 8
+            + 8
+            + digest_len
+            + 4
+            + group::SIGNATURE_LENGTH
+            + 8
+            + digest_len
+            + 4
+            + group::SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
         proof.put_u64(view);
-        proof.extend_from_slice(public_key);
         proof.put_u64(parent_1);
         proof.extend_from_slice(payload_1);
         proof.extend_from_slice(signature_1);
@@ -251,50 +253,48 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
     fn deserialize_conflicting_proposal(
         mut proof: Proof,
-        check_sig: bool,
-        namespace: &[u8],
-    ) -> Option<(PublicKey, View)> {
+    ) -> Option<(
+        View,
+        View,
+        Digest,
+        Eval<group::Signature>,
+        View,
+        Digest,
+        Eval<group::Signature>,
+    )> {
         // Ensure proof is big enough
         let digest_len = H::len();
-        let (public_key_len, signature_len) = C::len();
-        let len =
-            8 + public_key_len + 8 + digest_len + signature_len + 8 + digest_len + signature_len;
+        let len = 8
+            + 8
+            + digest_len
+            + 4
+            + group::SIGNATURE_LENGTH
+            + 8
+            + digest_len
+            + group::SIGNATURE_LENGTH;
         if proof.len() != len {
             return None;
         }
 
         // Decode proof
         let view = proof.get_u64();
-        let public_key = proof.copy_to_bytes(public_key_len);
         let parent_1 = proof.get_u64();
         let payload_1 = proof.copy_to_bytes(digest_len);
-        let signature_1 = proof.copy_to_bytes(signature_len);
+        let signature_1 = proof.copy_to_bytes(4 + group::SIGNATURE_LENGTH);
+        let signature_1 = Eval::deserialize(&signature_1)?;
         let parent_2 = proof.get_u64();
         let payload_2 = proof.copy_to_bytes(digest_len);
-        let signature_2 = proof.copy_to_bytes(signature_len);
-
-        // Verify signatures
-        if check_sig {
-            if !C::validate(&public_key) {
-                return None;
-            }
-            let proposal_message_1 = proposal_message(view, parent_1, &payload_1);
-            let proposal_message_2 = proposal_message(view, parent_2, &payload_2);
-            if !C::verify(
-                Some(namespace),
-                &proposal_message_1,
-                &public_key,
-                &signature_1,
-            ) || !C::verify(
-                Some(namespace),
-                &proposal_message_2,
-                &public_key,
-                &signature_2,
-            ) {
-                return None;
-            }
-        }
-        Some((public_key, view))
+        let signature_2 = proof.copy_to_bytes(4 + group::SIGNATURE_LENGTH);
+        let signature_2 = Eval::deserialize(&signature_2)?;
+        Some((
+            view,
+            parent_1,
+            payload_1,
+            signature_1,
+            parent_2,
+            payload_2,
+            signature_2,
+        ))
     }
 
     /// Serialize a conflicting notarize proof.
