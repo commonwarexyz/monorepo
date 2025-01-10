@@ -8,3 +8,4 @@
 pub mod archive;
 pub mod journal;
 pub mod metadata;
+pub mod mmr;
