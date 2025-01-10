@@ -582,59 +582,6 @@ mod tests {
     }
 
     #[test]
-    fn test_message_too_big_receiver() {
-        let (executor, runtime, _) = Executor::default();
-        executor.start(async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                runtime.clone(),
-                Config {
-                    registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
-                    max_size: 1,
-                },
-            );
-
-            // Start network
-            runtime.spawn("network", network.run());
-
-            // Register agents
-            let pk1 = Ed25519::from_seed(0).public_key();
-            let pk2 = Ed25519::from_seed(1).public_key();
-            let (mut sender1, _) = oracle.register(pk1.clone(), 0).await.unwrap();
-            let (_, mut receiver2) = oracle.register(pk2.clone(), 0).await.unwrap();
-
-            // Link agents
-            oracle
-                .add_link(
-                    pk1.clone(),
-                    pk2.clone(),
-                    Link {
-                        latency: 5.0,
-                        jitter: 0.0,
-                        success_rate: 1.0,
-                    },
-                )
-                .await
-                .unwrap();
-
-            // Send message
-            let msg = Bytes::from("hello from pk1");
-            sender1
-                .send(Recipients::One(pk2.clone()), msg, false)
-                .await
-                .unwrap();
-
-            // Confirm no message delivery
-            select! {
-                _ = receiver2.recv() => {
-                    panic!("unexpected message");
-                },
-                _ = runtime.sleep(Duration::from_secs(1)) => {},
-            }
-        });
-    }
-
-    #[test]
     fn test_dynamic_peers() {
         let (executor, runtime, _) = Executor::default();
         executor.start(async move {

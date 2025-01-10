@@ -536,7 +536,10 @@ impl Peer {
                                         continue;
                                     }
                                 };
-                                mailbox.send((dialer.clone(), message)).await.unwrap();
+                                if let Err(err) = mailbox.send((dialer.clone(), message)).await {
+                                    error!(?err, "failed to send message to mailbox");
+                                    break;
+                                }
                             }
                         }
                     });
@@ -581,6 +584,11 @@ impl Link {
         max_size: usize,
     ) -> Self {
         let (inbox, mut outbox) = mpsc::unbounded();
+        let result = Self {
+            sampler,
+            success_rate,
+            inbox,
+        };
 
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
@@ -589,11 +597,13 @@ impl Link {
             async move {
                 // Dial the peer and handshake by sending it the dialer's public key
                 let (mut sink, _) = runtime.dial(socket).await.unwrap();
-                send_frame(&mut sink, &dialer, max_size).await.unwrap();
+                if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
+                    error!(?err, "failed to send public key to dialee");
+                    return;
+                }
 
                 // For any item placed in the inbox, send it to the sink
-                loop {
-                    let (channel, message): (Channel, Bytes) = outbox.next().await.unwrap();
+                while let Some((channel, message)) = outbox.next().await {
                     let mut data =
                         bytes::BytesMut::with_capacity(size_of::<Channel>() + message.len());
                     data.extend_from_slice(&channel.to_be_bytes());
@@ -604,11 +614,7 @@ impl Link {
             }
         });
 
-        Self {
-            sampler,
-            success_rate,
-            inbox,
-        }
+        result
     }
 
     // Send a message over the link.
