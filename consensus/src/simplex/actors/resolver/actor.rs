@@ -124,7 +124,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
         let config = requester::Config {
             crypto: cfg.crypto.clone(),
             rate_limit: cfg.fetch_rate_per_peer,
-            initial: cfg.fetch_timeout / 2,
+            initial: Duration::from_secs(0),
             timeout: cfg.fetch_timeout,
         };
         let requester = requester::Requester::new(runtime.clone(), config);
