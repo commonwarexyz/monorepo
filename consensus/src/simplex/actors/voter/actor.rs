@@ -14,7 +14,10 @@ use crate::{
     },
     Automaton, Relay, ThresholdCommitter, ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::group, Digest, Hasher, PublicKey, Scheme};
+use commonware_cryptography::{
+    bls12381::primitives::{group, poly::Eval},
+    Digest, Hasher, PublicKey, Scheme,
+};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -125,8 +128,8 @@ impl<
 
     async fn add_verified_notarize(
         &mut self,
-        public_key: &PublicKey,
         notarize: wire::Notarize,
+        partial_signature: Eval<group::Signature>,
     ) -> bool {
         // Get proposal
         let proposal = notarize.proposal.as_ref().unwrap();
@@ -137,12 +140,12 @@ impl<
         let digest = self.hasher.finalize();
 
         // Check if already notarized
-        let public_key_index = notarize.signature.as_ref().unwrap().public_key;
+        let public_key_index = partial_signature.index;
         if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
             if previous_notarize == &digest {
                 trace!(
                     view = self.view,
-                    signer = hex(public_key),
+                    signer = public_key_index,
                     previous_notarize = hex(previous_notarize),
                     "already notarized"
                 );
@@ -157,9 +160,8 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_notarize.proposal.as_ref().unwrap();
-            let proof = Prover::<C, H>::serialize_conflicting_notarize(
+            let proof = Prover::<H>::serialize_conflicting_notarize(
                 self.view,
-                public_key,
                 previous_proposal.parent,
                 &previous_proposal.payload,
                 &previous_notarize.partial_signature,
@@ -170,7 +172,7 @@ impl<
             self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
                 view = self.view,
-                signer = hex(public_key),
+                signer = public_key_index,
                 activity = CONFLICTING_NOTARIZE,
                 "recorded fault"
             );
@@ -186,8 +188,7 @@ impl<
             return false;
         }
         let entry = self.notarizes.entry(digest).or_default();
-        let signature = &notarize.signature.as_ref().unwrap().signature;
-        let proof = Prover::<C, H>::serialize_proposal(proposal, public_key, signature);
+        let proof = Prover::<H>::serialize_proposal(proposal, &notarize.partial_signature);
         entry.insert(public_key_index, notarize);
         self.supervisor.report(NOTARIZE, proof).await;
         true
@@ -195,11 +196,11 @@ impl<
 
     async fn add_verified_nullify(
         &mut self,
-        public_key: &PublicKey,
         nullify: wire::Nullify,
+        partial_signature: Eval<group::Signature>,
     ) -> bool {
         // Check if already issued finalize
-        let public_key_index = nullify.signature.as_ref().unwrap().public_key;
+        let public_key_index = partial_signature.index;
         let finalize = self.finalizers.get(&public_key_index);
         if finalize.is_none() {
             // Store the nullify
@@ -215,18 +216,17 @@ impl<
             .get(&public_key_index)
             .unwrap();
         let finalize_proposal = finalize.proposal.as_ref().unwrap();
-        let proof = Prover::<C, H>::serialize_nullify_finalize(
+        let proof = Prover::<H>::serialize_nullify_finalize(
             self.view,
-            public_key,
             finalize_proposal.parent,
             &finalize_proposal.payload,
-            &finalize.signature.as_ref().unwrap().signature,
-            &nullify.signature.as_ref().unwrap().signature,
+            &finalize.partial_signature,
+            &nullify.partial_signature,
         );
         self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
         warn!(
             view = self.view,
-            signer = hex(public_key),
+            signer = public_key_index,
             activity = NULLIFY_AND_FINALIZE,
             "recorded fault"
         );
