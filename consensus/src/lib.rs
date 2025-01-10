@@ -6,7 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{bls12381::primitives::group, Digest, PublicKey};
 use futures::channel::oneshot;
 use std::future::Future;
 
@@ -71,28 +71,6 @@ pub trait Committer: Clone + Send + 'static {
     fn finalized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
 }
 
-/// TODO: we don't know what the seed will be for an item until after it is proposed/verified, so the seed
-/// can only be provided here.
-pub trait ThresholdCommitter: Committer {
-    type Seed;
-
-    /// Any valid parent will have prepared called on it by the time to propose, so the seed will
-    /// be available to perform computation.
-    fn prepared(
-        &mut self,
-        seed: Self::Seed,
-        proof: Proof,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
-
-    fn finalized(
-        &mut self,
-        seed: Self::Seed,
-        proof: Proof,
-        payload: Digest,
-    ) -> impl Future<Output = ()> + Send;
-}
-
 /// Activity is specified by the underlying consensus implementation and can be interpreted if desired.
 ///
 /// Examples of activity would be "vote", "finalize", or "fault". Various consensus implementations may
@@ -138,6 +116,7 @@ pub type Threshold = u32;
 
 pub trait ThresholdSupervisor: Supervisor {
     /// TODO: kept generic to allow using either Bls12381::{G1,G2} or another scheme entirely
+    /// TODO: may make sense to enshrine (as group::PublicKey, Signature, etc)?
     type Seed;
     type Identity;
     type Share;

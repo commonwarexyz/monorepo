@@ -3,7 +3,7 @@ use super::{
     config::Config,
     Context, View,
 };
-use crate::{Automaton, Relay, ThresholdCommitter, ThresholdSupervisor};
+use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
     Hasher, Scheme,
@@ -24,7 +24,7 @@ pub struct Engine<
     H: Hasher,
     A: Automaton<Context = Context>,
     R: Relay,
-    F: ThresholdCommitter<Seed = group::Signature>,
+    F: Committer,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -47,7 +47,7 @@ impl<
         H: Hasher,
         A: Automaton<Context = Context>,
         R: Relay,
-        F: ThresholdCommitter<Seed = group::Signature>,
+        F: Committer,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,
