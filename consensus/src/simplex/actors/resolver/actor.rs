@@ -5,13 +5,13 @@ use super::{
 use crate::{
     simplex::{
         actors::voter,
-        encoder::{notarize_namespace, nullify_namespace},
-        verifier::{verify_notarization, verify_nullification},
+        encoder::{notarize_namespace, nullify_namespace, seed_namespace},
+        verifier::{verify_notarization, verify_nullification, verify_seed},
         wire, View,
     },
-    Supervisor,
+    ThresholdSupervisor,
 };
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::{bls12381::primitives::poly, Hasher, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
@@ -96,11 +96,17 @@ impl Inflight {
 }
 
 /// Requests are made concurrently to multiple peers.
-pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
+pub struct Actor<
+    E: Clock + GClock + Rng,
+    C: Scheme,
+    H: Hasher,
+    S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
+> {
     runtime: E,
     supervisor: S,
     _hasher: PhantomData<H>,
 
+    seed_namespace: Vec<u8>,
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
 
@@ -126,7 +132,13 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<In
     served: Counter,
 }
 
-impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> Actor<E, C, H, S> {
+impl<
+        E: Clock + GClock + Rng,
+        C: Scheme,
+        H: Hasher,
+        S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
+    > Actor<E, C, H, S>
+{
     pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize requester
         let config = requester::Config {
@@ -164,6 +176,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 supervisor: cfg.supervisor,
                 _hasher: PhantomData,
 
+                seed_namespace: seed_namespace(&cfg.namespace),
                 notarize_namespace: notarize_namespace(&cfg.namespace),
                 nullify_namespace: nullify_namespace(&cfg.namespace),
 
@@ -551,7 +564,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     debug!(view, sender = hex(&s), "unnecessary seed");
                                     continue;
                                 }
-                                unimplemented!("verify seed");
+                                if !verify_seed::<S>(&self.supervisor, &self.seed_namespace, &seed) {
+                                    warn!(view, sender = hex(&s), "invalid seed");
+                                    self.requester.block(s.clone());
+                                    continue;
+                                }
                                 self.required.remove(&entry);
                                 self.seeds.insert(view, seed.clone());
                                 seeds_found.insert(view);
@@ -572,7 +589,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     debug!(view, sender = hex(&s), "unnecessary notarization");
                                     continue;
                                 }
-                                if !verify_notarization::<S,C>(&self.supervisor, &self.notarize_namespace, &notarization) {
+                                if !verify_notarization::<S>(&self.supervisor, &self.notarize_namespace, &notarization) {
                                     warn!(view, sender = hex(&s), "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;
@@ -591,7 +608,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     debug!(view, sender = hex(&s), "unnecessary nullification");
                                     continue;
                                 }
-                                if !verify_nullification::<S,C>(&self.supervisor, &self.nullify_namespace, &nullification) {
+                                if !verify_nullification::<S>(&self.supervisor, &self.nullify_namespace, &nullification) {
                                     warn!(view, sender = hex(&s), "invalid nullification");
                                     self.requester.block(s.clone());
                                     continue;
