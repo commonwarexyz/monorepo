@@ -32,6 +32,8 @@ use std::{
 };
 use tracing::{error, trace};
 
+const SIZE_OF_CHANNEL: usize = size_of::<Channel>();
+
 /// Task type representing a message to be sent within the network.
 type Task = (
     Channel,
@@ -86,12 +88,17 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 received_messages.clone(),
             );
         }
+
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
+        let next_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::from_bits(runtime.clone().next_u32())),
+            0,
+        );
         (
             Self {
                 runtime,
                 max_size: cfg.max_size,
-                next_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                next_addr,
                 ingress: oracle_receiver,
                 sender,
                 receiver,
@@ -106,7 +113,23 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
 
     fn get_next_socket(&mut self) -> SocketAddr {
         let result = self.next_addr;
-        self.next_addr.set_port(self.next_addr.port() + 1);
+
+        // Increment the port number, or the IP address if the port number overflows.
+        // Allows the ip address to overflow (wrapping).
+        match self.next_addr.port().checked_add(1) {
+            Some(port) => {
+                self.next_addr.set_port(port);
+            }
+            None => {
+                let ip = match self.next_addr.ip() {
+                    IpAddr::V4(ipv4) => ipv4,
+                    _ => unreachable!(),
+                };
+                let next_ip = Ipv4Addr::to_bits(ip).wrapping_add(1);
+                self.next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(next_ip)), 0);
+            }
+        }
+
         result
     }
 
@@ -164,10 +187,16 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 success_rate,
                 result,
             } => {
+                // Require both peers to be registered
+                if !self.peers.contains_key(&sender) {
+                    return send_result(result, Err(Error::PeerMissing));
+                }
                 let peer = match self.peers.get(&receiver) {
                     Some(peer) => peer,
                     None => return send_result(result, Err(Error::PeerMissing)),
                 };
+
+                // Require link to not already exist
                 let key = (sender.clone(), receiver);
                 if self.links.contains_key(&key) {
                     return send_result(result, Err(Error::LinkExists));
@@ -190,7 +219,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 result,
             } => {
                 match self.links.remove(&(sender, receiver)) {
-                    Some(link) => drop(link),
+                    Some(_) => (),
                     None => return send_result(result, Err(Error::LinkMissing)),
                 }
                 send_result(result, Ok(()))
@@ -512,9 +541,10 @@ impl Peer {
 
                             // Continually receive messages from the dialer and send them to the appropriate mailbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
-                                const C: usize = size_of::<Channel>();
-                                let channel = Channel::from_be_bytes(data[..C].try_into().unwrap());
-                                let message = data.slice(C..);
+                                let channel = Channel::from_be_bytes(
+                                    data[..SIZE_OF_CHANNEL].try_into().unwrap(),
+                                );
+                                let message = data.slice(SIZE_OF_CHANNEL..);
                                 let mut mailbox = match mailboxes.lock().unwrap().get(&channel) {
                                     Some(s) => s.clone(),
                                     None => {
@@ -590,8 +620,7 @@ impl Link {
 
                 // For any item placed in the inbox, send it to the sink
                 while let Some((channel, message)) = outbox.next().await {
-                    let mut data =
-                        bytes::BytesMut::with_capacity(size_of::<Channel>() + message.len());
+                    let mut data = bytes::BytesMut::with_capacity(SIZE_OF_CHANNEL + message.len());
                     data.extend_from_slice(&channel.to_be_bytes());
                     data.extend_from_slice(&message);
                     let data = data.freeze();

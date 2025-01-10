@@ -952,8 +952,10 @@ impl Networking {
     fn bind(&self, socket: SocketAddr) -> Result<Listener, Error> {
         self.auditor.bind(socket);
 
-        // Ensure the port is not in the ephemeral range
-        if EPHEMERAL_PORT_RANGE.contains(&socket.port()) {
+        // If the IP is localhost, ensure the port is not in the ephemeral range
+        if socket.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)
+            && EPHEMERAL_PORT_RANGE.contains(&socket.port())
+        {
             return Err(Error::BindFailed);
         }
 

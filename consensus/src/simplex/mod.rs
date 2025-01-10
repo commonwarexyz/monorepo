@@ -217,13 +217,6 @@ mod tests {
         Where(fn(usize, usize) -> bool),
     }
 
-    fn only(x: usize, i: usize, j: usize) -> bool {
-        x == i || x == j
-    }
-    fn omit(x: usize, i: usize, j: usize) -> bool {
-        x != i && x != j
-    }
-
     // Helper function to link validators together.
     async fn link_validators(
         oracle: &mut Oracle,
@@ -839,7 +832,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::NewLink(link),
-                Scope::Where(|i, j| omit(0, i, j)),
+                Scope::Where(|i, j| ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -878,7 +871,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Relink(link.clone()),
-                Scope::Where(|i, j| omit(0, i, j)),
+                Scope::Where(|i, j| ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -890,7 +883,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Unlink,
-                Scope::Where(|i, j| only(1, i, j) && omit(0, i, j)),
+                Scope::Where(|i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -907,7 +900,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::NewLink(link),
-                Scope::Where(|i, j| only(0, i, j) && omit(1, i, j)),
+                Scope::Where(|i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
             )
             .await;
 
@@ -921,7 +914,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Relink(link),
-                Scope::Where(|i, j| omit(1, i, j)),
+                Scope::Where(|i, j| ![i, j].contains(&1usize)),
             )
             .await;
 
@@ -1142,7 +1135,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::NewLink(link),
-                Scope::Where(|i, j| omit(0, i, j)),
+                Scope::Where(|i, j| ![i, j].contains(&0usize)),
             )
             .await;
 
