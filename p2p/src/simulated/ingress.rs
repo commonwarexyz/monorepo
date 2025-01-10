@@ -31,6 +31,7 @@ pub enum Message {
 ///
 /// Links are unidirectional (and must be set up in both directions
 /// for a bidirectional connection).
+#[derive(Clone)]
 pub struct Link {
     /// Mean latency for the delivery of a message in milliseconds.
     pub latency: f64,

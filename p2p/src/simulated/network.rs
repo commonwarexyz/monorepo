@@ -189,8 +189,9 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 receiver,
                 result,
             } => {
-                if self.links.remove(&(sender, receiver)).is_none() {
-                    return send_result(result, Err(Error::LinkMissing));
+                match self.links.remove(&(sender, receiver)) {
+                    Some(link) => drop(link),
+                    None => return send_result(result, Err(Error::LinkMissing)),
                 }
                 send_result(result, Ok(()))
             }

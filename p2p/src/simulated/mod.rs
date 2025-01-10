@@ -29,6 +29,7 @@
 //! // Configure network
 //! let p2p_cfg = Config {
 //!     registry: Arc::new(Mutex::new(Registry::with_prefix("p2p"))),
+//!     max_size: 1024 * 1024, // 1MB
 //! };
 //!
 //! // Start runtime
@@ -39,6 +40,10 @@
 //!
 //!     // Start network
 //!     let network_handler = runtime.spawn("network", network.run());
+//!
+//!     // Register some peers
+//!     let (sender, receiver) = oracle.register(peers[0].clone(), 0).await.unwrap();
+//!     let (sender, receiver) = oracle.register(peers[1].clone(), 0).await.unwrap();
 //!
 //!     // Link 2 peers
 //!     oracle.add_link(
@@ -51,16 +56,13 @@
 //!         },
 //!     ).await.unwrap();
 //!
-//!     // Register some channel
-//!     let (sender, receiver) = oracle.register(
-//!         peers[0].clone(),
-//!         0,
-//!         1024 * 1024, // 1MB
-//!     ).await.unwrap();
-//!
 //!     // ... Use sender and receiver ...
 //!
 //!     // Update link
+//!     oracle.remove_link(
+//!         peers[0].clone(),
+//!         peers[1].clone(),
+//!     ).await.unwrap();
 //!     oracle.add_link(
 //!         peers[0].clone(),
 //!         peers[1].clone(),
