@@ -111,10 +111,19 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
     }
 
     fn handle_ingress(&mut self, message: ingress::Message) {
-        // Handle ingress message
-        //
         // It is important to ensure that no failed receipt of a message will cause us to exit.
         // This could happen if the caller drops the `Oracle` after updating the network topology.
+        // Thus, we create a helper function to send the result to the oracle and log any errors.
+        fn send_result<T: std::fmt::Debug>(
+            result: oneshot::Sender<Result<T, Error>>,
+            value: Result<T, Error>,
+        ) {
+            let success = value.is_ok();
+            if let Err(e) = result.send(value) {
+                error!(?e, "failed to send result to oracle (ok = {})", success);
+            }
+        }
+
         match message {
             ingress::Message::Register {
                 public_key,
@@ -135,12 +144,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 let peer = self.peers.get_mut(&public_key).unwrap();
                 let receiver = match peer.register(channel) {
                     Ok(receiver) => Receiver { receiver },
-                    Err(err) => {
-                        if let Err(err) = result.send(Err(err)) {
-                            error!(?err, "failed to send register err to oracle");
-                        }
-                        return;
-                    }
+                    Err(err) => return send_result(result, Err(err)),
                 };
 
                 // Create a sender that allows sending messages to the network for a certain channel
@@ -151,10 +155,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                     self.max_size,
                     self.sender.clone(),
                 );
-
-                if let Err(err) = result.send(Ok((sender, receiver))) {
-                    error!(?err, "failed to send register ack to oracle");
-                }
+                send_result(result, Ok((sender, receiver)))
             }
             ingress::Message::AddLink {
                 sender,
@@ -165,19 +166,11 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
             } => {
                 let peer = match self.peers.get(&receiver) {
                     Some(peer) => peer,
-                    None => {
-                        if let Err(err) = result.send(Err(Error::PeerMissing)) {
-                            error!(?err, "failed to send add link err to oracle");
-                        }
-                        return;
-                    }
+                    None => return send_result(result, Err(Error::PeerMissing)),
                 };
                 let key = (sender.clone(), receiver);
                 if self.links.contains_key(&key) {
-                    if let Err(err) = result.send(Err(Error::LinkExists)) {
-                        error!(?err, "failed to send add link err to oracle");
-                    }
-                    return;
+                    return send_result(result, Err(Error::LinkExists));
                 }
 
                 let link = Link::new(
@@ -189,10 +182,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                     self.max_size,
                 );
                 self.links.insert(key, link);
-
-                if let Err(err) = result.send(Ok(())) {
-                    error!(?err, "failed to send add link ack to oracle");
-                }
+                send_result(result, Ok(()))
             }
             ingress::Message::RemoveLink {
                 sender,
@@ -200,14 +190,9 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 result,
             } => {
                 if self.links.remove(&(sender, receiver)).is_none() {
-                    if let Err(err) = result.send(Err(Error::LinkMissing)) {
-                        error!(?err, "failed to send remove link err to oracle");
-                    }
-                    return;
+                    return send_result(result, Err(Error::LinkMissing));
                 }
-                if let Err(err) = result.send(Ok(())) {
-                    error!(?err, "failed to send remove link ack to oracle");
-                }
+                send_result(result, Ok(()))
             }
         }
     }
