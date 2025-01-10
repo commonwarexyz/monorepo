@@ -163,7 +163,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 success_rate,
                 result,
             } => {
-                let peer = match self.peers.get(&sender) {
+                let peer = match self.peers.get(&receiver) {
                     Some(peer) => peer,
                     None => {
                         if let Err(err) = result.send(Err(Error::PeerMissing)) {
