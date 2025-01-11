@@ -14,11 +14,13 @@ message Voter {
     }
 }
 
+// TODO: include in message with notarize/nullify
 message Part {
     uint64 view = 1;
     bytes partial_signature = 2;
 }
 
+// TODO: include in message with notarization/nullification/finalization
 message Seed {
     uint64 view = 1;
     bytes signature = 2;
