@@ -9,9 +9,16 @@ use commonware_cryptography::{
         group::{self, Element},
         poly,
     },
-    Signature,
+    PublicKey, Signature,
 };
+use commonware_utils::quorum;
 use tracing::debug;
+
+pub fn threshold(validators: &[PublicKey]) -> Option<(u32, u32)> {
+    let len = validators.len() as u32;
+    let threshold = quorum(len).expect("not enough validators for a quorum");
+    Some((threshold, len))
+}
 
 pub fn verify_notarization<S: ThresholdSupervisor<Index = View, Identity = poly::Public>>(
     supervisor: &S,
@@ -62,7 +69,7 @@ pub fn verify_notarization<S: ThresholdSupervisor<Index = View, Identity = poly:
 
     // Verify seed
     let seed = seed_message(proposal.view);
-    let Some(signature) = Signature::deserialize(&notarization.seed) else {
+    let Some(signature) = group::Signature::deserialize(&notarization.seed) else {
         debug!(reason = "invalid seed signature", "dropping notarization");
         return false;
     };
@@ -116,7 +123,7 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
 
     // Verify seed
     let seed = seed_message(nullification.view);
-    let Some(signature) = Signature::deserialize(&nullification.seed) else {
+    let Some(signature) = group::Signature::deserialize(&nullification.seed) else {
         debug!(reason = "invalid seed signature", "dropping nullification");
         return false;
     };
@@ -178,7 +185,7 @@ pub fn verify_finalization<S: ThresholdSupervisor<Index = View, Identity = poly:
 
     // Verify seed
     let seed = seed_message(proposal.view);
-    let Some(signature) = Signature::deserialize(&finalization.seed) else {
+    let Some(signature) = group::Signature::deserialize(&finalization.seed) else {
         debug!(reason = "invalid seed signature", "dropping finalization");
         return false;
     };
