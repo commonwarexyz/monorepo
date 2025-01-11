@@ -1946,15 +1946,16 @@ impl<
                     wire::voter::Payload::Notarize(notarize) => {
                         // Handle notarize
                         let proposal = notarize.proposal.as_ref().unwrap().clone();
-                        let public_key = notarize.signature.as_ref().unwrap().public_key;
+                        let signature = Eval::deserialize(&notarize.signature).unwrap();
+                        let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
                             .participants(proposal.view)
                             .unwrap()
-                            .get(public_key as usize)
+                            .get(public_key_index as usize)
                             .unwrap()
                             .clone();
-                        self.handle_notarize(&public_key, notarize).await;
+                        self.handle_notarize(public_key_index, notarize).await;
 
                         // Update round info
                         if public_key == self.crypto.public_key() {
@@ -1972,15 +1973,16 @@ impl<
                     wire::voter::Payload::Nullify(nullify) => {
                         // Handle nullify
                         let view = nullify.view;
-                        let public_key = nullify.signature.as_ref().unwrap().public_key;
+                        let signature = Eval::deserialize(&nullify.signature).unwrap();
+                        let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
                             .participants(view)
                             .unwrap()
-                            .get(public_key as usize)
+                            .get(public_key_index as usize)
                             .unwrap()
                             .clone();
-                        self.handle_nullify(&public_key, nullify).await;
+                        self.handle_nullify(public_key_index, nullify).await;
 
                         // Update round info
                         if public_key == self.crypto.public_key() {
@@ -1992,15 +1994,16 @@ impl<
                     wire::voter::Payload::Finalize(finalize) => {
                         // Handle finalize
                         let view = finalize.proposal.as_ref().unwrap().view;
-                        let public_key = finalize.signature.as_ref().unwrap().public_key;
+                        let signature = Eval::deserialize(&finalize.signature).unwrap();
+                        let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
                             .participants(view)
                             .unwrap()
-                            .get(public_key as usize)
+                            .get(public_key_index as usize)
                             .unwrap()
                             .clone();
-                        self.handle_finalize(&public_key, finalize).await;
+                        self.handle_finalize(public_key_index, finalize).await;
 
                         // Update round info
                         //
@@ -2168,16 +2171,6 @@ impl<
 
                     // Process message
                     match payload {
-                        wire::voter::Payload::Part(part) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::part(&s)).inc();
-                            view = part.view;
-                            self.part(part).await;
-                        }
-                        wire::voter::Payload::Seed(seed) => {
-                            self.received_messages.get_or_create(&metrics::PeerMessage::seed(&s)).inc();
-                            view = seed.view;
-                            self.seed(seed).await;
-                        }
                         wire::voter::Payload::Notarize(notarize) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarize(&s)).inc();
                             view = match &notarize.proposal {
@@ -2186,7 +2179,7 @@ impl<
                                     continue;
                                 }
                             };
-                            self.notarize(notarize).await;
+                            self.notarize(&s, notarize).await;
                         }
                         wire::voter::Payload::Notarization(notarization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::notarization(&s)).inc();
@@ -2201,7 +2194,7 @@ impl<
                         wire::voter::Payload::Nullify(nullify) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullify(&s)).inc();
                             view = nullify.view;
-                            self.nullify(nullify).await;
+                            self.nullify(&s, nullify).await;
                         }
                         wire::voter::Payload::Nullification(nullification) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::nullification(&s)).inc();
@@ -2216,7 +2209,7 @@ impl<
                                     continue;
                                 }
                             };
-                            self.finalize(finalize).await;
+                            self.finalize(&s, finalize).await;
                         }
                         wire::voter::Payload::Finalization(finalization) => {
                             self.received_messages.get_or_create(&metrics::PeerMessage::finalization(&s)).inc();
