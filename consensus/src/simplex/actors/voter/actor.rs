@@ -1353,6 +1353,11 @@ impl<
             .entry(view)
             .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
 
+        // If already have notarization, ignore
+        if round.notarization.is_some() {
+            return;
+        }
+
         // Clear leader and advance deadlines (if they exist)
         round.leader_deadline = None;
         round.advance_deadline = None;
@@ -1369,6 +1374,21 @@ impl<
                 "setting unverified proposal in notarization"
             );
             round.proposal = Some((digest, proposal));
+        }
+
+        // Put notarization in journal
+        if self.journal.is_some() {
+            let notarization_bytes = wire::Voter {
+                payload: Some(wire::voter::Payload::Notarization(notarization.clone())),
+            }
+            .encode_to_vec()
+            .into();
+            self.journal
+                .as_mut()
+                .unwrap()
+                .append(view, notarization_bytes)
+                .await
+                .expect("unable to append to journal");
         }
 
         // Get seed
@@ -1423,6 +1443,21 @@ impl<
         // Clear leader and advance deadlines (if they exist)
         round.leader_deadline = None;
         round.advance_deadline = None;
+
+        // Put nullification in journal
+        if self.journal.is_some() {
+            let nullification_bytes = wire::Voter {
+                payload: Some(wire::voter::Payload::Nullification(nullification.clone())),
+            }
+            .encode_to_vec()
+            .into();
+            self.journal
+                .as_mut()
+                .unwrap()
+                .append(view, nullification_bytes)
+                .await
+                .expect("unable to append to journal");
+        }
 
         // Get seed
         let seed = group::Signature::deserialize(&nullification.seed).unwrap();
@@ -1561,6 +1596,21 @@ impl<
                 "setting unverified proposal in finalization"
             );
             round.proposal = Some((digest, proposal));
+        }
+
+        // Put finalization in journal
+        if self.journal.is_some() {
+            let finalization_bytes = wire::Voter {
+                payload: Some(wire::voter::Payload::Finalization(finalization.clone())),
+            }
+            .encode_to_vec()
+            .into();
+            self.journal
+                .as_mut()
+                .unwrap()
+                .append(view, finalization_bytes)
+                .await
+                .expect("unable to append to journal");
         }
 
         // Get seed
@@ -1928,7 +1978,6 @@ impl<
         self.enter_view(1, group::Signature::zero());
 
         // Rebuild from journal
-        let mut observed_view = 1;
         let mut journal = self.journal.take().expect("missing journal");
         {
             let stream = journal
@@ -1946,7 +1995,8 @@ impl<
                     wire::voter::Payload::Notarize(notarize) => {
                         // Handle notarize
                         let proposal = notarize.proposal.as_ref().unwrap().clone();
-                        let signature = Eval::deserialize(&notarize.signature).unwrap();
+                        let signature: Eval<group::Signature> =
+                            Eval::deserialize(&notarize.signature).unwrap();
                         let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
@@ -1959,7 +2009,6 @@ impl<
 
                         // Update round info
                         if public_key == self.crypto.public_key() {
-                            observed_view = max(observed_view, proposal.view);
                             let round = self.views.get_mut(&proposal.view).expect("missing round");
                             let proposal_message =
                                 proposal_message(proposal.view, proposal.parent, &proposal.payload);
@@ -1970,10 +2019,20 @@ impl<
                             round.broadcast_notarize = true;
                         }
                     }
+                    wire::voter::Payload::Notarization(notarization) => {
+                        // Handle notarization
+                        let proposal = notarization.proposal.as_ref().unwrap().clone();
+                        self.handle_notarization(notarization).await;
+
+                        // Update round info
+                        let round = self.views.get_mut(&proposal.view).expect("missing round");
+                        round.broadcast_notarization = true;
+                    }
                     wire::voter::Payload::Nullify(nullify) => {
                         // Handle nullify
                         let view = nullify.view;
-                        let signature = Eval::deserialize(&nullify.signature).unwrap();
+                        let signature: Eval<group::Signature> =
+                            Eval::deserialize(&nullify.signature).unwrap();
                         let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
@@ -1986,15 +2045,24 @@ impl<
 
                         // Update round info
                         if public_key == self.crypto.public_key() {
-                            observed_view = max(observed_view, view);
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_nullify = true;
                         }
                     }
+                    wire::voter::Payload::Nullification(nullification) => {
+                        // Handle nullification
+                        let view = nullification.view;
+                        self.handle_nullification(nullification).await;
+
+                        // Update round info
+                        let round = self.views.get_mut(&view).expect("missing round");
+                        round.broadcast_nullification = true;
+                    }
                     wire::voter::Payload::Finalize(finalize) => {
                         // Handle finalize
                         let view = finalize.proposal.as_ref().unwrap().view;
-                        let signature = Eval::deserialize(&finalize.signature).unwrap();
+                        let signature: Eval<group::Signature> =
+                            Eval::deserialize(&finalize.signature).unwrap();
                         let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
@@ -2009,11 +2077,19 @@ impl<
                         //
                         // If we are sending a finalize message, we must be in the next view
                         if public_key == self.crypto.public_key() {
-                            observed_view = max(observed_view, view + 1);
                             let round = self.views.get_mut(&view).expect("missing round");
                             round.broadcast_notarization = true;
                             round.broadcast_finalize = true;
                         }
+                    }
+                    wire::voter::Payload::Finalization(finalization) => {
+                        // Handle finalization
+                        let view = finalization.proposal.as_ref().unwrap().view;
+                        self.handle_finalization(finalization).await;
+
+                        // Update round info
+                        let round = self.views.get_mut(&view).expect("missing round");
+                        round.broadcast_finalization = true;
                     }
                     _ => panic!("unexpected message in journal"),
                 }
@@ -2022,8 +2098,8 @@ impl<
         self.journal = Some(journal);
 
         // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
+        let observed_view = self.view;
         debug!(current_view = observed_view, "replayed journal");
-        self.enter_view(observed_view);
         {
             let round = self.views.get_mut(&observed_view).expect("missing round");
             round.leader_deadline = Some(self.runtime.current());
