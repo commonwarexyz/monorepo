@@ -9,14 +9,16 @@ use crate::{
         metrics,
         prover::Prover,
         verifier::{threshold, verify_finalization, verify_notarization, verify_nullification},
-        wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
+        wire::{self, Finalization},
+        Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
     Automaton, Committer, Relay, ThresholdSupervisor,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
-        group, ops,
+        group::{self, Element},
+        ops,
         poly::{self, Eval},
     },
     Digest, Hasher, PublicKey, Scheme,
@@ -41,10 +43,6 @@ use std::{
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
-
-type Notarizable<'a> = Option<(wire::Proposal, &'a HashMap<u32, wire::Notarize>)>;
-type Nullifiable<'a> = Option<(View, &'a HashMap<u32, wire::Nullify>)>;
-type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<u32, wire::Finalize>)>;
 
 const GENESIS_VIEW: View = 0;
 
@@ -72,18 +70,19 @@ struct Round<
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
     notaries: HashMap<u32, Digest>,
     notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
-    // TODO: store reconstructed signature
+    notarization: Option<wire::Notarization>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
     nullifies: HashMap<u32, wire::Nullify>,
+    nullification: Option<wire::Nullification>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
     finalizers: HashMap<u32, Digest>,
     finalizes: HashMap<Digest, HashMap<u32, wire::Finalize>>,
-    // TODO: store reconstructed signature
+    finalization: Option<wire::Finalization>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
@@ -112,15 +111,18 @@ impl<
 
             notaries: HashMap::new(),
             notarizes: HashMap::new(),
+            notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
 
             nullifies: HashMap::new(),
+            nullification: None,
             broadcast_nullify: false,
             broadcast_nullification: false,
 
             finalizers: HashMap::new(),
             finalizes: HashMap::new(),
+            finalization: None,
             broadcast_finalize: false,
             broadcast_finalization: false,
         }
@@ -236,10 +238,14 @@ impl<
         false
     }
 
-    fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable {
+    fn notarizable(&mut self, threshold: u32, force: bool) -> Option<wire::Notarization> {
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
             return None;
+        }
+        if let Some(notarization) = &self.notarization {
+            self.broadcast_notarization = true;
+            return Some(notarization.clone());
         }
         for (proposal, notarizes) in self.notarizes.iter() {
             if (notarizes.len() as u32) < threshold {
@@ -254,7 +260,6 @@ impl<
                 verified = self.verified_proposal,
                 "broadcasting notarization"
             );
-            self.broadcast_notarization = true;
 
             // Grab the proposal
             let proposal = notarizes
@@ -265,20 +270,71 @@ impl<
                 .as_ref()
                 .unwrap()
                 .clone();
-            return Some((proposal, notarizes));
+
+            // Recover threshold signature
+            let mut notarization = Vec::new();
+            let mut seed = Vec::new();
+            for notarize in notarizes.values() {
+                let eval = Eval::deserialize(&notarize.signature).unwrap();
+                notarization.push(eval);
+                let eval = Eval::deserialize(&notarize.seed).unwrap();
+                seed.push(eval);
+            }
+            let signature = ops::threshold_signature_recover(threshold, notarization).unwrap();
+            let signature = signature.serialize();
+            let seed = ops::threshold_signature_recover(threshold, seed).unwrap();
+            let seed = seed.serialize();
+
+            // Construct notarization
+            let notarization = wire::Notarization {
+                proposal: Some(proposal.clone()),
+                signature: signature.into(),
+                seed: seed.into(),
+            };
+            self.notarization = Some(notarization.clone());
+            self.broadcast_notarization = true;
+            return Some(notarization);
         }
         None
     }
 
-    fn nullifiable(&mut self, threshold: u32, force: bool) -> Nullifiable {
+    fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<wire::Nullification> {
         if !force && (self.broadcast_nullification || self.broadcast_notarization) {
             return None;
+        }
+        if let Some(nullification) = &self.nullification {
+            self.broadcast_nullification = true;
+            return Some(nullification.clone());
         }
         if (self.nullifies.len() as u32) < threshold {
             return None;
         }
+
+        debug!(view = self.view, "broadcasting nullification");
+
+        // Recover threshold signature
+        let mut nullification = Vec::new();
+        let mut seed = Vec::new();
+        for nullify in self.nullifies.values() {
+            let eval = Eval::deserialize(&nullify.signature).unwrap();
+            nullification.push(eval);
+            let eval = Eval::deserialize(&nullify.seed).unwrap();
+            seed.push(eval);
+        }
+        let signature = ops::threshold_signature_recover(threshold, nullification).unwrap();
+        let signature = signature.serialize();
+        let seed = ops::threshold_signature_recover(threshold, seed).unwrap();
+        let seed = seed.serialize();
+
+        // Construct nullification
+        let nullification = wire::Nullification {
+            view: self.view,
+            signature: signature.into(),
+            seed: seed.into(),
+        };
+        self.nullification = Some(nullification.clone());
         self.broadcast_nullification = true;
-        Some((self.view, &self.nullifies))
+        Some(nullification)
     }
 
     async fn add_verified_finalize(
@@ -367,15 +423,25 @@ impl<
         true
     }
 
-    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable {
+    fn finalizable(&mut self, threshold: u32, force: bool) -> Option<wire::Finalization> {
         if !force && self.broadcast_finalization {
             // We want to broadcast a finalization, even if we haven't yet verified a proposal.
             return None;
+        }
+        if let Some(finalization) = &self.finalization {
+            self.broadcast_finalization = true;
+            return Some(finalization.clone());
         }
         for (proposal, finalizes) in self.finalizes.iter() {
             if (finalizes.len() as u32) < threshold {
                 continue;
             }
+
+            // Ensure we have a notarization
+            let Some(notarization) = &self.notarization else {
+                continue;
+            };
+            let seed = notarization.seed.clone();
 
             // There should never exist enough finalizes for multiple proposals, so it doesn't
             // matter which one we choose.
@@ -385,7 +451,6 @@ impl<
                 verified = self.verified_proposal,
                 "broadcasting finalization"
             );
-            self.broadcast_finalization = true;
 
             // Grab the proposal
             let proposal = finalizes
@@ -396,7 +461,25 @@ impl<
                 .as_ref()
                 .unwrap()
                 .clone();
-            return Some((proposal, finalizes));
+
+            // Recover threshold signature
+            let mut finalization = Vec::new();
+            for finalize in finalizes.values() {
+                let eval = Eval::deserialize(&finalize.signature).unwrap();
+                finalization.push(eval);
+            }
+            let signature = ops::threshold_signature_recover(threshold, finalization).unwrap();
+            let signature = signature.serialize();
+
+            // Construct finalization
+            let finalization = wire::Finalization {
+                proposal: Some(proposal.clone()),
+                signature: signature.into(),
+                seed,
+            };
+            self.finalization = Some(finalization.clone());
+            self.broadcast_finalization = true;
+            return Some(finalization);
         }
         None
     }
@@ -916,10 +999,13 @@ impl<
             let round = self.views.get(&self.view)?;
 
             // If we are the leader, drop peer proposals
-            if round.leader == self.crypto.public_key() {
+            let Some(leader) = &round.leader else {
+                return None;
+            };
+            if *leader == self.crypto.public_key() {
                 return None;
             }
-            let leader_index = self.supervisor.is_participant(self.view, &round.leader)?;
+            let leader_index = self.supervisor.is_participant(self.view, leader)?;
 
             // If we already broadcast nullify or set proposal, do nothing
             if round.broadcast_nullify {
@@ -1036,7 +1122,7 @@ impl<
         true
     }
 
-    fn enter_view(&mut self, view: u64) {
+    fn enter_view(&mut self, view: u64, seed: group::Signature) {
         // Ensure view is valid
         if view <= self.view {
             trace!(
@@ -1054,11 +1140,12 @@ impl<
             .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
         round.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
         round.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
+        round.set_leader(seed);
         self.view = view;
         info!(view, "entered view");
 
         // Check if we should fast exit this view
-        let leader = round.leader.clone();
+        let leader = round.leader.as_ref().unwrap().clone();
         if view < self.activity_timeout || leader == self.crypto.public_key() {
             // Don't fast exit the view
             return;
@@ -1245,7 +1332,12 @@ impl<
         }
 
         // Verify notarization
-        if !verify_notarization::<S, C>(&self.supervisor, &self.notarize_namespace, &notarization) {
+        if !verify_notarization::<S>(
+            &self.supervisor,
+            &self.notarize_namespace,
+            &self.seed_namespace,
+            &notarization,
+        ) {
             return;
         }
 
@@ -1319,8 +1411,12 @@ impl<
         }
 
         // Verify nullification
-        if !verify_nullification::<S, C>(&self.supervisor, &self.nullify_namespace, &nullification)
-        {
+        if !verify_nullification::<S>(
+            &self.supervisor,
+            &self.nullify_namespace,
+            &self.seed_namespace,
+            &nullification,
+        ) {
             return;
         }
 
