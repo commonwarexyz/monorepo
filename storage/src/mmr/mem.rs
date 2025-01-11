@@ -1,11 +1,11 @@
 //! A bare-bones MMR structure without pruning and where all elements are hashes & maintained in memory.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Hash([u8; 32]); // TODO: Parameterize on length of hash?
+pub struct Hash<const N: usize>([u8; N]);
 
 /// Implementation of `InMemoryMMR`.
-pub struct InMemoryMMR {
-    elements: Vec<Hash>,
+pub struct InMemoryMMR<const N: usize> {
+    elements: Vec<Hash<N>>,
 }
 
 #[derive(Default)]
@@ -35,7 +35,13 @@ impl Iterator for PeakIterator {
     }
 }
 
-impl InMemoryMMR {
+impl<const N: usize> Default for InMemoryMMR<N> {
+    fn default() -> Self {
+        InMemoryMMR::new()
+    }
+}
+
+impl<const N: usize> InMemoryMMR<N> {
     /// Return a new (empty) `InMemoryMMR`.
     pub fn new() -> Self {
         Self {
@@ -81,7 +87,7 @@ impl InMemoryMMR {
     }
 
     /// Add a hash to the MMR and return its index.
-    pub fn add_leaf_hash(&mut self, element: &Hash) -> u64 {
+    pub fn add_leaf_hash(&mut self, element: &Hash<N>) -> u64 {
         let mut v = Vec::new();
         self.peaks_from_leaf(&mut v);
         let index = self.elements.len() as u64;
@@ -103,11 +109,11 @@ mod tests {
     /// total with 3 peaks (14, 17, 18) as pictured in the MMR example here:
     /// https://docs.grin.mw/wiki/chain-state/merkle-mountain-range/
     fn test_add_elements() {
-        let mut mmr = InMemoryMMR::new();
+        let mut mmr: InMemoryMMR<32> = InMemoryMMR::new();
         // the empty iterator should have no peaks
         assert_eq!(mmr.peak_iterator().next(), None);
 
-        let element = Hash(*b"01234567012345670123456701234567");
+        let element: Hash<32> = Hash(*b"01234567012345670123456701234567");
         for _ in 0..11 {
             mmr.add_leaf_hash(&element);
             let peaks: Vec<(u32, u64)> = mmr.peak_iterator().collect();
