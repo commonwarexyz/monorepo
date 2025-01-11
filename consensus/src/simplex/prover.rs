@@ -33,6 +33,10 @@ pub struct Prover<H: Hasher> {
     finalize_namespace: Vec<u8>,
 }
 
+/// If we expose partial signatures of proofs, can be used to construct a partial signature
+/// over pre-aggregated data (where the public key of each index can be derived from the group
+/// polynomial). This can be very useful for distributing rewards without including all partial signatures
+/// in a block.
 impl<H: Hasher> Prover<H> {
     /// Create a new prover with the given signing `namespace`.
     pub fn new(public: group::Public, namespace: &[u8]) -> Self {
