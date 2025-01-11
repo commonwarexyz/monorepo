@@ -2,23 +2,17 @@ use commonware_cryptography::PublicKey;
 use commonware_utils::hex;
 use prometheus_client::encoding::EncodeLabelSet;
 
-const PART_TYPE: i32 = 1;
-const SEED_TYPE: i32 = 2;
-const NOTARIZE_TYPE: i32 = 3;
-const NOTARIZATION_TYPE: i32 = 4;
-const NULLIFY_TYPE: i32 = 5;
-const NULLIFICATION_TYPE: i32 = 6;
-const FINALIZE_TYPE: i32 = 7;
-const FINALIZATION_TYPE: i32 = 8;
+const NOTARIZE_TYPE: i32 = 1;
+const NOTARIZATION_TYPE: i32 = 2;
+const NULLIFY_TYPE: i32 = 3;
+const NULLIFICATION_TYPE: i32 = 4;
+const FINALIZE_TYPE: i32 = 5;
+const FINALIZATION_TYPE: i32 = 6;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Message {
     pub message: i32,
 }
-
-pub const PART: Message = Message { message: PART_TYPE };
-
-pub const SEED: Message = Message { message: SEED_TYPE };
 
 pub const NOTARIZE: Message = Message {
     message: NOTARIZE_TYPE,
@@ -51,20 +45,6 @@ pub struct PeerMessage {
 }
 
 impl PeerMessage {
-    pub fn part(peer: &PublicKey) -> Self {
-        Self {
-            peer: hex(peer),
-            message: PART_TYPE,
-        }
-    }
-
-    pub fn seed(peer: &PublicKey) -> Self {
-        Self {
-            peer: hex(peer),
-            message: SEED_TYPE,
-        }
-    }
-
     pub fn notarize(peer: &PublicKey) -> Self {
         Self {
             peer: hex(peer),

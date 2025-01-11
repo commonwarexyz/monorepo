@@ -567,7 +567,7 @@ impl<
 
                             // Update performance
                             let mut shuffle = false;
-                            if !!notarizations_found.is_empty() || !nullifications_found.is_empty() {
+                            if !notarizations_found.is_empty() || !nullifications_found.is_empty() {
                                 self.requester.resolve(request);
                                 debug!(
                                     sender = hex(&s),

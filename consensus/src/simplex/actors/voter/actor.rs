@@ -9,8 +9,7 @@ use crate::{
         metrics,
         prover::Prover,
         verifier::{threshold, verify_finalization, verify_notarization, verify_nullification},
-        wire::{self, Finalization},
-        Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
+        wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
     Automaton, Committer, Relay, ThresholdSupervisor,
@@ -37,7 +36,6 @@ use prometheus_client::metrics::{counter::Counter, family::Family, gauge::Gauge}
 use prost::Message as _;
 use rand::Rng;
 use std::{
-    cmp::max,
     collections::{BTreeMap, HashMap},
     time::{Duration, SystemTime},
 };
@@ -730,6 +728,7 @@ impl<
         missing
     }
 
+    #[allow(clippy::question_mark)]
     async fn propose(
         &mut self,
         backfiller: &mut resolver::Mailbox,
@@ -992,6 +991,7 @@ impl<
     }
 
     // Attempt to set proposal from each message received over the wire
+    #[allow(clippy::question_mark)]
     async fn peer_proposal(&mut self) -> Option<(Context, oneshot::Receiver<bool>)> {
         // Get round
         let (proposal_digest, proposal) = {
@@ -2099,7 +2099,6 @@ impl<
                         let round = self.views.get_mut(&view).expect("missing round");
                         round.broadcast_finalization = true;
                     }
-                    _ => panic!("unexpected message in journal"),
                 }
             }
         }

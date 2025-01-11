@@ -10,6 +10,9 @@ use commonware_cryptography::{
 };
 use std::marker::PhantomData;
 
+pub type ProposalSignature = (View, Digest, Eval<group::Signature>);
+pub type NullSignature = (View, Eval<group::Signature>);
+
 /// Encode and decode proofs of activity.
 ///
 /// We don't use protobuf for proof encoding because we expect external parties
@@ -25,6 +28,7 @@ pub struct Prover<H: Hasher> {
 /// in a block.
 impl<H: Hasher> Prover<H> {
     /// Create a new prover with the given signing `namespace`.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             _hasher: PhantomData,
@@ -173,11 +177,7 @@ impl<H: Hasher> Prover<H> {
 
     fn deserialize_conflicting_proposal(
         mut proof: Proof,
-    ) -> Option<(
-        View,
-        (View, Digest, Eval<group::Signature>),
-        (View, Digest, Eval<group::Signature>),
-    )> {
+    ) -> Option<(View, ProposalSignature, ProposalSignature)> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let len = 8
@@ -234,11 +234,7 @@ impl<H: Hasher> Prover<H> {
     /// Deserialize a conflicting notarization proof.
     pub fn deserialize_conflicting_notarize(
         proof: Proof,
-    ) -> Option<(
-        View,
-        (View, Digest, Eval<group::Signature>),
-        (View, Digest, Eval<group::Signature>),
-    )> {
+    ) -> Option<(View, ProposalSignature, ProposalSignature)> {
         Self::deserialize_conflicting_proposal(proof)
     }
 
@@ -267,11 +263,7 @@ impl<H: Hasher> Prover<H> {
     /// Deserialize a conflicting finalization proof.
     pub fn deserialize_conflicting_finalize(
         proof: Proof,
-    ) -> Option<(
-        View,
-        (View, Digest, Eval<group::Signature>),
-        (View, Digest, Eval<group::Signature>),
-    )> {
+    ) -> Option<(View, ProposalSignature, ProposalSignature)> {
         Self::deserialize_conflicting_proposal(proof)
     }
 
@@ -301,11 +293,7 @@ impl<H: Hasher> Prover<H> {
     /// Deserialize a conflicting nullify and finalize proof.
     pub fn deserialize_nullify_finalize(
         mut proof: Proof,
-    ) -> Option<(
-        View,
-        (View, Digest, Eval<group::Signature>),
-        (View, Eval<group::Signature>),
-    )> {
+    ) -> Option<(View, ProposalSignature, NullSignature)> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let len =

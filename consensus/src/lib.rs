@@ -6,7 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
-use commonware_cryptography::{bls12381::primitives::group, Digest, PublicKey};
+use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::oneshot;
 use std::future::Future;
 
