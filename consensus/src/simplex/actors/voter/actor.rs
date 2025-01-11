@@ -1594,20 +1594,19 @@ impl<
         if !round.verified_proposal {
             return None;
         }
-        let public_key = self
-            .supervisor
-            .is_participant(view, &self.crypto.public_key())?;
+        let share = self.supervisor.share(view).unwrap();
         let proposal = &round.proposal.as_ref().unwrap().1;
+        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+        let signature = ops::partial_sign_message(&share, Some(&self.notarize_namespace), &message);
+        let signature = signature.serialize();
+        let message = seed_message(view);
+        let seed = ops::partial_sign_message(&share, Some(&self.seed_namespace), &message);
+        let seed = seed.serialize();
         round.broadcast_notarize = true;
         Some(wire::Notarize {
             proposal: Some(proposal.clone()),
-            signature: Some(wire::Signature {
-                public_key,
-                signature: self.crypto.sign(
-                    Some(&self.notarize_namespace),
-                    &proposal_message(proposal.view, proposal.parent, &proposal.payload),
-                ),
-            }),
+            signature: signature.into(),
+            seed: seed.into(),
         })
     }
 
@@ -1621,28 +1620,8 @@ impl<
         };
 
         // Attempt to construct notarization
-        let validators = match self.supervisor.participants(view) {
-            Some(validators) => validators,
-            None => {
-                return None;
-            }
-        };
-        let threshold =
-            quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (proposal, notarizes) = round.notarizable(threshold, force)?;
-
-        // Construct notarization
-        let mut signatures = Vec::new();
-        for validator in 0..(validators.len() as u32) {
-            if let Some(notarize) = notarizes.get(&validator) {
-                signatures.push(notarize.signature.clone().unwrap());
-            }
-        }
-        let notarization = wire::Notarization {
-            proposal: Some(proposal),
-            signatures,
-        };
-        Some(notarization)
+        let (_, threshold) = self.supervisor.identity(view)?;
+        round.notarizable(threshold, force)
     }
 
     fn construct_nullification(&mut self, view: u64, force: bool) -> Option<wire::Nullification> {
@@ -1654,25 +1633,9 @@ impl<
             }
         };
 
-        // Attempt to construct notarization
-        let validators = match self.supervisor.participants(view) {
-            Some(validators) => validators,
-            None => {
-                return None;
-            }
-        };
-        let threshold =
-            quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (_, nullifies) = round.nullifiable(threshold, force)?;
-
-        // Construct nullification
-        let mut signatures = Vec::new();
-        for validator in 0..(validators.len() as u32) {
-            if let Some(nullify) = nullifies.get(&validator) {
-                signatures.push(nullify.signature.clone().unwrap());
-            }
-        }
-        Some(wire::Nullification { view, signatures })
+        // Attempt to construct nullification
+        let (_, threshold) = self.supervisor.identity(view)?;
+        round.nullifiable(threshold, force)
     }
 
     fn construct_finalize(&mut self, view: u64) -> Option<wire::Finalize> {
@@ -1696,25 +1659,20 @@ impl<
         if round.broadcast_finalize {
             return None;
         }
+        let share = self.supervisor.share(view).unwrap();
         let proposal = match &round.proposal {
             Some((_, proposal)) => proposal,
             None => {
                 return None;
             }
         };
-        let public_key = self
-            .supervisor
-            .is_participant(view, &self.crypto.public_key())?;
+        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+        let signature = ops::partial_sign_message(&share, Some(&self.finalize_namespace), &message);
+        let signature = signature.serialize();
         round.broadcast_finalize = true;
         Some(wire::Finalize {
             proposal: Some(proposal.clone()),
-            signature: Some(wire::Signature {
-                public_key,
-                signature: self.crypto.sign(
-                    Some(&self.finalize_namespace),
-                    &proposal_message(proposal.view, proposal.parent, &proposal.payload),
-                ),
-            }),
+            signature: signature.into(),
         })
     }
 
@@ -1727,28 +1685,8 @@ impl<
         };
 
         // Attempt to construct finalization
-        let validators = match self.supervisor.participants(view) {
-            Some(validators) => validators,
-            None => {
-                return None;
-            }
-        };
-        let threshold =
-            quorum(validators.len() as u32).expect("not enough validators for a quorum");
-        let (proposal, finalizes) = round.finalizable(threshold, force)?;
-
-        // Construct finalization
-        let mut signatures = Vec::new();
-        for validator in 0..(validators.len() as u32) {
-            if let Some(finalize) = finalizes.get(&validator) {
-                signatures.push(finalize.signature.clone().unwrap());
-            }
-        }
-        let finalization = wire::Finalization {
-            proposal: Some(proposal),
-            signatures,
-        };
-        Some(finalization)
+        let (_, threshold) = self.supervisor.identity(view)?;
+        round.finalizable(threshold, force)
     }
 
     async fn notify(
@@ -1757,10 +1695,13 @@ impl<
         sender: &mut impl Sender,
         view: u64,
     ) {
+        // Get public key index
+        let public_key_index = self.supervisor.share(view).unwrap().index;
+
         // Attempt to notarize
         if let Some(notarize) = self.construct_notarize(view) {
             // Handle the notarize
-            self.handle_notarize(&self.crypto.public_key(), notarize.clone())
+            self.handle_notarize(public_key_index, notarize.clone())
                 .await;
 
             // Sync the journal
@@ -1800,14 +1741,8 @@ impl<
                 .expect("unable to sync journal");
 
             // Alert application
-            let validators = self.supervisor.participants(view).unwrap();
             let proposal = notarization.proposal.as_ref().unwrap();
-            let mut signatures = Vec::with_capacity(notarization.signatures.len());
-            for signature in &notarization.signatures {
-                let public_key = validators.get(signature.public_key as usize).unwrap();
-                signatures.push((public_key, &signature.signature));
-            }
-            let proof = Prover::<C, H>::serialize_aggregation(proposal, signatures);
+            let proof = Prover::<H>::serialize_threshold(proposal, &notarization.signature);
             self.committer
                 .prepared(
                     proof,
@@ -1915,7 +1850,7 @@ impl<
         // Attempt to finalize
         if let Some(finalize) = self.construct_finalize(view) {
             // Handle the finalize
-            self.handle_finalize(&self.crypto.public_key(), finalize.clone())
+            self.handle_finalize(public_key_index, finalize.clone())
                 .await;
 
             // Sync the journal
@@ -1955,14 +1890,8 @@ impl<
                 .expect("unable to sync journal");
 
             // Alert application
-            let validators = self.supervisor.participants(view).unwrap();
             let proposal = finalization.proposal.as_ref().unwrap();
-            let mut signatures = Vec::with_capacity(finalization.signatures.len());
-            for signature in &finalization.signatures {
-                let public_key = validators.get(signature.public_key as usize).unwrap();
-                signatures.push((public_key, &signature.signature));
-            }
-            let proof = Prover::<C, H>::serialize_aggregation(proposal, signatures);
+            let proof = Prover::<H>::serialize_threshold(proposal, &finalization.signature);
             self.committer
                 .finalized(
                     proof,
@@ -1996,7 +1925,7 @@ impl<
         // Add initial view
         //
         // We start on view 1 because the genesis container occupies view 0/height 0.
-        self.enter_view(1);
+        self.enter_view(1, group::Signature::zero());
 
         // Rebuild from journal
         let mut observed_view = 1;
