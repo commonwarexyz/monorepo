@@ -1141,7 +1141,7 @@ impl<
         }
     }
 
-    async fn notarize(&mut self, notarize: wire::Notarize) {
+    async fn notarize(&mut self, sender: &PublicKey, notarize: wire::Notarize) {
         // Extract proposal
         let Some(proposal) = notarize.proposal.as_ref() else {
             return;
@@ -1152,35 +1152,49 @@ impl<
             return;
         }
 
-        // Parse signature
-        let Some(signature) = notarize.signature.as_ref() else {
-            return;
-        };
-
         // Verify that signer is a validator
-        let Some(participants) = self.supervisor.participants(proposal.view) else {
+        let Some(public_key_index) = self.supervisor.is_participant(proposal.view, sender) else {
             return;
         };
-        let Ok(public_key_index) = usize::try_from(signature.public_key) else {
-            return;
-        };
-        let Some(public_key) = participants.get(public_key_index).cloned() else {
+        let Some((identity, _)) = self.supervisor.identity(proposal.view) else {
             return;
         };
 
-        // Verify the signature
+        // Verify signature
+        let Some(signature) = Eval::deserialize(&notarize.signature) else {
+            return;
+        };
+        if signature.index != public_key_index {
+            return;
+        }
         let notarize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        if !C::verify(
+        if ops::partial_verify_message(
+            identity,
             Some(&self.notarize_namespace),
             &notarize_message,
-            &public_key,
-            &signature.signature,
-        ) {
+            &signature,
+        )
+        .is_err()
+        {
+            return;
+        }
+
+        // Verify seed
+        let Some(seed) = Eval::deserialize(&notarize.seed) else {
+            return;
+        };
+        if seed.index != public_key_index {
+            return;
+        }
+        let seed_message = seed_message(proposal.view);
+        if ops::partial_verify_message(identity, Some(&self.seed_namespace), &seed_message, &seed)
+            .is_err()
+        {
             return;
         }
 
         // Handle notarize
-        self.handle_notarize(&public_key, notarize).await;
+        self.handle_notarize(public_key_index, notarize).await;
     }
 
     async fn handle_notarize(&mut self, public_key_index: u32, notarize: wire::Notarize) {
@@ -1353,7 +1367,7 @@ impl<
         self.enter_view(nullification.view + 1);
     }
 
-    async fn finalize(&mut self, finalize: wire::Finalize) {
+    async fn finalize(&mut self, sender: &PublicKey, finalize: wire::Finalize) {
         // Extract proposal
         let Some(proposal) = finalize.proposal.as_ref() else {
             return;
@@ -1364,35 +1378,35 @@ impl<
             return;
         }
 
-        // Parse signature
-        let Some(signature) = finalize.signature.as_ref() else {
-            return;
-        };
-
         // Verify that signer is a validator
-        let Some(participants) = self.supervisor.participants(proposal.view) else {
+        let Some(public_key_index) = self.supervisor.is_participant(proposal.view, sender) else {
             return;
         };
-        let Ok(public_key_index) = usize::try_from(signature.public_key) else {
-            return;
-        };
-        let Some(public_key) = participants.get(public_key_index).cloned() else {
+        let Some((identity, _)) = self.supervisor.identity(proposal.view) else {
             return;
         };
 
-        // Verify the signature
+        // Verify signature
+        let Some(signature) = Eval::deserialize(&finalize.signature) else {
+            return;
+        };
+        if signature.index != public_key_index {
+            return;
+        }
         let finalize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        if !C::verify(
+        if ops::partial_verify_message(
+            identity,
             Some(&self.finalize_namespace),
             &finalize_message,
-            &public_key,
-            &signature.signature,
-        ) {
+            &signature,
+        )
+        .is_err()
+        {
             return;
         }
 
         // Handle finalize
-        self.handle_finalize(&public_key, finalize).await;
+        self.handle_finalize(public_key_index, finalize).await;
     }
 
     async fn handle_finalize(&mut self, public_key_index: u32, finalize: wire::Finalize) {
