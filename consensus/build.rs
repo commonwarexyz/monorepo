@@ -5,14 +5,17 @@ fn main() -> Result<()> {
     config.bytes([
         "Parent.digest",
         "Proposal.payload",
-        "Part.partial_signature",
-        "Seed.signature",
-        "Notarize.partial_signature",
+        "Notarize.signature",
+        "Notarize.seed",
         "Notarization.signature",
-        "Nullify.partial_signature",
+        "Notarization.seed",
+        "Nullify.signature",
+        "Nullify.seed",
         "Nullification.signature",
-        "Finalize.partial_signature",
+        "Nullification.seed",
+        "Finalize.signature",
         "Finalization.signature",
+        "Finalization.seed",
     ]);
     config.compile_protos(&["src/simplex/wire.proto"], &["src/simplex/"])?;
     Ok(())

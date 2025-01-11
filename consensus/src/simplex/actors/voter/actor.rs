@@ -12,7 +12,7 @@ use crate::{
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Automaton, Relay, ThresholdCommitter, ThresholdSupervisor,
+    Automaton, Committer, Relay, ThresholdSupervisor,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, poly::Eval},
