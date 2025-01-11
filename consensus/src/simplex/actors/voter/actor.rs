@@ -1792,7 +1792,11 @@ impl<
 
             // Alert application
             let proposal = notarization.proposal.as_ref().unwrap();
-            let proof = Prover::<H>::serialize_threshold(proposal, &notarization.signature);
+            let proof = Prover::<H>::serialize_threshold(
+                proposal,
+                &notarization.signature,
+                &notarization.seed,
+            );
             self.committer
                 .prepared(
                     proof,
@@ -1941,7 +1945,11 @@ impl<
 
             // Alert application
             let proposal = finalization.proposal.as_ref().unwrap();
-            let proof = Prover::<H>::serialize_threshold(proposal, &finalization.signature);
+            let proof = Prover::<H>::serialize_threshold(
+                proposal,
+                &finalization.signature,
+                &finalization.seed,
+            );
             self.committer
                 .finalized(
                     proof,

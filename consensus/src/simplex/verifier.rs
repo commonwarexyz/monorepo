@@ -9,7 +9,7 @@ use commonware_cryptography::{
         group::{self, Element},
         poly,
     },
-    PublicKey, Signature,
+    PublicKey,
 };
 use commonware_utils::quorum;
 use tracing::debug;
