@@ -8,7 +8,7 @@ use crate::{
         },
         metrics,
         prover::Prover,
-        verifier::{threshold, verify_finalization, verify_notarization, verify_nullification},
+        verifier::{verify_finalization, verify_notarization, verify_nullification},
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
@@ -650,8 +650,8 @@ impl<
         let round = self.views.get(&view)?;
         let (digest, proposal) = round.proposal.as_ref()?;
         let notarizes = round.notarizes.get(digest)?;
-        let validators = self.supervisor.participants(view)?;
-        let (threshold, _) = threshold(validators)?;
+        let identity = self.supervisor.identity(view)?;
+        let threshold = identity.degree() + 1;
         if notarizes.len() < threshold as usize {
             return None;
         }
@@ -663,14 +663,11 @@ impl<
             Some(round) => round,
             None => return false,
         };
-        let validators = match self.supervisor.participants(view) {
-            Some(validators) => validators,
+        let identity = match self.supervisor.identity(view) {
+            Some(identity) => identity,
             None => return false,
         };
-        let (threshold, _) = match threshold(validators) {
-            Some(threshold) => threshold,
-            None => return false,
-        };
+        let threshold = identity.degree() + 1;
         round.nullifies.len() >= threshold as usize
     }
 
@@ -678,8 +675,8 @@ impl<
         let round = self.views.get(&view)?;
         let (digest, proposal) = round.proposal.as_ref()?;
         let finalizes = round.finalizes.get(digest)?;
-        let validators = self.supervisor.participants(view)?;
-        let (threshold, _) = threshold(validators)?;
+        let identity = self.supervisor.identity(view)?;
+        let threshold = identity.degree() + 1;
         if finalizes.len() < threshold as usize {
             return None;
         }
@@ -853,10 +850,10 @@ impl<
         // Construct nullify
         let share = self.supervisor.share(self.view).unwrap();
         let message = nullify_message(self.view);
-        let signature = ops::partial_sign_message(&share, Some(&self.nullify_namespace), &message);
+        let signature = ops::partial_sign_message(share, Some(&self.nullify_namespace), &message);
         let signature = signature.serialize();
         let message = seed_message(self.view);
-        let seed = ops::partial_sign_message(&share, Some(&self.seed_namespace), &message);
+        let seed = ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
         let seed = seed.serialize();
         let null = wire::Nullify {
             view: self.view,
@@ -898,7 +895,7 @@ impl<
         let Some(public_key_index) = self.supervisor.is_participant(nullify.view, sender) else {
             return;
         };
-        let Some((identity, _)) = self.supervisor.identity(nullify.view) else {
+        let Some(identity) = self.supervisor.identity(nullify.view) else {
             return;
         };
 
@@ -1243,7 +1240,7 @@ impl<
         let Some(public_key_index) = self.supervisor.is_participant(proposal.view, sender) else {
             return;
         };
-        let Some((identity, _)) = self.supervisor.identity(proposal.view) else {
+        let Some(identity) = self.supervisor.identity(proposal.view) else {
             return;
         };
 
@@ -1484,7 +1481,7 @@ impl<
         let Some(public_key_index) = self.supervisor.is_participant(proposal.view, sender) else {
             return;
         };
-        let Some((identity, _)) = self.supervisor.identity(proposal.view) else {
+        let Some(identity) = self.supervisor.identity(proposal.view) else {
             return;
         };
 
@@ -1647,10 +1644,10 @@ impl<
         let share = self.supervisor.share(view).unwrap();
         let proposal = &round.proposal.as_ref().unwrap().1;
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        let signature = ops::partial_sign_message(&share, Some(&self.notarize_namespace), &message);
+        let signature = ops::partial_sign_message(share, Some(&self.notarize_namespace), &message);
         let signature = signature.serialize();
         let message = seed_message(view);
-        let seed = ops::partial_sign_message(&share, Some(&self.seed_namespace), &message);
+        let seed = ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
         let seed = seed.serialize();
         round.broadcast_notarize = true;
         Some(wire::Notarize {
@@ -1670,7 +1667,8 @@ impl<
         };
 
         // Attempt to construct notarization
-        let (_, threshold) = self.supervisor.identity(view)?;
+        let identity = self.supervisor.identity(view)?;
+        let threshold = identity.degree() + 1;
         round.notarizable(threshold, force)
     }
 
@@ -1684,7 +1682,8 @@ impl<
         };
 
         // Attempt to construct nullification
-        let (_, threshold) = self.supervisor.identity(view)?;
+        let identity = self.supervisor.identity(view)?;
+        let threshold = identity.degree() + 1;
         round.nullifiable(threshold, force)
     }
 
@@ -1717,7 +1716,7 @@ impl<
             }
         };
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        let signature = ops::partial_sign_message(&share, Some(&self.finalize_namespace), &message);
+        let signature = ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
         let signature = signature.serialize();
         round.broadcast_finalize = true;
         Some(wire::Finalize {
@@ -1735,7 +1734,8 @@ impl<
         };
 
         // Attempt to construct finalization
-        let (_, threshold) = self.supervisor.identity(view)?;
+        let identity = self.supervisor.identity(view)?;
+        let threshold = identity.degree() + 1;
         round.finalizable(threshold, force)
     }
 

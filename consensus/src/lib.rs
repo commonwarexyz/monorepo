@@ -111,9 +111,6 @@ pub trait Supervisor: Clone + Send + 'static {
     fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
 }
 
-/// TODO: move this to crypto
-pub type Threshold = u32;
-
 pub trait ThresholdSupervisor: Supervisor {
     /// TODO: kept generic to allow using either Bls12381::{G1,G2} or another scheme entirely
     /// TODO: may make sense to enshrine (as group::PublicKey, Signature, etc)?
@@ -127,8 +124,8 @@ pub trait ThresholdSupervisor: Supervisor {
     /// TODO: used to verify incoming partial signatures and recover full signature
     /// TODO: Across reshares the identity may change but not the public key (should
     /// think of better wording here)
-    fn identity(&self, index: Self::Index) -> Option<(&Self::Identity, Threshold)>;
+    fn identity(&self, index: Self::Index) -> Option<&Self::Identity>;
 
     /// Returns share to sign with at the given index.
-    fn share(&self, index: Self::Index) -> Option<Self::Share>;
+    fn share(&self, index: Self::Index) -> Option<&Self::Share>;
 }

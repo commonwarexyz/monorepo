@@ -3,22 +3,12 @@ use crate::{
     simplex::encoder::{nullify_message, proposal_message, seed_message},
     ThresholdSupervisor,
 };
-use commonware_cryptography::{
-    bls12381::primitives::{
-        self,
-        group::{self, Element},
-        poly,
-    },
-    PublicKey,
+use commonware_cryptography::bls12381::primitives::{
+    self,
+    group::{self, Element},
+    poly,
 };
-use commonware_utils::quorum;
 use tracing::debug;
-
-pub fn threshold(validators: &[PublicKey]) -> Option<(u32, u32)> {
-    let len = validators.len() as u32;
-    let threshold = quorum(len).expect("not enough validators for a quorum");
-    Some((threshold, len))
-}
 
 pub fn verify_notarization<S: ThresholdSupervisor<Index = View, Identity = poly::Public>>(
     supervisor: &S,
@@ -36,7 +26,7 @@ pub fn verify_notarization<S: ThresholdSupervisor<Index = View, Identity = poly:
     };
 
     // Get public key
-    let Some((polynomial, _)) = supervisor.identity(proposal.view) else {
+    let Some(polynomial) = supervisor.identity(proposal.view) else {
         debug!(
             view = proposal.view,
             reason = "unable to get identity for view",
@@ -90,7 +80,7 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
     nullification: &wire::Nullification,
 ) -> bool {
     // Get public key
-    let Some((polynomial, _)) = supervisor.identity(nullification.view) else {
+    let Some(polynomial) = supervisor.identity(nullification.view) else {
         debug!(
             view = nullification.view,
             reason = "unable to get identity for view",
@@ -152,7 +142,7 @@ pub fn verify_finalization<S: ThresholdSupervisor<Index = View, Identity = poly:
     };
 
     // Get public key
-    let Some((polynomial, _)) = supervisor.identity(proposal.view) else {
+    let Some(polynomial) = supervisor.identity(proposal.view) else {
         debug!(
             view = proposal.view,
             reason = "unable to get identity for view",
