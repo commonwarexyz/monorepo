@@ -1,10 +1,15 @@
 syntax = "proto3";
 package wire;
 
+// To avoid complex resolution cases, we include the beacon in the same message
+// as what is required to vote.
 message Voter {
-    oneof payload {
+    oneof beacon {
+        // TODO: seed from v is used as randomness to select leader in v+1
         Part part = 1;
         Seed seed = 2;
+    }
+    oneof payload {
         Notarize notarize = 3;
         Notarization notarization = 4;
         Nullify nullify = 5;
@@ -14,13 +19,11 @@ message Voter {
     }
 }
 
-// TODO: include in message with notarize/nullify
 message Part {
     uint64 view = 1;
     bytes partial_signature = 2;
 }
 
-// TODO: include in message with notarization/nullification/finalization
 message Seed {
     uint64 view = 1;
     bytes signature = 2;
