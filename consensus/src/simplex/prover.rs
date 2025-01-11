@@ -52,6 +52,8 @@ impl<H: Hasher> Prover<H> {
         }
     }
 
+    // TODO: serialize part/seed as part of other messages
+
     pub(crate) fn serialize_part(view: View, partial_signature: &Signature) -> Proof {
         // Setup proof
         let len = 8 + partial_signature.len();
