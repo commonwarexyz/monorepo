@@ -1,32 +1,17 @@
 syntax = "proto3";
 package wire;
 
-// To avoid complex resolution cases, we include the beacon in the same message
-// as what is required to vote.
+// To avoid complex resolution cases, we include partial signatures and signatures for the
+// beacon in the same message as what is required to vote.
 message Voter {
-    oneof beacon {
-        // TODO: seed from v is used as randomness to select leader in v+1
-        Part part = 1;
-        Seed seed = 2;
-    }
     oneof payload {
-        Notarize notarize = 3;
-        Notarization notarization = 4;
-        Nullify nullify = 5;
-        Nullification nullification = 6;
-        Finalize finalize = 7;
-        Finalization finalization = 8;
+        Notarize notarize = 1;
+        Notarization notarization = 2;
+        Nullify nullify = 3;
+        Nullification nullification = 4;
+        Finalize finalize = 5;
+        Finalization finalization = 6;
     }
-}
-
-message Part {
-    uint64 view = 1;
-    bytes partial_signature = 2;
-}
-
-message Seed {
-    uint64 view = 1;
-    bytes signature = 2;
 }
 
 // To ensure all participants stay informed, Container is included in all vote messages.
@@ -40,33 +25,38 @@ message Proposal {
 // for that view.
 message Notarize {
     Proposal proposal = 1;
-    bytes partial_signature = 2;
+    bytes signature = 2;
+    bytes beacon = 3;
 }
 
 message Notarization {
     Proposal proposal = 1;
     bytes signature = 2;
+    bytes beacon = 3;
 }
 
 // Nullify is used to indicate that a view should be nullified (skipped).
 message Nullify {
     uint64 view = 1;
-    bytes partial_signature = 2;
+    bytes signature = 2;
+    bytes beacon = 3;
 }
 
 message Nullification {
     uint64 view = 1;
     bytes signature = 2;
+    bytes beacon = 3;
 }
 
 message Finalize {
     Proposal proposal = 1;
-    bytes partial_signature = 2;
+    bytes signature = 2;
 }
 
 message Finalization {
     Proposal proposal = 1;
     bytes signature = 2;
+    bytes beacon = 3;
 }
 
 message Backfiller {
@@ -78,13 +68,11 @@ message Backfiller {
 }
 
 message Request {
-    repeated uint64 seeds = 1;
-    repeated uint64 notarizations = 2;
-    repeated uint64 nullifications = 3;
+    repeated uint64 notarizations = 1;
+    repeated uint64 nullifications = 2;
 }
 
 message Response {
-    repeated Seed seeds = 1;
-    repeated Notarization notarizations = 2;
-    repeated Nullification nullifications = 3;
+    repeated Notarization notarizations = 1;
+    repeated Nullification nullifications = 2;
 }
