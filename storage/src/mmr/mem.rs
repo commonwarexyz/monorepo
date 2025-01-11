@@ -1,7 +1,6 @@
 //! A bare-bones MMR structure without pruning and where all elements are hashes & maintained in memory.
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Hash<const N: usize>([u8; N]);
+use crate::mmr::Hash;
 
 /// Implementation of `InMemoryMMR`.
 pub struct InMemoryMMR<const N: usize> {
