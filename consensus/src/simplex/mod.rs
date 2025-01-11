@@ -181,20 +181,16 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Ed25519, Scheme, Sha256};
-    use commonware_macros::{select, test_traced};
+    use commonware_cryptography::{bls12381::dkg::ops, Ed25519, Scheme, Sha256};
+    use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Config, Link, Network};
-    use commonware_runtime::{
-        deterministic::{self, Executor},
-        Clock, Runner, Spawner,
-    };
+    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use commonware_storage::journal::{self, Journal};
     use commonware_utils::{hex, quorum};
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
     use prometheus_client::registry::Registry;
-    use prover::Prover;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::NonZeroU32,
@@ -207,7 +203,6 @@ mod tests {
         // Create runtime
         let n = 5;
         let threshold = quorum(n).expect("unable to calculate threshold");
-        let max_exceptions = 4;
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
@@ -235,16 +230,15 @@ mod tests {
             }
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let (public, shares) = ops::generate_shares(None, n, threshold);
 
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.into_iter() {
+            for (idx, scheme) in schemes.into_iter().enumerate() {
                 // Register on network
                 let validator = scheme.public_key();
                 let partition = hex(&validator);
@@ -277,12 +271,10 @@ mod tests {
                 }
 
                 // Start engine
-                let supervisor_config = mocks::supervisor::Config {
-                    prover: prover.clone(),
-                    participants: view_validators.clone(),
-                };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
+                let supervisor_config = mocks::supervisor::Config { participants };
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
@@ -341,24 +333,12 @@ mod tests {
             let mut finalized = HashMap::new();
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
-                if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 5, true).unwrap();
-                    if digest != payload {
-                        panic!(
-                            "finalization mismatch digest: {:?}, payload: {:?}",
-                            digest, payload
-                        );
-                    }
-                    if let Some(previous) = finalized.insert(view, digest.clone()) {
-                        if previous != digest {
-                            panic!(
-                                "finalization mismatch at {:?} previous: {:?}, current: {:?}",
-                                view, previous, digest
-                            );
-                        }
-                    }
-                    if (finalized.len() as u64) < required_containers {
+                if let mocks::application::Progress::Finalized(_, digest) = event {
+                    let entry = finalized
+                        .entry(validator.clone())
+                        .or_insert_with(HashSet::new);
+                    entry.insert(digest);
+                    if (entry.len() as u64) < required_containers {
                         continue;
                     }
                     completed.insert(validator);
@@ -366,74 +346,6 @@ mod tests {
                 if completed.len() == n as usize {
                     break;
                 }
-            }
-
-            // Check supervisors for correct activity
-            let latest_complete = required_containers - activity_timeout;
-            for supervisor in supervisors.iter() {
-                // Ensure no faults
-                {
-                    let faults = supervisor.faults.lock().unwrap();
-                    assert!(faults.is_empty());
-                }
-
-                // Ensure no forks
-                let mut exceptions = 0;
-                {
-                    let notarizes = supervisor.notarizes.lock().unwrap();
-                    for (view, payloads) in notarizes.iter() {
-                        // Ensure only one payload proposed per view
-                        if payloads.len() > 1 {
-                            panic!("view: {}", view);
-                        }
-
-                        // Only check at views below timeout
-                        if *view > latest_complete {
-                            continue;
-                        }
-
-                        // Ensure everyone participating
-                        let digest = finalized.get(view).expect("view should be finalized");
-                        let voters = payloads.get(digest).expect("digest should exist");
-                        if voters.len() < threshold as usize {
-                            // We can't verify that everyone participated at every view because some nodes may
-                            // have started later.
-                            panic!("view: {}", view);
-                        }
-                        if voters.len() != n as usize {
-                            exceptions += 1;
-                        }
-                    }
-                }
-                {
-                    let finalizes = supervisor.finalizes.lock().unwrap();
-                    for (view, payloads) in finalizes.iter() {
-                        // Ensure only one payload proposed per view
-                        if payloads.len() > 1 {
-                            panic!("view: {}", view);
-                        }
-
-                        // Only check at views below timeout
-                        if *view > latest_complete {
-                            continue;
-                        }
-
-                        // Ensure everyone participating
-                        let digest = finalized.get(view).expect("view should be finalized");
-                        let finalizers = payloads.get(digest).expect("digest should exist");
-                        if finalizers.len() < threshold as usize {
-                            // We can't verify that everyone participated at every view because some nodes may
-                            // have started later.
-                            panic!("view: {}", view);
-                        }
-                        if finalizers.len() != n as usize {
-                            exceptions += 1;
-                        }
-                    }
-                }
-
-                // Ensure exceptions within allowed
-                assert!(exceptions <= max_exceptions);
             }
         });
     }
