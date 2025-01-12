@@ -18,10 +18,10 @@ struct PeakIterator {
     two_h: u64, // 2^(height+1) of the current peak, where a leaf has a height of 0.
 }
 
-/// A PeakIterator returns a (height, position) tuple for each peak in the MMR. Height starts at 0
-/// for leaves, and a peak position is its 0-based offset into the underlying nodes vector. The
-/// iterator will only return the peaks that existed at the time of its initialization if new
-/// elements are added to the MMR between iterations.
+/// A PeakIterator returns a (height, position) tuple for each peak in the MMR, in decreasing order
+/// of height. Height starts at 0 for leaves, and a peak position is its 0-based offset into the
+/// underlying nodes vector. The iterator will only return the peaks that existed at the time of its
+/// initialization if new elements are added to the MMR between iterations.
 impl Iterator for PeakIterator {
     type Item = (u32, u64); // (height, peak)
 
@@ -43,6 +43,18 @@ impl Iterator for PeakIterator {
     }
 }
 
+// Return a new iterator over the peaks of a MMR with the given number of nodes.
+fn peak_iterator(sz: u64) -> PeakIterator {
+    if sz == 0 {
+        return PeakIterator::default();
+    }
+    // Compute the starting peak. This starting peak will not be in the MMR unless it happens to
+    // be a full binary tree, but that's OK as we will descend leftward until we find one.
+    let peak = u64::MAX >> sz.leading_zeros();
+    let two_h = 1 << peak.trailing_ones();
+    PeakIterator { sz, peak, two_h }
+}
+
 impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
     /// Return a new (empty) `InMemoryMMR`.
     pub fn new(hasher: H) -> Self {
@@ -54,21 +66,13 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
 
     /// Return a new iterator over the peaks of the MMR.
     fn peak_iterator(&self) -> PeakIterator {
-        let sz = self.nodes.len() as u64;
-        if sz == 0 {
-            return PeakIterator::default();
-        }
-        // Compute the starting peak. This starting peak will not be in the MMR unless it happens to
-        // be a full binary tree, but that's OK as we will descend leftward until we find one.
-        let peak = u64::MAX >> sz.leading_zeros();
-        let two_h = 1 << peak.trailing_ones();
-        PeakIterator { sz, peak, two_h }
+        peak_iterator(self.nodes.len() as u64)
     }
 
     // Returns the set of peaks that will require a new parent after adding the next leaf to the
     // MMR. This set is non-empty only if there is a height-0 (leaf) peak in the MMR. The result
-    // will contain this leaf peak plus all other MMR peaks of consecutively increasing height, in
-    // reverse order (that is, the leaf peak comes last).
+    // will contain this leaf peak plus the other MMR peaks with contiguously increasing height.
+    // Nodes in the result are ordered by decreasing height (so the leaf node comes last).
     fn nodes_needing_parents(&mut self) -> Vec<u64> {
         let mut peaks = Vec::new();
         let it = self.peak_iterator();
@@ -110,6 +114,14 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
         }
         leaf_pos
     }
+
+    /// Computes the root hash of the MMR.
+    pub fn root_hash(&mut self) -> Hash<N> {
+        let peaks = self
+            .peak_iterator()
+            .map(|(_, peak)| &self.nodes[peak as usize]);
+        self.hasher.root_hash(self.nodes.len() as u64, peaks)
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +158,8 @@ mod tests {
             let peaks: Vec<(u32, u64)> = mmr.peak_iterator().collect();
             assert_ne!(peaks.len(), 0);
             assert!(peaks.len() <= mmr.nodes.len());
+            let nodes_needing_parents = mmr.nodes_needing_parents();
+            assert!(nodes_needing_parents.len() <= peaks.len());
         }
         assert_eq!(mmr.nodes.len(), 19, "mmr not of expected size");
         assert_eq!(
@@ -199,5 +213,11 @@ mod tests {
         // verify topmost hash
         let hash14 = hasher.node_hash(14, &mmr.nodes[6], &mmr.nodes[13]);
         assert_eq!(mmr.nodes[14], hash14);
+
+        // verify root hash
+        let root_hash = mmr.root_hash();
+        let peak_hashes = vec![hash14, hash17, mmr.nodes[18]];
+        let expected_root_hash = hasher.root_hash(19, peak_hashes.iter());
+        assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
     }
 }
