@@ -651,7 +651,7 @@ impl<
         let (digest, proposal) = round.proposal.as_ref()?;
         let notarizes = round.notarizes.get(digest)?;
         let identity = self.supervisor.identity(view)?;
-        let threshold = identity.degree() + 1;
+        let threshold = identity.required();
         if notarizes.len() < threshold as usize {
             return None;
         }
@@ -667,7 +667,7 @@ impl<
             Some(identity) => identity,
             None => return false,
         };
-        let threshold = identity.degree() + 1;
+        let threshold = identity.required();
         round.nullifies.len() >= threshold as usize
     }
 
@@ -676,7 +676,7 @@ impl<
         let (digest, proposal) = round.proposal.as_ref()?;
         let finalizes = round.finalizes.get(digest)?;
         let identity = self.supervisor.identity(view)?;
-        let threshold = identity.degree() + 1;
+        let threshold = identity.required();
         if finalizes.len() < threshold as usize {
             return None;
         }
@@ -1668,7 +1668,7 @@ impl<
 
         // Attempt to construct notarization
         let identity = self.supervisor.identity(view)?;
-        let threshold = identity.degree() + 1;
+        let threshold = identity.required();
         round.notarizable(threshold, force)
     }
 
@@ -1683,7 +1683,7 @@ impl<
 
         // Attempt to construct nullification
         let identity = self.supervisor.identity(view)?;
-        let threshold = identity.degree() + 1;
+        let threshold = identity.required();
         round.nullifiable(threshold, force)
     }
 
@@ -1735,7 +1735,7 @@ impl<
 
         // Attempt to construct finalization
         let identity = self.supervisor.identity(view)?;
-        let threshold = identity.degree() + 1;
+        let threshold = identity.required();
         round.finalizable(threshold, force)
     }
 
