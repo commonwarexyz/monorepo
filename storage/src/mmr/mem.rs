@@ -1,35 +1,43 @@
-//! A bare-bones MMR structure without pruning and where all elements are hashes & maintained in memory.
+//! A bare-bones MMR structure without pruning and where all nodes are hashes & maintained in
+//! memory.
 
 use crate::mmr::{Hash, Hasher};
 
 /// Implementation of `InMemoryMMR`.
 pub struct InMemoryMMR<const N: usize, H: Hasher<N>> {
     hasher: H,
-    elements: Vec<Hash<N>>,
+    // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
+    // from the from highest peak to lowest.
+    nodes: Vec<Hash<N>>,
 }
 
 #[derive(Default)]
 struct PeakIterator {
-    sz: u64,    // Number of elements in the MMR at the point the iterator was initialized.
+    sz: u64,    // Number of nodes in the MMR at the point the iterator was initialized.
     peak: u64,  // 1-based index of the current peak, which may not be in the MMR.
     two_h: u64, // 2^(height+1) of the current peak, where a leaf has a height of 0.
 }
 
-/// A PeakIterator returns a (height, peak) tuple for each peak in the MMR. Height starts at 0 for leaves, and a peak is
-/// a 0-based index of the represented element. You can change the MMR underneath during iteration, but the iterator
-/// will only return the peaks that existed at the time of its initialization.
+/// A PeakIterator returns a (height, position) tuple for each peak in the MMR. Height starts at 0
+/// for leaves, and a peak position is its 0-based offset into the underlying nodes vector. The
+/// iterator will only return the peaks that existed at the time of its initialization if new
+/// elements are added to the MMR between iterations.
 impl Iterator for PeakIterator {
     type Item = (u32, u64); // (height, peak)
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.two_h > 1 {
             if self.peak <= self.sz {
+                // found a peak
                 let r = (self.two_h.trailing_zeros() - 1, self.peak - 1);
-                self.peak += self.two_h - 1; // move to the right sibling
+                // move to the right sibling
+                self.peak += self.two_h - 1;
+                assert!(self.peak > self.sz); // sibling shouldn't be in the MMR if MMR is valid
                 return Some(r);
             }
+            // descend to the left child
             self.two_h >>= 1;
-            self.peak -= self.two_h; // descend to the left child
+            self.peak -= self.two_h;
         }
         None
     }
@@ -40,13 +48,13 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
     pub fn new(hasher: H) -> Self {
         Self {
             hasher,
-            elements: Vec::new(),
+            nodes: Vec::new(),
         }
     }
 
     /// Return a new iterator over the peaks of the MMR.
     fn peak_iterator(&self) -> PeakIterator {
-        let sz = self.elements.len() as u64;
+        let sz = self.nodes.len() as u64;
         if sz == 0 {
             return PeakIterator::default();
         }
@@ -57,7 +65,7 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
         PeakIterator { sz, peak, two_h }
     }
 
-    // Returns the set of peaks that will require a new parent after adding the next element to the
+    // Returns the set of peaks that will require a new parent after adding the next leaf to the
     // MMR. This set is non-empty only if there is a height-0 (leaf) peak in the MMR. The result
     // will contain this leaf peak plus all other MMR peaks of consecutively increasing height, in
     // reverse order (that is, the leaf peak comes last).
@@ -81,24 +89,24 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
         peaks
     }
 
-    /// Add an element to the MMR and return its position in the MMR.
-    pub fn add(&mut self, element: &Hash<N>) -> u64 {
+    /// Add a leaf to the MMR and return its position in the MMR.
+    pub fn add(&mut self, leaf_hash: &Hash<N>) -> u64 {
         let peaks = self.nodes_needing_parents();
 
         // insert the new leaf hash into the MMR
-        let leaf_pos = self.elements.len() as u64;
-        let mut current_hash = self.hasher.hash_leaf(leaf_pos, element);
-        self.elements.push(current_hash);
+        let leaf_pos = self.nodes.len() as u64;
+        let mut current_hash = self.hasher.leaf_hash(leaf_pos, leaf_hash);
+        self.nodes.push(current_hash);
 
         // Compute the new parent nodes, if any, and insert them into the MMR.
         for sibling_pos in peaks.iter().rev() {
-            let parent_pos = self.elements.len() as u64;
-            current_hash = self.hasher.hash_node(
+            let parent_pos = self.nodes.len() as u64;
+            current_hash = self.hasher.node_hash(
                 parent_pos,
-                &self.elements[*sibling_pos as usize],
+                &self.nodes[*sibling_pos as usize],
                 &current_hash,
             );
-            self.elements.push(current_hash);
+            self.nodes.push(current_hash);
         }
         leaf_pos
     }
@@ -131,15 +139,15 @@ mod tests {
         // the empty iterator should have no peaks
         assert_eq!(mmr.peak_iterator().next(), None);
 
-        let element: Hash<32> = Hash(*b"01234567012345670123456701234567");
+        let leaf_hash: Hash<32> = Hash(*b"01234567012345670123456701234567");
         let mut leaves: Vec<u64> = Vec::new();
         for _ in 0..11 {
-            leaves.push(mmr.add(&element));
+            leaves.push(mmr.add(&leaf_hash));
             let peaks: Vec<(u32, u64)> = mmr.peak_iterator().collect();
             assert_ne!(peaks.len(), 0);
-            assert!(peaks.len() <= mmr.elements.len());
+            assert!(peaks.len() <= mmr.nodes.len());
         }
-        assert_eq!(mmr.elements.len(), 19, "mmr not of expected size");
+        assert_eq!(mmr.nodes.len(), 19, "mmr not of expected size");
         assert_eq!(
             leaves,
             vec![0, 1, 3, 4, 7, 8, 10, 11, 15, 16, 18],
@@ -164,32 +172,32 @@ mod tests {
         // verify leaf hashes
         let mut hasher = Sha256Hasher::new();
         for leaf in leaves {
-            let hash = hasher.hash_leaf(leaf, &element);
-            assert_eq!(mmr.elements[leaf as usize], hash);
+            let hash = hasher.leaf_hash(leaf, &leaf_hash);
+            assert_eq!(mmr.nodes[leaf as usize], hash);
         }
 
         // verify height=1 hashes
-        let hash2 = hasher.hash_node(2, &mmr.elements[0], &mmr.elements[1]);
-        assert_eq!(mmr.elements[2], hash2);
-        let hash5 = hasher.hash_node(5, &mmr.elements[3], &mmr.elements[4]);
-        assert_eq!(mmr.elements[5], hash5);
-        let hash9 = hasher.hash_node(9, &mmr.elements[7], &mmr.elements[8]);
-        assert_eq!(mmr.elements[9], hash9);
-        let hash12 = hasher.hash_node(12, &mmr.elements[10], &mmr.elements[11]);
-        assert_eq!(mmr.elements[12], hash12);
-        let hash17 = hasher.hash_node(17, &mmr.elements[15], &mmr.elements[16]);
-        assert_eq!(mmr.elements[17], hash17);
+        let hash2 = hasher.node_hash(2, &mmr.nodes[0], &mmr.nodes[1]);
+        assert_eq!(mmr.nodes[2], hash2);
+        let hash5 = hasher.node_hash(5, &mmr.nodes[3], &mmr.nodes[4]);
+        assert_eq!(mmr.nodes[5], hash5);
+        let hash9 = hasher.node_hash(9, &mmr.nodes[7], &mmr.nodes[8]);
+        assert_eq!(mmr.nodes[9], hash9);
+        let hash12 = hasher.node_hash(12, &mmr.nodes[10], &mmr.nodes[11]);
+        assert_eq!(mmr.nodes[12], hash12);
+        let hash17 = hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
+        assert_eq!(mmr.nodes[17], hash17);
 
         // verify height=2 hashes
-        let hash6 = hasher.hash_node(6, &mmr.elements[2], &mmr.elements[5]);
-        assert_eq!(mmr.elements[6], hash6);
-        let hash13 = hasher.hash_node(13, &mmr.elements[9], &mmr.elements[12]);
-        assert_eq!(mmr.elements[13], hash13);
-        let hash17 = hasher.hash_node(17, &mmr.elements[15], &mmr.elements[16]);
-        assert_eq!(mmr.elements[17], hash17);
+        let hash6 = hasher.node_hash(6, &mmr.nodes[2], &mmr.nodes[5]);
+        assert_eq!(mmr.nodes[6], hash6);
+        let hash13 = hasher.node_hash(13, &mmr.nodes[9], &mmr.nodes[12]);
+        assert_eq!(mmr.nodes[13], hash13);
+        let hash17 = hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
+        assert_eq!(mmr.nodes[17], hash17);
 
         // verify topmost hash
-        let hash14 = hasher.hash_node(14, &mmr.elements[6], &mmr.elements[13]);
-        assert_eq!(mmr.elements[14], hash14);
+        let hash14 = hasher.node_hash(14, &mmr.nodes[6], &mmr.nodes[13]);
+        assert_eq!(mmr.nodes[14], hash14);
     }
 }
