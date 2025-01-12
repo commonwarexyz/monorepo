@@ -1986,6 +1986,8 @@ impl<
         self.enter_view(1, group::Signature::zero());
 
         // Rebuild from journal
+        //
+        // TODO: speed up replay time (avoid full enter view logic?)
         let mut journal = self.journal.take().expect("missing journal");
         {
             let stream = journal

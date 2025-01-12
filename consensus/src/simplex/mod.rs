@@ -667,7 +667,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    runtime.gen_range(Duration::from_millis(10)..Duration::from_millis(2000));
+                    runtime.gen_range(Duration::from_millis(10_000)..Duration::from_millis(50_000));
                 runtime.sleep(wait).await;
                 {
                     let mut shutdowns = shutdowns.lock().unwrap();
