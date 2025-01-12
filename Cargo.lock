@@ -550,6 +550,7 @@ dependencies = [
  "prometheus-client",
  "rand",
  "rangemap",
+ "sha2 0.10.8",
  "thiserror",
  "tracing",
  "tracing-subscriber",
