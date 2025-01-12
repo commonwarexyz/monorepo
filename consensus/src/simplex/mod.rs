@@ -185,7 +185,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_cryptography::{Ed25519, Scheme, Sha256};
     use commonware_macros::{select, test_traced};
-    use commonware_p2p::simulated::{Config, Link, Network, Oracle};
+    use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
         deterministic::{self, Executor},
         Clock, Runner, Spawner,
@@ -205,6 +205,27 @@ mod tests {
         time::Duration,
     };
     use tracing::debug;
+
+    async fn register_validators(
+        oracle: &mut Oracle,
+        validators: &[Bytes],
+    ) -> HashMap<Bytes, ((Sender, Receiver), (Sender, Receiver))> {
+        let mut registrations = HashMap::new();
+        for validator in validators.iter() {
+            let (voter_sender, voter_receiver) =
+                oracle.register(validator.clone(), 0).await.unwrap();
+            let (resolver_sender, resolver_receiver) =
+                oracle.register(validator.clone(), 1).await.unwrap();
+            registrations.insert(
+                validator.clone(),
+                (
+                    (voter_sender, voter_receiver),
+                    (resolver_sender, resolver_receiver),
+                ),
+            );
+        }
+        registrations
+    }
 
     enum Action {
         NewLink(Link),
@@ -295,6 +316,15 @@ mod tests {
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -304,15 +334,8 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for scheme in schemes.into_iter() {
-                // Register on network
-                let validator = scheme.public_key();
-                let partition = hex(&validator);
-                let (voter_sender, voter_receiver) =
-                    oracle.register(validator.clone(), 0).await.unwrap();
-                let (backfiller_sender, backfiller_receiver) =
-                    oracle.register(validator.clone(), 1).await.unwrap();
-
                 // Start engine
+                let validator = scheme.public_key();
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
@@ -323,7 +346,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -335,7 +358,7 @@ mod tests {
                 });
                 let cfg = journal::Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition,
+                    partition: hex(&validator),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -362,23 +385,14 @@ mod tests {
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
+
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 engine_handlers.push(runtime.spawn("engine", async move {
-                    engine
-                        .run(
-                            (voter_sender, voter_receiver),
-                            (backfiller_sender, backfiller_receiver),
-                        )
-                        .await;
+                    engine.run(voter, resolver).await;
                 }));
             }
-
-            // Link all validators
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
             // Wait for all engines to finish
             let mut completed = HashSet::new();
@@ -529,6 +543,15 @@ mod tests {
                 validators.sort();
                 schemes.sort_by_key(|s| s.public_key());
                 let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+                let mut registrations = register_validators(&mut oracle, &validators).await;
+
+                // Link all validators
+                let link = Link {
+                    latency: 50.0,
+                    jitter: 50.0,
+                    success_rate: 1.0,
+                };
+                link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
                 // Create engines
                 let hasher = Sha256::default();
@@ -538,19 +561,8 @@ mod tests {
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
                 let mut engine_handlers = Vec::new();
                 for scheme in schemes.into_iter() {
-                    // Register on network
-                    let validator = scheme.public_key();
-                    let partition = hex(&validator);
-                    let (container_sender, container_receiver) = oracle
-                        .register(validator.clone(), 0)
-                        .await
-                        .unwrap();
-                    let (vote_sender, vote_receiver) = oracle
-                        .register(validator.clone(), 1)
-                        .await
-                        .unwrap();
-
                     // Start engine
+                    let validator = scheme.public_key();
                     let supervisor_config = mocks::supervisor::Config {
                         prover: prover.clone(),
                         participants: view_validators.clone(),
@@ -561,7 +573,7 @@ mod tests {
                     let application_cfg = mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
-                        participant: validator,
+                        participant: validator.clone(),
                         tracker: done_sender.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
@@ -573,7 +585,7 @@ mod tests {
                     });
                     let cfg = journal::Config {
                         registry: Arc::new(Mutex::new(Registry::default())),
-                        partition,
+                        partition: hex(&validator),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
                         .await
@@ -590,7 +602,7 @@ mod tests {
                         namespace: namespace.clone(),
                         leader_timeout: Duration::from_secs(1),
                         notarization_timeout: Duration::from_secs(2),
-                        nullify_retry: Duration::from_secs(1), // must be less than the shutdown time in order to make progress
+                        nullify_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         max_fetch_count: 1,
@@ -600,23 +612,14 @@ mod tests {
                         replay_concurrency: 1,
                     };
                     let engine = Engine::new(runtime.clone(), journal, cfg);
+                    let (voter_network, resolver_network) =
+                        registrations.remove(&validator).expect("validator should be registered");
                     engine_handlers.push(runtime.spawn("engine", async move {
                         engine
-                            .run(
-                                (container_sender, container_receiver),
-                                (vote_sender, vote_receiver),
-                            )
+                            .run(voter_network, resolver_network)
                             .await;
                     }));
                 }
-
-                // Link all validators
-                let link = Link {
-                    latency: 10.0,
-                    jitter: 1.0,
-                    success_rate: 1.0,
-                };
-                link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
                 // Wait for all engines to finish
                 runtime.spawn("confirmed", async move {
@@ -693,7 +696,7 @@ mod tests {
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    runtime.gen_range(Duration::from_millis(10)..Duration::from_millis(2000));
+                    runtime.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
                 runtime.sleep(wait).await;
                 {
                     let mut shutdowns = shutdowns.lock().unwrap();
@@ -740,6 +743,21 @@ mod tests {
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators except first
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::NewLink(link),
+                Scope::Where(|i, j| ![i, j].contains(&0usize)),
+            )
+            .await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -754,15 +772,8 @@ mod tests {
                     continue;
                 }
 
-                // Register on network
-                let validator = scheme.public_key();
-                let partition = hex(&validator);
-                let (voter_sender, voter_receiver) =
-                    oracle.register(validator.clone(), 0).await.unwrap();
-                let (backfiller_sender, backfiller_receiver) =
-                    oracle.register(validator.clone(), 1).await.unwrap();
-
                 // Start engine
+                let validator = scheme.public_key();
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
@@ -773,7 +784,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -785,7 +796,7 @@ mod tests {
                 });
                 let cfg = journal::Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition,
+                    partition: hex(&validator),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -811,30 +822,14 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
-                    engine
-                        .run(
-                            (voter_sender, voter_receiver),
-                            (backfiller_sender, backfiller_receiver),
-                        )
-                        .await;
+                    engine.run(voter, resolver).await;
                 }));
             }
-
-            // Link all validators except first
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::NewLink(link),
-                Scope::Where(|i, j| ![i, j].contains(&0usize)),
-            )
-            .await;
 
             // Wait for all online engines to finish
             let mut completed = HashSet::new();
@@ -890,10 +885,6 @@ mod tests {
             // Start engine for first peer
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
-            let partition = hex(&validator);
-            let (container_sender, container_receiver) =
-                oracle.register(validator.clone(), 0).await.unwrap();
-            let (vote_sender, vote_receiver) = oracle.register(validator.clone(), 1).await.unwrap();
 
             // Link first peer to all (except second)
             link_validators(
@@ -941,7 +932,7 @@ mod tests {
             });
             let cfg = journal::Config {
                 registry: Arc::new(Mutex::new(Registry::default())),
-                partition,
+                partition: hex(&validator),
             };
             let journal = Journal::init(runtime.clone(), cfg)
                 .await
@@ -967,14 +958,12 @@ mod tests {
                 fetch_concurrent: 1,
                 replay_concurrency: 1,
             };
+            let (voter, resolver) = registrations
+                .remove(&validator)
+                .expect("validator should be registered");
             let engine = Engine::new(runtime.clone(), journal, cfg);
             engine_handlers.push(runtime.spawn("engine", async move {
-                engine
-                    .run(
-                        (container_sender, container_receiver),
-                        (vote_sender, vote_receiver),
-                    )
-                    .await;
+                engine.run(voter, resolver).await;
             }));
 
             // Wait for new engine to finalize required
@@ -1043,6 +1032,21 @@ mod tests {
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators except first
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::NewLink(link),
+                Scope::Where(|i, j| ![i, j].contains(&0usize)),
+            )
+            .await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -1057,15 +1061,8 @@ mod tests {
                     continue;
                 }
 
-                // Register on network
-                let validator = scheme.public_key();
-                let partition = hex(&validator);
-                let (voter_sender, voter_receiver) =
-                    oracle.register(validator.clone(), 0).await.unwrap();
-                let (backfiller_sender, backfiller_receiver) =
-                    oracle.register(validator.clone(), 1).await.unwrap();
-
                 // Start engine
+                let validator = scheme.public_key();
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
@@ -1076,7 +1073,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -1088,7 +1085,7 @@ mod tests {
                 });
                 let cfg = journal::Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition,
+                    partition: hex(&validator),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -1114,30 +1111,14 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
-                    engine
-                        .run(
-                            (voter_sender, voter_receiver),
-                            (backfiller_sender, backfiller_receiver),
-                        )
-                        .await;
+                    engine.run(voter, resolver).await;
                 }));
             }
-
-            // Link all validators except first
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::NewLink(link),
-                Scope::Where(|i, j| ![i, j].contains(&0usize)),
-            )
-            .await;
 
             // Wait for all engines to finish
             let mut completed = HashSet::new();
@@ -1238,6 +1219,15 @@ mod tests {
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -1247,15 +1237,8 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
-                // Register on network
-                let validator = scheme.public_key();
-                let partition = hex(&validator);
-                let (voter_sender, voter_receiver) =
-                    oracle.register(validator.clone(), 0).await.unwrap();
-                let (backfiller_sender, backfiller_receiver) =
-                    oracle.register(validator.clone(), 1).await.unwrap();
-
                 // Start engine
+                let validator = scheme.public_key();
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
@@ -1267,7 +1250,7 @@ mod tests {
                     mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
-                        participant: validator,
+                        participant: validator.clone(),
                         tracker: done_sender.clone(),
                         propose_latency: (3_000.0, 0.0),
                         verify_latency: (3_000.0, 5.0),
@@ -1276,7 +1259,7 @@ mod tests {
                     mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
-                        participant: validator,
+                        participant: validator.clone(),
                         tracker: done_sender.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
@@ -1289,7 +1272,7 @@ mod tests {
                 });
                 let cfg = journal::Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition,
+                    partition: hex(&validator),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -1315,24 +1298,14 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
-                    engine
-                        .run(
-                            (voter_sender, voter_receiver),
-                            (backfiller_sender, backfiller_receiver),
-                        )
-                        .await;
+                    engine.run(voter, resolver).await;
                 }));
             }
-
-            // Link all validators
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
             // Wait for all engines to finish
             let mut completed = HashSet::new();
@@ -1433,6 +1406,15 @@ mod tests {
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 3_000.0,
+                jitter: 0.0,
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -1442,15 +1424,8 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for scheme in schemes.iter() {
-                // Register on network
-                let validator = scheme.public_key();
-                let partition = hex(&validator);
-                let (voter_sender, voter_receiver) =
-                    oracle.register(validator.clone(), 0).await.unwrap();
-                let (backfiller_sender, backfiller_receiver) =
-                    oracle.register(validator.clone(), 1).await.unwrap();
-
                 // Start engine
+                let validator = scheme.public_key();
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
@@ -1461,7 +1436,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -1473,7 +1448,7 @@ mod tests {
                 });
                 let cfg = journal::Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition,
+                    partition: hex(&validator),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -1499,24 +1474,14 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
-                    engine
-                        .run(
-                            (voter_sender, voter_receiver),
-                            (backfiller_sender, backfiller_receiver),
-                        )
-                        .await;
+                    engine.run(voter, resolver).await;
                 }));
             }
-
-            // Link all validators
-            let link = Link {
-                latency: 3_000.0,
-                jitter: 0.0,
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
             // Wait for a few virtual minutes (shouldn't finalize anything)
             select! {
@@ -1610,6 +1575,21 @@ mod tests {
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::NewLink(link.clone()),
+                Scope::All,
+            )
+            .await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -1619,15 +1599,8 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for scheme in schemes.iter() {
-                // Register on network
-                let validator = scheme.public_key();
-                let partition = hex(&validator);
-                let (voter_sender, voter_receiver) =
-                    oracle.register(validator.clone(), 0).await.unwrap();
-                let (backfiller_sender, backfiller_receiver) =
-                    oracle.register(validator.clone(), 1).await.unwrap();
-
                 // Start engine
+                let validator = scheme.public_key();
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
@@ -1638,7 +1611,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -1650,7 +1623,7 @@ mod tests {
                 });
                 let cfg = journal::Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition,
+                    partition: hex(&validator),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -1676,30 +1649,14 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
-                    engine
-                        .run(
-                            (voter_sender, voter_receiver),
-                            (backfiller_sender, backfiller_receiver),
-                        )
-                        .await;
+                    engine.run(voter, resolver).await;
                 }));
             }
-
-            // Link all validators
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::NewLink(link.clone()),
-                Scope::All,
-            )
-            .await;
 
             // Wait for all engines to finish
             let mut completed = HashSet::new();
@@ -1856,6 +1813,21 @@ mod tests {
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let degraded_link = Link {
+                latency: 200.0,
+                jitter: 150.0,
+                success_rate: 0.5,
+            };
+            link_validators(
+                &mut oracle,
+                &validators,
+                Action::NewLink(degraded_link),
+                Scope::All,
+            )
+            .await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -1865,15 +1837,8 @@ mod tests {
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for scheme in schemes.into_iter() {
-                // Register on network
-                let validator = scheme.public_key();
-                let partition = hex(&validator);
-                let (voter_sender, voter_receiver) =
-                    oracle.register(validator.clone(), 0).await.unwrap();
-                let (backfiller_sender, backfiller_receiver) =
-                    oracle.register(validator.clone(), 1).await.unwrap();
-
                 // Start engine
+                let validator = scheme.public_key();
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
@@ -1884,7 +1849,7 @@ mod tests {
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
                     relay: relay.clone(),
-                    participant: validator,
+                    participant: validator.clone(),
                     tracker: done_sender.clone(),
                     propose_latency: (10.0, 5.0),
                     verify_latency: (10.0, 5.0),
@@ -1896,7 +1861,7 @@ mod tests {
                 });
                 let cfg = journal::Config {
                     registry: Arc::new(Mutex::new(Registry::default())),
-                    partition,
+                    partition: hex(&validator),
                 };
                 let journal = Journal::init(runtime.clone(), cfg)
                     .await
@@ -1922,30 +1887,14 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
-                    engine
-                        .run(
-                            (voter_sender, voter_receiver),
-                            (backfiller_sender, backfiller_receiver),
-                        )
-                        .await;
+                    engine.run(voter, resolver).await;
                 }));
             }
-
-            // Link all validators
-            let degraded_link = Link {
-                latency: 200.0,
-                jitter: 150.0,
-                success_rate: 0.5,
-            };
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::NewLink(degraded_link),
-                Scope::All,
-            )
-            .await;
 
             // Wait for all engines to finish
             let mut completed = HashSet::new();
@@ -2045,6 +1994,15 @@ mod tests {
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -2053,15 +2011,8 @@ mod tests {
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
-                // Register on network
-                let validator = scheme.public_key();
-                let partition = hex(&validator);
-                let (voter_sender, voter_receiver) =
-                    oracle.register(validator.clone(), 0).await.unwrap();
-                let (backfiller_sender, backfiller_receiver) =
-                    oracle.register(validator.clone(), 1).await.unwrap();
-
                 // Start engine
+                let validator = scheme.public_key();
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
@@ -2074,22 +2025,20 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
+                    let (voter, resolver) = registrations
+                        .remove(&validator)
+                        .expect("validator should be registered");
                     let engine: mocks::conflicter::Conflicter<_, _, Sha256, _> =
                         mocks::conflicter::Conflicter::new(runtime.clone(), cfg);
                     runtime.spawn("byzantine_engine", async move {
-                        engine
-                            .run(
-                                (voter_sender, voter_receiver),
-                                (backfiller_sender, backfiller_receiver),
-                            )
-                            .await;
+                        engine.run(voter, resolver).await;
                     });
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
-                        participant: validator,
+                        participant: validator.clone(),
                         tracker: done_sender.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
@@ -2101,7 +2050,7 @@ mod tests {
                     });
                     let cfg = journal::Config {
                         registry: Arc::new(Mutex::new(Registry::default())),
-                        partition,
+                        partition: hex(&validator),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
                         .await
@@ -2127,25 +2076,15 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
+                    let (voter, resolver) = registrations
+                        .remove(&validator)
+                        .expect("validator should be registered");
                     let engine = Engine::new(runtime.clone(), journal, cfg);
                     runtime.spawn("engine", async move {
-                        engine
-                            .run(
-                                (voter_sender, voter_receiver),
-                                (backfiller_sender, backfiller_receiver),
-                            )
-                            .await;
+                        engine.run(voter, resolver).await;
                     });
                 }
             }
-
-            // Link all validators
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
             // Wait for all engines to finish
             let mut completed = HashSet::new();
@@ -2242,6 +2181,15 @@ mod tests {
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
             let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
+            let mut registrations = register_validators(&mut oracle, &validators).await;
+
+            // Link all validators
+            let link = Link {
+                latency: 10.0,
+                jitter: 1.0,
+                success_rate: 1.0,
+            };
+            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -2250,15 +2198,8 @@ mod tests {
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
-                // Register on network
-                let validator = scheme.public_key();
-                let partition = hex(&validator);
-                let (voter_sender, voter_receiver) =
-                    oracle.register(validator.clone(), 0).await.unwrap();
-                let (backfiller_sender, backfiller_receiver) =
-                    oracle.register(validator.clone(), 1).await.unwrap();
-
                 // Start engine
+                let validator = scheme.public_key();
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
@@ -2271,22 +2212,20 @@ mod tests {
                         supervisor,
                         namespace: namespace.clone(),
                     };
+                    let (voter, resolver) = registrations
+                        .remove(&validator)
+                        .expect("validator should be registered");
                     let engine: mocks::nuller::Nuller<_, Sha256, _> =
                         mocks::nuller::Nuller::new(cfg);
                     runtime.spawn("byzantine_engine", async move {
-                        engine
-                            .run(
-                                (voter_sender, voter_receiver),
-                                (backfiller_sender, backfiller_receiver),
-                            )
-                            .await;
+                        engine.run(voter, resolver).await;
                     });
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: hasher.clone(),
                         relay: relay.clone(),
-                        participant: validator,
+                        participant: validator.clone(),
                         tracker: done_sender.clone(),
                         propose_latency: (10.0, 5.0),
                         verify_latency: (10.0, 5.0),
@@ -2298,7 +2237,7 @@ mod tests {
                     });
                     let cfg = journal::Config {
                         registry: Arc::new(Mutex::new(Registry::default())),
-                        partition,
+                        partition: hex(&validator),
                     };
                     let journal = Journal::init(runtime.clone(), cfg)
                         .await
@@ -2324,25 +2263,15 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
+                    let (voter, resolver) = registrations
+                        .remove(&validator)
+                        .expect("validator should be registered");
                     let engine = Engine::new(runtime.clone(), journal, cfg);
                     runtime.spawn("engine", async move {
-                        engine
-                            .run(
-                                (voter_sender, voter_receiver),
-                                (backfiller_sender, backfiller_receiver),
-                            )
-                            .await;
+                        engine.run(voter, resolver).await;
                     });
                 }
             }
-
-            // Link all validators
-            let link = Link {
-                latency: 10.0,
-                jitter: 1.0,
-                success_rate: 1.0,
-            };
-            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
 
             // Wait for all engines to finish
             let mut completed = HashSet::new();
