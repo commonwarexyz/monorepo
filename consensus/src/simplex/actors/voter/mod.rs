@@ -2,9 +2,9 @@ mod actor;
 mod ingress;
 
 use crate::simplex::Context;
-use crate::{simplex::View, Automaton, Supervisor};
-use crate::{Committer, Relay};
+use crate::{simplex::View, Automaton, Committer, Relay, ThresholdSupervisor};
 pub use actor::Actor;
+use commonware_cryptography::bls12381::primitives::group;
 use commonware_cryptography::{Hasher, Scheme};
 pub use ingress::{Mailbox, Message};
 use prometheus_client::registry::Registry;
@@ -17,7 +17,7 @@ pub struct Config<
     A: Automaton<Context = Context>,
     R: Relay,
     F: Committer,
-    S: Supervisor<Seed = (), Index = View>,
+    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
     pub crypto: C,
     pub hasher: H,

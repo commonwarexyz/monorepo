@@ -9,6 +9,7 @@ pub struct Relay {
 }
 
 impl Relay {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             recipients: Mutex::new(BTreeMap::new()),

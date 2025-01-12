@@ -4,6 +4,7 @@ use crate::bls12381::{
     dkg::Error,
     primitives::{group::Share, poly},
 };
+use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
 
@@ -16,6 +17,35 @@ use std::collections::BTreeMap;
 pub fn generate_shares(share: Option<Share>, n: u32, t: u32) -> (poly::Public, Vec<Share>) {
     // Generate a secret polynomial and commit to it
     let mut secret = poly::new(t - 1);
+    if let Some(share) = share {
+        // Set the free coefficient of the secret polynomial to the secret
+        // of the previous DKG
+        secret.set(0, share.private);
+    }
+
+    // Commit to polynomial and generate shares
+    let commitment = poly::Public::commit(secret.clone());
+    let shares = (0..n)
+        .map(|i| {
+            let eval = secret.evaluate(i);
+            Share {
+                index: eval.index,
+                private: eval.value,
+            }
+        })
+        .collect::<Vec<_>>();
+    (commitment, shares)
+}
+
+/// TODO: update generate shares to take external randomness
+pub fn generate_shares_from<R: RngCore>(
+    rng: &mut R,
+    share: Option<Share>,
+    n: u32,
+    t: u32,
+) -> (poly::Public, Vec<Share>) {
+    // Generate a secret polynomial and commit to it
+    let mut secret = poly::new_from(t - 1, rng);
     if let Some(share) = share {
         // Set the free coefficient of the secret polynomial to the secret
         // of the previous DKG

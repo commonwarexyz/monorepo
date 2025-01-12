@@ -97,11 +97,8 @@ pub trait Supervisor: Clone + Send + 'static {
     /// Index is the type used to indicate the in-progress consensus decision.
     type Index;
 
-    /// Seed is a consensus artifact to use as randomness for leader selection.
-    type Seed;
-
-    /// Return the leader at a given index for the provided seed.
-    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
+    /// Return the leader at a given index.
+    fn leader(&self, index: Self::Index) -> Option<PublicKey>;
 
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.
@@ -112,4 +109,23 @@ pub trait Supervisor: Clone + Send + 'static {
 
     /// Report some activity observed by the consensus implementation.
     fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
+}
+
+pub trait ThresholdSupervisor: Supervisor {
+    /// TODO: kept generic to allow using either Bls12381::{G1,G2} or another scheme entirely
+    /// TODO: may make sense to enshrine (as group::PublicKey, Signature, etc)?
+    type Seed;
+    type Identity;
+    type Share;
+
+    /// Return the leader at a given index for the provided seed.
+    fn leader(&self, seed: Self::Seed, index: Self::Index) -> Option<PublicKey>;
+
+    /// TODO: used to verify incoming partial signatures and recover full signature
+    /// TODO: Across reshares the identity may change but not the public key (should
+    /// think of better wording here)
+    fn identity(&self, index: Self::Index) -> Option<&Self::Identity>;
+
+    /// Returns share to sign with at the given index.
+    fn share(&self, index: Self::Index) -> Option<&Self::Share>;
 }

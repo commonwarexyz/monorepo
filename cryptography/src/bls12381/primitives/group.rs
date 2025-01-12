@@ -21,7 +21,7 @@ use blst::{
     blst_scalar_from_fr, blst_sk_check, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use rand::RngCore;
-use std::ptr;
+use std::{mem, ptr};
 use zeroize::Zeroize;
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -153,6 +153,8 @@ pub type Signature = G2;
 
 /// The default signature length (G2).
 pub const SIGNATURE_LENGTH: usize = G2_ELEMENT_BYTE_LENGTH;
+
+pub const PARTIAL_SIGNATURE_LENGTH: usize = mem::size_of::<u32>() + SIGNATURE_LENGTH;
 
 /// The DST for hashing a proof of possession to the default signature type (G2).
 pub const PROOF_OF_POSSESSION: DST = G2_PROOF_OF_POSSESSION;
