@@ -9,11 +9,17 @@ pub struct Hash<const N: usize>([u8; N]);
 /// Interface the MMR uses for hashing a leaf element with its position and for generating the hash of a non-leaf node.
 pub trait Hasher<const N: usize> {
     fn hash_leaf(&mut self, pos: u64, hash: &Hash<N>) -> Hash<N>;
-    fn hash_node(&mut self, pos: u64, hash1: &Hash<N>, hash2: &Hash<N>) -> Hash<N>;
+    fn hash_node(&mut self, pos: u64, left_hash: &Hash<N>, right_hash: &Hash<N>) -> Hash<N>;
 }
 
-struct Sha256Hasher {
+pub struct Sha256Hasher {
     hasher: Sha256,
+}
+
+impl Default for Sha256Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Sha256Hasher {
@@ -31,10 +37,10 @@ impl Hasher<32> for Sha256Hasher {
         Hash(self.hasher.finalize_reset().into())
     }
 
-    fn hash_node(&mut self, pos: u64, hash1: &Hash<32>, hash2: &Hash<32>) -> Hash<32> {
+    fn hash_node(&mut self, pos: u64, left_hash: &Hash<32>, right_hash: &Hash<32>) -> Hash<32> {
         self.hasher.update(pos.to_be_bytes());
-        self.hasher.update(hash1.0);
-        self.hasher.update(hash2.0);
+        self.hasher.update(left_hash.0);
+        self.hasher.update(right_hash.0);
         Hash(self.hasher.finalize_reset().into())
     }
 }
