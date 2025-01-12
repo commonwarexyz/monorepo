@@ -245,6 +245,7 @@ impl<
             activity = NULLIFY_AND_FINALIZE,
             "recorded fault"
         );
+        panic!("nullify and finalize");
         false
     }
 
@@ -264,8 +265,10 @@ impl<
 
             // There should never exist enough notarizes for multiple proposals, so it doesn't
             // matter which one we choose.
+            let me = self.supervisor.share(self.view).unwrap();
             debug!(
                 view = self.view,
+                me = me.index,
                 proposal = hex(proposal),
                 verified = self.verified_proposal,
                 "broadcasting notarization"
@@ -301,7 +304,7 @@ impl<
                 signature: signature.into(),
                 seed: seed.into(),
             };
-            self.notarization = Some(notarization.clone());
+            // self.notarization = Some(notarization.clone());
             self.broadcast_notarization = true;
             return Some(notarization);
         }
@@ -342,7 +345,7 @@ impl<
             signature: signature.into(),
             seed: seed.into(),
         };
-        self.nullification = Some(nullification.clone());
+        // self.nullification = Some(nullification.clone());
         self.broadcast_nullification = true;
         Some(nullification)
     }
@@ -425,6 +428,13 @@ impl<
         {
             return false;
         }
+        let me = self.supervisor.share(self.view).unwrap();
+        debug!(
+            view = self.view,
+            signer = public_key_index,
+            me = me.index,
+            "recorded finalize"
+        );
         let entry = self.finalizes.entry(digest).or_default();
         let signature = &finalize.signature;
         let proof = Prover::<H>::serialize_proposal(proposal, signature);
@@ -487,7 +497,7 @@ impl<
                 signature: signature.into(),
                 seed,
             };
-            self.finalization = Some(finalization.clone());
+            // self.finalization = Some(finalization.clone());
             self.broadcast_finalization = true;
             return Some(finalization);
         }
@@ -874,6 +884,8 @@ impl<
             }
         }
 
+        // TODO: don't send nullify if we are already sent finalize? Why are we still in this view...
+
         // Construct nullify
         let share = self.supervisor.share(self.view).unwrap();
         let message = nullify_message(self.view);
@@ -887,6 +899,11 @@ impl<
             signature: signature.into(),
             seed: seed.into(),
         };
+        debug!(
+            view = self.view,
+            public_key_index = share.index,
+            "constructing nullify"
+        );
 
         // Handle the nullify
         self.handle_nullify(share.index, null.clone()).await;
@@ -1188,7 +1205,8 @@ impl<
         round.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         round.set_leader(seed);
         self.view = view;
-        info!(view, "entered view");
+        let me = self.supervisor.share(view).unwrap();
+        info!(me = me.index, view, "entered view");
 
         // Check if we should fast exit this view
         let leader = round.leader.as_ref().unwrap().clone();
@@ -1438,6 +1456,7 @@ impl<
                 .append(view, notarization_bytes)
                 .await
                 .expect("unable to append to journal");
+            debug!(view = self.view, "journaled notarization");
         }
 
         // Get seed
@@ -1506,6 +1525,7 @@ impl<
                 .append(view, nullification_bytes)
                 .await
                 .expect("unable to append to journal");
+            debug!(view = self.view, "journaled nullification");
         }
 
         // Get seed
@@ -1662,6 +1682,7 @@ impl<
                 .append(view, finalization_bytes)
                 .await
                 .expect("unable to append to journal");
+            debug!(view = self.view, "journaled finalization");
         }
 
         // Get seed
@@ -1769,6 +1790,11 @@ impl<
                 return None;
             }
         };
+        debug!(
+            view,
+            public_key_index = share.index,
+            "constructing finalize"
+        );
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         let signature = ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
         let signature = signature.serialize();
@@ -2086,6 +2112,7 @@ impl<
                     wire::voter::Payload::Notarization(notarization) => {
                         // Handle notarization
                         let proposal = notarization.proposal.as_ref().unwrap().clone();
+                        debug!(view = proposal.view, "replaying notarization");
                         self.handle_notarization(notarization).await;
 
                         // Update round info
@@ -2116,6 +2143,7 @@ impl<
                     wire::voter::Payload::Nullification(nullification) => {
                         // Handle nullification
                         let view = nullification.view;
+                        debug!(view, "replaying nullification");
                         self.handle_nullification(nullification).await;
 
                         // Update round info
@@ -2142,13 +2170,13 @@ impl<
                         // If we are sending a finalize message, we must be in the next view
                         if public_key == self.crypto.public_key() {
                             let round = self.views.get_mut(&view).expect("missing round");
-                            round.broadcast_notarization = true;
                             round.broadcast_finalize = true;
                         }
                     }
                     wire::voter::Payload::Finalization(finalization) => {
                         // Handle finalization
                         let view = finalization.proposal.as_ref().unwrap().view;
+                        debug!(view, "replaying finalization");
                         self.handle_finalization(finalization).await;
 
                         // Update round info
