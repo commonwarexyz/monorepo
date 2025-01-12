@@ -655,19 +655,26 @@ mod tests {
                                 completed.lock().unwrap().insert(validator);
                             }
                         }
+                    }
+                });
 
-                        // Check supervisors for correct activity
+                // Check for faults
+                runtime.spawn("confirmed", {
+                    let runtime = runtime.clone();
+                    async move {
+                    loop {
                         for (_, supervisor) in supervisors.iter() {
                             // Ensure no faults
                             let faults = supervisor.faults.lock().unwrap();
                             assert!(faults.is_empty());
                         }
+                        runtime.sleep(Duration::from_millis(10)).await;
                     }
-                });
+                }});
 
                 // Exit at random points for unclean shutdown of entire set
                 let wait =
-                    runtime.gen_range(Duration::from_millis(10_000)..Duration::from_millis(50_000));
+                    runtime.gen_range(Duration::from_millis(10)..Duration::from_millis(2_000));
                 runtime.sleep(wait).await;
                 {
                     let mut shutdowns = shutdowns.lock().unwrap();
@@ -993,7 +1000,7 @@ mod tests {
                 max_fetch_count: 1,
                 max_fetch_size: 1024 * 512,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-                fetch_concurrent: 1,
+                fetch_concurrent: 2, // needed to ensure both notarization/nullification can run at same time
                 replay_concurrency: 1,
             };
             let engine = Engine::new(runtime.clone(), journal, cfg);

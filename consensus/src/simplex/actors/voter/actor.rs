@@ -27,6 +27,7 @@ use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
 use commonware_storage::journal::Journal;
 use commonware_utils::{hex, quorum};
+use core::panic;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
@@ -67,6 +68,7 @@ struct Round<
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
     notaries: HashMap<u32, Digest>,
+    // TODO: this is used to determine if notarized...so need to be careful about when we check it?
     notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
     notarization: Option<wire::Notarization>,
     broadcast_notarize: bool,
@@ -191,6 +193,11 @@ impl<
         {
             return false;
         }
+        debug!(
+            view = self.view,
+            signer = public_key_index,
+            "recorded notarize"
+        );
         let entry = self.notarizes.entry(digest).or_default();
         let proof = Prover::<H>::serialize_proposal(proposal, &notarize.signature);
         entry.insert(public_key_index, notarize);
@@ -207,6 +214,11 @@ impl<
         let finalize = self.finalizers.get(&public_key_index);
         if finalize.is_none() {
             // Store the nullify
+            debug!(
+                view = self.view,
+                signer = public_key_index,
+                "recorded nullify"
+            );
             return self.nullifies.insert(public_key_index, nullify).is_none();
         }
         let finalize = finalize.unwrap();
@@ -648,14 +660,26 @@ impl<
 
     fn is_notarized(&self, view: View) -> Option<&wire::Proposal> {
         let round = self.views.get(&view)?;
-        let (digest, proposal) = round.proposal.as_ref()?;
-        let notarizes = round.notarizes.get(digest)?;
-        let identity = self.supervisor.identity(view)?;
-        let threshold = identity.required();
-        if notarizes.len() < threshold as usize {
+        let Some((digest, proposal)) = round.proposal.as_ref() else {
+            debug!(view, "proposal not found during is_notarized check");
             return None;
+        };
+        if round.notarization.is_some() {
+            return Some(proposal);
         }
-        Some(proposal)
+        let Some(notarizes) = round.notarizes.get(digest) else {
+            debug!(view, "notarizes not found during is_notarized check");
+            return None;
+        };
+        let Some(identity) = self.supervisor.identity(view) else {
+            debug!(view, "identity not found during is_notarized check");
+            return None;
+        };
+        let threshold = identity.required();
+        if notarizes.len() >= threshold as usize {
+            return Some(proposal);
+        }
+        None
     }
 
     fn is_nullified(&self, view: View) -> bool {
@@ -668,19 +692,22 @@ impl<
             None => return false,
         };
         let threshold = identity.required();
-        round.nullifies.len() >= threshold as usize
+        round.nullification.is_some() || round.nullifies.len() >= threshold as usize
     }
 
     fn is_finalized(&self, view: View) -> Option<&wire::Proposal> {
         let round = self.views.get(&view)?;
         let (digest, proposal) = round.proposal.as_ref()?;
+        if round.finalization.is_some() {
+            return Some(proposal);
+        }
         let finalizes = round.finalizes.get(digest)?;
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
-        if finalizes.len() < threshold as usize {
-            return None;
+        if finalizes.len() >= threshold as usize {
+            return Some(proposal);
         }
-        Some(proposal)
+        None
     }
 
     fn find_parent(&self) -> Result<(View, Digest), View> {
@@ -997,6 +1024,10 @@ impl<
 
             // If we are the leader, drop peer proposals
             let Some(leader) = &round.leader else {
+                debug!(
+                    view = self.view,
+                    "dropping peer proposal because leader is not set"
+                );
                 return None;
             };
             if *leader == self.crypto.public_key() {
@@ -1012,6 +1043,11 @@ impl<
                 return None;
             }
 
+            debug!(
+                view = self.view,
+                leader_index, "checking proposal notarization"
+            );
+
             // Check if leader has signed a digest
             let proposal_digest = round.notaries.get(&leader_index)?;
             let proposal = round
@@ -1021,11 +1057,24 @@ impl<
                 .proposal
                 .as_ref()?;
 
+            debug!(view = proposal.view, "found proposal notarization");
+
             // Check parent validity
             if proposal.view <= proposal.parent {
+                debug!(
+                    view = proposal.view,
+                    parent = proposal.parent,
+                    "dropping peer proposal because parent is invalid"
+                );
                 return None;
             }
             if proposal.parent < self.last_finalized {
+                debug!(
+                    view = proposal.view,
+                    parent = proposal.parent,
+                    last_finalized = self.last_finalized,
+                    "dropping peer proposal because parent is less than last finalized"
+                );
                 return None;
             }
             (proposal_digest, proposal)
@@ -1049,7 +1098,7 @@ impl<
                 let parent_proposal = match self.is_notarized(cursor) {
                     Some(parent) => parent,
                     None => {
-                        trace!(view = cursor, "parent proposal is not notarized");
+                        debug!(view = cursor, "parent proposal is not notarized");
                         return None;
                     }
                 };
@@ -1060,7 +1109,7 @@ impl<
 
             // Check nullification exists in gap
             if !self.is_nullified(cursor) {
-                trace!(
+                debug!(
                     view = cursor,
                     "missing nullification during proposal verification"
                 );
@@ -1352,6 +1401,7 @@ impl<
 
         // If already have notarization, ignore
         if round.notarization.is_some() {
+            debug!(view, "ignoring notarization because already have one");
             return;
         }
 
@@ -1372,6 +1422,8 @@ impl<
             );
             round.proposal = Some((digest, proposal));
         }
+
+        // TODO: compare proposal to value in notarization
 
         // Put notarization in journal
         if self.journal.is_some() {
@@ -1594,6 +1646,8 @@ impl<
             );
             round.proposal = Some((digest, proposal));
         }
+
+        // TODO: compare proposal to value in finalization?
 
         // Put finalization in journal
         if self.journal.is_some() {
@@ -1852,7 +1906,7 @@ impl<
                 if parent >= self.last_finalized {
                     // Compute missing nullifications
                     let mut missing_notarizations = Vec::new();
-                    if self.is_notarized(parent).is_none() {
+                    if self.is_notarized(parent).is_none() && parent != GENESIS_VIEW {
                         missing_notarizations.push(parent);
                     }
                     let missing_nullifications = self.missing_nullifications(parent);
@@ -2234,10 +2288,12 @@ impl<
                     match msg {
                         Message::Notarization{ notarization }  => {
                             view = notarization.proposal.as_ref().unwrap().view;
+                            debug!(view, "received notarization from backfiller");
                             self.handle_notarization(notarization).await;
                         },
                         Message::Nullification { nullification } => {
                             view = nullification.view;
+                            debug!(view, "received nullification from backfiller");
                             self.handle_nullification(nullification).await;
                         },
                     }
