@@ -124,6 +124,7 @@ fn main() {
                 match msg {
                     Message::PutBlock(msg) => {
                         debug!("received PutBlock");
+                        // TODO: send ack back so know when stored to start consensus
                     }
                     Message::GetBlock { incoming, response } => {
                         debug!("received GetBlock");
