@@ -943,9 +943,18 @@ impl<
 
         // Verify signature
         let Some(signature) = Eval::deserialize(&nullify.signature) else {
+            debug!(
+                public_key_index,
+                "partial signature is not formatted correctly"
+            );
             return;
         };
         if signature.index != public_key_index {
+            debug!(
+                public_key_index,
+                partial_signature = signature.index,
+                "invalid signature index for nullify"
+            );
             return;
         }
         let nullify_message = nullify_message(nullify.view);

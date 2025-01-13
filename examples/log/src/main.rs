@@ -20,43 +20,125 @@
 //!
 //! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
 //!
-//! ## Participant 0 (Bootstrapper)
+//! ## Generate Shared Secrets
+//!
+//! _In production, this should be done using a DKG (and with Resharing whenever changing set)._
+//!
+//! We assign shares to validators based on their order in the sorted list of participants (by public key).
+//! The assignments seen below are just the seeds used to derive the public keys and as such do not necessarily
+//! align with the share indices.
+//!
+//! ### Network 1
 //!
 //! ```sh
-//! cargo run --release -- --me 0@3000 --participants 0,1,2,3 --storage-dir /tmp/log/0
+//! cargo run --release --bin dealer -- --seed 1 --participants 1,2,3,4
 //! ```
 //!
-//! ## Participant 1
-//!
-//! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3001 --participants 0,1,2,3 --storage-dir /tmp/log/1
+//! ```txt
+//! polynomial: a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd8e754b2a66d247e9937e35326a36415adfe606082c86bb823a63ba9a2a9c87f146f3d55d067b5f08f768e76f8ea382f2aa2a5bfcfc67656703f15fb905bc271514bfb0be0eb54becaba4743754638b7a1d9d2fbf3d4e2ea07850601f82a1d3ac
+//! public: a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd
+//! share (index=0 validator=2): 000000003521e062da79bd64dc8c5e0d07f07d64c805a137153ef2e6fa5485d28026990e
+//! share (index=1 validator=4): 000000016b63f2c22039b703a52e4903a00986d2ea63361d3a6ef33b00330a52d4dce155
+//! share (index=2 validator=3): 000000023fa89505734c5ab4d8727e5011e17fd0fee654d1f05496f0a9660025432adc38
+//! share (index=3 validator=1): 0000000325dd6e7ffd4f25c0a992d5fa671a4064594ca15836ee3a06f5ed6748cb1089b8
 //! ```
 //!
-//! # Participant 2
+//! ### Network 2
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participants 0,1,2,3 --storage-dir /tmp/log/2
+//! cargo run --release --bin dealer -- --seed 2 --participants 5,6,7,8
 //! ```
 //!
-//! # Participant 3
+//! ```txt
+//! polynomial: a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f58ff12f093cfbe796aa417ffa938be43cfe13ac8fe8c9bc1fddddfe8de840b8372d3165aa172fe930ed6ade9501dbe2ac80e9c5debaaad3eed786c1670b3f13a03712bfe6f326e57f48bb536522c3fb0a465e95a2de83ef3159675523842ef892
+//! public: a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f5
+//! share (index=0 validator=6): 000000004dba2ad66b0bb0760cdfc1b1e51fb96fb3b6bdd8cdd451beca1fb0247b2071c0
+//! share (index=1 validator=7): 000000014342ca6e1877c338e416dc67bb836c996ca78e5c99dc12e937008e810c59ba44
+//! share (index=2 validator=8): 0000000255ccd5a1f8962ce3e665d75f504d27e33db466838eb38476a162a32e4e73341a
+//! share (index=3 validator=5): 00000003116aa51ee1c9702ee092da9099db1347d31fa24aac5c4a680945ee2d416cdf41
+//! ```
+//!
+//!
+//! ## Indexer
+//!
+//! _Stores blocks and threshold finalizations. This isn't necessary in practice (could use separate mechanisms)._
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3 --storage-dir /tmp/log/3
+//! cargo run --release --bin indexer -- --me 0@3000 --participants 1,2,3,4,5,6,7,8 --networks a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd,a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f5
+//! ```
+//!
+//! ## Network 1
+//!
+//! ### Participant 1 (Bootstrapper)
+//!
+//! ```sh
+//! cargo run --release -- --me 1@3001 --participants 1,2,3,4 --storage-dir /tmp/log/1 --indexer 0@127.0.0.1:3000 --identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd8e754b2a66d247e9937e35326a36415adfe606082c86bb823a63ba9a2a9c87f146f3d55d067b5f08f768e76f8ea382f2aa2a5bfcfc67656703f15fb905bc271514bfb0be0eb54becaba4743754638b7a1d9d2fbf3d4e2ea07850601f82a1d3ac --share 0000000325dd6e7ffd4f25c0a992d5fa671a4064594ca15836ee3a06f5ed6748cb1089b8 --other-identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f5
+//! ```
+//!
+//! ### Participant 2
+//!
+//! ```sh
+//! cargo run --release -- --me 2@3002 --bootstrappers 1@127.0.0.1:3001 --participants 1,2,3,4 --storage-dir /tmp/log/2 --indexer 0@127.0.0.1:3000 --identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd8e754b2a66d247e9937e35326a36415adfe606082c86bb823a63ba9a2a9c87f146f3d55d067b5f08f768e76f8ea382f2aa2a5bfcfc67656703f15fb905bc271514bfb0be0eb54becaba4743754638b7a1d9d2fbf3d4e2ea07850601f82a1d3ac --share 000000003521e062da79bd64dc8c5e0d07f07d64c805a137153ef2e6fa5485d28026990e --other-identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f5
+//! ```
+//!
+//! ### Participant 3
+//!
+//! ```sh
+//! cargo run --release -- --me 3@3003 --bootstrappers 1@127.0.0.1:3001 --participants 1,2,3,4 --storage-dir /tmp/log/3 --indexer 0@127.0.0.1:3000 --identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd8e754b2a66d247e9937e35326a36415adfe606082c86bb823a63ba9a2a9c87f146f3d55d067b5f08f768e76f8ea382f2aa2a5bfcfc67656703f15fb905bc271514bfb0be0eb54becaba4743754638b7a1d9d2fbf3d4e2ea07850601f82a1d3ac --share 000000023fa89505734c5ab4d8727e5011e17fd0fee654d1f05496f0a9660025432adc38 --other-identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f5
+//! ```
+//!
+//! ### Participant 4
+//!
+//! ```sh
+//! cargo run --release -- --me 4@3004 --bootstrappers 1@127.0.0.1:3001 --participants 1,2,3,4 --storage-dir /tmp/log/4 --indexer 0@127.0.0.1:3000 --identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd8e754b2a66d247e9937e35326a36415adfe606082c86bb823a63ba9a2a9c87f146f3d55d067b5f08f768e76f8ea382f2aa2a5bfcfc67656703f15fb905bc271514bfb0be0eb54becaba4743754638b7a1d9d2fbf3d4e2ea07850601f82a1d3ac --share 000000016b63f2c22039b703a52e4903a00986d2ea63361d3a6ef33b00330a52d4dce155 --other-identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f5
+//! ```
+//!
+//! ## Network 2
+//!
+//! ### Participant 5
+//!
+//! ```sh
+//! cargo run --release -- --me 5@3005 --participants 5,6,7,8 --storage-dir /tmp/log/5 --indexer 0@127.0.0.1:3000 --identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f58ff12f093cfbe796aa417ffa938be43cfe13ac8fe8c9bc1fddddfe8de840b8372d3165aa172fe930ed6ade9501dbe2ac80e9c5debaaad3eed786c1670b3f13a03712bfe6f326e57f48bb536522c3fb0a465e95a2de83ef3159675523842ef892 --share 00000003116aa51ee1c9702ee092da9099db1347d31fa24aac5c4a680945ee2d416cdf41 --other-identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd
+//! ```
+//!
+//! ### Participant 6
+//!
+//! ```sh
+//! cargo run --release -- --me 6@3006 --bootstrappers 5@127.0.0.1:3005 --participants 5,6,7,8 --storage-dir /tmp/log/6 --indexer 0@127.0.0.1:3000 --identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f58ff12f093cfbe796aa417ffa938be43cfe13ac8fe8c9bc1fddddfe8de840b8372d3165aa172fe930ed6ade9501dbe2ac80e9c5debaaad3eed786c1670b3f13a03712bfe6f326e57f48bb536522c3fb0a465e95a2de83ef3159675523842ef892 --share 000000004dba2ad66b0bb0760cdfc1b1e51fb96fb3b6bdd8cdd451beca1fb0247b2071c0 --other-identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd
+//! ```
+//!
+//! ### Participant 7
+//!
+//! ```sh
+//! cargo run --release -- --me 7@3007 --bootstrappers 5@127.0.0.1:3005 --participants 5,6,7,8 --storage-dir /tmp/log/7 --indexer 0@127.0.0.1:3000 --identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f58ff12f093cfbe796aa417ffa938be43cfe13ac8fe8c9bc1fddddfe8de840b8372d3165aa172fe930ed6ade9501dbe2ac80e9c5debaaad3eed786c1670b3f13a03712bfe6f326e57f48bb536522c3fb0a465e95a2de83ef3159675523842ef892 --share 000000014342ca6e1877c338e416dc67bb836c996ca78e5c99dc12e937008e810c59ba44 --other-identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd
+//! ```
+//!
+//! ### Participant 8
+//!
+//! ```sh
+//! cargo run --release -- --me 8@3007 --bootstrappers 5@127.0.0.1:3005 --participants 5,6,7,8 --storage-dir /tmp/log/8 --indexer 0@127.0.0.1:3000 --identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f58ff12f093cfbe796aa417ffa938be43cfe13ac8fe8c9bc1fddddfe8de840b8372d3165aa172fe930ed6ade9501dbe2ac80e9c5debaaad3eed786c1670b3f13a03712bfe6f326e57f48bb536522c3fb0a465e95a2de83ef3159675523842ef892 --share 0000000255ccd5a1f8962ce3e665d75f504d27e33db466838eb38476a162a32e4e73341a --other-identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd
 //! ```
 
 mod application;
-mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex::{self, Engine, Prover};
-use commonware_cryptography::{Ed25519, Scheme, Sha256};
-use commonware_p2p::authenticated::{self, Network};
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group::{self, Element},
+        poly::{self, Poly},
+    },
+    Ed25519, Scheme, Sha256,
+};
+use commonware_log::{CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX};
+use commonware_p2p::authenticated;
 use commonware_runtime::{
     tokio::{self, Executor},
-    Runner, Spawner,
+    Network, Runner, Spawner,
 };
 use commonware_storage::journal::{self, Journal};
-use commonware_utils::{hex, union};
+use commonware_stream::public_key::{self, Connection};
+use commonware_utils::{from_hex, hex, quorum, union};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -65,9 +147,6 @@ use std::{
     num::NonZeroU32,
 };
 use std::{str::FromStr, time::Duration};
-
-/// Unique namespace to avoid message replay attacks.
-const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_LOG";
 
 fn main() {
     // Parse arguments
@@ -87,13 +166,23 @@ fn main() {
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(u64))
-                .help("All participants (arbiter and contributors)"),
+                .help("All participants"),
         )
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
+        .arg(Arg::new("indexer").long("indexer").required(true))
+        .arg(Arg::new("identity").long("identity").required(true))
+        .arg(Arg::new("share").long("share").required(true))
+        .arg(
+            Arg::new("other-identity")
+                .long("other-identity")
+                .required(true),
+        )
         .get_matches();
 
-    // Create GUI
-    let gui = gui::Gui::new();
+    // Create logger
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
 
     // Configure my identity
     let me = matches
@@ -147,6 +236,41 @@ fn main() {
         .get_one::<String>("storage-dir")
         .expect("Please provide storage directory");
 
+    // Configure threshold
+    let threshold = quorum(validators.len() as u32).expect("Threshold not well-formed");
+    let identity = matches
+        .get_one::<String>("identity")
+        .expect("Please provide identity");
+    let identity = from_hex(identity).expect("Identity not well-formed");
+    let identity: Poly<group::Public> =
+        Poly::deserialize(&identity, threshold).expect("Identity not well-formed");
+    let public = poly::public(&identity);
+    let share = matches
+        .get_one::<String>("share")
+        .expect("Please provide share");
+    let share = from_hex(share).expect("Share not well-formed");
+    let share = group::Share::deserialize(&share).expect("Share not well-formed");
+
+    // Configure indexer
+    let namespace = public.serialize();
+    let indexer = matches
+        .get_one::<String>("indexer")
+        .expect("Please provide indexer");
+    let parts = indexer.split('@').collect::<Vec<&str>>();
+    let indexer_key = parts[0]
+        .parse::<u64>()
+        .expect("Indexer key not well-formed");
+    let indexer = Ed25519::from_seed(indexer_key).public_key();
+    let indexer_address = SocketAddr::from_str(parts[1]).expect("Indexer address not well-formed");
+
+    // Configure other identity
+    let other_identity = matches
+        .get_one::<String>("other-identity")
+        .expect("Please provide other identity");
+    let other_identity = from_hex(other_identity).expect("Other identity not well-formed");
+    let other_identity =
+        group::Public::deserialize(&other_identity).expect("Other identity not well-formed");
+
     // Initialize runtime
     let runtime_cfg = tokio::Config {
         storage_directory: storage_directory.into(),
@@ -154,10 +278,20 @@ fn main() {
     };
     let (executor, runtime) = Executor::init(runtime_cfg.clone());
 
+    // Configure indexer
+    let indexer_cfg = public_key::Config {
+        crypto: signer.clone(),
+        namespace: INDEXER_NAMESPACE.to_vec(),
+        max_message_size: 1024 * 1024,
+        synchrony_bound: Duration::from_secs(1),
+        max_handshake_age: Duration::from_secs(60),
+        handshake_timeout: Duration::from_secs(5),
+    };
+
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        &union(APPLICATION_NAMESPACE, b"_P2P"),
+        &union(&namespace, P2P_SUFFIX),
         Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
@@ -166,7 +300,18 @@ fn main() {
 
     // Start runtime
     executor.start(async move {
-        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+        // Dial indexer
+        let (sink, stream) = runtime
+            .dial(indexer_address)
+            .await
+            .expect("Failed to dial indexer");
+        let indexer =
+            Connection::upgrade_dialer(runtime.clone(), indexer_cfg, sink, stream, indexer)
+                .await
+                .expect("Failed to upgrade connection with indexer");
+
+        // Setup p2p
+        let (mut network, mut oracle) = authenticated::Network::new(runtime.clone(), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -203,16 +348,23 @@ fn main() {
         .expect("Failed to initialize journal");
 
         // Initialize application
-        let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
+        let consensus_namespace = union(&namespace, CONSENSUS_SUFFIX);
         let hasher = Sha256::default();
-        let prover: Prover<Ed25519, Sha256> = Prover::new(&namespace);
+        let prover: Prover<Sha256> = Prover::new(public, &consensus_namespace);
+        let other_consensus_namespace = union(&other_identity.serialize(), CONSENSUS_SUFFIX);
+        let other_prover: Prover<Sha256> = Prover::new(other_identity, &other_consensus_namespace);
         let (application, supervisor, mailbox) = application::Application::new(
             runtime.clone(),
             application::Config {
+                indexer,
                 prover,
+                other_prover,
+                other_network: other_identity,
                 hasher: hasher.clone(),
                 mailbox_size: 1024,
+                identity,
                 participants: validators.clone(),
+                share,
             },
         );
 
@@ -228,7 +380,7 @@ fn main() {
                 committer: mailbox,
                 supervisor,
                 registry: Arc::new(Mutex::new(Registry::default())),
-                namespace,
+                namespace: consensus_namespace,
                 mailbox_size: 1024,
                 replay_concurrency: 1,
                 leader_timeout: Duration::from_secs(1),
@@ -244,7 +396,6 @@ fn main() {
         );
 
         // Start consensus
-        runtime.spawn("application", application.run());
         runtime.spawn("network", network.run());
         runtime.spawn(
             "engine",
@@ -254,7 +405,7 @@ fn main() {
             ),
         );
 
-        // Block on GUI
-        gui.run(runtime).await;
+        // Block on application
+        application.run().await;
     });
 }
