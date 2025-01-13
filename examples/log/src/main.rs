@@ -20,29 +20,44 @@
 //!
 //! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
 //!
-//! ## Participant 0 (Bootstrapper)
+//! ## Indexer
+//!
+//! _Stores blocks and threshold finalizations. This isn't necessary in practice (could use separate mechanism)._
 //!
 //! ```sh
-//! cargo run --release -- --me 0@3000 --participants 0,1,2,3 --storage-dir /tmp/log/0
+//! cargo run --release -- --me 0@3000 --participants 1,2,3,4,5,6,7,8
 //! ```
 //!
-//! ## Participant 1
+//! ## Network 1
+//!
+//! ### Participant 1 (Bootstrapper)
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3001 --participants 0,1,2,3 --storage-dir /tmp/log/1
+//! cargo run --release -- --me 1@3001 --participants 1,2,3,4 --storage-dir /tmp/log/1 --relay 0@3000
 //! ```
 //!
-//! # Participant 2
+//! ### Participant 2
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participants 0,1,2,3 --storage-dir /tmp/log/2
+//! cargo run --release -- --bootstrappers 1@127.0.0.1:3001 --me 2@3002 --participants 1,2,3,4 --storage-dir /tmp/log/2 --relay 0@3000
 //! ```
 //!
-//! # Participant 3
+//! ### Participant 3
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3 --storage-dir /tmp/log/3
+//! cargo run --release -- --bootstrappers 1@127.0.0.1:3001 --me 3@3003 --participants 1,2,3,4 --storage-dir /tmp/log/3 --relay 0@3000
 //! ```
+//!
+//! ### Participant 4
+//!
+//! ```sh
+//! cargo run --release -- --bootstrappers 1@127.0.0.1:3001 --me 4@3004 --participants 1,2,3,4 --storage-dir /tmp/log/4 --relay 0@3000
+//! ```
+//!
+//! ## Network 2
+//!
+//! ### Participant 5
+//!
 
 mod application;
 mod gui;
