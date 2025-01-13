@@ -7,7 +7,7 @@ use crate::{
         },
         wire, View,
     },
-    Supervisor, ThresholdSupervisor,
+    ThresholdSupervisor,
 };
 use commonware_cryptography::{
     bls12381::primitives::{group, ops},
@@ -21,13 +21,18 @@ use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
 use tracing::debug;
 
-pub struct Config<S: Supervisor<Index = View>> {
+pub struct Config<
+    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+> {
     pub supervisor: S,
     pub namespace: Vec<u8>,
 }
 
-pub struct Conflicter<E: Clock + Rng + CryptoRng + Spawner, H: Hasher, S: Supervisor<Index = View>>
-{
+pub struct Conflicter<
+    E: Clock + Rng + CryptoRng + Spawner,
+    H: Hasher,
+    S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
+> {
     runtime: E,
     supervisor: S,
     _hasher: PhantomData<H>,
