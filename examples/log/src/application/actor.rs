@@ -5,6 +5,8 @@ use super::{
 };
 use commonware_consensus::simplex::Prover;
 use commonware_cryptography::{bls12381::primitives::group::Element, Hasher};
+use commonware_runtime::{Sink, Stream};
+use commonware_stream::public_key::Connection;
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
@@ -14,20 +16,22 @@ use tracing::info;
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng, H: Hasher> {
+pub struct Application<R: Rng, H: Hasher, Si: Sink, St: Stream> {
     runtime: R,
+    indexer: Connection<Si, St>,
     prover: Prover<H>,
     hasher: H,
     mailbox: mpsc::Receiver<Message>,
 }
 
-impl<R: Rng, H: Hasher> Application<R, H> {
+impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
-    pub fn new(runtime: R, config: Config<H>) -> (Self, Supervisor, Mailbox) {
+    pub fn new(runtime: R, config: Config<H, Si, St>) -> (Self, Supervisor, Mailbox) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
                 runtime,
+                indexer: config.indexer,
                 prover: config.prover,
                 hasher: config.hasher,
                 mailbox,

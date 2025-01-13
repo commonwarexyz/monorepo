@@ -5,7 +5,7 @@ use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
     Ed25519, Hasher, Scheme, Sha256,
 };
-use commonware_log::{wire, CONSENSUS_SUFFIX};
+use commonware_log::{wire, CONSENSUS_SUFFIX, INDEXER_NAMESPACE};
 use commonware_runtime::{tokio::Executor, Listener, Network, Runner, Spawner};
 use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
@@ -213,7 +213,7 @@ fn main() {
                 let mut listener = runtime.bind(socket).await.expect("failed to bind listener");
                 let config = Config {
                     crypto: signer,
-                    namespace: b"INDEXER".to_vec(),
+                    namespace: INDEXER_NAMESPACE.to_vec(),
                     max_message_size: 1024 * 1024,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(60),

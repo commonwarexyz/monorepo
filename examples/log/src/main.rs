@@ -111,13 +111,14 @@ use commonware_cryptography::{
     },
     Ed25519, Scheme, Sha256,
 };
-use commonware_log::{CONSENSUS_SUFFIX, P2P_SUFFIX};
-use commonware_p2p::authenticated::{self, Network};
+use commonware_log::{CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX};
+use commonware_p2p::authenticated;
 use commonware_runtime::{
     tokio::{self, Executor},
-    Runner, Spawner,
+    Network, Runner, Spawner,
 };
 use commonware_storage::journal::{self, Journal};
+use commonware_stream::public_key::{self, Connection};
 use commonware_utils::{from_hex, hex, quorum, union};
 use governor::Quota;
 use prometheus_client::registry::Registry;
@@ -228,15 +229,15 @@ fn main() {
 
     // Configure indexer
     let namespace = public.serialize();
-    // let indexer = matches
-    //     .get_one::<String>("indexer")
-    //     .expect("Please provide indexer");
-    // let parts = indexer.split('@').collect::<Vec<&str>>();
-    // let indexer_key = parts[0]
-    //     .parse::<u64>()
-    //     .expect("Indexer key not well-formed");
-    // let indexer_address = SocketAddr::from_str(parts[1]);
-    // TODO: dial indexer (block if can't connect)
+    let indexer = matches
+        .get_one::<String>("indexer")
+        .expect("Please provide indexer");
+    let parts = indexer.split('@').collect::<Vec<&str>>();
+    let indexer_key = parts[0]
+        .parse::<u64>()
+        .expect("Indexer key not well-formed");
+    let indexer = Ed25519::from_seed(indexer_key).public_key();
+    let indexer_address = SocketAddr::from_str(parts[1]).expect("Indexer address not well-formed");
 
     // Initialize runtime
     let runtime_cfg = tokio::Config {
@@ -244,6 +245,16 @@ fn main() {
         ..Default::default()
     };
     let (executor, runtime) = Executor::init(runtime_cfg.clone());
+
+    // Configure indexer
+    let indexer_cfg = public_key::Config {
+        crypto: signer.clone(),
+        namespace: INDEXER_NAMESPACE.to_vec(),
+        max_message_size: 1024 * 1024,
+        synchrony_bound: Duration::from_secs(1),
+        max_handshake_age: Duration::from_secs(60),
+        handshake_timeout: Duration::from_secs(5),
+    };
 
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
@@ -257,7 +268,18 @@ fn main() {
 
     // Start runtime
     executor.start(async move {
-        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+        // Dial indexer
+        let (sink, stream) = runtime
+            .dial(indexer_address)
+            .await
+            .expect("Failed to dial indexer");
+        let indexer =
+            Connection::upgrade_dialer(runtime.clone(), indexer_cfg, sink, stream, indexer)
+                .await
+                .expect("Failed to upgrade connection with indexer");
+
+        // Setup p2p
+        let (mut network, mut oracle) = authenticated::Network::new(runtime.clone(), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -300,6 +322,7 @@ fn main() {
         let (application, supervisor, mailbox) = application::Application::new(
             runtime.clone(),
             application::Config {
+                indexer,
                 prover,
                 hasher: hasher.clone(),
                 mailbox_size: 1024,

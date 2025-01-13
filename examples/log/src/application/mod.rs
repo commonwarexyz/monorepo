@@ -10,11 +10,15 @@ use commonware_cryptography::{
 
 mod actor;
 pub use actor::Application;
+use commonware_runtime::{Sink, Stream};
+use commonware_stream::public_key::Connection;
 mod ingress;
 mod supervisor;
 
 /// Configuration for the application.
-pub struct Config<H: Hasher> {
+pub struct Config<H: Hasher, Si: Sink, St: Stream> {
+    pub indexer: Connection<Si, St>,
+
     /// Hashing scheme to use.
     pub hasher: H,
 
