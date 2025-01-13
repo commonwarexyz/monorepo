@@ -22,7 +22,7 @@
 //!
 //! ## Indexer
 //!
-//! _Stores blocks and threshold finalizations. This isn't necessary in practice (could use separate mechanism)._
+//! _Stores blocks and threshold finalizations. This isn't necessary in practice (could use separate mechanisms)._
 //!
 //! ```sh
 //! cargo run --release -- --me 0@3000 --participants 1,2,3,4,5,6,7,8
