@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
+use commonware_consensus::simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
     Ed25519, Hasher, Scheme, Sha256,
@@ -21,8 +22,8 @@ use futures::{
 };
 use prost::Message as _;
 use std::{
-    collections::{HashMap, HashSet},
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    collections::{BTreeMap, HashMap, HashSet},
+    net::{self, IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
 use tracing::debug;
@@ -107,6 +108,7 @@ fn main() {
     }
 
     // Configure networks
+    let mut provers = HashMap::new();
     let mut blocks = HashMap::new();
     let mut finalizations = HashMap::new();
     let networks = matches
@@ -117,19 +119,21 @@ fn main() {
     }
     for network in networks {
         let network = from_hex(network).expect("Network not well-formed");
-        group::Public::deserialize(&network).expect("Network not well-formed");
-        blocks.insert(network, HashMap::new());
-        finalizations.insert(network, HashMap::new());
+        let public = group::Public::deserialize(&network).expect("Network not well-formed");
+        let prover = Prover::<Sha256>::new(public, b"");
+        provers.insert(network.clone(), prover);
+        blocks.insert(network.clone(), HashMap::new());
+        finalizations.insert(network, BTreeMap::new());
     }
 
     // Create runtime
-    let hasher = Sha256::new();
     let (executor, runtime) = Executor::default();
     executor.start(async move {
         // Create message handler
         let (handler, mut receiver) = mpsc::unbounded();
 
         // Start handler
+        let mut hasher = Sha256::new();
         runtime.spawn("handler", async move {
             while let Some(msg) = receiver.next().await {
                 match msg {
@@ -145,12 +149,12 @@ fn main() {
                         let digest = hasher.finalize();
 
                         // Store block
-                        network.insert(digest, incoming.data);
+                        network.insert(digest.clone(), incoming.data);
                         let _ = response.send(true);
                         debug!(
                             network = hex(&incoming.network),
                             block = hex(&digest),
-                            "stored"
+                            "stored block"
                         );
                     }
                     Message::GetBlock { incoming, response } => {
@@ -169,8 +173,22 @@ fn main() {
                         };
 
                         // Verify signature
+                        let prover = provers.get(&incoming.network).expect("missing prover");
+                        let Some((view, _, _, _, _)) =
+                            prover.deserialize_finalization(incoming.data.clone())
+                        else {
+                            let _ = response.send(false);
+                            continue;
+                        };
 
                         // Store finalization
+                        network.insert(view, incoming.data);
+                        let _ = response.send(true);
+                        debug!(
+                            network = hex(&incoming.network),
+                            view = view,
+                            "stored finalization"
+                        );
                     }
                     Message::GetFinalization { incoming, response } => {
                         // Get latest finalization
@@ -227,10 +245,10 @@ fn main() {
 
                     // Spawn message handler
                     runtime.spawn("connection", {
-                        let handler = handler.clone();
+                        let mut handler = handler.clone();
                         async move {
                             // Split stream
-                            let (sender, mut receiver) = stream.split();
+                            let (mut sender, mut receiver) = stream.split();
 
                             // Handle messages
                             while let Ok(msg) = receiver.receive().await {
@@ -279,15 +297,37 @@ fn main() {
                                             .expect("failed to send message");
                                         let response =
                                             receiver.await.expect("failed to receive response");
-                                        let msg = wire::Outbound {
-                                            payload: Some(wire::outbound::Payload::Block(
-                                                response.into(),
-                                            )),
-                                        }
-                                        .encode_to_vec();
-                                        if sender.send(&msg).await.is_err() {
-                                            debug!(peer = hex(&peer), "failed to send message");
-                                            return;
+                                        match response {
+                                            Some(data) => {
+                                                let msg = wire::Outbound {
+                                                    payload: Some(wire::outbound::Payload::Block(
+                                                        data.into(),
+                                                    )),
+                                                }
+                                                .encode_to_vec();
+                                                if sender.send(&msg).await.is_err() {
+                                                    debug!(
+                                                        peer = hex(&peer),
+                                                        "failed to send message"
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                            None => {
+                                                let msg = wire::Outbound {
+                                                    payload: Some(
+                                                        wire::outbound::Payload::Success(false),
+                                                    ),
+                                                }
+                                                .encode_to_vec();
+                                                if sender.send(&msg).await.is_err() {
+                                                    debug!(
+                                                        peer = hex(&peer),
+                                                        "failed to send message"
+                                                    );
+                                                    return;
+                                                }
+                                            }
                                         }
                                     }
                                     wire::inbound::Payload::PutFinalization(msg) => {
@@ -323,15 +363,39 @@ fn main() {
                                             .expect("failed to send message");
                                         let response =
                                             receiver.await.expect("failed to receive response");
-                                        let msg = wire::Outbound {
-                                            payload: Some(wire::outbound::Payload::Finalization(
-                                                response.into(),
-                                            )),
-                                        }
-                                        .encode_to_vec();
-                                        if sender.send(&msg).await.is_err() {
-                                            debug!(peer = hex(&peer), "failed to send message");
-                                            return;
+                                        match response {
+                                            Some(data) => {
+                                                let msg = wire::Outbound {
+                                                    payload: Some(
+                                                        wire::outbound::Payload::Finalization(
+                                                            data.into(),
+                                                        ),
+                                                    ),
+                                                }
+                                                .encode_to_vec();
+                                                if sender.send(&msg).await.is_err() {
+                                                    debug!(
+                                                        peer = hex(&peer),
+                                                        "failed to send message"
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                            None => {
+                                                let msg = wire::Outbound {
+                                                    payload: Some(
+                                                        wire::outbound::Payload::Success(false),
+                                                    ),
+                                                }
+                                                .encode_to_vec();
+                                                if sender.send(&msg).await.is_err() {
+                                                    debug!(
+                                                        peer = hex(&peer),
+                                                        "failed to send message"
+                                                    );
+                                                    return;
+                                                }
+                                            }
                                         }
                                     }
                                 }
