@@ -9,6 +9,7 @@ readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/log"
 documentation = "https://docs.rs/commonware-log"
+default-run="commonware-log"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
