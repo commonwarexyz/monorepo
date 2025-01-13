@@ -4,7 +4,7 @@ use super::{
     Config,
 };
 use commonware_consensus::simplex::Prover;
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::Hasher;
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
@@ -14,16 +14,16 @@ use tracing::info;
 const GENESIS: &[u8] = b"commonware is neat";
 
 /// Application actor.
-pub struct Application<R: Rng, C: Scheme, H: Hasher> {
+pub struct Application<R: Rng, H: Hasher> {
     runtime: R,
-    prover: Prover<C, H>,
+    prover: Prover<H>,
     hasher: H,
     mailbox: mpsc::Receiver<Message>,
 }
 
-impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
+impl<R: Rng, H: Hasher> Application<R, H> {
     /// Create a new application actor.
-    pub fn new(runtime: R, config: Config<C, H>) -> (Self, Supervisor, Mailbox) {
+    pub fn new(runtime: R, config: Config<H>) -> (Self, Supervisor, Mailbox) {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
         (
             Self {
@@ -32,7 +32,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                 hasher: config.hasher,
                 mailbox,
             },
-            Supervisor::new(config.participants),
+            Supervisor::new(config.identity, config.participants, config.share),
             Mailbox::new(sender),
         )
     }
@@ -72,17 +72,11 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                     let _ = response.send(valid);
                 }
                 Message::Prepared { proof, payload } => {
-                    let (view, _, _, _) = self
-                        .prover
-                        .deserialize_notarization(proof, u32::MAX, false)
-                        .unwrap();
+                    let (view, _, _, _, _) = self.prover.deserialize_notarization(proof).unwrap();
                     info!(view, payload = hex(&payload), "prepared")
                 }
                 Message::Finalized { proof, payload } => {
-                    let (view, _, _, _) = self
-                        .prover
-                        .deserialize_finalization(proof, u32::MAX, false)
-                        .unwrap();
+                    let (view, _, _, _, _) = self.prover.deserialize_finalization(proof).unwrap();
                     info!(view, payload = hex(&payload), "finalized")
                 }
             }
