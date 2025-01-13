@@ -12,7 +12,7 @@ use commonware_runtime::{
     deterministic::{Listener, Sink, Stream},
     Clock, Listener as _, Network as RNetwork, Spawner,
 };
-use commonware_stream::public_key::utils::codec::{recv_frame, send_frame};
+use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::hex;
 use futures::{
     channel::{mpsc, oneshot},
