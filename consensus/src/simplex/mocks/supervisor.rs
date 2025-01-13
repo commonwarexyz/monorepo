@@ -12,6 +12,7 @@ use commonware_cryptography::{
     },
     Digest, Hasher, PublicKey,
 };
+use commonware_utils::modulo;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -210,8 +211,7 @@ impl<H: Hasher> TSu for Supervisor<H> {
             }
         };
         let seed = seed.serialize();
-        let modulo = u64::from_be_bytes(seed[0..8].try_into().unwrap());
-        let index = modulo % closest.len() as u64;
+        let index = modulo(&seed, closest.len() as u64);
         Some(closest[index as usize].clone())
     }
 
