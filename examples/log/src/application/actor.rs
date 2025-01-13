@@ -6,10 +6,7 @@ use super::{
 use bytes::BufMut;
 use commonware_consensus::simplex::Prover;
 use commonware_cryptography::{
-    bls12381::primitives::{
-        group::{self, Element},
-        poly,
-    },
+    bls12381::primitives::{group::Element, poly},
     Hasher,
 };
 use commonware_log::wire;
