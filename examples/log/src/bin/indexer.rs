@@ -1,6 +1,9 @@
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{Ed25519, Scheme};
+use commonware_cryptography::{
+    bls12381::primitives::group::{self, Element},
+    Ed25519, Hasher, Scheme, Sha256,
+};
 use commonware_log::wire;
 use commonware_runtime::{
     tokio::{Executor, Sink, Stream},
@@ -10,7 +13,8 @@ use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
     Receiver, Sender,
 };
-use commonware_utils::hex;
+use commonware_utils::{from_hex, hex};
+use core::hash;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -26,7 +30,7 @@ use tracing::debug;
 enum Message {
     PutBlock {
         incoming: wire::PutBlock,
-        response: oneshot::Sender<()>, // wait to broadcast consensus message
+        response: oneshot::Sender<bool>, // wait to broadcast consensus message
     },
     GetBlock {
         incoming: wire::GetBlock,
@@ -34,7 +38,7 @@ enum Message {
     },
     PutFinalization {
         incoming: wire::PutFinalization,
-        response: oneshot::Sender<()>, // wait to delete from validator storage
+        response: oneshot::Sender<bool>, // wait to delete from validator storage
     },
     GetFinalization {
         incoming: wire::GetFinalization,
@@ -112,12 +116,14 @@ fn main() {
         panic!("Please provide at least one network");
     }
     for network in networks {
-        let network = Bytes::from(*network);
+        let network = from_hex(network).expect("Network not well-formed");
+        group::Public::deserialize(&network).expect("Network not well-formed");
         blocks.insert(network, HashMap::new());
         finalizations.insert(network, HashMap::new());
     }
 
     // Create runtime
+    let hasher = Sha256::new();
     let (executor, runtime) = Executor::default();
     executor.start(async move {
         // Create message handler
@@ -127,16 +133,27 @@ fn main() {
         runtime.spawn("handler", async move {
             while let Some(msg) = receiver.next().await {
                 match msg {
-                    Message::PutBlock(msg) => {
-                        debug!("received PutBlock");
-                        // TODO: send ack back so know when stored to start consensus
+                    Message::PutBlock { incoming, response } => {
+                        let Some(network) = blocks.get_mut(&incoming.network) else {
+                            let _ = response.send(false);
+                            continue;
+                        };
+                        hasher.update(&incoming.data);
+                        let digest = hasher.finalize();
+                        network.insert(digest, incoming.data);
+                        let _ = response.send(true);
+                        debug!(
+                            network = hex(&incoming.network),
+                            block = hex(&digest),
+                            "stored"
+                        );
                     }
                     Message::GetBlock { incoming, response } => {
                         debug!("received GetBlock");
                         let msg = Bytes::from("block");
                         let _ = response.send(msg);
                     }
-                    Message::PutFinalization(msg) => {
+                    Message::PutFinalization { incoming, response } => {
                         debug!("received PutFinalization");
                     }
                     Message::GetFinalization { incoming, response } => {
@@ -224,9 +241,12 @@ fn main() {
                                             })
                                             .await
                                             .expect("failed to send message");
-                                        let _ = receiver.await.expect("failed to receive response");
+                                        let success =
+                                            receiver.await.expect("failed to receive response");
                                         let msg = wire::Outbound {
-                                            payload: Some(wire::outbound::Payload::Success(true)),
+                                            payload: Some(wire::outbound::Payload::Success(
+                                                success,
+                                            )),
                                         }
                                         .encode_to_vec();
                                         if sender.send(&msg).await.is_err() {
@@ -265,9 +285,12 @@ fn main() {
                                             })
                                             .await
                                             .expect("failed to send message");
-                                        let _ = receiver.await.expect("failed to receive response");
+                                        let success =
+                                            receiver.await.expect("failed to receive response");
                                         let msg = wire::Outbound {
-                                            payload: Some(wire::outbound::Payload::Success(true)),
+                                            payload: Some(wire::outbound::Payload::Success(
+                                                success,
+                                            )),
                                         }
                                         .encode_to_vec();
                                         if sender.send(&msg).await.is_err() {
