@@ -20,12 +20,28 @@
 //!
 //! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
 //!
+//! ## Generate Shared Secrets
+//!
+//! _In production, this should be done using a DKG (and with Resharing whenever changing set)._
+//!
+//! ### Network 1
+//!
+//! ```sh
+//! cargo run --release --bin dealer -- --seed 1 --n 4 --t 3
+//! ```
+//!
+//! ### Network 2
+//!
+//! ```sh
+//! cargo run --release --bin dealer -- --seed 2 --n 4
+//! ```
+//!
 //! ## Indexer
 //!
 //! _Stores blocks and threshold finalizations. This isn't necessary in practice (could use separate mechanisms)._
 //!
 //! ```sh
-//! cargo run --release -- --me 0@3000 --participants 1,2,3,4,5,6,7,8
+//! cargo run --release --bin indexer -- --me 0@3000 --participants 1,2,3,4,5,6,7,8 --identity-1 --identity-2
 //! ```
 //!
 //! ## Network 1
@@ -33,45 +49,49 @@
 //! ### Participant 1 (Bootstrapper)
 //!
 //! ```sh
-//! cargo run --release -- --me 1@3001 --participants 1,2,3,4 --storage-dir /tmp/log/1 --relay 0@3000
+//! cargo run --release -- --me 1@3001 --participants 1,2,3,4 --storage-dir /tmp/log/1 --indexer 0@127.0.0.1:3000 --identity --share
 //! ```
 //!
 //! ### Participant 2
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 1@127.0.0.1:3001 --me 2@3002 --participants 1,2,3,4 --storage-dir /tmp/log/2 --relay 0@3000
 //! ```
 //!
 //! ### Participant 3
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 1@127.0.0.1:3001 --me 3@3003 --participants 1,2,3,4 --storage-dir /tmp/log/3 --relay 0@3000
 //! ```
 //!
 //! ### Participant 4
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 1@127.0.0.1:3001 --me 4@3004 --participants 1,2,3,4 --storage-dir /tmp/log/4 --relay 0@3000
 //! ```
 //!
 //! ## Network 2
 //!
 //! ### Participant 5
 //!
+//! ```sh
+//! ```
 
 mod application;
-mod gui;
 
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex::{self, Engine, Prover};
-use commonware_cryptography::{Ed25519, Scheme, Sha256};
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group,
+        poly::{self, Poly},
+    },
+    Ed25519, Scheme, Sha256,
+};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
     Runner, Spawner,
 };
 use commonware_storage::journal::{self, Journal};
-use commonware_utils::{hex, union};
+use commonware_utils::{from_hex, hex, quorum, union};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -105,10 +125,15 @@ fn main() {
                 .help("All participants (arbiter and contributors)"),
         )
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
+        .arg(Arg::new("indexer").long("indexer").required(true))
+        .arg(Arg::new("identity").long("identity").required(true))
+        .arg(Arg::new("share").long("share").required(true))
         .get_matches();
 
-    // Create GUI
-    let gui = gui::Gui::new();
+    // Create logger
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
 
     // Configure my identity
     let me = matches
@@ -161,6 +186,32 @@ fn main() {
     let storage_directory = matches
         .get_one::<String>("storage-dir")
         .expect("Please provide storage directory");
+
+    // Configure indexer
+    let indexer = matches
+        .get_one::<String>("indexer")
+        .expect("Please provide indexer");
+    let parts = indexer.split('@').collect::<Vec<&str>>();
+    let indexer_key = parts[0]
+        .parse::<u64>()
+        .expect("Indexer key not well-formed");
+    let indexer_address = SocketAddr::from_str(parts[1]);
+    // TODO: dial indexer (block if can't connect)
+
+    // Configure threshold
+    let threshold = quorum(participants.len() as u32).expect("Threshold not well-formed");
+    let identity = matches
+        .get_one::<String>("identity")
+        .expect("Please provide identity");
+    let identity = from_hex(&identity).expect("Identity not well-formed");
+    let identity: Poly<group::Public> =
+        Poly::deserialize(&identity, threshold).expect("Identity not well-formed");
+    let public = poly::public(&identity);
+    let share = matches
+        .get_one::<String>("share")
+        .expect("Please provide share");
+    let share = from_hex(&share).expect("Share not well-formed");
+    let share = group::Share::deserialize(&share).expect("Share not well-formed");
 
     // Initialize runtime
     let runtime_cfg = tokio::Config {
@@ -220,7 +271,7 @@ fn main() {
         // Initialize application
         let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
         let hasher = Sha256::default();
-        let prover: Prover<Ed25519, Sha256> = Prover::new(&namespace);
+        let prover: Prover<Sha256> = Prover::new(public, &namespace);
         let (application, supervisor, mailbox) = application::Application::new(
             runtime.clone(),
             application::Config {
