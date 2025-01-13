@@ -30,9 +30,9 @@ message GetFinalization {
 }
 
 message Outbound {
-    // If not set, the message is an empty response
     oneof payload {
-        bytes block = 1;
-        bytes finalization = 2;
+        bool success = 1; // if PUT (success), if GET (success is false if not found)
+        bytes block = 2;
+        bytes finalization = 3;
     }
 }

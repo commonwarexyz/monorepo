@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::simplex::FINALIZE;
 use commonware_cryptography::{Ed25519, Scheme};
 use commonware_log::wire;
 use commonware_runtime::{
@@ -9,7 +8,7 @@ use commonware_runtime::{
 };
 use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
-    Receiver,
+    Receiver, Sender,
 };
 use commonware_utils::hex;
 use futures::{
@@ -35,7 +34,7 @@ enum Message {
     },
     PutFinalization {
         incoming: wire::PutFinalization,
-        response: oneshot::Sender<()>, // wait to delete from storage
+        response: oneshot::Sender<()>, // wait to delete from validator storage
     },
     GetFinalization {
         incoming: wire::GetFinalization,
@@ -217,10 +216,23 @@ fn main() {
                                 // Handle message
                                 match payload {
                                     wire::inbound::Payload::PutBlock(msg) => {
+                                        let (response, receiver) = oneshot::channel();
                                         handler
-                                            .send(Message::PutBlock(msg))
+                                            .send(Message::PutBlock {
+                                                incoming: msg,
+                                                response,
+                                            })
                                             .await
                                             .expect("failed to send message");
+                                        let _ = receiver.await.expect("failed to receive response");
+                                        let msg = wire::Outbound {
+                                            payload: Some(wire::outbound::Payload::Success(true)),
+                                        }
+                                        .encode_to_vec();
+                                        if sender.send(&msg).await.is_err() {
+                                            debug!(peer = hex(&peer), "failed to send message");
+                                            return;
+                                        }
                                     }
                                     wire::inbound::Payload::GetBlock(msg) => {
                                         let (response, receiver) = oneshot::channel();
@@ -234,19 +246,34 @@ fn main() {
                                         let response =
                                             receiver.await.expect("failed to receive response");
                                         let msg = wire::Outbound {
-                                            payload: Some(wire::outbound::Payload::Block(response)),
-                                        };
-                                        let msg = msg.encode_to_vec();
-                                        sender
-                                            .send(msg.into())
-                                            .await
-                                            .expect("failed to send message");
+                                            payload: Some(wire::outbound::Payload::Block(
+                                                response.into(),
+                                            )),
+                                        }
+                                        .encode_to_vec();
+                                        if sender.send(&msg).await.is_err() {
+                                            debug!(peer = hex(&peer), "failed to send message");
+                                            return;
+                                        }
                                     }
                                     wire::inbound::Payload::PutFinalization(msg) => {
+                                        let (response, receiver) = oneshot::channel();
                                         handler
-                                            .send(Message::PutFinalization(msg))
+                                            .send(Message::PutFinalization {
+                                                incoming: msg,
+                                                response,
+                                            })
                                             .await
                                             .expect("failed to send message");
+                                        let _ = receiver.await.expect("failed to receive response");
+                                        let msg = wire::Outbound {
+                                            payload: Some(wire::outbound::Payload::Success(true)),
+                                        }
+                                        .encode_to_vec();
+                                        if sender.send(&msg).await.is_err() {
+                                            debug!(peer = hex(&peer), "failed to send message");
+                                            return;
+                                        }
                                     }
                                     wire::inbound::Payload::GetFinalization(msg) => {
                                         let (response, receiver) = oneshot::channel();
@@ -261,14 +288,14 @@ fn main() {
                                             receiver.await.expect("failed to receive response");
                                         let msg = wire::Outbound {
                                             payload: Some(wire::outbound::Payload::Finalization(
-                                                response,
+                                                response.into(),
                                             )),
-                                        };
-                                        let msg = msg.encode_to_vec();
-                                        sender
-                                            .send(msg.into())
-                                            .await
-                                            .expect("failed to send message");
+                                        }
+                                        .encode_to_vec();
+                                        if sender.send(&msg).await.is_err() {
+                                            debug!(peer = hex(&peer), "failed to send message");
+                                            return;
+                                        }
                                     }
                                 }
                             }
