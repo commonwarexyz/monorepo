@@ -24,6 +24,10 @@
 //!
 //! _In production, this should be done using a DKG (and with Resharing whenever changing set)._
 //!
+//! We assign shares to validators based on their order in the sorted list of participants (by public key).
+//! The assignments seen below are just the seeds used to derive the public keys and as such do not necessarily
+//! align with the share indices.
+//!
 //! ### Network 1
 //!
 //! ```sh
