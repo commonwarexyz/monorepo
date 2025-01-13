@@ -5,17 +5,13 @@ use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
     Ed25519, Hasher, Scheme, Sha256,
 };
-use commonware_log::wire;
-use commonware_runtime::{
-    tokio::{Executor, Sink, Stream},
-    Listener, Network, Runner, Spawner,
-};
+use commonware_log::{wire, CONSENSUS_SUFFIX};
+use commonware_runtime::{tokio::Executor, Listener, Network, Runner, Spawner};
 use commonware_stream::{
     public_key::{Config, Connection, IncomingConnection},
     Receiver, Sender,
 };
-use commonware_utils::{from_hex, hex};
-use core::hash;
+use commonware_utils::{from_hex, hex, union};
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -23,7 +19,7 @@ use futures::{
 use prost::Message as _;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    net::{self, IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
 use tracing::debug;
@@ -120,7 +116,8 @@ fn main() {
     for network in networks {
         let network = from_hex(network).expect("Network not well-formed");
         let public = group::Public::deserialize(&network).expect("Network not well-formed");
-        let prover = Prover::<Sha256>::new(public, b"");
+        let consensus_namespace = union(&public.serialize(), CONSENSUS_SUFFIX);
+        let prover = Prover::<Sha256>::new(public, &consensus_namespace);
         provers.insert(network.clone(), prover);
         blocks.insert(network.clone(), HashMap::new());
         finalizations.insert(network, BTreeMap::new());
@@ -191,7 +188,19 @@ fn main() {
                         );
                     }
                     Message::GetFinalization { incoming, response } => {
+                        // Ensure we care
+                        let Some(network) = finalizations.get(&incoming.network) else {
+                            let _ = response.send(None);
+                            continue;
+                        };
+
                         // Get latest finalization
+                        let Some(data) = network.iter().next_back().map(|(_, data)| data.clone())
+                        else {
+                            let _ = response.send(None);
+                            continue;
+                        };
+                        let _ = response.send(Some(data));
                     }
                 }
             }

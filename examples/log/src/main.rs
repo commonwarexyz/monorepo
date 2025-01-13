@@ -106,11 +106,12 @@ use clap::{value_parser, Arg, Command};
 use commonware_consensus::simplex::{self, Engine, Prover};
 use commonware_cryptography::{
     bls12381::primitives::{
-        group,
+        group::{self, Element},
         poly::{self, Poly},
     },
     Ed25519, Scheme, Sha256,
 };
+use commonware_log::{CONSENSUS_SUFFIX, P2P_SUFFIX};
 use commonware_p2p::authenticated::{self, Network};
 use commonware_runtime::{
     tokio::{self, Executor},
@@ -126,9 +127,6 @@ use std::{
     num::NonZeroU32,
 };
 use std::{str::FromStr, time::Duration};
-
-/// Unique namespace to avoid message replay attacks.
-const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_LOG";
 
 fn main() {
     // Parse arguments
@@ -213,17 +211,6 @@ fn main() {
         .get_one::<String>("storage-dir")
         .expect("Please provide storage directory");
 
-    // Configure indexer
-    // let indexer = matches
-    //     .get_one::<String>("indexer")
-    //     .expect("Please provide indexer");
-    // let parts = indexer.split('@').collect::<Vec<&str>>();
-    // let indexer_key = parts[0]
-    //     .parse::<u64>()
-    //     .expect("Indexer key not well-formed");
-    // let indexer_address = SocketAddr::from_str(parts[1]);
-    // TODO: dial indexer (block if can't connect)
-
     // Configure threshold
     let threshold = quorum(validators.len() as u32).expect("Threshold not well-formed");
     let identity = matches
@@ -239,6 +226,18 @@ fn main() {
     let share = from_hex(share).expect("Share not well-formed");
     let share = group::Share::deserialize(&share).expect("Share not well-formed");
 
+    // Configure indexer
+    let namespace = public.serialize();
+    // let indexer = matches
+    //     .get_one::<String>("indexer")
+    //     .expect("Please provide indexer");
+    // let parts = indexer.split('@').collect::<Vec<&str>>();
+    // let indexer_key = parts[0]
+    //     .parse::<u64>()
+    //     .expect("Indexer key not well-formed");
+    // let indexer_address = SocketAddr::from_str(parts[1]);
+    // TODO: dial indexer (block if can't connect)
+
     // Initialize runtime
     let runtime_cfg = tokio::Config {
         storage_directory: storage_directory.into(),
@@ -249,7 +248,7 @@ fn main() {
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        &union(APPLICATION_NAMESPACE, b"_P2P"),
+        &union(&namespace, P2P_SUFFIX),
         Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
@@ -295,9 +294,9 @@ fn main() {
         .expect("Failed to initialize journal");
 
         // Initialize application
-        let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
+        let consensus_namespace = union(&namespace, CONSENSUS_SUFFIX);
         let hasher = Sha256::default();
-        let prover: Prover<Sha256> = Prover::new(public, &namespace);
+        let prover: Prover<Sha256> = Prover::new(public, &consensus_namespace);
         let (application, supervisor, mailbox) = application::Application::new(
             runtime.clone(),
             application::Config {
@@ -322,7 +321,7 @@ fn main() {
                 committer: mailbox,
                 supervisor,
                 registry: Arc::new(Mutex::new(Registry::default())),
-                namespace,
+                namespace: consensus_namespace,
                 mailbox_size: 1024,
                 replay_concurrency: 1,
                 leader_timeout: Duration::from_secs(1),
