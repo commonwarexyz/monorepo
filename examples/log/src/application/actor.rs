@@ -4,7 +4,7 @@ use super::{
     Config,
 };
 use commonware_consensus::simplex::Prover;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{bls12381::primitives::group::Element, Hasher};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
 use rand::Rng;
@@ -72,12 +72,30 @@ impl<R: Rng, H: Hasher> Application<R, H> {
                     let _ = response.send(valid);
                 }
                 Message::Prepared { proof, payload } => {
-                    let (view, _, _, _, _) = self.prover.deserialize_notarization(proof).unwrap();
-                    info!(view, payload = hex(&payload), "prepared")
+                    let (view, _, _, signature, seed) =
+                        self.prover.deserialize_notarization(proof).unwrap();
+                    let signature = signature.serialize();
+                    let seed = seed.serialize();
+                    info!(
+                        view,
+                        payload = hex(&payload),
+                        signature = hex(&signature),
+                        seed = hex(&seed),
+                        "prepared"
+                    )
                 }
                 Message::Finalized { proof, payload } => {
-                    let (view, _, _, _, _) = self.prover.deserialize_finalization(proof).unwrap();
-                    info!(view, payload = hex(&payload), "finalized")
+                    let (view, _, _, signature, seed) =
+                        self.prover.deserialize_finalization(proof).unwrap();
+                    let signature = signature.serialize();
+                    let seed = seed.serialize();
+                    info!(
+                        view,
+                        payload = hex(&payload),
+                        signature = hex(&signature),
+                        seed = hex(&seed),
+                        "finalized"
+                    )
                 }
             }
         }
