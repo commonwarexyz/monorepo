@@ -32,7 +32,7 @@ use p256::{
     },
     elliptic_curve::scalar::IsHigh,
 };
-use rand::{CryptoRng, Rng, SeedableRng};
+use rand::{CryptoRng, Rng};
 use std::borrow::Cow;
 
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -64,11 +64,6 @@ impl Scheme for Secp256r1 {
         };
         let verifier = signer.verifying_key().to_owned();
         Some(Self { signer, verifier })
-    }
-
-    fn from_seed(seed: u64) -> Self {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        Self::new(&mut rng)
     }
 
     fn private_key(&self) -> PrivateKey {
@@ -343,6 +338,51 @@ mod tests {
             message,
             &signer.public_key(),
             &signature.into()
+        ));
+    }
+
+    #[test]
+    fn test_scheme_verify_signature_r0() {
+        let private_key: PrivateKey = commonware_utils::from_hex_formatted(
+            "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
+        )
+        .unwrap()
+        .into();
+        let message = b"sample";
+        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let signature = signer.sign(None, message);
+        let (_, s) = signature.split_at(32);
+        let mut signature: Vec<u8> = vec![0x00; 32];
+        signature.extend_from_slice(s);
+
+        assert!(!Secp256r1::verify(
+            None,
+            message,
+            &signer.public_key(),
+            &signature.into(),
+        ));
+    }
+
+    #[test]
+    fn test_scheme_verify_signature_s0() {
+        let private_key: PrivateKey = commonware_utils::from_hex_formatted(
+            "c9806898a0334916c860748880a541f093b579a9b1f32934d86c363c39800357",
+        )
+        .unwrap()
+        .into();
+        let message = b"sample";
+        let mut signer = <Secp256r1 as Scheme>::from(private_key).unwrap();
+        let signature = signer.sign(None, message);
+        let (r, _) = signature.split_at(32);
+        let s: Vec<u8> = vec![0x00; 32];
+        let mut signature = r.to_vec();
+        signature.extend(s);
+
+        assert!(!Secp256r1::verify(
+            None,
+            message,
+            &signer.public_key(),
+            &signature.into(),
         ));
     }
 
