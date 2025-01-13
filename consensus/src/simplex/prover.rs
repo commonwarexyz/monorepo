@@ -222,12 +222,10 @@ impl<H: Hasher> Prover<H> {
         let len = 8
             + 8
             + digest_len
-            + 4
-            + group::SIGNATURE_LENGTH
+            + group::PARTIAL_SIGNATURE_LENGTH
             + 8
             + digest_len
-            + 4
-            + group::SIGNATURE_LENGTH;
+            + group::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -250,11 +248,10 @@ impl<H: Hasher> Prover<H> {
         let len = 8
             + 8
             + digest_len
-            + 4
-            + group::SIGNATURE_LENGTH
+            + group::PARTIAL_SIGNATURE_LENGTH
             + 8
             + digest_len
-            + group::SIGNATURE_LENGTH;
+            + group::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != len {
             return None;
         }
