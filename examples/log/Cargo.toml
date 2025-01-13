@@ -19,6 +19,7 @@ commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 commonware-consensus = { workspace = true }
 commonware-storage = { workspace = true }
+commonware-stream = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
@@ -31,6 +32,10 @@ chrono = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 serde_json = { workspace = true }
+prost = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
 
 [[bin]]
 name = "commonware-log"

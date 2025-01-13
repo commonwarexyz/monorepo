@@ -64,7 +64,7 @@
 //! _Stores blocks and threshold finalizations. This isn't necessary in practice (could use separate mechanisms)._
 //!
 //! ```sh
-//! cargo run --release --bin indexer -- --me 0@3000 --participants 1,2,3,4,5,6,7,8 --identity-1 --identity-2
+//! cargo run --release --bin indexer -- --me 0@3000 --participants 1,2,3,4,5,6,7,8 --networks a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd,a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f5
 //! ```
 //!
 //! ## Network 1
@@ -148,7 +148,7 @@ fn main() {
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(u64))
-                .help("All participants (arbiter and contributors)"),
+                .help("All participants"),
         )
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
         .arg(Arg::new("indexer").long("indexer").required(true))

@@ -1,0 +1,38 @@
+syntax = "proto3";
+package wire;
+
+message Inbound {
+    oneof payload {
+        PutBlock put_block = 1;
+        GetBlock get_block = 2;
+        PutFinalization put_finalization = 3;
+        GetFinalization get_finalization = 4;
+    }
+}
+
+message PutBlock {
+    bytes network = 1;
+    bytes data = 2;
+}
+
+message GetBlock {
+    bytes network = 1;
+    bytes hash = 2;
+}
+
+message PutFinalization {
+    bytes network = 1;
+    bytes data = 2;
+}
+
+message GetFinalization {
+    bytes network = 1;
+}
+
+message Outbound {
+    // If not set, the message is an empty response
+    oneof payload {
+        bytes block = 1;
+        bytes finalization = 2;
+    }
+}
