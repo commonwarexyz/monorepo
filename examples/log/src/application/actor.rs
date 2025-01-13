@@ -4,11 +4,19 @@ use super::{
     Config,
 };
 use commonware_consensus::simplex::Prover;
-use commonware_cryptography::{bls12381::primitives::group::Element, Hasher};
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group::{self, Element},
+        poly,
+    },
+    Hasher,
+};
+use commonware_log::wire;
 use commonware_runtime::{Sink, Stream};
-use commonware_stream::public_key::Connection;
+use commonware_stream::{public_key::Connection, Receiver, Sender};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
+use prost::Message as _;
 use rand::Rng;
 use tracing::info;
 
@@ -19,6 +27,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: Rng, H: Hasher, Si: Sink, St: Stream> {
     runtime: R,
     indexer: Connection<Si, St>,
+    public: Vec<u8>,
     prover: Prover<H>,
     hasher: H,
     mailbox: mpsc::Receiver<Message>,
@@ -32,6 +41,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
             Self {
                 runtime,
                 indexer: config.indexer,
+                public: poly::public(&config.identity).serialize(),
                 prover: config.prover,
                 hasher: config.hasher,
                 mailbox,
@@ -43,6 +53,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
 
     /// Run the application actor.
     pub async fn run(mut self) {
+        let (mut indexer_sender, mut indexer_receiver) = self.indexer.split();
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { response } => {
@@ -90,7 +101,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                 }
                 Message::Finalized { proof, payload } => {
                     let (view, _, _, signature, seed) =
-                        self.prover.deserialize_finalization(proof).unwrap();
+                        self.prover.deserialize_finalization(proof.clone()).unwrap();
                     let signature = signature.serialize();
                     let seed = seed.serialize();
                     info!(
@@ -99,7 +110,29 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                         signature = hex(&signature),
                         seed = hex(&seed),
                         "finalized"
-                    )
+                    );
+
+                    // Post finalization
+                    let msg = wire::PutFinalization {
+                        network: self.public.clone(),
+                        data: proof,
+                    }
+                    .encode_to_vec();
+                    indexer_sender
+                        .send(&msg)
+                        .await
+                        .expect("failed to send finalization to indexer");
+                    let result = indexer_receiver
+                        .receive()
+                        .await
+                        .expect("failed to receive from indexer");
+                    let msg = wire::Outbound::decode(result).expect("failed to decode result");
+                    let payload = msg.payload.expect("missing payload");
+                    let success = match payload {
+                        wire::outbound::Payload::Success(s) => s,
+                        _ => panic!("unexpected response"),
+                    };
+                    info!(success, "finalization posted");
                 }
             }
         }
