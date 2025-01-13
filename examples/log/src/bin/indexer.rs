@@ -25,12 +25,18 @@ use std::{
 use tracing::debug;
 
 enum Message {
-    PutBlock(wire::PutBlock),
+    PutBlock {
+        incoming: wire::PutBlock,
+        response: oneshot::Sender<()>, // wait to broadcast consensus message
+    },
     GetBlock {
         incoming: wire::GetBlock,
         response: oneshot::Sender<Bytes>,
     },
-    PutFinalization(wire::PutFinalization),
+    PutFinalization {
+        incoming: wire::PutFinalization,
+        response: oneshot::Sender<()>, // wait to delete from storage
+    },
     GetFinalization {
         incoming: wire::GetFinalization,
         response: oneshot::Sender<Bytes>,
