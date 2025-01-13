@@ -188,29 +188,29 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Configure indexer
-    let indexer = matches
-        .get_one::<String>("indexer")
-        .expect("Please provide indexer");
-    let parts = indexer.split('@').collect::<Vec<&str>>();
-    let indexer_key = parts[0]
-        .parse::<u64>()
-        .expect("Indexer key not well-formed");
-    let indexer_address = SocketAddr::from_str(parts[1]);
+    // let indexer = matches
+    //     .get_one::<String>("indexer")
+    //     .expect("Please provide indexer");
+    // let parts = indexer.split('@').collect::<Vec<&str>>();
+    // let indexer_key = parts[0]
+    //     .parse::<u64>()
+    //     .expect("Indexer key not well-formed");
+    // let indexer_address = SocketAddr::from_str(parts[1]);
     // TODO: dial indexer (block if can't connect)
 
     // Configure threshold
-    let threshold = quorum(participants.len() as u32).expect("Threshold not well-formed");
+    let threshold = quorum(validators.len() as u32).expect("Threshold not well-formed");
     let identity = matches
         .get_one::<String>("identity")
         .expect("Please provide identity");
-    let identity = from_hex(&identity).expect("Identity not well-formed");
+    let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Poly<group::Public> =
         Poly::deserialize(&identity, threshold).expect("Identity not well-formed");
     let public = poly::public(&identity);
     let share = matches
         .get_one::<String>("share")
         .expect("Please provide share");
-    let share = from_hex(&share).expect("Share not well-formed");
+    let share = from_hex(share).expect("Share not well-formed");
     let share = group::Share::deserialize(&share).expect("Share not well-formed");
 
     // Initialize runtime
@@ -278,7 +278,9 @@ fn main() {
                 prover,
                 hasher: hasher.clone(),
                 mailbox_size: 1024,
+                identity,
                 participants: validators.clone(),
+                share,
             },
         );
 
@@ -310,7 +312,6 @@ fn main() {
         );
 
         // Start consensus
-        runtime.spawn("application", application.run());
         runtime.spawn("network", network.run());
         runtime.spawn(
             "engine",
@@ -320,7 +321,7 @@ fn main() {
             ),
         );
 
-        // Block on GUI
-        gui.run(runtime).await;
+        // Block on application
+        application.run().await;
     });
 }
