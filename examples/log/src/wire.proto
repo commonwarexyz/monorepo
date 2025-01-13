@@ -17,7 +17,7 @@ message PutBlock {
 
 message GetBlock {
     bytes network = 1;
-    bytes hash = 2;
+    bytes digest = 2;
 }
 
 message PutFinalization {

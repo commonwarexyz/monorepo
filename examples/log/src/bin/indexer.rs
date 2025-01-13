@@ -34,7 +34,7 @@ enum Message {
     },
     GetBlock {
         incoming: wire::GetBlock,
-        response: oneshot::Sender<Bytes>,
+        response: oneshot::Sender<Option<Bytes>>,
     },
     PutFinalization {
         incoming: wire::PutFinalization,
@@ -42,7 +42,7 @@ enum Message {
     },
     GetFinalization {
         incoming: wire::GetFinalization,
-        response: oneshot::Sender<Bytes>,
+        response: oneshot::Sender<Option<Bytes>>,
     },
 }
 
@@ -134,12 +134,17 @@ fn main() {
             while let Some(msg) = receiver.next().await {
                 match msg {
                     Message::PutBlock { incoming, response } => {
+                        // Ensure we care
                         let Some(network) = blocks.get_mut(&incoming.network) else {
                             let _ = response.send(false);
                             continue;
                         };
+
+                        // Compute digest
                         hasher.update(&incoming.data);
                         let digest = hasher.finalize();
+
+                        // Store block
                         network.insert(digest, incoming.data);
                         let _ = response.send(true);
                         debug!(
@@ -149,17 +154,26 @@ fn main() {
                         );
                     }
                     Message::GetBlock { incoming, response } => {
-                        debug!("received GetBlock");
-                        let msg = Bytes::from("block");
-                        let _ = response.send(msg);
+                        let Some(network) = blocks.get(&incoming.network) else {
+                            let _ = response.send(None);
+                            continue;
+                        };
+                        let data = network.get(&incoming.digest);
+                        let _ = response.send(data.cloned());
                     }
                     Message::PutFinalization { incoming, response } => {
-                        debug!("received PutFinalization");
+                        // Ensure we care
+                        let Some(network) = finalizations.get_mut(&incoming.network) else {
+                            let _ = response.send(false);
+                            continue;
+                        };
+
+                        // Verify signature
+
+                        // Store finalization
                     }
                     Message::GetFinalization { incoming, response } => {
-                        debug!("received GetFinalization");
-                        let msg = Bytes::from("finalization");
-                        let _ = response.send(msg);
+                        // Get latest finalization
                     }
                 }
             }
