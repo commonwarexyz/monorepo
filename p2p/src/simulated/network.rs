@@ -15,7 +15,10 @@ use commonware_runtime::{
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::hex;
 use futures::{
-    channel::{mpsc, oneshot},
+    channel::{
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
     SinkExt, StreamExt,
 };
 use prometheus_client::{
@@ -154,7 +157,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
     /// Handle an ingress message.
     ///
     /// This method is called when a message is received from the oracle.
-    fn handle_ingress(&mut self, message: ingress::Message) {
+    async fn handle_ingress(&mut self, message: ingress::Message) {
         // It is important to ensure that no failed receipt of a message will cause us to exit.
         // This could happen if the caller drops the `Oracle` after updating the network topology.
         // Thus, we create a helper function to send the result to the oracle and log any errors.
@@ -187,7 +190,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
                 let peer = self.peers.get_mut(&public_key).unwrap();
-                let receiver = match peer.register(channel) {
+                let receiver = match peer.register(channel).await {
                     Ok(receiver) => Receiver { receiver },
                     Err(err) => return send_result(result, Err(err)),
                 };
@@ -387,8 +390,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                         Some(message) => message,
                         None => break,
                     };
-
-                    self.handle_ingress(message);
+                    self.handle_ingress(message).await;
                 },
                 task = self.receiver.next() => {
                     // If receiver is closed, exit
@@ -506,8 +508,14 @@ struct Peer {
     // Socket address that the peer is listening on
     socket: SocketAddr,
 
-    // Map from channel to a sender that can deliver messages to that channel
-    mailboxes: Arc<Mutex<HashMap<Channel, mpsc::UnboundedSender<Message>>>>,
+    // Handling for control
+    control: UnboundedSender<(
+        Channel,
+        oneshot::Sender<Result<UnboundedReceiver<Message>, Error>>,
+    )>,
+
+    // Handling for all inbound messages
+    inbound: UnboundedSender<(Channel, Message)>,
 }
 
 impl Peer {
@@ -517,22 +525,77 @@ impl Peer {
         socket: SocketAddr,
         max_size: usize,
     ) -> Self {
-        let result = Self {
-            socket,
-            mailboxes: Arc::new(Mutex::new(HashMap::new())),
-        };
+        // Create inbound handler
+        let (inbound, mut outbound) = mpsc::unbounded();
+        let (control, mut control_receiver) = mpsc::unbounded();
+
+        // Spawn router
+        runtime.spawn("router", async move {
+            let mut mailboxes = HashMap::new();
+            loop {
+                select! {
+                    control = control_receiver.next() => {
+                        // If control is closed, exit
+                        let (channel, result): (Channel, oneshot::Sender<Result<UnboundedReceiver<Message>, Error>>) = match control {
+                            Some(control) => control,
+                            None => break,
+                        };
+
+                        // Check if channel is registered
+                        if mailboxes.contains_key(&channel) {
+                            result.send(Err(Error::ChannelAlreadyRegistered(channel))).unwrap();
+                            continue;
+                        }
+
+                        // Register channel
+                        let (sender, receiver) = mpsc::unbounded();
+                        mailboxes.insert(channel, sender);
+                        result.send(Ok(receiver)).unwrap();
+                    },
+                    message = outbound.next() => {
+                        // If outbound is closed, exit
+                        let message = match message {
+                            Some(message) => message,
+                            None => break,
+                        };
+
+                        // Send message to mailbox
+                        let (channel, message) = message;
+                        match mailboxes.get_mut(&channel) {
+                            Some(mailbox) => {
+                                if let Err(err) = mailbox.send(message).await {
+                                    error!(?err, "failed to send message to mailbox");
+                                }
+                            }
+                            None => {
+                                trace!(
+                                    recipient = hex(&public_key),
+                                    channel,
+                                    reason = "missing channel",
+                                    "dropping message",
+                                );
+                            }
+                        }
+                    },
+                }
+            }
+        });
 
         // Continually listen for incoming connections on the socket
+        let result = Self {
+            socket,
+            control,
+            inbound,
+        };
         runtime.spawn("listener", {
             let runtime = runtime.clone();
-            let mailboxes = result.mailboxes.clone();
+            let inbound = result.inbound.clone();
             async move {
                 let mut listener = runtime.bind(socket).await.unwrap();
                 while let Ok((_, _, mut stream)) = listener.accept().await {
                     // Spawn a task for this connection
                     runtime.spawn("receiver", {
-                        let mailboxes = mailboxes.clone();
-                        let public_key = public_key.clone();
+                        let mut inbound = inbound.clone();
                         async move {
                             // Receive dialer's public key as a handshake
                             let dialer = match recv_frame(&mut stream, max_size).await {
@@ -549,19 +612,9 @@ impl Peer {
                                     data[..SIZE_OF_CHANNEL].try_into().unwrap(),
                                 );
                                 let message = data.slice(SIZE_OF_CHANNEL..);
-                                let mut mailbox = match mailboxes.lock().unwrap().get(&channel) {
-                                    Some(s) => s.clone(),
-                                    None => {
-                                        trace!(
-                                            recipient = hex(&public_key),
-                                            channel,
-                                            reason = "missing channel",
-                                            "dropping message",
-                                        );
-                                        continue;
-                                    }
-                                };
-                                if let Err(err) = mailbox.send((dialer.clone(), message)).await {
+                                if let Err(err) =
+                                    inbound.send((channel, (dialer.clone(), message))).await
+                                {
                                     error!(?err, "failed to send message to mailbox");
                                     break;
                                 }
@@ -575,18 +628,16 @@ impl Peer {
         result
     }
 
-    fn register(&mut self, channel: Channel) -> Result<mpsc::UnboundedReceiver<Message>, Error> {
-        let mut mailboxes = self.mailboxes.lock().unwrap();
-
-        // Error if channel already exists
-        if mailboxes.contains_key(&channel) {
-            return Err(Error::ChannelAlreadyRegistered(channel));
-        }
-
-        // Insert new channel
-        let (sender, receiver) = mpsc::unbounded();
-        mailboxes.insert(channel, sender);
-        Ok(receiver)
+    async fn register(
+        &mut self,
+        channel: Channel,
+    ) -> Result<mpsc::UnboundedReceiver<Message>, Error> {
+        let (sender, receiver) = oneshot::channel();
+        self.control
+            .send((channel, sender))
+            .await
+            .map_err(|_| Error::NetworkClosed)?;
+        receiver.await.map_err(|_| Error::NetworkClosed)?
     }
 }
 
