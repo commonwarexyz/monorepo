@@ -24,6 +24,12 @@ pub type Public = Poly<group::Public>;
 /// is interpolated using at least `threshold` evaluations).
 pub type Signature = Poly<group::Signature>;
 
+/// The default partial signature type (G2).
+pub type PartialSignature = Eval<group::Signature>;
+
+/// The default partial signature length (G2).
+pub const PARTIAL_SIGNATURE_LENGTH: usize = size_of::<u32>() + group::SIGNATURE_LENGTH;
+
 /// A polynomial evaluation at a specific index.
 #[derive(Debug, Clone)]
 pub struct Eval<C: Element> {

@@ -454,6 +454,7 @@ mod tests {
         let notarized = Arc::new(Mutex::new(HashMap::new()));
         let finalized = Arc::new(Mutex::new(HashMap::new()));
         let completed = Arc::new(Mutex::new(HashSet::new()));
+        let supervised = Arc::new(Mutex::new(Vec::new()));
         let (mut executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         while completed.lock().unwrap().len() != n as usize {
             let namespace = namespace.clone();
@@ -461,6 +462,7 @@ mod tests {
             let notarized = notarized.clone();
             let finalized = finalized.clone();
             let completed = completed.clone();
+            let supervised = supervised.clone();
             executor.start({
                 let mut runtime = runtime.clone();
                 async move {
@@ -650,13 +652,6 @@ mod tests {
                                 completed.lock().unwrap().insert(validator);
                             }
                         }
-
-                        // Check supervisors for correct activity
-                        for (_, supervisor) in supervisors.iter() {
-                            // Ensure no faults
-                            let faults = supervisor.faults.lock().unwrap();
-                            assert!(faults.is_empty());
-                        }
                     }
                 });
 
@@ -669,10 +664,22 @@ mod tests {
                     debug!(shutdowns = *shutdowns, elapsed = ?wait, "restarting");
                     *shutdowns += 1;
                 }
+
+                // Collect supervisors
+                supervised.lock().unwrap().push(supervisors);
             }});
 
             // Recover runtime
             (executor, runtime, _) = runtime.recover();
+        }
+
+        // Check supervisors for faults activity
+        let supervised = supervised.lock().unwrap();
+        for supervisors in supervised.iter() {
+            for (_, supervisor) in supervisors.iter() {
+                let faults = supervisor.faults.lock().unwrap();
+                assert!(faults.is_empty());
+            }
         }
     }
 

@@ -3,6 +3,8 @@ use commonware_cryptography::Ed25519;
 use commonware_cryptography::Scheme;
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use std::collections::HashMap;
 use std::hint::black_box;
 
@@ -10,6 +12,7 @@ use std::hint::black_box;
 const CONCURRENCY: usize = 1;
 
 fn benchmark_dkg_recovery(c: &mut Criterion) {
+    let mut rng = StdRng::seed_from_u64(0);
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         let t = quorum(n).unwrap();
         c.bench_function(&format!("{}/n={} t={}", module_path!(), n, t), |b| {
@@ -34,7 +37,8 @@ fn benchmark_dkg_recovery(c: &mut Criterion) {
                     // Create commitments and send shares to player
                     let mut commitments = HashMap::new();
                     for (idx, dealer) in contributors.iter().take(t as usize).enumerate() {
-                        let (_, commitment, shares) = Dealer::new(None, contributors.clone());
+                        let (_, commitment, shares) =
+                            Dealer::new(&mut rng, None, contributors.clone());
                         player
                             .share(dealer.clone(), commitment.clone(), shares[0])
                             .unwrap();

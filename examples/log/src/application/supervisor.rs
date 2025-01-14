@@ -28,9 +28,8 @@ impl Supervisor {
 
 impl Su for Supervisor {
     type Index = View;
-    type Seed = ();
 
-    fn leader(&self, index: Self::Index, _: Self::Seed) -> Option<PublicKey> {
+    fn leader(&self, index: Self::Index) -> Option<PublicKey> {
         Some(self.participants[index as usize % self.participants.len()].clone())
     }
 

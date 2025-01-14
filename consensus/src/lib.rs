@@ -97,11 +97,8 @@ pub trait Supervisor: Clone + Send + 'static {
     /// Index is the type used to indicate the in-progress consensus decision.
     type Index;
 
-    /// Seed is a consensus artifact to use as randomness for leader selection.
-    type Seed;
-
     /// Return the leader at a given index for the provided seed.
-    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
+    fn leader(&self, index: Self::Index) -> Option<PublicKey>;
 
     /// Get the **sorted** participants for the given view. This is called when entering a new view before
     /// listening for proposals or votes. If nothing is returned, the view will not be entered.

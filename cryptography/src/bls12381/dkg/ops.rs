@@ -4,18 +4,19 @@ use crate::bls12381::{
     dkg::Error,
     primitives::{group::Share, poly},
 };
+use rand::RngCore;
 use rayon::{prelude::*, ThreadPoolBuilder};
 use std::collections::BTreeMap;
 
 /// Generate shares and a commitment.
-///
-/// # Arguments
-/// * `share` - The dealer's share of the previous DKG (if any)
-/// * `n` - The total number of participants in the round
-/// * `t` - The threshold number of participants required to reconstruct the secret
-pub fn generate_shares(share: Option<Share>, n: u32, t: u32) -> (poly::Public, Vec<Share>) {
+pub fn generate_shares<R: RngCore>(
+    rng: &mut R,
+    share: Option<Share>,
+    n: u32,
+    t: u32,
+) -> (poly::Public, Vec<Share>) {
     // Generate a secret polynomial and commit to it
-    let mut secret = poly::new(t - 1);
+    let mut secret = poly::new_from(t - 1, rng);
     if let Some(share) = share {
         // Set the free coefficient of the secret polynomial to the secret
         // of the previous DKG
