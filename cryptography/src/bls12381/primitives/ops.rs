@@ -362,7 +362,8 @@ mod tests {
     fn test_threshold_proof_of_possession() {
         // Generate PoP
         let (n, t) = (5, 4);
-        let (public, shares) = generate_shares(None, n, t);
+        let mut rng = StdRng::seed_from_u64(0);
+        let (public, shares) = generate_shares(&mut rng, None, n, t);
         let partials: Vec<_> = shares
             .iter()
             .map(|s| partial_sign_proof_of_possession(&public, s))
@@ -453,7 +454,8 @@ mod tests {
     fn test_threshold_message() {
         // Generate signature
         let (n, t) = (5, 4);
-        let (public, shares) = generate_shares(None, n, t);
+        let mut rng = StdRng::seed_from_u64(0);
+        let (public, shares) = generate_shares(&mut rng, None, n, t);
         let msg = &[1, 9, 6, 9];
         let namespace = b"test";
         let partials: Vec<_> = shares
