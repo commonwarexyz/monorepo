@@ -1,10 +1,18 @@
 mod mem;
-pub use mem::InMemoryMMR;
+pub use mem::{verify_proof, InMemoryMMR};
 
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Hash<const N: usize>([u8; N]);
+
+#[derive(Clone, Debug)]
+/// A Proof contains the information necessary for proving the inclusion of an element at some leaf
+/// position in the MMR.
+pub struct Proof<const N: usize> {
+    sz: u64, // total # of nodes in the MMR
+    hashes: Vec<Hash<N>>,
+}
 
 /// Interface the MMR uses for computing leaf, node and root hashes.
 pub trait Hasher<const N: usize> {
@@ -12,14 +20,14 @@ pub trait Hasher<const N: usize> {
     fn update_with_hash(&mut self, hash: &Hash<N>);
     fn finalize_reset(&mut self) -> Hash<N>;
 
-    // Computes the hash for a leaf given its position and hash.
-    fn leaf_hash(&mut self, pos: u64, hash: &Hash<N>) -> Hash<N> {
+    /// Computes the hash for a leaf given its position and the element it represents.
+    fn leaf_hash(&mut self, pos: u64, element: &Hash<N>) -> Hash<N> {
         self.update_with_pos(pos);
-        self.update_with_hash(hash);
+        self.update_with_hash(element);
         self.finalize_reset()
     }
 
-    // Computes the hash for a node given its position and the hashes of its children.
+    /// Computes the hash for a node given its position and the hashes of its children.
     fn node_hash(&mut self, pos: u64, left_hash: &Hash<N>, right_hash: &Hash<N>) -> Hash<N> {
         self.update_with_pos(pos);
         self.update_with_hash(left_hash);
@@ -27,8 +35,8 @@ pub trait Hasher<const N: usize> {
         self.finalize_reset()
     }
 
-    // Computes the root hash for an MMR given its size and an iterator over the hashes of its
-    // peaks. The iterator should yield the peak hashes in decreasing order of their height.
+    /// Computes the root hash for an MMR given its size and an iterator over the hashes of its
+    /// peaks. The iterator should yield the peak hashes in decreasing order of their height.
     fn root_hash<'a>(
         &mut self,
         pos: u64,
@@ -74,8 +82,6 @@ impl Hasher<32> for Sha256Hasher {
 
 #[cfg(test)]
 mod tests {
-    use std::vec;
-
     use super::*;
 
     #[test]
@@ -162,7 +168,7 @@ mod tests {
             "root hash of empty MMR should be non-zero"
         );
 
-        let vec = vec![hash1, hash2, hash3, hash4];
+        let vec = [hash1, hash2, hash3, hash4];
         let out = hasher.root_hash(10, vec.iter());
         assert_ne!(out.0, [0u8; N], "root hash should be non-zero");
         assert_ne!(out, empty_out, "root hash should differ from empty MMR");
@@ -173,14 +179,14 @@ mod tests {
         out2 = hasher.root_hash(11, vec.iter());
         assert_ne!(out, out2, "root hash should change with different position");
 
-        let vec2 = vec![hash1, hash2, hash4, hash3];
+        let vec2 = [hash1, hash2, hash4, hash3];
         out2 = hasher.root_hash(10, vec2.iter());
         assert_ne!(
             out, out2,
             "root hash should change with different hash order"
         );
 
-        let vec3 = vec![hash1, hash2, hash3];
+        let vec3 = [hash1, hash2, hash3];
         out2 = hasher.root_hash(10, vec3.iter());
         assert_ne!(
             out, out2,
