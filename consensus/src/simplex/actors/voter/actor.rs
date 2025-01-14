@@ -464,10 +464,12 @@ impl<
                 let eval = Eval::deserialize(&notarize.seed).unwrap();
                 seed.push(eval);
             }
-            let signature = ops::threshold_signature_recover(threshold, notarization).unwrap();
-            let signature = signature.serialize();
-            let seed = ops::threshold_signature_recover(threshold, seed).unwrap();
-            let seed = seed.serialize();
+            let signature = ops::threshold_signature_recover(threshold, notarization)
+                .unwrap()
+                .serialize();
+            let seed = ops::threshold_signature_recover(threshold, seed)
+                .unwrap()
+                .serialize();
 
             // Construct notarization
             let notarization = wire::Notarization {
@@ -508,10 +510,12 @@ impl<
             let eval = Eval::deserialize(&nullify.seed).unwrap();
             seed.push(eval);
         }
-        let signature = ops::threshold_signature_recover(threshold, nullification).unwrap();
-        let signature = signature.serialize();
-        let seed = ops::threshold_signature_recover(threshold, seed).unwrap();
-        let seed = seed.serialize();
+        let signature = ops::threshold_signature_recover(threshold, nullification)
+            .unwrap()
+            .serialize();
+        let seed = ops::threshold_signature_recover(threshold, seed)
+            .unwrap()
+            .serialize();
 
         // Construct nullification
         let nullification = wire::Nullification {
@@ -573,8 +577,9 @@ impl<
                 let eval = Eval::deserialize(&finalize.signature).unwrap();
                 finalization.push(eval);
             }
-            let signature = ops::threshold_signature_recover(threshold, finalization).unwrap();
-            let signature = signature.serialize();
+            let signature = ops::threshold_signature_recover(threshold, finalization)
+                .unwrap()
+                .serialize();
 
             // Construct finalization
             let finalization = wire::Finalization {
@@ -963,11 +968,11 @@ impl<
         // Construct nullify
         let share = self.supervisor.share(self.view).unwrap();
         let message = nullify_message(self.view);
-        let signature = ops::partial_sign_message(share, Some(&self.nullify_namespace), &message);
-        let signature = signature.serialize();
+        let signature =
+            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
         let message = seed_message(self.view);
-        let seed = ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
-        let seed = seed.serialize();
+        let seed =
+            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         let null = wire::Nullify {
             view: self.view,
             signature: signature.into(),
@@ -1728,11 +1733,11 @@ impl<
         let share = self.supervisor.share(view).unwrap();
         let proposal = &round.proposal.as_ref().unwrap().1;
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        let signature = ops::partial_sign_message(share, Some(&self.notarize_namespace), &message);
-        let signature = signature.serialize();
+        let signature =
+            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
         let message = seed_message(view);
-        let seed = ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
-        let seed = seed.serialize();
+        let seed =
+            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         round.broadcast_notarize = true;
         Some(wire::Notarize {
             proposal: Some(proposal.clone()),
@@ -1805,8 +1810,8 @@ impl<
             "constructing finalize"
         );
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        let signature = ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
-        let signature = signature.serialize();
+        let signature =
+            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
         round.broadcast_finalize = true;
         Some(wire::Finalize {
             proposal: Some(proposal.clone()),
