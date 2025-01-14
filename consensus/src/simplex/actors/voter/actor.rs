@@ -347,13 +347,6 @@ impl<
         {
             return false;
         }
-        let me = self.supervisor.share(self.view).unwrap();
-        debug!(
-            view = self.view,
-            signer = public_key_index,
-            me = me.index,
-            "recorded finalize"
-        );
         let entry = self.finalizes.entry(digest).or_default();
         let signature = &finalize.signature;
         let proof = Prover::<H>::serialize_proposal(proposal, signature);
@@ -436,16 +429,14 @@ impl<
 
             // There should never exist enough notarizes for multiple proposals, so it doesn't
             // matter which one we choose.
-            let me = self.supervisor.share(self.view).unwrap();
             debug!(
                 view = self.view,
-                me = me.index,
                 proposal = hex(proposal),
                 verified = self.verified_proposal,
                 "broadcasting notarization"
             );
 
-            // Grab the proposal
+            // Grab the proposal (all will be the same)
             let proposal = notarizes
                 .values()
                 .next()
