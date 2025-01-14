@@ -15,10 +15,7 @@ use commonware_runtime::{
 use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::hex;
 use futures::{
-    channel::{
-        mpsc::{self, UnboundedReceiver, UnboundedSender},
-        oneshot,
-    },
+    channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
 use prometheus_client::{
@@ -488,10 +485,13 @@ impl crate::Sender for Sender {
     }
 }
 
+type MessageReceiver = mpsc::UnboundedReceiver<Message>;
+type MessageReceiverResult = Result<MessageReceiver, Error>;
+
 /// Implementation of a [`crate::Receiver`] for the simulated network.
 #[derive(Debug)]
 pub struct Receiver {
-    receiver: mpsc::UnboundedReceiver<Message>,
+    receiver: MessageReceiver,
 }
 
 impl crate::Receiver for Receiver {
@@ -502,41 +502,48 @@ impl crate::Receiver for Receiver {
     }
 }
 
-// A peer in the simulated network.
-// The peer can receive messages over any registered channel.
+/// A peer in the simulated network.
+///
+/// The peer can register channels, which allows it to receive messages sent to the channel from other peers.
 struct Peer {
     // Socket address that the peer is listening on
     socket: SocketAddr,
 
-    // Handling for control
-    control: UnboundedSender<(
-        Channel,
-        oneshot::Sender<Result<UnboundedReceiver<Message>, Error>>,
-    )>,
-
-    // Handling for all inbound messages
-    inbound: UnboundedSender<(Channel, Message)>,
+    // Control to register new channels
+    control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult>)>,
 }
 
 impl Peer {
+    /// Create and return a new peer.
+    ///
+    /// The peer will listen for incoming connections on the given `socket` address.
+    /// `max_size` is the maximum size of a message that can be sent to the peer.
     fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
         runtime: &mut E,
         public_key: PublicKey,
         socket: SocketAddr,
         max_size: usize,
     ) -> Self {
-        // Create inbound handler
-        let (inbound, mut outbound) = mpsc::unbounded();
-        let (control, mut control_receiver) = mpsc::unbounded();
+        // The control is used to register channels.
+        // There is exactly one mailbox created for each channel that the peer is registered for.
+        let (control_sender, mut control_receiver) = mpsc::unbounded();
+
+        // Whenever a message is received from a peer, it is placed in the inbox.
+        // The router polls the inbox and forwards the message to the appropriate mailbox.
+        let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
 
         // Spawn router
         runtime.spawn("router", async move {
+            // Map of channels to mailboxes (senders to particular channels)
             let mut mailboxes = HashMap::new();
+
+            // Continually listen for control messages and outbound messages
             loop {
                 select! {
+                    // Listen for control messages, which are used to register channels
                     control = control_receiver.next() => {
                         // If control is closed, exit
-                        let (channel, result): (Channel, oneshot::Sender<Result<UnboundedReceiver<Message>, Error>>) = match control {
+                        let (channel, result): (Channel, oneshot::Sender<MessageReceiverResult>) = match control {
                             Some(control) => control,
                             None => break,
                         };
@@ -552,15 +559,16 @@ impl Peer {
                         mailboxes.insert(channel, sender);
                         result.send(Ok(receiver)).unwrap();
                     },
-                    message = outbound.next() => {
-                        // If outbound is closed, exit
-                        let message = match message {
+
+                    // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
+                    inbox = inbox_receiver.next() => {
+                        // If inbox is closed, exit
+                        let (channel, message) = match inbox {
                             Some(message) => message,
                             None => break,
                         };
 
                         // Send message to mailbox
-                        let (channel, message) = message;
                         match mailboxes.get_mut(&channel) {
                             Some(mailbox) => {
                                 if let Err(err) = mailbox.send(message).await {
@@ -581,21 +589,19 @@ impl Peer {
             }
         });
 
-        // Continually listen for incoming connections on the socket
-        let result = Self {
-            socket,
-            control,
-            inbound,
-        };
+        // Spawn a task that accepts new connections and spawns a task for each connection
         runtime.spawn("listener", {
             let runtime = runtime.clone();
-            let inbound = result.inbound.clone();
+            let inbox_sender = inbox_sender.clone();
             async move {
+                // Initialize listener
                 let mut listener = runtime.bind(socket).await.unwrap();
+
+                // Continually accept new connections
                 while let Ok((_, _, mut stream)) = listener.accept().await {
-                    // Spawn a task for this connection
+                    // New connection accepted. Spawn a task for this connection
                     runtime.spawn("receiver", {
-                        let mut inbound = inbound.clone();
+                        let mut inbox_sender = inbox_sender.clone();
                         async move {
                             // Receive dialer's public key as a handshake
                             let dialer = match recv_frame(&mut stream, max_size).await {
@@ -606,14 +612,15 @@ impl Peer {
                                 }
                             };
 
-                            // Continually receive messages from the dialer and send them to the appropriate mailbox
+                            // Continually receive messages from the dialer and send them to the inbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
                                 let channel = Channel::from_be_bytes(
                                     data[..SIZE_OF_CHANNEL].try_into().unwrap(),
                                 );
                                 let message = data.slice(SIZE_OF_CHANNEL..);
-                                if let Err(err) =
-                                    inbound.send((channel, (dialer.clone(), message))).await
+                                if let Err(err) = inbox_sender
+                                    .send((channel, (dialer.clone(), message)))
+                                    .await
                                 {
                                     error!(?err, "failed to send message to mailbox");
                                     break;
@@ -625,13 +632,18 @@ impl Peer {
             }
         });
 
-        result
+        // Return peer
+        Self {
+            socket,
+            control: control_sender,
+        }
     }
 
-    async fn register(
-        &mut self,
-        channel: Channel,
-    ) -> Result<mpsc::UnboundedReceiver<Message>, Error> {
+    /// Register a channel with the peer.
+    ///
+    /// This allows the peer to receive messages sent to the channel.
+    /// Returns a receiver that can be used to receive messages sent to the channel.
+    async fn register(&mut self, channel: Channel) -> MessageReceiverResult {
         let (sender, receiver) = oneshot::channel();
         self.control
             .send((channel, sender))
