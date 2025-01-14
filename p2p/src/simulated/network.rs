@@ -90,6 +90,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
     /// be used to modify the state of the network during runtime.
     pub fn new(runtime: E, cfg: Config) -> (Self, Oracle) {
         let (sender, receiver) = mpsc::unbounded();
+        let (oracle_sender, oracle_receiver) = mpsc::unbounded();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         {
@@ -101,8 +102,6 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 received_messages.clone(),
             );
         }
-
-        let (oracle_sender, oracle_receiver) = mpsc::unbounded();
 
         // Start with a pseudo-random IP address to assign sockets to for new peers
         let next_addr = SocketAddr::new(
@@ -179,6 +178,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 if !self.peers.contains_key(&public_key) {
                     let peer = Peer::new(
                         &mut self.runtime.clone(),
+                        public_key.clone(),
                         self.get_next_socket(),
                         self.max_size,
                     );
@@ -226,7 +226,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
 
                 let link = Link::new(
                     &mut self.runtime,
-                    sender.clone(),
+                    sender,
                     peer.socket,
                     sampler,
                     success_rate,
@@ -276,18 +276,8 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 continue;
             }
 
-            // Determine if recipient exists
-            if !self.peers.contains_key(&recipient) {
-                trace!(
-                    recipient = hex(&recipient),
-                    reason = "no agent",
-                    "dropping message",
-                );
-                continue;
-            };
-
             // Determine if there is a link between the sender and recipient
-            let link = match self
+            let mut link = match self
                 .links
                 .get(&(origin.clone(), recipient.clone()))
                 .cloned()
@@ -523,6 +513,7 @@ struct Peer {
 impl Peer {
     fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
         runtime: &mut E,
+        public_key: PublicKey,
         socket: SocketAddr,
         max_size: usize,
     ) -> Self {
@@ -541,6 +532,7 @@ impl Peer {
                     // Spawn a task for this connection
                     runtime.spawn("receiver", {
                         let mailboxes = mailboxes.clone();
+                        let public_key = public_key.clone();
                         async move {
                             // Receive dialer's public key as a handshake
                             let dialer = match recv_frame(&mut stream, max_size).await {
@@ -560,7 +552,12 @@ impl Peer {
                                 let mut mailbox = match mailboxes.lock().unwrap().get(&channel) {
                                     Some(s) => s.clone(),
                                     None => {
-                                        error!("failed to find mailbox for channel");
+                                        trace!(
+                                            recipient = hex(&public_key),
+                                            channel,
+                                            reason = "missing channel",
+                                            "dropping message",
+                                        );
                                         continue;
                                     }
                                 };
@@ -645,12 +642,95 @@ impl Link {
     }
 
     // Send a message over the link.
-    async fn send(&self, channel: Channel, message: Bytes) -> Result<(), Error> {
-        let mut inbox = self.inbox.clone();
-        inbox
+    async fn send(&mut self, channel: Channel, message: Bytes) -> Result<(), Error> {
+        self.inbox
             .send((channel, message))
             .await
             .map_err(|_| Error::NetworkClosed)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{Ed25519, Scheme};
+    use commonware_runtime::{deterministic::Executor, Runner};
+
+    const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
+    #[test]
+    fn test_register_and_link() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                max_size: MAX_MESSAGE_SIZE,
+            };
+            let (network, mut oracle) = Network::new(runtime.clone(), cfg);
+            runtime.spawn("network", network.run());
+
+            // Create two public keys
+            let pk1 = Ed25519::from_seed(1).public_key();
+            let pk2 = Ed25519::from_seed(2).public_key();
+
+            // Register
+            oracle.register(pk1.clone(), 0).await.unwrap();
+            oracle.register(pk1.clone(), 1).await.unwrap();
+            oracle.register(pk2.clone(), 0).await.unwrap();
+            oracle.register(pk2.clone(), 1).await.unwrap();
+
+            // Expect error when registering again
+            assert!(matches!(
+                oracle.register(pk1.clone(), 1).await,
+                Err(Error::ChannelAlreadyRegistered(_))
+            ));
+
+            // Add link
+            let link = ingress::Link {
+                latency: 2.0,
+                jitter: 1.0,
+                success_rate: 0.9,
+            };
+            oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await
+                .unwrap();
+
+            // Expect error when adding link again
+            assert!(matches!(
+                oracle.add_link(pk1.clone(), pk2.clone(), link).await,
+                Err(Error::LinkExists)
+            ));
+        });
+    }
+
+    #[test]
+    fn test_get_next_socket() {
+        let cfg = Config {
+            registry: Arc::new(Mutex::new(Registry::default())),
+            max_size: MAX_MESSAGE_SIZE,
+        };
+        let (_, runtime, _) = Executor::default();
+        let (mut network, _) = Network::new(runtime.clone(), cfg);
+
+        // Test that the next socket address is incremented correctly
+        let mut original = network.next_addr;
+        let next = network.get_next_socket();
+        assert_eq!(next, original);
+        let next = network.get_next_socket();
+        original.set_port(1);
+        assert_eq!(next, original);
+
+        // Test that the port number overflows correctly
+        let max_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 0, 255, 255)), 65535);
+        network.next_addr = max_addr;
+        let next = network.get_next_socket();
+        assert_eq!(next, max_addr);
+        let next = network.get_next_socket();
+        assert_eq!(
+            next,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 1, 0, 0)), 0)
+        );
     }
 }

@@ -206,7 +206,7 @@ mod tests {
     };
     use tracing::debug;
 
-    // Helper function to register validators with the oracle.
+    /// Registers all validators using the oracle.
     async fn register_validators(
         oracle: &mut Oracle,
         validators: &[Bytes],
@@ -228,14 +228,18 @@ mod tests {
         registrations
     }
 
-    // Enum to describe the action to take when linking validators.
+    /// Enum to describe the action to take when linking validators.
     enum Action {
         Link(Link),
         Update(Link), // Unlink and then link
         Unlink,
     }
 
-    // Helper function to link validators together.
+    /// Links (or unlinks) validators using the oracle.
+    ///
+    /// The `action` parameter determines the action (e.g. link, unlink) to take.
+    /// The `restrict_to` function can be used to restrict the linking to certain connections,
+    /// otherwise all validators will be linked to all other validators.
     async fn link_validators(
         oracle: &mut Oracle,
         validators: &[Bytes],
