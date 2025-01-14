@@ -218,7 +218,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             let mut notarizations = Vec::new();
             let mut nullifications = Vec::new();
             let mut inflight = Vec::new();
-            for entry in self.required.iter() {
+            for entry in entries {
                 inflight.push(entry.clone());
                 match entry.task {
                     Task::Notarization => notarizations.push(entry.view),
@@ -235,13 +235,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             }
 
             // Select next recipient
-            let notarization_count = notarizations.len();
-            let nullification_count = nullifications.len();
             let mut msg = wire::Backfiller {
                 id: 0, // set once we have a request ID
                 payload: Some(wire::backfiller::Payload::Request(wire::Request {
-                    notarizations,
-                    nullifications,
+                    notarizations: notarizations.clone(),
+                    nullifications: nullifications.clone(),
                 })),
             };
             loop {
@@ -284,7 +282,9 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 self.inflight.add(request, inflight);
                 debug!(
                     peer = hex(&recipient),
-                    notarization_count, nullification_count, "sent request"
+                    ?notarizations,
+                    ?nullifications,
+                    "sent request"
                 );
                 break;
             }
@@ -437,7 +437,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                     match payload {
                         wire::backfiller::Payload::Request(request) => {
                             let mut populated_bytes = 0;
+                            let mut notarizations = Vec::new();
+                            let mut missing_notarizations = Vec::new();
                             let mut notarizations_found = Vec::new();
+                            let mut nullifications = Vec::new();
+                            let mut missing_nullifications = Vec::new();
                             let mut nullifications_found = Vec::new();
 
                             // Ensure too many notarizations/nullifications aren't requested
@@ -455,8 +459,11 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                         break;
                                     }
                                     populated_bytes += size;
+                                    notarizations.push(view);
                                     notarizations_found.push(notarization.clone());
                                     self.served.inc();
+                                } else {
+                                    missing_notarizations.push(view);
                                 }
                             }
 
@@ -468,13 +475,16 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                         break;
                                     }
                                     populated_bytes += size;
+                                    nullifications.push(view);
                                     nullifications_found.push(nullification.clone());
                                     self.served.inc();
+                                } else {
+                                    missing_nullifications.push(view);
                                 }
                             }
 
                             // Send response
-                            debug!(sender = hex(&s), notarization_count = notarizations_found.len(), nullification_count = nullifications_found.len(),  "sending response");
+                            debug!(sender = hex(&s), ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
                             let response = wire::Backfiller {
                                 id: msg.id,
                                 payload: Some(wire::backfiller::Payload::Response(wire::Response {
@@ -561,8 +571,8 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                 self.requester.resolve(request);
                                 debug!(
                                     sender = hex(&s),
-                                    notarization_count = notarizations_found.len(),
-                                    nullification_count = ?nullifications_found.len(),
+                                    notarizations = ?notarizations_found,
+                                    nullifications = ?nullifications_found,
                                     "response useful",
                                 );
                             } else {
