@@ -953,6 +953,7 @@ impl Networking {
         self.auditor.bind(socket);
 
         // If the IP is localhost, ensure the port is not in the ephemeral range
+        // so that it can be used for binding in the dial method
         if socket.ip() == IpAddr::V4(Ipv4Addr::LOCALHOST)
             && EPHEMERAL_PORT_RANGE.contains(&socket.port())
         {

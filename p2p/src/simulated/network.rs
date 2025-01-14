@@ -56,16 +56,29 @@ pub struct Config {
 pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> {
     runtime: E,
 
+    // Maximum size of a message that can be sent over the network
     max_size: usize,
+
+    // Next socket address to assign to a new peer
+    // Incremented for each new peer
     next_addr: SocketAddr,
 
+    // Channel to receive messages from the oracle
     ingress: mpsc::UnboundedReceiver<ingress::Message>,
 
+    // A channel to receive tasks from peers
+    // The sender is cloned and given to each peer
+    // The receiver is polled in the main loop
     sender: mpsc::UnboundedSender<Task>,
     receiver: mpsc::UnboundedReceiver<Task>,
+
+    // A map from a pair of public keys (from, to) to a link between the two peers
     links: HashMap<(PublicKey, PublicKey), Link>,
+
+    // A map from a public key to a peer
     peers: BTreeMap<PublicKey, Peer>,
 
+    // Metrics for received and sent messages
     received_messages: Family<metrics::Message, Counter>,
     sent_messages: Family<metrics::Message, Counter>,
 }
@@ -90,6 +103,8 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
         }
 
         let (oracle_sender, oracle_receiver) = mpsc::unbounded();
+
+        // Start with a pseudo-random IP address to assign sockets to for new peers
         let next_addr = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::from_bits(runtime.clone().next_u32())),
             0,
@@ -111,6 +126,10 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
         )
     }
 
+    /// Returns (and increments) the next available socket address.
+    ///
+    /// The port number is incremented for each call, and the IP address is incremented if the port
+    /// number overflows.
     fn get_next_socket(&mut self) -> SocketAddr {
         let result = self.next_addr;
 
@@ -133,6 +152,9 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
         result
     }
 
+    /// Handle an ingress message.
+    ///
+    /// This method is called when a message is received from the oracle.
     fn handle_ingress(&mut self, message: ingress::Message) {
         // It is important to ensure that no failed receipt of a message will cause us to exit.
         // This could happen if the caller drops the `Oracle` after updating the network topology.
@@ -227,6 +249,10 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
         }
     }
 
+    /// Handle a task.
+    ///
+    /// This method is called when a task is received from the sender, which can come from
+    /// any peer in the network.
     fn handle_task(&mut self, task: Task) {
         // Collect recipients
         let (channel, origin, recipients, message, reply) = task;
@@ -501,11 +527,11 @@ impl crate::Receiver for Receiver {
 // A peer in the simulated network.
 // The peer can receive messages over any registered channel.
 struct Peer {
-    // Map from channel to a sender that can deliver messages to that channel
-    mailboxes: Arc<Mutex<HashMap<Channel, mpsc::UnboundedSender<Message>>>>,
-
     // Socket address that the peer is listening on
     socket: SocketAddr,
+
+    // Map from channel to a sender that can deliver messages to that channel
+    mailboxes: Arc<Mutex<HashMap<Channel, mpsc::UnboundedSender<Message>>>>,
 }
 
 impl Peer {
@@ -515,8 +541,8 @@ impl Peer {
         max_size: usize,
     ) -> Self {
         let result = Self {
-            mailboxes: Arc::new(Mutex::new(HashMap::new())),
             socket,
+            mailboxes: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Continually listen for incoming connections on the socket

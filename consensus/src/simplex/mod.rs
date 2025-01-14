@@ -206,6 +206,7 @@ mod tests {
     };
     use tracing::debug;
 
+    // Helper function to register validators with the oracle.
     async fn register_validators(
         oracle: &mut Oracle,
         validators: &[Bytes],
@@ -227,15 +228,11 @@ mod tests {
         registrations
     }
 
+    // Enum to describe the action to take when linking validators.
     enum Action {
-        NewLink(Link),
-        Relink(Link),
+        Link(Link),
+        Update(Link), // Unlink and then link
         Unlink,
-    }
-
-    enum Scope {
-        All,
-        Where(fn(usize, usize) -> bool),
     }
 
     // Helper function to link validators together.
@@ -243,7 +240,7 @@ mod tests {
         oracle: &mut Oracle,
         validators: &[Bytes],
         action: Action,
-        scope: Scope,
+        restrict_to: Option<fn(usize, usize) -> bool>,
     ) {
         for (i1, v1) in validators.iter().enumerate() {
             for (i2, v2) in validators.iter().enumerate() {
@@ -252,8 +249,8 @@ mod tests {
                     continue;
                 }
 
-                // Scope only to certain connections
-                if let Scope::Where(f) = scope {
+                // Restrict to certain connections
+                if let Some(f) = restrict_to {
                     if !f(i1, i2) {
                         continue;
                     }
@@ -261,7 +258,7 @@ mod tests {
 
                 // Do any unlinking first
                 match action {
-                    Action::Relink(_) | Action::Unlink => {
+                    Action::Update(_) | Action::Unlink => {
                         oracle.remove_link(v1.clone(), v2.clone()).await.unwrap();
                     }
                     _ => {}
@@ -269,7 +266,7 @@ mod tests {
 
                 // Do any linking after
                 match action {
-                    Action::NewLink(ref link) | Action::Relink(ref link) => {
+                    Action::Link(ref link) | Action::Update(ref link) => {
                         oracle
                             .add_link(v1.clone(), v2.clone(), link.clone())
                             .await
@@ -324,7 +321,7 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -551,7 +548,7 @@ mod tests {
                     jitter: 50.0,
                     success_rate: 1.0,
                 };
-                link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
+                link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
                 // Create engines
                 let hasher = Sha256::default();
@@ -754,8 +751,8 @@ mod tests {
             link_validators(
                 &mut oracle,
                 &validators,
-                Action::NewLink(link),
-                Scope::Where(|i, j| ![i, j].contains(&0usize)),
+                Action::Link(link),
+                Some(|i, j| ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -865,8 +862,8 @@ mod tests {
             link_validators(
                 &mut oracle,
                 &validators,
-                Action::Relink(link.clone()),
-                Scope::Where(|i, j| ![i, j].contains(&0usize)),
+                Action::Update(link.clone()),
+                Some(|i, j| ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -878,7 +875,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Unlink,
-                Scope::Where(|i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
+                Some(|i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -890,8 +887,8 @@ mod tests {
             link_validators(
                 &mut oracle,
                 &validators,
-                Action::NewLink(link),
-                Scope::Where(|i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
+                Action::Link(link),
+                Some(|i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
             )
             .await;
 
@@ -904,8 +901,8 @@ mod tests {
             link_validators(
                 &mut oracle,
                 &validators,
-                Action::Relink(link),
-                Scope::Where(|i, j| ![i, j].contains(&1usize)),
+                Action::Update(link),
+                Some(|i, j| ![i, j].contains(&1usize)),
             )
             .await;
 
@@ -1043,8 +1040,8 @@ mod tests {
             link_validators(
                 &mut oracle,
                 &validators,
-                Action::NewLink(link),
-                Scope::Where(|i, j| ![i, j].contains(&0usize)),
+                Action::Link(link),
+                Some(|i, j| ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -1227,7 +1224,7 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -1414,7 +1411,7 @@ mod tests {
                 jitter: 0.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -1497,7 +1494,7 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &validators, Action::Relink(link), Scope::All).await;
+            link_validators(&mut oracle, &validators, Action::Update(link), None).await;
 
             // Wait for all engines to finish
             let mut completed = HashSet::new();
@@ -1583,13 +1580,7 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::NewLink(link.clone()),
-                Scope::All,
-            )
-            .await;
+            link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -1703,7 +1694,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Unlink,
-                Scope::Where(are_separated),
+                Some(are_separated),
             )
             .await;
 
@@ -1729,8 +1720,8 @@ mod tests {
             link_validators(
                 &mut oracle,
                 &validators,
-                Action::NewLink(link),
-                Scope::Where(are_separated),
+                Action::Link(link),
+                Some(are_separated),
             )
             .await;
 
@@ -1821,13 +1812,7 @@ mod tests {
                 jitter: 150.0,
                 success_rate: 0.5,
             };
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::NewLink(degraded_link),
-                Scope::All,
-            )
-            .await;
+            link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -2002,7 +1987,7 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Create engines
             let hasher = Sha256::default();
@@ -2189,7 +2174,7 @@ mod tests {
                 jitter: 1.0,
                 success_rate: 1.0,
             };
-            link_validators(&mut oracle, &validators, Action::NewLink(link), Scope::All).await;
+            link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Create engines
             let hasher = Sha256::default();
