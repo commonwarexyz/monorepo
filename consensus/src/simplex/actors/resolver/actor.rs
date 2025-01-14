@@ -20,7 +20,7 @@ use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prost::Message as _;
-use rand::{prelude::SliceRandom, Rng};
+use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -202,17 +202,13 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 return;
             }
 
-            // We assume nothing about the usefulness (or existence) of any given entry, so we shuffle
+            // We assume nothing about the usefulness (or existence) of any given entry, so we sample
             // the iterator to ensure we eventually try to fetch everything requested.
-            let mut entries = self
+            let entries = self
                 .required
                 .iter()
                 .filter(|entry| !self.inflight.contains(entry))
-                .collect::<Vec<_>>();
-            if entries.is_empty() {
-                return;
-            }
-            entries.shuffle(&mut self.runtime);
+                .choose_multiple(&mut self.runtime, self.max_fetch_count);
 
             // Select entries up to configured limits
             let mut notarizations = Vec::new();
