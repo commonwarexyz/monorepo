@@ -325,7 +325,6 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                 let runtime = self.runtime.clone();
                 let recipient = recipient.clone();
                 let message = message.clone();
-                let max_size = self.max_size;
                 let mut acquired_sender = acquired_sender.clone();
                 let origin = origin.clone();
                 let received_messages = self.received_messages.clone();
@@ -344,19 +343,6 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                         trace!(
                             recipient = hex(&recipient),
                             reason = "random link failure",
-                            "dropping message",
-                        );
-                        return;
-                    }
-
-                    // Drop message if too large
-                    if message.len() > max_size {
-                        trace!(
-                            recipient = hex(&recipient),
-                            channel,
-                            size = message.len(),
-                            max_size,
-                            reason = "message too large",
                             "dropping message",
                         );
                         return;
@@ -634,7 +620,7 @@ impl Link {
 
         // Spawn a task that will wait for messages to be sent to the link and then send them
         // over the network.
-        runtime.spawn("sender", {
+        runtime.spawn("link", {
             let runtime = runtime.clone();
             async move {
                 // Dial the peer and handshake by sending it the dialer's public key
