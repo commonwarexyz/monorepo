@@ -104,6 +104,24 @@
 //! * Every `t_r` after `(part(v), nullify(v))` broadcast that we are still in view `v`:
 //!    * Rebroadcast `(part(v), nullify(v))` and either `(seed(v-1), notarization(v-1))` or `(seed(v-1), nullification(v-1))`
 //!
+//! ### VRF
+//!
+//! When broadcasting a `notarize(c,v)` or `nullify(v)` message, a validator must also include a `part(v)` message (a partial
+//! signature over the view `v` index). When `2f+1` `notarize(c,v)` or `nullify(v)` messages are received, a validator can
+//! derive `seed(v)`. Because `part(v)` is only over the view `v`, the seed is the same for a given view `v` regardless of
+//! whether or not a block was notarized in said view `v`.
+//!
+//! `seed(v)` can be used as bias-resistant randomness to select the leader for `v+1` and in the execution of `c` (at view `v`).
+//! TODO: more elaboration on why this is safe.
+//!
+//! ### Threshold Certificates
+//!
+//! Because all messages are partial signatures (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`), `notarization(c,v)`, `nullification(v)`,
+//! and `finalization(c,v)` are all recovered threshold signatures (of a static public key). This makes it possible for an external
+//! process to verify that a block is canonical in a given consensus instance without actually following that consensus instance.
+//!
+//! This can be used both to secure interopability between different consensus instances and to secure user interactions with an RPC provider.
+//!
 //! ### Deviations from Simplex Consensus
 //!
 //! * Fetch missing notarizations/nullifications as needed rather than assuming each proposal contains
