@@ -1734,7 +1734,7 @@ impl<
             // notarizations
             let round = self.views.get(&view).expect("missing round");
             if let Some(parent) = round.at_least_one_honest() {
-                if parent >= self.last_finalized {
+                if parent >= self.last_finalized && parent != GENESIS_VIEW {
                     // Compute missing nullifications
                     let mut missing_notarizations = Vec::new();
                     if self.is_notarized(parent).is_none() {
@@ -1758,10 +1758,10 @@ impl<
                 } else {
                     // Broadcast last finalized
                     debug!(
-                    parent,
-                    last_finalized = self.last_finalized,
-                    "not backfilling because parent is behind finalized tip, broadcasting finalized"
-                );
+                        parent,
+                        last_finalized = self.last_finalized,
+                        "not backfilling because parent is behind finalized tip, broadcasting finalized"
+                    );
                     let finalization = self.construct_finalization(self.last_finalized, true);
                     if let Some(finalization) = finalization {
                         let msg = wire::Voter {
