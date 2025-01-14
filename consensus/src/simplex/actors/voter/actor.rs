@@ -75,11 +75,9 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, Seed = ()>> Round<C, H, S> {
+impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
     pub fn new(hasher: H, supervisor: S, view: View) -> Self {
-        let leader = supervisor
-            .leader(view, ())
-            .expect("unable to compute leader");
+        let leader = supervisor.leader(view).expect("unable to compute leader");
         Self {
             hasher,
             supervisor,
@@ -463,7 +461,7 @@ impl<
         A: Automaton<Context = Context>,
         R: Relay,
         F: Committer,
-        S: Supervisor<Seed = (), Index = View>,
+        S: Supervisor<Index = View>,
     > Actor<B, E, C, H, A, R, F, S>
 {
     pub fn new(

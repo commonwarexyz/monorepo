@@ -22,7 +22,7 @@ pub struct Engine<
     A: Automaton<Context = Context>,
     R: Relay,
     F: Committer,
-    S: Supervisor<Seed = (), Index = View>,
+    S: Supervisor<Index = View>,
 > {
     runtime: E,
 
@@ -40,7 +40,7 @@ impl<
         A: Automaton<Context = Context>,
         R: Relay,
         F: Committer,
-        S: Supervisor<Seed = (), Index = View>,
+        S: Supervisor<Index = View>,
     > Engine<B, E, C, H, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.

@@ -17,7 +17,7 @@ pub struct Config<
     A: Automaton<Context = Context>,
     R: Relay,
     F: Committer,
-    S: Supervisor<Seed = (), Index = View>,
+    S: Supervisor<Index = View>,
 > {
     pub crypto: C,
     pub hasher: H,
