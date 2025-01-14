@@ -127,7 +127,7 @@ mod prover;
 pub use prover::Prover;
 mod verifier;
 mod wire {
-    include!(concat!(env!("OUT_DIR"), "/wire.rs"));
+    include!(concat!(env!("OUT_DIR"), "/simplex.wire.rs"));
 }
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.

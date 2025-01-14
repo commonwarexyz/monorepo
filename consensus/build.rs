@@ -9,5 +9,27 @@ fn main() -> Result<()> {
         "Proposal.payload",
     ]);
     config.compile_protos(&["src/simplex/wire.proto"], &["src/simplex/"])?;
+
+    // Proto compilation rules for `threshold_simplex` dialect
+    let mut config = prost_build::Config::new();
+    config.bytes([
+        "Parent.digest",
+        "Proposal.payload",
+        "Notarize.signature",
+        "Notarize.seed",
+        "Notarization.signature",
+        "Notarization.seed",
+        "Nullify.signature",
+        "Nullify.seed",
+        "Nullification.signature",
+        "Nullification.seed",
+        "Finalize.signature",
+        "Finalization.signature",
+        "Finalization.seed",
+    ]);
+    config.compile_protos(
+        &["src/threshold_simplex/wire.proto"],
+        &["src/threshold_simplex/"],
+    )?;
     Ok(())
 }
