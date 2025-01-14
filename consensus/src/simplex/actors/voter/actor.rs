@@ -40,7 +40,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 const GENESIS_VIEW: View = 0;
 
@@ -60,14 +60,13 @@ struct Round<
     advance_deadline: Option<SystemTime>,
     nullify_retry: Option<SystemTime>,
 
-    // Track one proposal per view
+    // Track one proposal per view (only matters prior to notarization)
     proposal: Option<(Digest /* proposal */, wire::Proposal)>,
     requested_proposal: bool,
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
     notaries: HashMap<u32, Digest>,
-    // TODO: this is used to determine if notarized...so need to be careful about when we check it?
     notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
     notarization: Option<wire::Notarization>,
     broadcast_notarize: bool,
@@ -130,6 +129,29 @@ impl<
     pub fn set_leader(&mut self, seed: group::Signature) {
         let leader = ThresholdSupervisor::leader(&self.supervisor, seed, self.view).unwrap();
         self.leader = Some(leader);
+    }
+
+    fn add_verified_proposal(&mut self, proposal: wire::Proposal) {
+        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+        self.hasher.update(&message);
+        let digest = self.hasher.finalize();
+        if self.proposal.is_none() {
+            debug!(
+                view = proposal.view,
+                digest = hex(&digest),
+                "setting unverified proposal in notarization"
+            );
+            self.proposal = Some((digest, proposal));
+        } else if let Some((previous_digest, _)) = &self.proposal {
+            if digest != *previous_digest {
+                warn!(
+                    view = proposal.view,
+                    previous_digest = hex(previous_digest),
+                    digest = hex(&digest),
+                    "proposal in notarization does not match stored proposal"
+                );
+            }
+        }
     }
 
     async fn add_verified_notarize(
@@ -247,107 +269,6 @@ impl<
         false
     }
 
-    fn notarizable(&mut self, threshold: u32, force: bool) -> Option<wire::Notarization> {
-        if !force && (self.broadcast_notarization || self.broadcast_nullification) {
-            // We want to broadcast a notarization, even if we haven't yet verified a proposal.
-            return None;
-        }
-        if let Some(notarization) = &self.notarization {
-            self.broadcast_notarization = true;
-            return Some(notarization.clone());
-        }
-        for (proposal, notarizes) in self.notarizes.iter() {
-            if (notarizes.len() as u32) < threshold {
-                continue;
-            }
-
-            // There should never exist enough notarizes for multiple proposals, so it doesn't
-            // matter which one we choose.
-            let me = self.supervisor.share(self.view).unwrap();
-            debug!(
-                view = self.view,
-                me = me.index,
-                proposal = hex(proposal),
-                verified = self.verified_proposal,
-                "broadcasting notarization"
-            );
-
-            // Grab the proposal
-            let proposal = notarizes
-                .values()
-                .next()
-                .unwrap()
-                .proposal
-                .as_ref()
-                .unwrap()
-                .clone();
-
-            // Recover threshold signature
-            let mut notarization = Vec::new();
-            let mut seed = Vec::new();
-            for notarize in notarizes.values() {
-                let eval = Eval::deserialize(&notarize.signature).unwrap();
-                notarization.push(eval);
-                let eval = Eval::deserialize(&notarize.seed).unwrap();
-                seed.push(eval);
-            }
-            let signature = ops::threshold_signature_recover(threshold, notarization).unwrap();
-            let signature = signature.serialize();
-            let seed = ops::threshold_signature_recover(threshold, seed).unwrap();
-            let seed = seed.serialize();
-
-            // Construct notarization
-            let notarization = wire::Notarization {
-                proposal: Some(proposal.clone()),
-                signature: signature.into(),
-                seed: seed.into(),
-            };
-            // self.notarization = Some(notarization.clone());
-            self.broadcast_notarization = true;
-            return Some(notarization);
-        }
-        None
-    }
-
-    fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<wire::Nullification> {
-        if !force && (self.broadcast_nullification || self.broadcast_notarization) {
-            return None;
-        }
-        if let Some(nullification) = &self.nullification {
-            self.broadcast_nullification = true;
-            return Some(nullification.clone());
-        }
-        if (self.nullifies.len() as u32) < threshold {
-            return None;
-        }
-
-        debug!(view = self.view, "broadcasting nullification");
-
-        // Recover threshold signature
-        let mut nullification = Vec::new();
-        let mut seed = Vec::new();
-        for nullify in self.nullifies.values() {
-            let eval = Eval::deserialize(&nullify.signature).unwrap();
-            nullification.push(eval);
-            let eval = Eval::deserialize(&nullify.seed).unwrap();
-            seed.push(eval);
-        }
-        let signature = ops::threshold_signature_recover(threshold, nullification).unwrap();
-        let signature = signature.serialize();
-        let seed = ops::threshold_signature_recover(threshold, seed).unwrap();
-        let seed = seed.serialize();
-
-        // Construct nullification
-        let nullification = wire::Nullification {
-            view: self.view,
-            signature: signature.into(),
-            seed: seed.into(),
-        };
-        // self.nullification = Some(nullification.clone());
-        self.broadcast_nullification = true;
-        Some(nullification)
-    }
-
     async fn add_verified_finalize(
         &mut self,
         public_key_index: u32,
@@ -426,13 +347,6 @@ impl<
         {
             return false;
         }
-        let me = self.supervisor.share(self.view).unwrap();
-        debug!(
-            view = self.view,
-            signer = public_key_index,
-            me = me.index,
-            "recorded finalize"
-        );
         let entry = self.finalizes.entry(digest).or_default();
         let signature = &finalize.signature;
         let proof = Prover::<H>::serialize_proposal(proposal, signature);
@@ -441,15 +355,183 @@ impl<
         true
     }
 
+    fn add_verified_notarization(&mut self, notarization: wire::Notarization) -> bool {
+        // If already have notarization, ignore
+        if self.notarization.is_some() {
+            return false;
+        }
+
+        // Clear leader and advance deadlines (if they exist)
+        self.leader_deadline = None;
+        self.advance_deadline = None;
+
+        // If proposal is missing, set it
+        let proposal = notarization.proposal.as_ref().unwrap().clone();
+        self.add_verified_proposal(proposal);
+
+        // Store the notarization
+        self.notarization = Some(notarization);
+        true
+    }
+
+    fn add_verified_nullification(&mut self, nullification: wire::Nullification) -> bool {
+        // If already have nullification, ignore
+        if self.nullification.is_some() {
+            return false;
+        }
+
+        // Clear leader and advance deadlines (if they exist)
+        self.leader_deadline = None;
+        self.advance_deadline = None;
+
+        // Store the nullification
+        self.nullification = Some(nullification);
+        true
+    }
+
+    fn add_verified_finalization(&mut self, finalization: wire::Finalization) -> bool {
+        // If already have finalization, ignore
+        if self.finalization.is_some() {
+            return false;
+        }
+
+        // Clear leader and advance deadlines (if they exist)
+        self.leader_deadline = None;
+        self.advance_deadline = None;
+
+        // If proposal is missing, set it
+        let proposal = finalization.proposal.as_ref().unwrap().clone();
+        self.add_verified_proposal(proposal);
+
+        // Store the finalization
+        self.finalization = Some(finalization);
+        true
+    }
+
+    fn notarizable(&mut self, threshold: u32, force: bool) -> Option<wire::Notarization> {
+        // Ensure we haven't already broadcast
+        if !force && (self.broadcast_notarization || self.broadcast_nullification) {
+            // We want to broadcast a notarization, even if we haven't yet verified a proposal.
+            return None;
+        }
+
+        // If already constructed, return
+        if let Some(notarization) = &self.notarization {
+            self.broadcast_notarization = true;
+            return Some(notarization.clone());
+        }
+
+        // Attempt to construct notarization
+        for (proposal, notarizes) in self.notarizes.iter() {
+            if (notarizes.len() as u32) < threshold {
+                continue;
+            }
+
+            // There should never exist enough notarizes for multiple proposals, so it doesn't
+            // matter which one we choose.
+            debug!(
+                view = self.view,
+                proposal = hex(proposal),
+                verified = self.verified_proposal,
+                "broadcasting notarization"
+            );
+
+            // Grab the proposal (all will be the same)
+            let proposal = notarizes
+                .values()
+                .next()
+                .unwrap()
+                .proposal
+                .as_ref()
+                .unwrap()
+                .clone();
+
+            // Recover threshold signature
+            let mut notarization = Vec::new();
+            let mut seed = Vec::new();
+            for notarize in notarizes.values() {
+                let eval = Eval::deserialize(&notarize.signature).unwrap();
+                notarization.push(eval);
+                let eval = Eval::deserialize(&notarize.seed).unwrap();
+                seed.push(eval);
+            }
+            let signature = ops::threshold_signature_recover(threshold, notarization)
+                .unwrap()
+                .serialize();
+            let seed = ops::threshold_signature_recover(threshold, seed)
+                .unwrap()
+                .serialize();
+
+            // Construct notarization
+            let notarization = wire::Notarization {
+                proposal: Some(proposal.clone()),
+                signature: signature.into(),
+                seed: seed.into(),
+            };
+            self.broadcast_notarization = true;
+            return Some(notarization);
+        }
+        None
+    }
+
+    fn nullifiable(&mut self, threshold: u32, force: bool) -> Option<wire::Nullification> {
+        // Ensure we haven't already broadcast
+        if !force && (self.broadcast_nullification || self.broadcast_notarization) {
+            return None;
+        }
+
+        // If already constructed, return
+        if let Some(nullification) = &self.nullification {
+            self.broadcast_nullification = true;
+            return Some(nullification.clone());
+        }
+
+        // Attempt to construct nullification
+        if (self.nullifies.len() as u32) < threshold {
+            return None;
+        }
+        debug!(view = self.view, "broadcasting nullification");
+
+        // Recover threshold signature
+        let mut nullification = Vec::new();
+        let mut seed = Vec::new();
+        for nullify in self.nullifies.values() {
+            let eval = Eval::deserialize(&nullify.signature).unwrap();
+            nullification.push(eval);
+            let eval = Eval::deserialize(&nullify.seed).unwrap();
+            seed.push(eval);
+        }
+        let signature = ops::threshold_signature_recover(threshold, nullification)
+            .unwrap()
+            .serialize();
+        let seed = ops::threshold_signature_recover(threshold, seed)
+            .unwrap()
+            .serialize();
+
+        // Construct nullification
+        let nullification = wire::Nullification {
+            view: self.view,
+            signature: signature.into(),
+            seed: seed.into(),
+        };
+        self.broadcast_nullification = true;
+        Some(nullification)
+    }
+
     fn finalizable(&mut self, threshold: u32, force: bool) -> Option<wire::Finalization> {
+        // Ensure we haven't already broadcast
         if !force && self.broadcast_finalization {
             // We want to broadcast a finalization, even if we haven't yet verified a proposal.
             return None;
         }
+
+        // If already constructed, return
         if let Some(finalization) = &self.finalization {
             self.broadcast_finalization = true;
             return Some(finalization.clone());
         }
+
+        // Attempt to construct finalization
         for (proposal, finalizes) in self.finalizes.iter() {
             if (finalizes.len() as u32) < threshold {
                 continue;
@@ -486,8 +568,9 @@ impl<
                 let eval = Eval::deserialize(&finalize.signature).unwrap();
                 finalization.push(eval);
             }
-            let signature = ops::threshold_signature_recover(threshold, finalization).unwrap();
-            let signature = signature.serialize();
+            let signature = ops::threshold_signature_recover(threshold, finalization)
+                .unwrap()
+                .serialize();
 
             // Construct finalization
             let finalization = wire::Finalization {
@@ -502,6 +585,7 @@ impl<
         None
     }
 
+    /// Returns whether at least one honest participant has notarized a proposal.
     pub fn at_least_one_honest(&self) -> Option<View> {
         let participants = self.supervisor.participants(self.view)?;
         let threshold = quorum(participants.len() as u32)?;
@@ -577,7 +661,7 @@ pub struct Actor<
 impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
-        C: Scheme, // TODO: changing share over time (no longer a fixed value) -> need to determine which index we are in the identity
+        C: Scheme,
         H: Hasher,
         A: Automaton<Context = Context>,
         R: Relay,
@@ -588,7 +672,6 @@ impl<
             Index = View,
             Share = group::Share,
         >,
-        // TODO: can use participants to perform basic check + verify index associated with right participant before verification + track invalid signatures using partial and group polynomial (only way to verify correct signature) + Seed will just be seed signature (separate from notarization/finalization) + need polynomial threshold
     > Actor<B, E, C, H, A, R, F, S>
 {
     pub fn new(
@@ -668,21 +751,12 @@ impl<
 
     fn is_notarized(&self, view: View) -> Option<&wire::Proposal> {
         let round = self.views.get(&view)?;
-        let Some((digest, proposal)) = round.proposal.as_ref() else {
-            debug!(view, "proposal not found during is_notarized check");
-            return None;
-        };
-        if round.notarization.is_some() {
-            return Some(proposal);
+        if let Some(notarization) = &round.notarization {
+            return notarization.proposal.as_ref();
         }
-        let Some(notarizes) = round.notarizes.get(digest) else {
-            debug!(view, "notarizes not found during is_notarized check");
-            return None;
-        };
-        let Some(identity) = self.supervisor.identity(view) else {
-            debug!(view, "identity not found during is_notarized check");
-            return None;
-        };
+        let (digest, proposal) = round.proposal.as_ref()?;
+        let notarizes = round.notarizes.get(digest)?;
+        let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if notarizes.len() >= threshold as usize {
             return Some(proposal);
@@ -705,10 +779,10 @@ impl<
 
     fn is_finalized(&self, view: View) -> Option<&wire::Proposal> {
         let round = self.views.get(&view)?;
-        let (digest, proposal) = round.proposal.as_ref()?;
-        if round.finalization.is_some() {
-            return Some(proposal);
+        if let Some(finalization) = &round.finalization {
+            return finalization.proposal.as_ref();
         }
+        let (digest, proposal) = round.proposal.as_ref()?;
         let finalizes = round.finalizes.get(digest)?;
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
@@ -882,26 +956,19 @@ impl<
             }
         }
 
-        // TODO: don't send nullify if we are already sent finalize? Why are we still in this view...
-
         // Construct nullify
         let share = self.supervisor.share(self.view).unwrap();
         let message = nullify_message(self.view);
-        let signature = ops::partial_sign_message(share, Some(&self.nullify_namespace), &message);
-        let signature = signature.serialize();
+        let signature =
+            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
         let message = seed_message(self.view);
-        let seed = ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
-        let seed = seed.serialize();
+        let seed =
+            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         let null = wire::Nullify {
             view: self.view,
             signature: signature.into(),
             seed: seed.into(),
         };
-        debug!(
-            view = self.view,
-            public_key_index = share.index,
-            "constructing nullify"
-        );
 
         // Handle the nullify
         self.handle_nullify(share.index, null.clone()).await;
@@ -1067,11 +1134,6 @@ impl<
                 return None;
             }
 
-            debug!(
-                view = self.view,
-                leader_index, "checking proposal notarization"
-            );
-
             // Check if leader has signed a digest
             let proposal_digest = round.notaries.get(&leader_index)?;
             let proposal = round
@@ -1080,8 +1142,6 @@ impl<
                 .get(&leader_index)?
                 .proposal
                 .as_ref()?;
-
-            debug!(view = proposal.view, "found proposal notarization");
 
             // Check parent validity
             if proposal.view <= proposal.parent {
@@ -1212,8 +1272,11 @@ impl<
         round.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         round.set_leader(seed);
         self.view = view;
-        let me = self.supervisor.share(view).unwrap();
-        info!(me = me.index, view, "entered view");
+
+        // If we are backfilling, exit early
+        if self.journal.is_none() {
+            return;
+        }
 
         // Check if we should fast exit this view
         let leader = round.leader.as_ref().unwrap().clone();
@@ -1424,39 +1487,14 @@ impl<
             .entry(view)
             .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
 
-        // If already have notarization, ignore
-        if round.notarization.is_some() {
-            debug!(view, "ignoring notarization because already have one");
-            return;
+        // Store notarization
+        let notarization_bytes = wire::Voter {
+            payload: Some(wire::voter::Payload::Notarization(notarization.clone())),
         }
-
-        // Clear leader and advance deadlines (if they exist)
-        round.leader_deadline = None;
-        round.advance_deadline = None;
-
-        // If proposal is missing, set it
-        if round.proposal.is_none() {
-            let proposal = notarization.proposal.as_ref().unwrap().clone();
-            let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-            self.hasher.update(&message);
-            let digest = self.hasher.finalize();
-            debug!(
-                view = proposal.view,
-                digest = hex(&digest),
-                "setting unverified proposal in notarization"
-            );
-            round.proposal = Some((digest, proposal));
-        }
-
-        // TODO: compare proposal to value in notarization
-
-        // Put notarization in journal
-        if self.journal.is_some() {
-            let notarization_bytes = wire::Voter {
-                payload: Some(wire::voter::Payload::Notarization(notarization.clone())),
-            }
-            .encode_to_vec()
-            .into();
+        .encode_to_vec()
+        .into();
+        let seed = group::Signature::deserialize(&notarization.seed).unwrap();
+        if round.add_verified_notarization(notarization) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1465,12 +1503,6 @@ impl<
                 .expect("unable to append to journal");
             debug!(view = self.view, "journaled notarization");
         }
-
-        // Get seed
-        let seed = group::Signature::deserialize(&notarization.seed).unwrap();
-
-        // Store notarization
-        round.notarization = Some(notarization);
 
         // Enter next view
         self.enter_view(view + 1, seed);
@@ -1515,17 +1547,14 @@ impl<
             )
         });
 
-        // Clear leader and advance deadlines (if they exist)
-        round.leader_deadline = None;
-        round.advance_deadline = None;
-
-        // Put nullification in journal
-        if self.journal.is_some() {
-            let nullification_bytes = wire::Voter {
-                payload: Some(wire::voter::Payload::Nullification(nullification.clone())),
-            }
-            .encode_to_vec()
-            .into();
+        // Store nullification
+        let nullification_bytes = wire::Voter {
+            payload: Some(wire::voter::Payload::Nullification(nullification.clone())),
+        }
+        .encode_to_vec()
+        .into();
+        let seed = group::Signature::deserialize(&nullification.seed).unwrap();
+        if round.add_verified_nullification(nullification) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1534,12 +1563,6 @@ impl<
                 .expect("unable to append to journal");
             debug!(view = self.view, "journaled nullification");
         }
-
-        // Get seed
-        let seed = group::Signature::deserialize(&nullification.seed).unwrap();
-
-        // Store nullification
-        round.nullification = Some(nullification);
 
         // Enter next view
         self.enter_view(view + 1, seed);
@@ -1656,33 +1679,14 @@ impl<
             .entry(view)
             .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
 
-        // Clear leader and advance deadlines (if they exist)
-        round.leader_deadline = None;
-        round.advance_deadline = None;
-
-        // If proposal is missing, set it
-        if round.proposal.is_none() {
-            let proposal = finalization.proposal.as_ref().unwrap().clone();
-            let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-            self.hasher.update(&message);
-            let digest = self.hasher.finalize();
-            debug!(
-                view = proposal.view,
-                digest = hex(&digest),
-                "setting unverified proposal in finalization"
-            );
-            round.proposal = Some((digest, proposal));
+        // Store finalization
+        let finalization_bytes = wire::Voter {
+            payload: Some(wire::voter::Payload::Finalization(finalization.clone())),
         }
-
-        // TODO: compare proposal to value in finalization?
-
-        // Put finalization in journal
-        if self.journal.is_some() {
-            let finalization_bytes = wire::Voter {
-                payload: Some(wire::voter::Payload::Finalization(finalization.clone())),
-            }
-            .encode_to_vec()
-            .into();
+        .encode_to_vec()
+        .into();
+        let seed = group::Signature::deserialize(&finalization.seed).unwrap();
+        if round.add_verified_finalization(finalization) && self.journal.is_some() {
             self.journal
                 .as_mut()
                 .unwrap()
@@ -1691,12 +1695,6 @@ impl<
                 .expect("unable to append to journal");
             debug!(view = self.view, "journaled finalization");
         }
-
-        // Get seed
-        let seed = group::Signature::deserialize(&finalization.seed).unwrap();
-
-        // Store finalization
-        round.finalization = Some(finalization);
 
         // Track view finalized
         if view > self.last_finalized {
@@ -1726,11 +1724,11 @@ impl<
         let share = self.supervisor.share(view).unwrap();
         let proposal = &round.proposal.as_ref().unwrap().1;
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        let signature = ops::partial_sign_message(share, Some(&self.notarize_namespace), &message);
-        let signature = signature.serialize();
+        let signature =
+            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
         let message = seed_message(view);
-        let seed = ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
-        let seed = seed.serialize();
+        let seed =
+            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
         round.broadcast_notarize = true;
         Some(wire::Notarize {
             proposal: Some(proposal.clone()),
@@ -1803,8 +1801,8 @@ impl<
             "constructing finalize"
         );
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        let signature = ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
-        let signature = signature.serialize();
+        let signature =
+            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
         round.broadcast_finalize = true;
         Some(wire::Finalize {
             proposal: Some(proposal.clone()),
@@ -2073,8 +2071,6 @@ impl<
         self.enter_view(1, group::Signature::zero());
 
         // Rebuild from journal
-        //
-        // TODO: speed up replay time (avoid full enter view logic?)
         let mut journal = self.journal.take().expect("missing journal");
         {
             let stream = journal
@@ -2119,7 +2115,6 @@ impl<
                     wire::voter::Payload::Notarization(notarization) => {
                         // Handle notarization
                         let proposal = notarization.proposal.as_ref().unwrap().clone();
-                        debug!(view = proposal.view, "replaying notarization");
                         self.handle_notarization(notarization).await;
 
                         // Update round info
@@ -2150,7 +2145,6 @@ impl<
                     wire::voter::Payload::Nullification(nullification) => {
                         // Handle nullification
                         let view = nullification.view;
-                        debug!(view, "replaying nullification");
                         self.handle_nullification(nullification).await;
 
                         // Update round info
@@ -2183,7 +2177,6 @@ impl<
                     wire::voter::Payload::Finalization(finalization) => {
                         // Handle finalization
                         let view = finalization.proposal.as_ref().unwrap().view;
-                        debug!(view, "replaying finalization");
                         self.handle_finalization(finalization).await;
 
                         // Update round info

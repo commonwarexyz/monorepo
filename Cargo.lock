@@ -459,7 +459,6 @@ name = "commonware-log"
 version = "0.0.4"
 dependencies = [
  "bytes",
- "chrono",
  "clap",
  "commonware-consensus",
  "commonware-cryptography",
@@ -469,15 +468,12 @@ dependencies = [
  "commonware-storage",
  "commonware-stream",
  "commonware-utils",
- "crossterm 0.28.1",
  "futures",
  "governor",
  "prometheus-client",
  "prost",
  "prost-build",
  "rand",
- "ratatui",
- "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
