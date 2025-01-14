@@ -1026,7 +1026,7 @@ mod tests {
                 max_fetch_count: 1,
                 max_fetch_size: 1024 * 512,
                 fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-                fetch_concurrent: 2, // needed to ensure both notarization/nullification can run at same time
+                fetch_concurrent: 1,
                 replay_concurrency: 1,
             };
             let engine = Engine::new(runtime.clone(), journal, cfg);
@@ -2095,10 +2095,10 @@ mod tests {
                     nullify_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
-                    max_fetch_count: 4,
+                    max_fetch_count: 1,
                     max_fetch_size: 1024 * 512,
                     fetch_rate_per_peer: Quota::per_second(NonZeroU32::new(1).unwrap()),
-                    fetch_concurrent: 4,
+                    fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);

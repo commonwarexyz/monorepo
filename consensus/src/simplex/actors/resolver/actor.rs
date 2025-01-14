@@ -20,7 +20,7 @@ use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prost::Message as _;
-use rand::Rng;
+use rand::{prelude::SliceRandom, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -214,22 +214,24 @@ impl<
                 return;
             }
 
-            // Select notarizations by ascending height rather than preferring all notarizations or all nullifications
-            //
-            // It is possible we may have requested notarizations and nullifications for the same view (and only one may
-            // exist). We should try to fetch both before trying to fetch the next view, or we may never ask for an existing
-            // notarization or nullification.
+            // We assume nothing about the usefulness (or existence) of any given entry, so we shuffle
+            // the iterator to ensure we eventually try to fetch everything requested.
+            let mut entries = self
+                .required
+                .iter()
+                .filter(|entry| !self.inflight.contains(entry))
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                return;
+            }
+            entries.shuffle(&mut self.runtime);
+
+            // Select entries up to configured limits
             let mut notarizations = Vec::new();
             let mut nullifications = Vec::new();
             let mut inflight = Vec::new();
-            for entry in self.required.iter() {
-                // Check if we already have a request outstanding for this
-                if self.inflight.contains(entry) {
-                    continue;
-                }
+            for entry in entries {
                 inflight.push(entry.clone());
-
-                // Add to inflight
                 match entry.task {
                     Task::Notarization => notarizations.push(entry.view),
                     Task::Nullification => nullifications.push(entry.view),
