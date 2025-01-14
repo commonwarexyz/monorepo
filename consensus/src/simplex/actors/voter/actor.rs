@@ -1734,10 +1734,10 @@ impl<
             // notarizations
             let round = self.views.get(&view).expect("missing round");
             if let Some(parent) = round.at_least_one_honest() {
-                if parent >= self.last_finalized && parent != GENESIS_VIEW {
+                if parent >= self.last_finalized {
                     // Compute missing nullifications
                     let mut missing_notarizations = Vec::new();
-                    if self.is_notarized(parent).is_none() {
+                    if parent != GENESIS_VIEW && self.is_notarized(parent).is_none() {
                         missing_notarizations.push(parent);
                     }
                     let missing_nullifications = self.missing_nullifications(parent);
