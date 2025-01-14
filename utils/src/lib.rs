@@ -84,9 +84,24 @@ pub fn union_unique(namespace: &[u8], msg: &[u8]) -> Vec<u8> {
     result
 }
 
+/// Compute the modulo of bytes interpreted as a big-endian integer.
+///
+/// This function is used to select a random entry from an array
+/// when the bytes are a random seed.
+pub fn modulo(bytes: &[u8], n: u64) -> u64 {
+    let mut result = 0;
+    for &byte in bytes {
+        result = (result << 8) | (byte as u64);
+        result %= n;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_bigint::BigUint;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     #[test]
     fn test_hex() {
@@ -259,5 +274,27 @@ mod tests {
         let result = union_unique(namespace, msg);
         assert_eq!(result, expected);
         assert_eq!(result.len(), result.capacity());
+    }
+
+    #[test]
+    fn test_modulo() {
+        // Test case 0: empty bytes
+        assert_eq!(modulo(&[], 1), 0);
+
+        // Test case 1: single byte
+        assert_eq!(modulo(&[0x01], 1), 0);
+
+        // Test case 2: multiple bytes
+        assert_eq!(modulo(&[0x01, 0x02, 0x03], 10), 1);
+
+        // Test case 3: check equivalence with BigUint
+        let n = 11u64;
+        for i in 0..100 {
+            let mut rng = StdRng::seed_from_u64(i);
+            let bytes: [u8; 32] = rng.gen();
+            let big_modulo = BigUint::from_bytes_be(&bytes) % n;
+            let utils_modulo = modulo(&bytes, n);
+            assert_eq!(big_modulo, BigUint::from(utils_modulo));
+        }
     }
 }

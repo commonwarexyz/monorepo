@@ -14,5 +14,9 @@ documentation = "https://docs.rs/commonware-utils"
 prost = { workspace = true }
 sha2 = { workspace = true }
 
+[dev-dependencies]
+num-bigint = "0.4.6"
+rand = { workspace = true }
+
 [lib]
 bench = false
