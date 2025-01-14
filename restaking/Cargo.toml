@@ -1,0 +1,11 @@
+[package]
+name = "commonware-restaking"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+alloy = { version = "0.9.2", features = ["full"] }
+
+[build-dependencies]
+anyhow = "1.0"
