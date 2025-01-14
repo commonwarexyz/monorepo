@@ -1,8 +1,10 @@
 //! Simple and fast BFT agreement inspired by Simplex Consensus.
 //!
-//! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides
+//! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
 //! simple and fast BFT agreement that seeks to minimize view latency (i.e. block time)
 //! and to provide optimal finalization latency in a partially synchronous setting.
+//!
+//! _For a non-threshold version of this, checkout `simplex`._
 //!
 //! # Features
 //!
@@ -11,6 +13,8 @@
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
 //! * Flexible Block Format
+//! * VRF for Block-Ahead Leader Election
+//! * Threshold Certificates for Notarization and Finality
 //!
 //! # Design
 //!
@@ -68,24 +72,24 @@
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
 //!     * If leader `l` has not been active (no votes) in last `r` views, set `t_l` to 0.
-//! * If leader `l`, broadcast `notarize(c,v)`
+//! * If leader `l`, broadcast `(part(v), notarize(c,v))`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
 //!
-//! Upon receiving first `notarize(c,v)` from `l`:
+//! Upon receiving first `(part(v), notarize(c,v))` from `l`:
 //! * Cancel `t_l`
 //! * If the container's parent `c_parent` is notarized at `v_parent` and we have null notarizations for all views
-//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//!   between `v` and `v_parent`, verify `c` and broadcast `(part(v), notarize(c,v))`
 //!
-//! Upon receiving `2f+1` `notarize(c,v)`:
+//! Upon receiving `2f+1` `(part(v), notarize(c,v))`:
 //! * Cancel `t_a`
 //! * Mark `c` as notarized
-//! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
-//! * If have not broadcast `nullify(v)`, broadcast `finalize(c,v)`
+//! * Broadcast `(seed(v), notarization(c,v))` (even if we have not verified `c`)
+//! * If have not broadcast `(part(v), nullify(v))`, broadcast `finalize(c,v)`
 //! * Enter `v+1`
 //!
-//! Upon receiving `2f+1` `nullify(v)`:
-//! * Broadcast `nullification(v)`
+//! Upon receiving `2f+1` `(part(v), nullify(v))`:
+//! * Broadcast `(seed(v), nullification(v))`
 //!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
 //!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
 //!       instead.
@@ -93,12 +97,12 @@
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
 //! * Mark `c` as finalized (and recursively finalize its parents)
-//! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
+//! * Broadcast `(seed(v), finalization(c,v))` (even if we have not verified `c`)
 //!
 //! Upon `t_l` or `t_a` firing:
-//! * Broadcast `nullify(v)`
-//! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
+//! * Broadcast `(part(v), nullify(v))`
+//! * Every `t_r` after `(part(v), nullify(v))` broadcast that we are still in view `v`:
+//!    * Rebroadcast `(part(v), nullify(v))` and either `(seed(v-1), notarization(v-1))` or `(seed(v-1), nullification(v-1))`
 //!
 //! ### Deviations from Simplex Consensus
 //!
