@@ -12,10 +12,7 @@ use crate::bls12381::primitives::{
 };
 use bytes::BufMut;
 use rand::{rngs::OsRng, RngCore};
-use std::{
-    collections::BTreeMap,
-    mem::{self, size_of},
-};
+use std::{collections::BTreeMap, mem::size_of};
 
 /// Private polynomials are used to generate secret shares.
 pub type Private = Poly<group::Private>;
@@ -31,7 +28,7 @@ pub type Signature = Poly<group::Signature>;
 pub type PartialSignature = Eval<group::Signature>;
 
 /// The default partial signature length (G2).
-pub const PARTIAL_SIGNATURE_LENGTH: usize = mem::size_of::<u32>() + group::SIGNATURE_LENGTH;
+pub const PARTIAL_SIGNATURE_LENGTH: usize = size_of::<u32>() + group::SIGNATURE_LENGTH;
 
 /// A polynomial evaluation at a specific index.
 #[derive(Debug, Clone)]
