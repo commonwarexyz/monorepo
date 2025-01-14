@@ -665,7 +665,7 @@ pub struct Actor<
 impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
-        C: Scheme, // TODO: changing share over time (no longer a fixed value) -> need to determine which index we are in the identity
+        C: Scheme,
         H: Hasher,
         A: Automaton<Context = Context>,
         R: Relay,
@@ -676,7 +676,6 @@ impl<
             Index = View,
             Share = group::Share,
         >,
-        // TODO: can use participants to perform basic check + verify index associated with right participant before verification + track invalid signatures using partial and group polynomial (only way to verify correct signature) + Seed will just be seed signature (separate from notarization/finalization) + need polynomial threshold
     > Actor<B, E, C, H, A, R, F, S>
 {
     pub fn new(
@@ -756,21 +755,12 @@ impl<
 
     fn is_notarized(&self, view: View) -> Option<&wire::Proposal> {
         let round = self.views.get(&view)?;
-        let Some((digest, proposal)) = round.proposal.as_ref() else {
-            debug!(view, "proposal not found during is_notarized check");
-            return None;
-        };
-        if round.notarization.is_some() {
-            return Some(proposal);
+        if let Some(notarization) = &round.notarization {
+            return notarization.proposal.as_ref();
         }
-        let Some(notarizes) = round.notarizes.get(digest) else {
-            debug!(view, "notarizes not found during is_notarized check");
-            return None;
-        };
-        let Some(identity) = self.supervisor.identity(view) else {
-            debug!(view, "identity not found during is_notarized check");
-            return None;
-        };
+        let (digest, proposal) = round.proposal.as_ref()?;
+        let notarizes = round.notarizes.get(digest)?;
+        let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if notarizes.len() >= threshold as usize {
             return Some(proposal);
@@ -793,10 +783,10 @@ impl<
 
     fn is_finalized(&self, view: View) -> Option<&wire::Proposal> {
         let round = self.views.get(&view)?;
-        let (digest, proposal) = round.proposal.as_ref()?;
-        if round.finalization.is_some() {
-            return Some(proposal);
+        if let Some(finalization) = &round.finalization {
+            return finalization.proposal.as_ref();
         }
+        let (digest, proposal) = round.proposal.as_ref()?;
         let finalizes = round.finalizes.get(digest)?;
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
@@ -983,11 +973,6 @@ impl<
             signature: signature.into(),
             seed: seed.into(),
         };
-        debug!(
-            view = self.view,
-            public_key_index = share.index,
-            "constructing nullify"
-        );
 
         // Handle the nullify
         self.handle_nullify(share.index, null.clone()).await;
@@ -1153,11 +1138,6 @@ impl<
                 return None;
             }
 
-            debug!(
-                view = self.view,
-                leader_index, "checking proposal notarization"
-            );
-
             // Check if leader has signed a digest
             let proposal_digest = round.notaries.get(&leader_index)?;
             let proposal = round
@@ -1166,8 +1146,6 @@ impl<
                 .get(&leader_index)?
                 .proposal
                 .as_ref()?;
-
-            debug!(view = proposal.view, "found proposal notarization");
 
             // Check parent validity
             if proposal.view <= proposal.parent {
