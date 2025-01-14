@@ -9,7 +9,7 @@
 
 use super::{
     group::{self, equal, Element, Point, Share, DST, MESSAGE, PROOF_OF_POSSESSION},
-    poly::{self, Eval},
+    poly::{self, Eval, PartialSignature},
     Error,
 };
 use commonware_utils::union_unique;
@@ -112,7 +112,7 @@ pub fn verify_message(
 pub fn partial_sign_proof_of_possession(
     public: &poly::Public,
     private: &Share,
-) -> Eval<group::Signature> {
+) -> PartialSignature {
     // Get public key
     let threshold_public = poly::public(public);
 
@@ -135,7 +135,7 @@ pub fn partial_sign_proof_of_possession(
 /// This function assumes a group check was already performed on `signature`.
 pub fn partial_verify_proof_of_possession(
     public: &poly::Public,
-    partial: &Eval<group::Signature>,
+    partial: &PartialSignature,
 ) -> Result<(), Error> {
     let threshold_public = poly::public(public);
     let public = public.evaluate(partial.index);
@@ -152,7 +152,7 @@ pub fn partial_sign_message(
     private: &Share,
     namespace: Option<&[u8]>,
     message: &[u8],
-) -> Eval<group::Signature> {
+) -> PartialSignature {
     let sig = sign_message(&private.private, namespace, message);
     Eval {
         value: sig,
@@ -169,7 +169,7 @@ pub fn partial_verify_message(
     public: &poly::Public,
     namespace: Option<&[u8]>,
     message: &[u8],
-    partial: &Eval<group::Signature>,
+    partial: &PartialSignature,
 ) -> Result<(), Error> {
     let public = public.evaluate(partial.index);
     verify_message(&public.value, namespace, message, &partial.value)
@@ -183,7 +183,7 @@ pub fn partial_verify_message(
 /// to use in a consensus-critical context.
 pub fn threshold_signature_recover(
     threshold: u32,
-    partials: Vec<Eval<group::Signature>>,
+    partials: Vec<PartialSignature>,
 ) -> Result<group::Signature, Error> {
     let sigs = partials.len() as u32;
     if threshold > sigs {
