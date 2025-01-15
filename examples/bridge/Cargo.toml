@@ -9,7 +9,6 @@ readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/bridge"
 documentation = "https://docs.rs/commonware-bridge"
-default-run="commonware-bridge"
 
 [dependencies]
 commonware-cryptography = { workspace = true }
@@ -34,5 +33,16 @@ prost = { workspace = true }
 prost-build = { workspace = true }
 
 [[bin]]
-name = "commonware-bridge"
+name = "validator"
+path = "src/bin/validator.rs"
+bench = false
+
+[[bin]]
+name = "indexer"
+path = "src/bin/indexer.rs"
+bench = false
+
+[[bin]]
+name = "dealer"
+path = "src/bin/dealer.rs"
 bench = false

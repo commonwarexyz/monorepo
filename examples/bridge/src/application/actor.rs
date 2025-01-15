@@ -1,10 +1,11 @@
+use crate::wire;
+
 use super::{
     ingress::{Mailbox, Message},
     supervisor::Supervisor,
     Config,
 };
 use bytes::BufMut;
-use commonware_bridge::wire;
 use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},
