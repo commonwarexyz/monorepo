@@ -40,7 +40,7 @@
 //! and to collect finality certificates. A production-grade implementation would likely replace the `indexer` with
 //! a p2p broadcast mechanism.
 //!
-//! # Usage (Run at Least 3 to Make Progress)
+//! # Usage
 //!
 //! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
 //!
@@ -96,7 +96,7 @@
 //! Each network has an `identity` (the group polynomial generated above) and each validator has a `share` that can be used to create partial signatures that can be verified on said `identity`. The `other-identity` is the public
 //! key (constant term) of the other network's group polynomial. This value would remain static across a reshare (not implemented in this demo).
 //!
-//! ### Network 1
+//! ### Network 1 (Run at Least 3 to Make Progress)
 //!
 //! #### Participant 1 (Bootstrapper)
 //!
@@ -122,7 +122,7 @@
 //! cargo run --release --bin validator -- --me 4@3004 --bootstrappers 1@127.0.0.1:3001 --participants 1,2,3,4 --storage-dir /tmp/commonware-bridge/4 --indexer 0@127.0.0.1:3000 --identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd8e754b2a66d247e9937e35326a36415adfe606082c86bb823a63ba9a2a9c87f146f3d55d067b5f08f768e76f8ea382f2aa2a5bfcfc67656703f15fb905bc271514bfb0be0eb54becaba4743754638b7a1d9d2fbf3d4e2ea07850601f82a1d3ac --share 000000016b63f2c22039b703a52e4903a00986d2ea63361d3a6ef33b00330a52d4dce155 --other-identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f5
 //! ```
 //!
-//! ### Network 2
+//! ### Network 2 (Run at Least 3 to Make Progress)
 //!
 //! #### Participant 5
 //!
