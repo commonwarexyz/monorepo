@@ -10,7 +10,7 @@ pub fn new<R: Rng + CryptoRng>(rng: &mut R) -> EphemeralSecret {
 }
 
 pub fn decode_public_key(public_key: &Bytes) -> Result<PublicKey, Error> {
-    // Constuct a public key array from the data
+    // Construct a public key array from the data
     let public_key: [u8; PUBLIC_KEY_LENGTH] = match public_key.as_ref().try_into() {
         Ok(key) => key,
         Err(_) => return Err(Error::InvalidEphemeralPublicKey),
