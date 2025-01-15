@@ -22,7 +22,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
-use tracing::debug;
+use tracing::{debug, info};
 
 enum Message {
     PutBlock {
@@ -148,7 +148,7 @@ fn main() {
                         // Store block
                         network.insert(digest.clone(), incoming.data);
                         let _ = response.send(true);
-                        debug!(
+                        info!(
                             network = hex(&incoming.network),
                             block = hex(&digest),
                             "stored block"
@@ -181,7 +181,7 @@ fn main() {
                         // Store finalization
                         network.insert(view, incoming.data);
                         let _ = response.send(true);
-                        debug!(
+                        info!(
                             network = hex(&incoming.network),
                             view = view,
                             "stored finalization"
@@ -244,7 +244,7 @@ fn main() {
                     continue;
                 }
             };
-            debug!(peer = hex(&peer), "upgraded connection");
+            info!(peer = hex(&peer), "upgraded connection");
 
             // Spawn message handler
             runtime.spawn("connection", {
