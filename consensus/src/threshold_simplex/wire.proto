@@ -1,10 +1,10 @@
 syntax = "proto3";
 package threshold_simplex.wire;
 
-// To avoid complex resolution cases, we include partial signatures and signatures for the
-// seed in the same message as what is required to vote.
 message Voter {
     oneof payload {
+        // To avoid complex resolution scenarios, we include partial signatures/signatures for both
+        // consensus and the seed in the same message (dropping anything that doesn't have both).
         Notarize notarize = 1;
         Notarization notarization = 2;
         Nullify nullify = 3;
@@ -14,7 +14,7 @@ message Voter {
     }
 }
 
-// To ensure all participants stay informed, Container is included in all vote messages.
+// To ensure all participants stay informed, Proposal is included in all vote messages.
 message Proposal {
     uint64 view = 1;
     uint64 parent = 2;

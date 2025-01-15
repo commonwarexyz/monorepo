@@ -12,7 +12,7 @@ message Voter {
     }
 }
 
-// To ensure all participants stay informed, Container is included in all vote messages.
+// To ensure all participants stay informed, Proposal is included in all vote messages.
 message Proposal {
     uint64 view = 1;
     uint64 parent = 2;
