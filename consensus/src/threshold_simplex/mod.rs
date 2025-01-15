@@ -131,7 +131,7 @@
 //! to operate a lite client).
 //!
 //! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
-//! can be used to secure interopability between different consensus instances and user interactions with an infrastructure provider
+//! can be used to secure interoperability between different consensus instances and user interactions with an infrastructure provider
 //! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
 //!
 //! ### Deviations from Simplex Consensus

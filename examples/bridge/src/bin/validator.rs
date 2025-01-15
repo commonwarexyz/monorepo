@@ -1,62 +1,23 @@
-//! Commit to a secret log and agree to its hash.
-//!
-//! This example demonstrates how to build an application that employs [commonware_consensus::simplex].
-//! Whenever it is a participant's turn to build a block, they randomly generate a 16-byte secret message and send the
-//! hashed message to other participants. Participants use consensus to ensure everyone agrees on the same hash in the same
-//! view.
-//!
-//! # Persistence
-//!
-//! All consensus data is persisted to disk in the `storage-dir` directory. If you shutdown (whether unclean or not),
-//! consensus will resume where it left off when you restart.
-//!
-//! # Broadcast and Backfilling
-//!
-//! This example demonstrates how [commonware_consensus::simplex] can minimally be used. It purposely avoids introducing
-//! logic to handle broadcasting secret messages and/or backfilling old hashes/messages. Think of this as an exercise
-//! for the reader.
-//!
-//! # Usage (Run at Least 3 to Make Progress)
-//!
-//! _To run this example, you must first install [Rust](https://www.rust-lang.org/tools/install) and [protoc](https://grpc.io/docs/protoc-installation)._
-//!
-//! ## Participant 0 (Bootstrapper)
-//!
-//! ```sh
-//! cargo run --release -- --me 0@3000 --participants 0,1,2,3 --storage-dir /tmp/commonware-log/0
-//! ```
-//!
-//! ## Participant 1
-//!
-//! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3001 --participants 0,1,2,3 --storage-dir /tmp/commonware-log/1
-//! ```
-//!
-//! # Participant 2
-//!
-//! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participants 0,1,2,3 --storage-dir /tmp/commonware-log/2
-//! ```
-//!
-//! # Participant 3
-//!
-//! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3 --storage-dir /tmp/commonware-log/3
-//! ```
-
-mod application;
-mod gui;
-
 use clap::{value_parser, Arg, Command};
-use commonware_consensus::simplex::{self, Engine, Prover};
-use commonware_cryptography::{Ed25519, Scheme, Sha256};
-use commonware_p2p::authenticated::{self, Network};
+use commonware_bridge::{
+    application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
+};
+use commonware_consensus::threshold_simplex::{self, Engine, Prover};
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group::{self, Element},
+        poly::{self, Poly},
+    },
+    Ed25519, Scheme, Sha256,
+};
+use commonware_p2p::authenticated;
 use commonware_runtime::{
     tokio::{self, Executor},
-    Runner, Spawner,
+    Network, Runner, Spawner,
 };
 use commonware_storage::journal::{self, Journal};
-use commonware_utils::{hex, union};
+use commonware_stream::public_key::{self, Connection};
+use commonware_utils::{from_hex, hex, quorum, union};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::sync::{Arc, Mutex};
@@ -66,13 +27,10 @@ use std::{
 };
 use std::{str::FromStr, time::Duration};
 
-/// Unique namespace to avoid message replay attacks.
-const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_LOG";
-
 fn main() {
     // Parse arguments
-    let matches = Command::new("commonware-log")
-        .about("generate secret logs and agree on their hash")
+    let matches = Command::new("validator")
+        .about("produce finality certificates and verify external finality certificates")
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
@@ -87,13 +45,23 @@ fn main() {
                 .required(true)
                 .value_delimiter(',')
                 .value_parser(value_parser!(u64))
-                .help("All participants (arbiter and contributors)"),
+                .help("All participants"),
         )
         .arg(Arg::new("storage-dir").long("storage-dir").required(true))
+        .arg(Arg::new("indexer").long("indexer").required(true))
+        .arg(Arg::new("identity").long("identity").required(true))
+        .arg(Arg::new("share").long("share").required(true))
+        .arg(
+            Arg::new("other-identity")
+                .long("other-identity")
+                .required(true),
+        )
         .get_matches();
 
-    // Create GUI
-    let gui = gui::Gui::new();
+    // Create logger
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .init();
 
     // Configure my identity
     let me = matches
@@ -147,6 +115,40 @@ fn main() {
         .get_one::<String>("storage-dir")
         .expect("Please provide storage directory");
 
+    // Configure threshold
+    let threshold = quorum(validators.len() as u32).expect("Threshold not well-formed");
+    let identity = matches
+        .get_one::<String>("identity")
+        .expect("Please provide identity");
+    let identity = from_hex(identity).expect("Identity not well-formed");
+    let identity: Poly<group::Public> =
+        Poly::deserialize(&identity, threshold).expect("Identity not well-formed");
+    let public = poly::public(&identity);
+    let share = matches
+        .get_one::<String>("share")
+        .expect("Please provide share");
+    let share = from_hex(share).expect("Share not well-formed");
+    let share = group::Share::deserialize(&share).expect("Share not well-formed");
+
+    // Configure indexer
+    let indexer = matches
+        .get_one::<String>("indexer")
+        .expect("Please provide indexer");
+    let parts = indexer.split('@').collect::<Vec<&str>>();
+    let indexer_key = parts[0]
+        .parse::<u64>()
+        .expect("Indexer key not well-formed");
+    let indexer = Ed25519::from_seed(indexer_key).public_key();
+    let indexer_address = SocketAddr::from_str(parts[1]).expect("Indexer address not well-formed");
+
+    // Configure other identity
+    let other_identity = matches
+        .get_one::<String>("other-identity")
+        .expect("Please provide other identity");
+    let other_identity = from_hex(other_identity).expect("Other identity not well-formed");
+    let other_identity =
+        group::Public::deserialize(&other_identity).expect("Other identity not well-formed");
+
     // Initialize runtime
     let runtime_cfg = tokio::Config {
         storage_directory: storage_directory.into(),
@@ -154,10 +156,20 @@ fn main() {
     };
     let (executor, runtime) = Executor::init(runtime_cfg.clone());
 
+    // Configure indexer
+    let indexer_cfg = public_key::Config {
+        crypto: signer.clone(),
+        namespace: INDEXER_NAMESPACE.to_vec(),
+        max_message_size: 1024 * 1024,
+        synchrony_bound: Duration::from_secs(1),
+        max_handshake_age: Duration::from_secs(60),
+        handshake_timeout: Duration::from_secs(5),
+    };
+
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        &union(APPLICATION_NAMESPACE, b"_P2P"),
+        &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
@@ -166,7 +178,18 @@ fn main() {
 
     // Start runtime
     executor.start(async move {
-        let (mut network, mut oracle) = Network::new(runtime.clone(), p2p_cfg);
+        // Dial indexer
+        let (sink, stream) = runtime
+            .dial(indexer_address)
+            .await
+            .expect("Failed to dial indexer");
+        let indexer =
+            Connection::upgrade_dialer(runtime.clone(), indexer_cfg, sink, stream, indexer)
+                .await
+                .expect("Failed to upgrade connection with indexer");
+
+        // Setup p2p
+        let (mut network, mut oracle) = authenticated::Network::new(runtime.clone(), p2p_cfg);
 
         // Provide authorized peers
         //
@@ -203,16 +226,22 @@ fn main() {
         .expect("Failed to initialize journal");
 
         // Initialize application
-        let namespace = union(APPLICATION_NAMESPACE, b"_CONSENSUS");
+        let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let hasher = Sha256::default();
-        let prover: Prover<Ed25519, Sha256> = Prover::new(&namespace);
+        let prover: Prover<Sha256> = Prover::new(public, &consensus_namespace);
+        let other_prover: Prover<Sha256> = Prover::new(other_identity, &consensus_namespace);
         let (application, supervisor, mailbox) = application::Application::new(
             runtime.clone(),
             application::Config {
+                indexer,
                 prover,
+                other_prover,
+                other_network: other_identity,
                 hasher: hasher.clone(),
                 mailbox_size: 1024,
+                identity,
                 participants: validators.clone(),
+                share,
             },
         );
 
@@ -220,7 +249,7 @@ fn main() {
         let engine = Engine::new(
             runtime.clone(),
             journal,
-            simplex::Config {
+            threshold_simplex::Config {
                 crypto: signer.clone(),
                 hasher,
                 automaton: mailbox.clone(),
@@ -228,7 +257,7 @@ fn main() {
                 committer: mailbox,
                 supervisor,
                 registry: Arc::new(Mutex::new(Registry::default())),
-                namespace,
+                namespace: consensus_namespace,
                 mailbox_size: 1024,
                 replay_concurrency: 1,
                 leader_timeout: Duration::from_secs(1),
@@ -244,7 +273,6 @@ fn main() {
         );
 
         // Start consensus
-        runtime.spawn("application", application.run());
         runtime.spawn("network", network.run());
         runtime.spawn(
             "engine",
@@ -254,7 +282,7 @@ fn main() {
             ),
         );
 
-        // Block on GUI
-        gui.run(runtime).await;
+        // Block on application
+        application.run().await;
     });
 }
