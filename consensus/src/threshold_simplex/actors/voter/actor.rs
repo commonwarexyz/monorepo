@@ -215,11 +215,6 @@ impl<
         {
             return false;
         }
-        debug!(
-            view = self.view,
-            signer = public_key_index,
-            "recorded notarize"
-        );
         let entry = self.notarizes.entry(digest).or_default();
         let proof = Prover::<H>::serialize_proposal(proposal, &notarize.proposal_signature);
         entry.insert(public_key_index, notarize);
@@ -236,11 +231,6 @@ impl<
         let finalize = self.finalizers.get(&public_key_index);
         if finalize.is_none() {
             // Store the nullify
-            debug!(
-                view = self.view,
-                signer = public_key_index,
-                "recorded nullify"
-            );
             return self.nullifies.insert(public_key_index, nullify).is_none();
         }
         let finalize = finalize.unwrap();
@@ -1825,11 +1815,6 @@ impl<
                 return None;
             }
         };
-        debug!(
-            view,
-            public_key_index = share.index,
-            "constructing finalize"
-        );
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         let proposal_signature =
             ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
