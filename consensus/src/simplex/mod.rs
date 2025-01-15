@@ -1,8 +1,8 @@
 //! Simple and fast BFT agreement inspired by Simplex Consensus.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides
-//! simple and fast BFT agreement that minimizes both view latency (i.e. block time)
-//! and finalization latency in a partially synchronous setting.
+//! simple and fast BFT agreement that minimizes both view (i.e. block time) and finalization
+//! latency in a partially synchronous setting.
 //!
 //! _If your application would benefit from succinct consensus certificates or a bias-resistant
 //! VRF, see [Threshold Simplex](crate::threshold_simplex)._
