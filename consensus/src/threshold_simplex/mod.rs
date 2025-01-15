@@ -206,7 +206,7 @@ mod tests {
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
     use prometheus_client::registry::Registry;
-    use rand::{Rng, SeedableRng};
+    use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::NonZeroU32,
@@ -300,7 +300,7 @@ mod tests {
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -336,8 +336,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-            let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -571,8 +570,7 @@ mod tests {
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
                 // Derive threshold
-                let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-                let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+                let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
                 let pk = poly::public(&public);
                 let prover = Prover::new(pk, &namespace);
 
@@ -753,7 +751,7 @@ mod tests {
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(360));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -795,8 +793,7 @@ mod tests {
             .await;
 
             // Derive threshold
-            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-            let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -1051,7 +1048,7 @@ mod tests {
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1093,8 +1090,7 @@ mod tests {
             .await;
 
             // Derive threshold
-            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-            let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -1245,7 +1241,7 @@ mod tests {
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1281,8 +1277,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-            let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -1439,7 +1434,7 @@ mod tests {
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(120));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(120));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1475,8 +1470,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-            let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -1615,7 +1609,7 @@ mod tests {
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(900));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(900));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1651,8 +1645,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
 
             // Derive threshold
-            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-            let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -1847,7 +1840,7 @@ mod tests {
             timeout: Some(Duration::from_secs(3_000)),
             ..deterministic::Config::default()
         };
-        let (executor, runtime, auditor) = Executor::init(cfg);
+        let (executor, mut runtime, auditor) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1883,8 +1876,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
 
             // Derive threshold
-            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-            let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -2029,7 +2021,7 @@ mod tests {
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -2065,8 +2057,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-            let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
@@ -2217,7 +2208,7 @@ mod tests {
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -2253,8 +2244,7 @@ mod tests {
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
             // Derive threshold
-            let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-            let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
             let prover = Prover::new(pk, &namespace);
 
