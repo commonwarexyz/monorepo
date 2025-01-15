@@ -4,7 +4,7 @@
 //! simple and fast BFT agreement that minimizes both view latency (i.e. block time)
 //! and finalization latency in a partially synchronous setting. Unlike Simplex Consensus,
 //! `threshold-simplex` emits both succinct consensus certificates and a bias-resistant beacon
-//! during each view without any additional message overhead.
+//! during each view (without any additional message overhead).
 //!
 //! _If you want to deploy Simplex Consensus but can't employ threshold signatures, see
 //! [Simplex](crate::simplex)._
