@@ -17,7 +17,7 @@ pub mod utils;
 
 /// Tuple representing a message received from a given public key.
 ///
-/// This message is guranteed to adhere to the configuration of the channel and
+/// This message is guaranteed to adhere to the configuration of the channel and
 /// will already be decrypted and authenticated.
 pub type Message = (PublicKey, Bytes);
 
