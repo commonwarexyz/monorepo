@@ -50,7 +50,7 @@ impl std::io::Write for Writer {
             msg,
         );
 
-        // Add remaning fields
+        // Add remaining fields
         Self::add_to_log_message("", &json, &mut log_message);
         let log_message = format!("{})", log_message.trim_end());
 
