@@ -1,4 +1,4 @@
-//! Extension of Simplex Consensus with succinct consensus certificates and a bias-resistant VRF.
+//! Simple and fast BFT agreement with succinct consensus certificates and a bias-resistant VRF inspired by Simplex Consensus.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
 //! simple and fast BFT agreement that minimizes both view latency (i.e. block time)
