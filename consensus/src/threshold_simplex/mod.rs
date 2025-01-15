@@ -3,7 +3,9 @@
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
 //! simple and fast BFT agreement that minimizes both view latency (i.e. block time)
 //! and finalization latency in a partially synchronous setting. Unlike Simplex Consensus,
-//! `threshold-simplex` emits both succinct consensus certificates and a bias-resistant beacon
+//! `threshold-simplex` employs a `2f+1` threshold to
+//!
+//! emits both succinct consensus certificates and a bias-resistant beacon
 //! during each view (without any additional message overhead).
 //!
 //! _If you want to deploy Simplex Consensus but can't employ threshold signatures, see
@@ -29,7 +31,7 @@
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
 //! * Flexible Block Format
-//! * Stateless Consensus Certificates for Notarization and Finality
+//! * Succinct Consensus Certificates for Notarization and Finality
 //! * VRF for Leader Election and Post-Facto Execution Modifications
 //!
 //! # Design
@@ -120,23 +122,30 @@
 //! * Every `t_r` after `(part(v), nullify(v))` broadcast that we are still in view `v`:
 //!    * Rebroadcast `(part(v), nullify(v))` and either `(seed(v-1), notarization(v-1))` or `(seed(v-1), nullification(v-1))`
 //!
-//! #### Bias-Resistant VRF
-//!
-//! When broadcasting a `notarize(c,v)` or `nullify(v)` message, a validator must also include a `part(v)` message (a partial
-//! signature over the view `v` index). When `2f+1` `notarize(c,v)` or `nullify(v)` messages are received, a validator can
-//! derive `seed(v)`. Because `part(v)` is only over the view `v`, the seed is the same for a given view `v` regardless of
-//! whether or not a block was notarized in said view `v`.
-//!
-//! `seed(v)` can be used as bias-resistant randomness to select the leader for `v+1` and in the execution of `c` (at view `v`).
-//! TODO: more elaboration on why this is safe.
-//!
 //! #### Succinct Consensus Certificates
 //!
-//! Because all messages are partial signatures (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`), `notarization(c,v)`, `nullification(v)`,
-//! and `finalization(c,v)` are all recovered threshold signatures (of a static public key). This makes it possible for an external
+//! All broadcast consensus messages are partial signatures (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) for a `2f+1` of `3f+1`
+//! shared secret. As soon as `2f+1` messages are received, a threshold signature over `notarization(c,v)`, `nullification(v)`, and
+//! `finalization(c,v)` can be recovered, respectively. Using a DKG and resharing scheme, a static public key can be maintained
+//! across reconfiguration to ensure any of these certificates can be verified with a static public by an external process without
+//! following consensus and/or tracking the current set of participants.
+//!
+//!
+//! are all recovered threshold signatures (of a static public key). This makes it possible for an external
 //! process to verify that a block is canonical in a given consensus instance without actually following that consensus instance.
 //!
 //! This can be used both to secure interopability between different consensus instances and to secure user interactions with an RPC provider.
+//!
+//! #### Bias-Resistant VRF
+//!
+//! When broadcasting a `notarize(c,v)` or `nullify(v)` message, a participant must also include a `part(v)` message (a partial
+//! signature over the view `v` index). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are received from unique participants,
+//! `seed(v)` can be derived. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
+//! whether or not a block was notarized in said view `v`.
+//!
+//! Because the value of `seed(v)` cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it
+//! can be used both as a beacon for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness for in
+//! execution (where `seed(v)` impacts a block in `v`).
 //!
 //! ### Deviations from Simplex Consensus
 //!
