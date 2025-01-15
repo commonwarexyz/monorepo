@@ -14,49 +14,49 @@ message Voter {
     }
 }
 
-// To ensure all participants stay informed, Proposal is included in all vote messages.
+// To ensure all participants stay informed, Proposal is included in all Notarize/Finalize messages.
 message Proposal {
     uint64 view = 1;
     uint64 parent = 2;
     bytes payload = 3; // Digest
 }
 
-// A vote from the leader for a view is also treated as a proposal
+// A Notarize from the leader for a view is also treated as a proposal
 // for that view.
 message Notarize {
     Proposal proposal = 1;
-    bytes signature = 2;
-    bytes seed = 3;
+    bytes proposal_signature = 2; // Partial
+    bytes seed_signature = 3; // Partial
 }
 
 message Notarization {
     Proposal proposal = 1;
-    bytes signature = 2;
-    bytes seed = 3;
+    bytes proposal_signature = 2;
+    bytes seed_signature = 3;
 }
 
 // Nullify is used to indicate that a view should be nullified (skipped).
 message Nullify {
     uint64 view = 1;
-    bytes signature = 2;
-    bytes seed = 3;
+    bytes view_signature = 2; // Partial
+    bytes seed_signature = 3; // Partial
 }
 
 message Nullification {
     uint64 view = 1;
-    bytes signature = 2;
-    bytes seed = 3;
+    bytes view_signature = 2;
+    bytes seed_signature = 3;
 }
 
 message Finalize {
     Proposal proposal = 1;
-    bytes signature = 2;
+    bytes proposal_signature = 2; // Partial
 }
 
 message Finalization {
     Proposal proposal = 1;
-    bytes signature = 2;
-    bytes seed = 3;
+    bytes proposal_signature = 2;
+    bytes seed_signature = 3;
 }
 
 message Backfiller {

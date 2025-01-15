@@ -12,7 +12,7 @@ message Voter {
     }
 }
 
-// To ensure all participants stay informed, Proposal is included in all vote messages.
+// To ensure all participants stay informed, Proposal is included in all Notarize/Finalize messages.
 message Proposal {
     uint64 view = 1;
     uint64 parent = 2;
@@ -24,7 +24,7 @@ message Signature {
     bytes signature = 2;
 }
 
-// A vote from the leader for a view is also treated as a proposal
+// A Notarize from the leader for a view is also treated as a proposal
 // for that view.
 message Notarize {
     Proposal proposal = 1;
