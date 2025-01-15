@@ -68,9 +68,9 @@
 //!
 //! ## Joining Consensus
 //!
-//! As soon as `2f+1` votes or finalizes are observed for some view `v`, the `Voter` will enter `v+1`.
-//! This means that a new participant joining consensus will immediately jump ahead to the latest view
-//! and begin participating in consensus (assuming it can verify blocks).
+//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
+//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
+//! latest view and begin participating in consensus (assuming it can verify blocks).
 //!
 //! ## Persistence
 //!
@@ -87,7 +87,7 @@
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
-//!     * If leader `l` has not been active (no votes) in last `r` views, set `t_l` to 0.
+//!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
 //! * If leader `l`, broadcast `(part(v), notarize(c,v))`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
