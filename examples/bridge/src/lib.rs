@@ -36,7 +36,7 @@
 //! # Broadcast and Backfilling
 //!
 //! This example demonstrates how [commonware_consensus::threshold_simplex] can minimally be used to efficiently power
-//! interopability between two networks. To simplify the example, an `indexer` is used both to distribute blocks
+//! interoperability between two networks. To simplify the example, an `indexer` is used both to distribute blocks
 //! and to collect finality certificates. A production-grade implementation would likely replace the `indexer` with
 //! a p2p broadcast mechanism.
 //!
