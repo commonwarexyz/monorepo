@@ -1518,7 +1518,6 @@ impl<
                 .append(view, notarization_bytes)
                 .await
                 .expect("unable to append to journal");
-            debug!(view = self.view, "journaled notarization");
         }
 
         // Enter next view
@@ -1578,7 +1577,6 @@ impl<
                 .append(view, nullification_bytes)
                 .await
                 .expect("unable to append to journal");
-            debug!(view = self.view, "journaled nullification");
         }
 
         // Enter next view
@@ -1710,7 +1708,6 @@ impl<
                 .append(view, finalization_bytes)
                 .await
                 .expect("unable to append to journal");
-            debug!(view = self.view, "journaled finalization");
         }
 
         // Track view finalized
