@@ -1,5 +1,6 @@
 use commonware_consensus::{
-    threshold_simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re,
+    threshold_simplex::{Context, View},
+    Automaton as Au, Committer as Co, Proof, Relay as Re,
 };
 use commonware_cryptography::Digest;
 use futures::{
@@ -12,6 +13,7 @@ pub enum Message {
         response: oneshot::Sender<Digest>,
     },
     Propose {
+        index: View,
         response: oneshot::Sender<Digest>,
     },
     Verify {
@@ -52,12 +54,15 @@ impl Au for Mailbox {
         receiver.await.expect("Failed to receive genesis")
     }
 
-    async fn propose(&mut self, _: Context) -> oneshot::Receiver<Digest> {
+    async fn propose(&mut self, context: Context) -> oneshot::Receiver<Digest> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(Message::Propose { response })
+            .send(Message::Propose {
+                index: context.view,
+                response,
+            })
             .await
             .expect("Failed to send propose");
         receiver

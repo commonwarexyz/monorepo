@@ -60,26 +60,23 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
         while let Some(message) = self.mailbox.next().await {
             match message {
                 Message::Genesis { response } => {
-                    // Use the hash of the genesis message as the initial
+                    // Use the digest of the genesis message as the initial
                     // payload.
-                    //
-                    // Since we don't verify that proposed messages link
-                    // to some parent, this doesn't really do anything
-                    // in this example.
                     self.hasher.update(GENESIS);
                     let digest = self.hasher.finalize();
                     let _ = response.send(digest);
                 }
-                Message::Propose { response } => {
+                Message::Propose { index, response } => {
+                    // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
                     let msg = match self.runtime.gen_bool(0.5) {
                         true => {
-                            // Generate a random message (secret to us)
+                            // Generate a random message
                             let mut msg = vec![0; 17];
                             self.runtime.fill(&mut msg[1..]);
                             msg
                         }
                         false => {
-                            // Fetch a proof from the indexer for other network
+                            // Fetch a certificate from the indexer for the other network
                             let msg = wire::GetFinalization {
                                 network: self.other_public.clone(),
                             };
@@ -107,12 +104,12 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                                 _ => panic!("unexpected response"),
                             };
 
-                            // Verify proof
+                            // Verify certificate
                             self.other_prover
                                 .deserialize_finalization(proof.clone().into())
                                 .expect("indexer is corrupt");
 
-                            // Use proof as message
+                            // Use certificate as message
                             let mut msg = Vec::with_capacity(1 + proof.len());
                             msg.put_u8(1);
                             msg.extend(proof);
@@ -148,12 +145,12 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                         wire::outbound::Payload::Success(s) => s,
                         _ => panic!("unexpected response"),
                     };
+                    debug!(view = index, success, "block published");
                     if !success {
-                        debug!("failed to publish block");
                         continue;
                     }
 
-                    // Send digest to consensus
+                    // Send digest to consensus once we confirm indexer has underlying data
                     let _ = response.send(digest);
                 }
                 Message::Verify { payload, response } => {
@@ -201,7 +198,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                         continue;
                     }
 
-                    // Verify proof
+                    // Verify consensus certificate
                     let proof = block[1..].to_vec();
                     let result = self
                         .other_prover
@@ -260,7 +257,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                         wire::outbound::Payload::Success(s) => s,
                         _ => panic!("unexpected response"),
                     };
-                    info!(success, "finalization posted");
+                    debug!(view, success, "finalization posted");
                 }
             }
         }
