@@ -1,0 +1,38 @@
+[package]
+name = "commonware-bridge"
+edition = "2021"
+publish = true
+version = "0.0.2"
+license = "MIT OR Apache-2.0"
+description = "TBD"
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/bridge"
+documentation = "https://docs.rs/commonware-bridge"
+default-run="commonware-bridge"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+commonware-consensus = { workspace = true }
+commonware-storage = { workspace = true }
+commonware-stream = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+prometheus-client = { workspace = true }
+governor = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "json"] }
+prost = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+
+[[bin]]
+name = "commonware-bridge"
+bench = false

@@ -391,6 +391,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fd119d74b830634cea2a0f58bbd0d54540518a14397557951e79340abc28c0"
 
 [[package]]
+name = "commonware-bridge"
+version = "0.0.2"
+dependencies = [
+ "bytes",
+ "clap",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "governor",
+ "prometheus-client",
+ "prost",
+ "prost-build",
+ "rand",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-chat"
 version = "0.0.29"
 dependencies = [
