@@ -1,8 +1,10 @@
 syntax = "proto3";
-package simplex.wire;
+package threshold_simplex.wire;
 
 message Voter {
     oneof payload {
+        // To avoid complex resolution scenarios, we include partial signatures/signatures for both
+        // consensus and the seed in the same message (dropping anything that doesn't have both).
         Notarize notarize = 1;
         Notarization notarization = 2;
         Nullify nullify = 3;
@@ -19,42 +21,42 @@ message Proposal {
     bytes payload = 3; // Digest
 }
 
-message Signature {
-    uint32 public_key = 1;
-    bytes signature = 2;
-}
-
 // A Notarize from the leader for a view is also treated as a proposal
 // for that view.
 message Notarize {
     Proposal proposal = 1;
-    Signature signature = 2;
+    bytes proposal_signature = 2; // Partial
+    bytes seed_signature = 3; // Partial
 }
 
 message Notarization {
     Proposal proposal = 1;
-    repeated Signature signatures = 2;
+    bytes proposal_signature = 2;
+    bytes seed_signature = 3;
 }
 
 // Nullify is used to indicate that a view should be nullified (skipped).
 message Nullify {
     uint64 view = 1;
-    Signature signature = 2;
+    bytes view_signature = 2; // Partial
+    bytes seed_signature = 3; // Partial
 }
 
 message Nullification {
     uint64 view = 1;
-    repeated Signature signatures = 2;
+    bytes view_signature = 2;
+    bytes seed_signature = 3;
 }
 
 message Finalize {
     Proposal proposal = 1;
-    Signature signature = 2;
+    bytes proposal_signature = 2; // Partial
 }
 
 message Finalization {
     Proposal proposal = 1;
-    repeated Signature signatures = 2;
+    bytes proposal_signature = 2;
+    bytes seed_signature = 3;
 }
 
 message Backfiller {

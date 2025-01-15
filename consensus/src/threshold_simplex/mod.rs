@@ -1,11 +1,15 @@
-//! Simple and fast BFT agreement inspired by Simplex Consensus.
+//! [Simplex](crate::simplex)-like BFT agreement with an embedded VRF and succinct consensus certificates.
 //!
-//! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `simplex` provides
-//! simple and fast BFT agreement that minimizes both view (i.e. block time) and finalization
-//! latency in a partially synchronous setting.
+//! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
+//! simple and fast BFT agreement that minimizes both view (i.e. block time) and finalization latency in
+//! a partially synchronous setting. Unlike Simplex Consensus, however, `threshold-simplex` employs threshold
+//! cryptography (specifically BLS12-381 threshold signatures with a `2f+1` of `3f+1` quorum) to generate both
+//! a bias-resistant beacon (for leader election and post-facto execution randomness) and succinct consensus certificates
+//! (any certificate can be verified with just the static public key of the consensus instance) for each view
+//! with zero message overhead (natively integrated).
 //!
-//! _If your application would benefit from succinct consensus certificates or a bias-resistant
-//! VRF, see [Threshold Simplex](crate::threshold_simplex)._
+//! _If you wish to deploy Simplex Consensus but can't employ threshold signatures, see
+//! [Simplex](crate::simplex)._
 //!
 //! # Features
 //!
@@ -14,12 +18,14 @@
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
 //! * Flexible Block Format
+//! * Embedded VRF for Leader Election and Post-Facto Execution Randomness
+//! * Succinct Consensus Certificates for Notarization, Nullification, and Finality
 //!
 //! # Design
 //!
 //! ## Architecture
 //!
-//! All logic is split into two components: the `Voter` and the `Resolver` (and the user of `simplex`
+//! All logic is split into two components: the `Voter` and the `Resolver` (and the user of `threshold-simplex`
 //! provides `Application`). The `Voter` is responsible for participating in the latest view and the
 //! `Resolver` is responsible for fetching artifacts from previous views required to verify proposed
 //! blocks in the latest view.
@@ -47,13 +53,13 @@
 //! ```
 //!
 //! _Application is usually a single object that implements the `Automaton`, `Relay`, `Committer`,
-//! and `Supervisor` traits._
+//! and `ThresholdSupervisor` traits._
 //!
 //! ## Joining Consensus
 //!
-//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter`
-//! will enter `v+1`. This means that a new participant joining consensus will immediately jump
-//! ahead to the latest view and begin participating in consensus (assuming it can verify blocks).
+//! As soon as `2f+1` notarizes, nullifies, or finalizes are observed for some view `v`, the `Voter` will
+//! enter `v+1`. This means that a new participant joining consensus will immediately jump ahead to the
+//! latest view and begin participating in consensus (assuming it can verify blocks).
 //!
 //! ## Persistence
 //!
@@ -71,24 +77,24 @@
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
 //!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
-//! * If leader `l`, broadcast `notarize(c,v)`
+//! * If leader `l`, broadcast `(part(v), notarize(c,v))`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
 //!
-//! Upon receiving first `notarize(c,v)` from `l`:
+//! Upon receiving first `(part(v), notarize(c,v))` from `l`:
 //! * Cancel `t_l`
 //! * If the container's parent `c_parent` is notarized at `v_parent` and we have null notarizations for all views
-//!   between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//!   between `v` and `v_parent`, verify `c` and broadcast `(part(v), notarize(c,v))`
 //!
-//! Upon receiving `2f+1` `notarize(c,v)`:
+//! Upon receiving `2f+1` `(part(v), notarize(c,v))`:
 //! * Cancel `t_a`
 //! * Mark `c` as notarized
-//! * Broadcast `notarization(c,v)` (even if we have not verified `c`)
-//! * If have not broadcast `nullify(v)`, broadcast `finalize(c,v)`
+//! * Broadcast `(seed(v), notarization(c,v))` (even if we have not verified `c`)
+//! * If have not broadcast `(part(v), nullify(v))`, broadcast `finalize(c,v)`
 //! * Enter `v+1`
 //!
-//! Upon receiving `2f+1` `nullify(v)`:
-//! * Broadcast `nullification(v)`
+//! Upon receiving `2f+1` `(part(v), nullify(v))`:
+//! * Broadcast `(seed(v), nullification(v))`
 //!     * If observe `>= f+1` `notarize(c,v)` for some `c`, request `notarization(c_parent, v_parent)` and any missing
 //!       `nullification(*)` between `v_parent` and `v`. If `c_parent` is than last finalized, broadcast last finalization
 //!       instead.
@@ -96,12 +102,37 @@
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
 //! * Mark `c` as finalized (and recursively finalize its parents)
-//! * Broadcast `finalization(c,v)` (even if we have not verified `c`)
+//! * Broadcast `(seed(v), finalization(c,v))` (even if we have not verified `c`)
 //!
 //! Upon `t_l` or `t_a` firing:
-//! * Broadcast `nullify(v)`
-//! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
+//! * Broadcast `(part(v), nullify(v))`
+//! * Every `t_r` after `(part(v), nullify(v))` broadcast that we are still in view `v`:
+//!    * Rebroadcast `(part(v), nullify(v))` and either `(seed(v-1), notarization(v-1))` or `(seed(v-1), nullification(v-1))`
+//!
+//! #### Embedded VRF
+//!
+//! When broadcasting any `notarize(c,v)` or `nullify(v)` message, a participant must also include a `part(v)` message (a partial
+//! signature over the view `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected from unique participants,
+//! `seed(v)` can be recovered. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
+//! whether or not a block was notarized in said view `v`.
+//!
+//! Because the value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v`
+//! and cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it can be used both as a beacon
+//! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
+//! is used as a seed in `v`).
+//!
+//! #### Succinct Consensus Certificates
+//!
+//! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) contain partial signatures for a static
+//! public key (derived from a group polynomial that can be recomputed during reconfiguration using [dkg](commonware_cryptography::bls12381::dkg)).
+//! As soon as `2f+1` messages are collected, a threshold signature over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)`
+//! can be recovered, respectively. Because the public key is static, any of these certificates can be verified by an external
+//! process without following the consensus instance and/or tracking the current set of participants (as is typically required
+//! to operate a lite client).
+//!
+//! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
+//! can be used to secure interopability between different consensus instances and user interactions with an infrastructure provider
+//! (where any data served can be proven to derive from some finalized block of some consensus instance with a known static public key).
 //!
 //! ### Deviations from Simplex Consensus
 //!
@@ -124,13 +155,13 @@ mod encoder;
 mod engine;
 pub use engine::Engine;
 mod metrics;
-#[cfg(test)]
-mod mocks;
 mod prover;
 pub use prover::Prover;
+#[cfg(test)]
+pub mod mocks;
 mod verifier;
 mod wire {
-    include!(concat!(env!("OUT_DIR"), "/simplex.wire.rs"));
+    include!(concat!(env!("OUT_DIR"), "/threshold_simplex.wire.rs"));
 }
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
@@ -171,7 +202,10 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Ed25519, PublicKey, Scheme, Sha256};
+    use commonware_cryptography::{
+        bls12381::{dkg::ops, primitives::poly},
+        Ed25519, PublicKey, Scheme, Sha256,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
@@ -184,8 +218,7 @@ mod tests {
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
     use prometheus_client::registry::Registry;
-    use prover::Prover;
-    use rand::Rng;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::NonZeroU32,
@@ -279,7 +312,7 @@ mod tests {
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -304,7 +337,6 @@ mod tests {
             }
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -315,22 +347,27 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let pk = poly::public(&public);
+            let prover = Prover::new(pk, &namespace);
+
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.into_iter() {
-                // Start engine
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Configure engine
                 let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
-                    participants: view_validators.clone(),
+                    participants,
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
@@ -375,6 +412,7 @@ mod tests {
                 };
                 let engine = Engine::new(runtime.clone(), journal, cfg);
 
+                // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -389,8 +427,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",
@@ -489,9 +526,15 @@ mod tests {
     fn test_unclean_shutdown() {
         // Create runtime
         let n = 5;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
+
+        // Derive threshold
+        let mut rng = StdRng::seed_from_u64(0);
+        let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+        let pk = poly::public(&public);
 
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
@@ -499,7 +542,7 @@ mod tests {
         let finalized = Arc::new(Mutex::new(HashMap::new()));
         let completed = Arc::new(Mutex::new(HashSet::new()));
         let supervised = Arc::new(Mutex::new(Vec::new()));
-        let (mut executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (mut executor, mut runtime, _) = Executor::timed(Duration::from_secs(300));
         while completed.lock().unwrap().len() != n as usize {
             let namespace = namespace.clone();
             let shutdowns = shutdowns.clone();
@@ -509,6 +552,8 @@ mod tests {
             let supervised = supervised.clone();
             executor.start({
                 let mut runtime = runtime.clone();
+                let public = public.clone();
+                let shares = shares.clone();
                 async move {
                 // Create simulated network
                 let (network, mut oracle) = Network::new(
@@ -533,7 +578,6 @@ mod tests {
                 }
                 validators.sort();
                 schemes.sort_by_key(|s| s.public_key());
-                let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
                 let mut registrations = register_validators(&mut oracle, &validators).await;
 
                 // Link all validators
@@ -545,21 +589,23 @@ mod tests {
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
                 // Create engines
+                let prover = Prover::new(pk, &namespace);
                 let hasher = Sha256::default();
-                let prover = Prover::new(&namespace);
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
                 let mut engine_handlers = Vec::new();
-                for scheme in schemes.into_iter() {
-                    // Start engine
+                for (idx, scheme) in schemes.into_iter().enumerate() {
+                    // Configure engine
                     let validator = scheme.public_key();
+                    let mut participants = BTreeMap::new();
+                    participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
                     let supervisor_config = mocks::supervisor::Config {
                         prover: prover.clone(),
-                        participants: view_validators.clone(),
+                        participants,
                     };
                     let supervisor =
-                        mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                        mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
                     supervisors.insert(validator.clone(), supervisor.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: hasher.clone(),
@@ -603,11 +649,17 @@ mod tests {
                         replay_concurrency: 1,
                     };
                     let engine = Engine::new(runtime.clone(), journal, cfg);
-                    let (voter_network, resolver_network) =
-                        registrations.remove(&validator).expect("validator should be registered");
+
+                    // Start engine
+                    let (voter, resolver) = registrations
+                        .remove(&validator)
+                        .expect("validator should be registered");
                     engine_handlers.push(runtime.spawn("engine", async move {
                         engine
-                            .run(voter_network, resolver_network)
+                            .run(
+                                voter,
+                                resolver,
+                            )
                             .await;
                     }));
                 }
@@ -620,8 +672,8 @@ mod tests {
                         match event {
                             mocks::application::Progress::Notarized(proof, digest) => {
                                 // Check correctness of proof
-                                let (view, _, payload, _) =
-                                    prover.deserialize_notarization(proof, 5, true).unwrap();
+                                let (view, _, payload, _, _) =
+                                    prover.deserialize_notarization(proof).unwrap();
                                 if digest != payload {
                                     panic!(
                                         "notarization mismatch digest: {:?}, payload: {:?}",
@@ -648,8 +700,8 @@ mod tests {
                             }
                             mocks::application::Progress::Finalized(proof, digest) => {
                                 // Check correctness of proof
-                                let (view, _, payload, _) =
-                                    prover.deserialize_finalization(proof, 5, true).unwrap();
+                                let (view, _, payload, _, _) =
+                                    prover.deserialize_finalization(proof).unwrap();
                                 if digest != payload {
                                     panic!(
                                         "finalization mismatch digest: {:?}, payload: {:?}",
@@ -710,10 +762,11 @@ mod tests {
     fn test_backfill() {
         // Create runtime
         let n = 4;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(360));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(360));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -738,7 +791,6 @@ mod tests {
             }
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators except first
@@ -755,9 +807,13 @@ mod tests {
             )
             .await;
 
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let pk = poly::public(&public);
+            let prover = Prover::new(pk, &namespace);
+
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -768,14 +824,15 @@ mod tests {
                     continue;
                 }
 
-                // Start engine
+                // Configure engine
                 let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
-                    participants: view_validators.clone(),
+                    participants,
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
@@ -818,10 +875,12 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let engine = Engine::new(runtime.clone(), journal, cfg);
+
+                // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine.run(voter, resolver).await;
                 }));
@@ -833,8 +892,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",
@@ -878,7 +936,7 @@ mod tests {
             )
             .await;
 
-            // Start engine for first peer
+            // Configure engine for first peer
             let scheme = schemes[0].clone();
             let validator = scheme.public_key();
 
@@ -905,13 +963,14 @@ mod tests {
             )
             .await;
 
-            // Start engine
+            // Configure engine
+            let mut participants = BTreeMap::new();
+            participants.insert(0, (public.clone(), validators.clone(), shares[0]));
             let supervisor_config = mocks::supervisor::Config {
                 prover: prover.clone(),
-                participants: view_validators.clone(),
+                participants,
             };
-            let supervisor =
-                mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+            let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
             supervisors.push(supervisor.clone());
             let application_cfg = mocks::application::Config {
                 hasher: hasher.clone(),
@@ -954,10 +1013,12 @@ mod tests {
                 fetch_concurrent: 1,
                 replay_concurrency: 1,
             };
+            let engine = Engine::new(runtime.clone(), journal, cfg);
+
+            // Start engine
             let (voter, resolver) = registrations
                 .remove(&validator)
                 .expect("validator should be registered");
-            let engine = Engine::new(runtime.clone(), journal, cfg);
             engine_handlers.push(runtime.spawn("engine", async move {
                 engine.run(voter, resolver).await;
             }));
@@ -968,8 +1029,7 @@ mod tests {
             loop {
                 let (candidate, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",
@@ -999,10 +1059,11 @@ mod tests {
     fn test_one_offline() {
         // Create runtime
         let n = 5;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1027,7 +1088,6 @@ mod tests {
             }
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators except first
@@ -1044,9 +1104,13 @@ mod tests {
             )
             .await;
 
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let pk = poly::public(&public);
+            let prover = Prover::new(pk, &namespace);
+
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1057,14 +1121,15 @@ mod tests {
                     continue;
                 }
 
-                // Start engine
+                // Configure engine
                 let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
-                    participants: view_validators.clone(),
+                    participants,
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
@@ -1107,10 +1172,12 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let engine = Engine::new(runtime.clone(), journal, cfg);
+
+                // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine.run(voter, resolver).await;
                 }));
@@ -1122,8 +1189,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",
@@ -1186,10 +1252,11 @@ mod tests {
     fn test_slow_validator() {
         // Create runtime
         let n = 5;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1214,7 +1281,6 @@ mod tests {
             }
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1225,22 +1291,27 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let pk = poly::public(&public);
+            let prover = Prover::new(pk, &namespace);
+
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
-                // Start engine
+                // Configure engine
                 let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
-                    participants: view_validators.clone(),
+                    participants,
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
@@ -1294,10 +1365,12 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let engine = Engine::new(runtime.clone(), journal, cfg);
+
+                // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine.run(voter, resolver).await;
                 }));
@@ -1309,8 +1382,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",
@@ -1373,10 +1445,11 @@ mod tests {
     fn test_all_recovery() {
         // Create runtime
         let n = 5;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 100;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(120));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(120));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1401,7 +1474,6 @@ mod tests {
             }
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1412,22 +1484,27 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let pk = poly::public(&public);
+            let prover = Prover::new(pk, &namespace);
+
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.iter() {
-                // Start engine
+            for (idx, scheme) in schemes.iter().enumerate() {
+                // Configure engine
                 let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
-                    participants: view_validators.clone(),
+                    participants,
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
@@ -1470,10 +1547,12 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let engine = Engine::new(runtime.clone(), journal, cfg);
+
+                // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine.run(voter, resolver).await;
                 }));
@@ -1501,8 +1580,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",
@@ -1542,10 +1620,11 @@ mod tests {
     fn test_partition() {
         // Create runtime
         let n = 10;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(900));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(900));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1570,7 +1649,6 @@ mod tests {
             }
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1581,22 +1659,27 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link.clone()), None).await;
 
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let pk = poly::public(&public);
+            let prover = Prover::new(pk, &namespace);
+
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.iter() {
-                // Start engine
+            for (idx, scheme) in schemes.iter().enumerate() {
+                // Configure engine
                 let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
-                    participants: view_validators.clone(),
+                    participants,
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
@@ -1639,10 +1722,12 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let engine = Engine::new(runtime.clone(), journal, cfg);
+
+                // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine.run(voter, resolver).await;
                 }));
@@ -1655,8 +1740,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 10, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",
@@ -1679,7 +1763,7 @@ mod tests {
                     }
                     completed.insert(validator);
                 }
-                if completed.len() == n {
+                if completed.len() == n as usize {
                     break;
                 }
             }
@@ -1723,8 +1807,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 10, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",
@@ -1744,7 +1827,7 @@ mod tests {
                     }
                     completed.insert(validator);
                 }
-                if completed.len() == n {
+                if completed.len() == n as usize {
                     break;
                 }
             }
@@ -1763,6 +1846,7 @@ mod tests {
     fn slow_and_lossy_links(seed: u64) -> String {
         // Create runtime
         let n = 5;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
@@ -1771,7 +1855,7 @@ mod tests {
             timeout: Some(Duration::from_secs(3_000)),
             ..deterministic::Config::default()
         };
-        let (executor, runtime, auditor) = Executor::init(cfg);
+        let (executor, mut runtime, auditor) = Executor::init(cfg);
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1796,7 +1880,6 @@ mod tests {
             }
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1807,22 +1890,27 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(degraded_link), None).await;
 
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let pk = poly::public(&public);
+            let prover = Prover::new(pk, &namespace);
+
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             let mut engine_handlers = Vec::new();
-            for scheme in schemes.into_iter() {
-                // Start engine
+            for (idx, scheme) in schemes.into_iter().enumerate() {
+                // Configure engine
                 let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx]));
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
-                    participants: view_validators.clone(),
+                    participants,
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: hasher.clone(),
@@ -1865,10 +1953,12 @@ mod tests {
                     fetch_concurrent: 1,
                     replay_concurrency: 1,
                 };
+                let engine = Engine::new(runtime.clone(), journal, cfg);
+
+                // Start engine
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
-                let engine = Engine::new(runtime.clone(), journal, cfg);
                 engine_handlers.push(runtime.spawn("engine", async move {
                     engine.run(voter, resolver).await;
                 }));
@@ -1880,8 +1970,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",
@@ -1943,10 +2032,11 @@ mod tests {
     fn test_conflicter() {
         // Create runtime
         let n = 4;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -1971,7 +2061,6 @@ mod tests {
             }
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -1982,31 +2071,35 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let pk = poly::public(&public);
+            let prover = Prover::new(pk, &namespace);
+
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Start engine
                 let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
-                    participants: view_validators.clone(),
+                    participants,
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
-                        crypto: scheme,
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let (voter, resolver) = registrations
-                        .remove(&validator)
-                        .expect("validator should be registered");
-                    let engine: mocks::conflicter::Conflicter<_, _, Sha256, _> =
+                    let engine: mocks::conflicter::Conflicter<_, Sha256, _> =
                         mocks::conflicter::Conflicter::new(runtime.clone(), cfg);
                     runtime.spawn("byzantine_engine", async move {
                         engine.run(voter, resolver).await;
@@ -2054,9 +2147,6 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
-                    let (voter, resolver) = registrations
-                        .remove(&validator)
-                        .expect("validator should be registered");
                     let engine = Engine::new(runtime.clone(), journal, cfg);
                     runtime.spawn("engine", async move {
                         engine.run(voter, resolver).await;
@@ -2070,8 +2160,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",
@@ -2130,10 +2219,11 @@ mod tests {
     fn test_nuller() {
         // Create runtime
         let n = 4;
+        let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
-        let (executor, runtime, _) = Executor::timed(Duration::from_secs(30));
+        let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
         executor.start(async move {
             // Create simulated network
             let (network, mut oracle) = Network::new(
@@ -2158,7 +2248,6 @@ mod tests {
             }
             validators.sort();
             schemes.sort_by_key(|s| s.public_key());
-            let view_validators = BTreeMap::from_iter(vec![(0, validators.clone())]);
             let mut registrations = register_validators(&mut oracle, &validators).await;
 
             // Link all validators
@@ -2169,32 +2258,35 @@ mod tests {
             };
             link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
+            // Derive threshold
+            let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
+            let pk = poly::public(&public);
+            let prover = Prover::new(pk, &namespace);
+
             // Create engines
             let hasher = Sha256::default();
-            let prover = Prover::new(&namespace);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
             for (idx_scheme, scheme) in schemes.into_iter().enumerate() {
                 // Start engine
                 let validator = scheme.public_key();
+                let mut participants = BTreeMap::new();
+                participants.insert(0, (public.clone(), validators.clone(), shares[idx_scheme]));
                 let supervisor_config = mocks::supervisor::Config {
                     prover: prover.clone(),
-                    participants: view_validators.clone(),
+                    participants,
                 };
-                let supervisor =
-                    mocks::supervisor::Supervisor::<Ed25519, Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let (voter, resolver) = registrations
+                    .remove(&validator)
+                    .expect("validator should be registered");
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
-                        crypto: scheme,
                         supervisor,
                         namespace: namespace.clone(),
                     };
-                    let (voter, resolver) = registrations
-                        .remove(&validator)
-                        .expect("validator should be registered");
-                    let engine: mocks::nuller::Nuller<_, Sha256, _> =
-                        mocks::nuller::Nuller::new(cfg);
+                    let engine: mocks::nuller::Nuller<Sha256, _> = mocks::nuller::Nuller::new(cfg);
                     runtime.spawn("byzantine_engine", async move {
                         engine.run(voter, resolver).await;
                     });
@@ -2241,9 +2333,6 @@ mod tests {
                         fetch_concurrent: 1,
                         replay_concurrency: 1,
                     };
-                    let (voter, resolver) = registrations
-                        .remove(&validator)
-                        .expect("validator should be registered");
                     let engine = Engine::new(runtime.clone(), journal, cfg);
                     runtime.spawn("engine", async move {
                         engine.run(voter, resolver).await;
@@ -2257,8 +2346,7 @@ mod tests {
             loop {
                 let (validator, event) = done_receiver.next().await.unwrap();
                 if let mocks::application::Progress::Finalized(proof, digest) = event {
-                    let (view, _, payload, _) =
-                        prover.deserialize_finalization(proof, 5, true).unwrap();
+                    let (view, _, payload, _, _) = prover.deserialize_finalization(proof).unwrap();
                     if digest != payload {
                         panic!(
                             "finalization mismatch digest: {:?}, payload: {:?}",

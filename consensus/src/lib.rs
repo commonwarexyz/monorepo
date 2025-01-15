@@ -11,6 +11,7 @@ use futures::channel::oneshot;
 use std::future::Future;
 
 pub mod simplex;
+pub mod threshold_simplex;
 
 /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
 /// and verifying payloads proposed by other participants.
@@ -109,4 +110,34 @@ pub trait Supervisor: Clone + Send + 'static {
 
     /// Report some activity observed by the consensus implementation.
     fn report(&self, activity: Activity, proof: Proof) -> impl Future<Output = ()> + Send;
+}
+
+/// ThresholdSupervisor is the interface responsible for managing which `identity` (typically a group polynomial with
+/// a fixed constant factor) and `share` for a participant is active at a given time.
+///
+/// ## Synchronization
+///
+/// The same considerations for `Supervisor` apply here.
+pub trait ThresholdSupervisor: Supervisor {
+    /// Seed is some random value used to bias the leader selection process.
+    type Seed;
+
+    /// Identity is the type against which partial signatures are verified.
+    type Identity;
+
+    /// Share is the type used to generate a partial signature that can be verified
+    /// against `Identity`.
+    type Share;
+
+    /// Return the leader at a given index over the provided seed.
+    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey>;
+
+    /// Returns the identity (typically a group polynomial with a fixed constant factor)
+    /// at the given index. This is used to verify partial signatures from participants
+    /// enumerated in `Supervisor::participants`.
+    fn identity(&self, index: Self::Index) -> Option<&Self::Identity>;
+
+    /// Returns share to sign with at a given index. After resharing, the share
+    /// may change (and old shares may be deleted).
+    fn share(&self, index: Self::Index) -> Option<&Self::Share>;
 }
