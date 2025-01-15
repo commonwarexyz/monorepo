@@ -5,7 +5,8 @@
 //! a partially synchronous setting. Unlike Simplex Consensus, however, `threshold-simplex` employs threshold
 //! cryptography (specifically BLS12-381 threshold signatures with a `2f+1` of `3f+1` quorum) to generate both
 //! a bias-resistant beacon (for leader election and post-facto execution randomness) and succinct consensus certificates
-//! (any certificate can be verified with just the static public key of the consensus instance) for each view.
+//! (any certificate can be verified with just the static public key of the consensus instance) for each view
+//! with zero message overhead (natively integrated).
 //!
 //! _If you wish to deploy Simplex Consensus but can't employ threshold signatures, see
 //! [Simplex](crate::simplex)._
@@ -110,14 +111,15 @@
 //!
 //! #### Embedded VRF
 //!
-//! When broadcasting a `notarize(c,v)` or `nullify(v)` message, a participant must also include a `part(v)` message (a partial
-//! signature over the view `v` index). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are received from unique participants,
-//! `seed(v)` can be derived. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
+//! When broadcasting any `notarize(c,v)` or `nullify(v)` message, a participant must also include a `part(v)` message (a partial
+//! signature over the view `v`). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are collected from unique participants,
+//! `seed(v)` can be recovered. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
 //! whether or not a block was notarized in said view `v`.
 //!
-//! Because the value of `seed(v)` cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it
-//! can be used both as a beacon for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness for in
-//! execution (where `seed(v)` impacts a block in `v`).
+//! Because the value of `seed(v)` cannot be known prior to message broadcast by any participant (including the leader) in view `v`
+//! and cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it can be used both as a beacon
+//! for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness in execution (where `seed(v)`
+//! is used as a seed in `v`).
 //!
 //! #### Succinct Consensus Certificates
 //!
