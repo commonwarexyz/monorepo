@@ -145,7 +145,7 @@
 //! #### Participant 8
 //!
 //! ```sh
-//! cargo run --release --bin validator -- --me 8@3007 --bootstrappers 5@127.0.0.1:3005 --participants 5,6,7,8 --storage-dir /tmp/commonware-bridge/8 --indexer 0@127.0.0.1:3000 --identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f58ff12f093cfbe796aa417ffa938be43cfe13ac8fe8c9bc1fddddfe8de840b8372d3165aa172fe930ed6ade9501dbe2ac80e9c5debaaad3eed786c1670b3f13a03712bfe6f326e57f48bb536522c3fb0a465e95a2de83ef3159675523842ef892 --share 0000000255ccd5a1f8962ce3e665d75f504d27e33db466838eb38476a162a32e4e73341a --other-identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd
+//! cargo run --release --bin validator -- --me 8@3008 --bootstrappers 5@127.0.0.1:3005 --participants 5,6,7,8 --storage-dir /tmp/commonware-bridge/8 --indexer 0@127.0.0.1:3000 --identity a311e2573501053c4b0dc00b64462d5d47c787d143a5b3cfe22c16a9023b89734074356ea0ce70ab71fe2042c2e426f58ff12f093cfbe796aa417ffa938be43cfe13ac8fe8c9bc1fddddfe8de840b8372d3165aa172fe930ed6ade9501dbe2ac80e9c5debaaad3eed786c1670b3f13a03712bfe6f326e57f48bb536522c3fb0a465e95a2de83ef3159675523842ef892 --share 0000000255ccd5a1f8962ce3e665d75f504d27e33db466838eb38476a162a32e4e73341a --other-identity a4a1b4b8a3fb2c11f4dba5c6c57743554f746d2211cd519c3c980b8d8019f8fa328b97e44e19dcc6150688da5f38fbcd
 //! ```
 
 #[doc(hidden)]
