@@ -190,10 +190,9 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::poly},
-        Ed25519, Scheme, Sha256,
+        Ed25519, PublicKey, Scheme, Sha256,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
@@ -219,8 +218,8 @@ mod tests {
     /// Registers all validators using the oracle.
     async fn register_validators(
         oracle: &mut Oracle,
-        validators: &[Bytes],
-    ) -> HashMap<Bytes, ((Sender, Receiver), (Sender, Receiver))> {
+        validators: &[PublicKey],
+    ) -> HashMap<PublicKey, ((Sender, Receiver), (Sender, Receiver))> {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
             let (voter_sender, voter_receiver) =
@@ -252,7 +251,7 @@ mod tests {
     /// otherwise all validators will be linked to all other validators.
     async fn link_validators(
         oracle: &mut Oracle,
-        validators: &[Bytes],
+        validators: &[PublicKey],
         action: Action,
         restrict_to: Option<fn(usize, usize) -> bool>,
     ) {
