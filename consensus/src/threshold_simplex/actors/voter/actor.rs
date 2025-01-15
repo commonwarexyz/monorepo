@@ -1968,7 +1968,7 @@ impl<
                 if parent >= self.last_finalized {
                     // Compute missing nullifications
                     let mut missing_notarizations = Vec::new();
-                    if self.is_notarized(parent).is_none() && parent != GENESIS_VIEW {
+                    if parent != GENESIS_VIEW && self.is_notarized(parent).is_none() {
                         missing_notarizations.push(parent);
                     }
                     let missing_nullifications = self.missing_nullifications(parent);

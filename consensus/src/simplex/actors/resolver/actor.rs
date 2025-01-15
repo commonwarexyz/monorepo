@@ -209,6 +209,9 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                 .iter()
                 .filter(|entry| !self.inflight.contains(entry))
                 .choose_multiple(&mut self.runtime, self.max_fetch_count);
+            if entries.is_empty() {
+                return;
+            }
 
             // Select entries up to configured limits
             let mut notarizations = Vec::new();

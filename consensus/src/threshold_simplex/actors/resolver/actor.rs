@@ -20,7 +20,7 @@ use futures::{channel::mpsc, future::Either, StreamExt};
 use governor::clock::Clock as GClock;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use prost::Message as _;
-use rand::{prelude::SliceRandom, Rng};
+use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -29,6 +29,7 @@ use std::{
 };
 use tracing::{debug, warn};
 
+/// Task in the required set.
 #[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord)]
 enum Task {
     Notarization,
@@ -214,17 +215,16 @@ impl<
                 return;
             }
 
-            // We assume nothing about the usefulness (or existence) of any given entry, so we shuffle
+            // We assume nothing about the usefulness (or existence) of any given entry, so we sample
             // the iterator to ensure we eventually try to fetch everything requested.
-            let mut entries = self
+            let entries = self
                 .required
                 .iter()
                 .filter(|entry| !self.inflight.contains(entry))
-                .collect::<Vec<_>>();
+                .choose_multiple(&mut self.runtime, self.max_fetch_count);
             if entries.is_empty() {
                 return;
             }
-            entries.shuffle(&mut self.runtime);
 
             // Select entries up to configured limits
             let mut notarizations = Vec::new();
@@ -354,11 +354,9 @@ impl<
                         Message::Fetch { notarizations, nullifications } => {
                             // Add to all outstanding required
                             for view in notarizations {
-                                debug!(view, "requiring notarization");
                                 self.required.insert(Entry { task: Task::Notarization, view });
                             }
                             for view in nullifications {
-                                debug!(view, "requiring nullification");
                                 self.required.insert(Entry { task: Task::Nullification, view });
                             }
 
@@ -452,8 +450,10 @@ impl<
                         wire::backfiller::Payload::Request(request) => {
                             let mut populated_bytes = 0;
                             let mut notarizations = Vec::new();
+                            let mut missing_notarizations = Vec::new();
                             let mut notarizations_found = Vec::new();
                             let mut nullifications = Vec::new();
+                            let mut missing_nullifications = Vec::new();
                             let mut nullifications_found = Vec::new();
 
                             // Ensure too many notarizations/nullifications aren't requested
@@ -475,7 +475,7 @@ impl<
                                     notarizations_found.push(notarization.clone());
                                     self.served.inc();
                                 } else {
-                                    debug!(view, "missing notarization");
+                                    missing_notarizations.push(view);
                                 }
                             }
 
@@ -491,12 +491,12 @@ impl<
                                     nullifications_found.push(nullification.clone());
                                     self.served.inc();
                                 } else {
-                                    debug!(view, "missing nullification");
+                                    missing_nullifications.push(view);
                                 }
                             }
 
                             // Send response
-                            debug!(sender = hex(&s), ?notarizations, ?nullifications,  "sending response");
+                            debug!(sender = hex(&s), ?notarizations, ?missing_notarizations, ?nullifications, ?missing_nullifications, "sending response");
                             let response = wire::Backfiller {
                                 id: msg.id,
                                 payload: Some(wire::backfiller::Payload::Response(wire::Response {
