@@ -1,5 +1,7 @@
 use clap::{value_parser, Arg, Command};
-use commonware_bridge::{application, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX};
+use commonware_bridge::{
+    application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
+};
 use commonware_consensus::threshold_simplex::{self, Engine, Prover};
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -129,7 +131,6 @@ fn main() {
     let share = group::Share::deserialize(&share).expect("Share not well-formed");
 
     // Configure indexer
-    let namespace = public.serialize();
     let indexer = matches
         .get_one::<String>("indexer")
         .expect("Please provide indexer");
@@ -168,7 +169,7 @@ fn main() {
     // Configure network
     let p2p_cfg = authenticated::Config::aggressive(
         signer.clone(),
-        &union(&namespace, P2P_SUFFIX),
+        &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         Arc::new(Mutex::new(Registry::default())),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
@@ -225,7 +226,7 @@ fn main() {
         .expect("Failed to initialize journal");
 
         // Initialize application
-        let consensus_namespace = union(&namespace, CONSENSUS_SUFFIX);
+        let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let hasher = Sha256::default();
         let prover: Prover<Sha256> = Prover::new(public, &consensus_namespace);
         let other_consensus_namespace = union(&other_identity.serialize(), CONSENSUS_SUFFIX);

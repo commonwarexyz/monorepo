@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
-use commonware_bridge::{wire, CONSENSUS_SUFFIX, INDEXER_NAMESPACE};
+use commonware_bridge::{wire, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE};
 use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
@@ -116,8 +116,8 @@ fn main() {
     for network in networks {
         let network = from_hex(network).expect("Network not well-formed");
         let public = group::Public::deserialize(&network).expect("Network not well-formed");
-        let consensus_namespace = union(&public.serialize(), CONSENSUS_SUFFIX);
-        let prover = Prover::<Sha256>::new(public, &consensus_namespace);
+        let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
+        let prover = Prover::<Sha256>::new(public, &namespace);
         provers.insert(network.clone(), prover);
         blocks.insert(network.clone(), HashMap::new());
         finalizations.insert(network, BTreeMap::new());
