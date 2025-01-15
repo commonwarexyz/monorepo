@@ -1,12 +1,11 @@
 use super::{
     handshake::{create_handshake, Handshake, IncomingHandshake},
-    utils::{
-        codec::{recv_frame, send_frame},
-        nonce,
-    },
-    x25519, Config,
+    nonce, x25519, Config,
 };
-use crate::Error;
+use crate::{
+    utils::codec::{recv_frame, send_frame},
+    Error,
+};
 use bytes::Bytes;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},

@@ -1,5 +1,5 @@
-use super::{utils::codec::recv_frame, wire, x25519};
-use crate::Error;
+use super::{wire, x25519};
+use crate::{utils::codec::recv_frame, Error};
 use bytes::{BufMut, Bytes};
 use commonware_cryptography::{PublicKey, Scheme};
 use commonware_macros::select;
@@ -175,7 +175,7 @@ impl<Si: Sink, St: Stream> IncomingHandshake<Si, St> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::public_key::utils::codec::send_frame;
+    use crate::utils::codec::send_frame;
     use commonware_cryptography::{Ed25519, Scheme};
     use commonware_runtime::{deterministic::Executor, mocks, Runner};
     use x25519_dalek::PublicKey;
