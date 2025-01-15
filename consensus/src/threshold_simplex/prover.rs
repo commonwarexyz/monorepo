@@ -97,7 +97,7 @@ impl<H: Hasher> Prover<H> {
     ) -> Option<(View, View, Digest, Verifier)> {
         // Ensure proof is big enough
         let digest_len = H::len();
-        if proof.len() != 8 + 8 + digest_len + group::PARTIAL_SIGNATURE_LENGTH {
+        if proof.len() != 8 + 8 + digest_len + poly::PARTIAL_SIGNATURE_LENGTH {
             return None;
         }
 
@@ -105,7 +105,7 @@ impl<H: Hasher> Prover<H> {
         let view = proof.get_u64();
         let parent = proof.get_u64();
         let payload = proof.copy_to_bytes(digest_len);
-        let signature = proof.copy_to_bytes(group::PARTIAL_SIGNATURE_LENGTH);
+        let signature = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature = poly::Eval::deserialize(&signature)?;
 
         // Create callback
@@ -222,10 +222,10 @@ impl<H: Hasher> Prover<H> {
         let len = 8
             + 8
             + digest_len
-            + group::PARTIAL_SIGNATURE_LENGTH
+            + poly::PARTIAL_SIGNATURE_LENGTH
             + 8
             + digest_len
-            + group::PARTIAL_SIGNATURE_LENGTH;
+            + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -248,10 +248,10 @@ impl<H: Hasher> Prover<H> {
         let len = 8
             + 8
             + digest_len
-            + group::PARTIAL_SIGNATURE_LENGTH
+            + poly::PARTIAL_SIGNATURE_LENGTH
             + 8
             + digest_len
-            + group::PARTIAL_SIGNATURE_LENGTH;
+            + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != len {
             return None;
         }
@@ -260,11 +260,11 @@ impl<H: Hasher> Prover<H> {
         let view = proof.get_u64();
         let parent_1 = proof.get_u64();
         let payload_1 = proof.copy_to_bytes(digest_len);
-        let signature_1 = proof.copy_to_bytes(group::PARTIAL_SIGNATURE_LENGTH);
+        let signature_1 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_1 = Eval::deserialize(&signature_1)?;
         let parent_2 = proof.get_u64();
         let payload_2 = proof.copy_to_bytes(digest_len);
-        let signature_2 = proof.copy_to_bytes(group::PARTIAL_SIGNATURE_LENGTH);
+        let signature_2 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_2 = Eval::deserialize(&signature_2)?;
         if signature_1.index != signature_2.index {
             return None;
@@ -363,7 +363,7 @@ impl<H: Hasher> Prover<H> {
         // Setup proof
         let digest_len = H::len();
         let len =
-            8 + 8 + digest_len + group::PARTIAL_SIGNATURE_LENGTH + group::PARTIAL_SIGNATURE_LENGTH;
+            8 + 8 + digest_len + poly::PARTIAL_SIGNATURE_LENGTH + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -380,7 +380,7 @@ impl<H: Hasher> Prover<H> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let len =
-            8 + 8 + digest_len + group::PARTIAL_SIGNATURE_LENGTH + group::PARTIAL_SIGNATURE_LENGTH;
+            8 + 8 + digest_len + poly::PARTIAL_SIGNATURE_LENGTH + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != len {
             return None;
         }
@@ -389,9 +389,9 @@ impl<H: Hasher> Prover<H> {
         let view = proof.get_u64();
         let parent = proof.get_u64();
         let payload = proof.copy_to_bytes(digest_len);
-        let signature_finalize = proof.copy_to_bytes(group::PARTIAL_SIGNATURE_LENGTH);
+        let signature_finalize = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_finalize = Eval::deserialize(&signature_finalize)?;
-        let signature_null = proof.copy_to_bytes(group::PARTIAL_SIGNATURE_LENGTH);
+        let signature_null = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_null = Eval::deserialize(&signature_null)?;
         if signature_finalize.index != signature_null.index {
             return None;

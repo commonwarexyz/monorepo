@@ -3,7 +3,7 @@ use super::{
     Config,
 };
 use crate::{
-    simplex::{
+    threshold_simplex::{
         actors::voter,
         encoder::{notarize_namespace, nullify_namespace, seed_namespace},
         verifier::{verify_notarization, verify_nullification},

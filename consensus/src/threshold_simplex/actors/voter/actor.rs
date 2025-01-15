@@ -1,6 +1,6 @@
 use super::{Config, Mailbox, Message};
 use crate::{
-    simplex::{
+    threshold_simplex::{
         actors::resolver,
         encoder::{
             finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
@@ -127,7 +127,7 @@ impl<
     }
 
     pub fn set_leader(&mut self, seed: group::Signature) {
-        let leader = ThresholdSupervisor::leader(&self.supervisor, seed, self.view).unwrap();
+        let leader = ThresholdSupervisor::leader(&self.supervisor, self.view, seed).unwrap();
         self.leader = Some(leader);
     }
 
@@ -191,10 +191,10 @@ impl<
                 self.view,
                 previous_proposal.parent,
                 &previous_proposal.payload,
-                &previous_notarize.signature,
+                &previous_notarize.proposal_signature,
                 proposal.parent,
                 &proposal.payload,
-                &notarize.signature,
+                &notarize.proposal_signature,
             );
             self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
@@ -220,7 +220,7 @@ impl<
             "recorded notarize"
         );
         let entry = self.notarizes.entry(digest).or_default();
-        let proof = Prover::<H>::serialize_proposal(proposal, &notarize.signature);
+        let proof = Prover::<H>::serialize_proposal(proposal, &notarize.proposal_signature);
         entry.insert(public_key_index, notarize);
         self.supervisor.report(NOTARIZE, proof).await;
         true
@@ -256,8 +256,8 @@ impl<
             self.view,
             finalize_proposal.parent,
             &finalize_proposal.payload,
-            &finalize.signature,
-            &nullify.signature,
+            &finalize.proposal_signature,
+            &nullify.view_signature,
         );
         self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
         warn!(
@@ -283,8 +283,8 @@ impl<
                 self.view,
                 proposal.parent,
                 &proposal.payload,
-                &finalize.signature,
-                &null.signature,
+                &finalize.proposal_signature,
+                &null.view_signature,
             );
             self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
             warn!(
@@ -324,10 +324,10 @@ impl<
                 self.view,
                 previous_proposal.parent,
                 &previous_proposal.payload,
-                &previous_finalize.signature,
+                &previous_finalize.proposal_signature,
                 proposal.parent,
                 &proposal.payload,
-                &finalize.signature,
+                &finalize.proposal_signature,
             );
             self.supervisor.report(CONFLICTING_FINALIZE, proof).await;
             warn!(
@@ -348,7 +348,7 @@ impl<
             return false;
         }
         let entry = self.finalizes.entry(digest).or_default();
-        let signature = &finalize.signature;
+        let signature = &finalize.proposal_signature;
         let proof = Prover::<H>::serialize_proposal(proposal, signature);
         entry.insert(public_key_index, finalize);
         self.supervisor.report(FINALIZE, proof).await;
@@ -450,23 +450,25 @@ impl<
             let mut notarization = Vec::new();
             let mut seed = Vec::new();
             for notarize in notarizes.values() {
-                let eval = Eval::deserialize(&notarize.signature).unwrap();
+                let eval = Eval::deserialize(&notarize.proposal_signature).unwrap();
                 notarization.push(eval);
-                let eval = Eval::deserialize(&notarize.seed).unwrap();
+                let eval = Eval::deserialize(&notarize.seed_signature).unwrap();
                 seed.push(eval);
             }
-            let signature = ops::threshold_signature_recover(threshold, notarization)
+            let proposal_signature = ops::threshold_signature_recover(threshold, notarization)
                 .unwrap()
-                .serialize();
-            let seed = ops::threshold_signature_recover(threshold, seed)
+                .serialize()
+                .into();
+            let seed_signature = ops::threshold_signature_recover(threshold, seed)
                 .unwrap()
-                .serialize();
+                .serialize()
+                .into();
 
             // Construct notarization
             let notarization = wire::Notarization {
                 proposal: Some(proposal.clone()),
-                signature: signature.into(),
-                seed: seed.into(),
+                proposal_signature,
+                seed_signature,
             };
             self.broadcast_notarization = true;
             return Some(notarization);
@@ -496,23 +498,25 @@ impl<
         let mut nullification = Vec::new();
         let mut seed = Vec::new();
         for nullify in self.nullifies.values() {
-            let eval = Eval::deserialize(&nullify.signature).unwrap();
+            let eval = Eval::deserialize(&nullify.view_signature).unwrap();
             nullification.push(eval);
-            let eval = Eval::deserialize(&nullify.seed).unwrap();
+            let eval = Eval::deserialize(&nullify.seed_signature).unwrap();
             seed.push(eval);
         }
-        let signature = ops::threshold_signature_recover(threshold, nullification)
+        let view_signature = ops::threshold_signature_recover(threshold, nullification)
             .unwrap()
-            .serialize();
-        let seed = ops::threshold_signature_recover(threshold, seed)
+            .serialize()
+            .into();
+        let seed_signature = ops::threshold_signature_recover(threshold, seed)
             .unwrap()
-            .serialize();
+            .serialize()
+            .into();
 
         // Construct nullification
         let nullification = wire::Nullification {
             view: self.view,
-            signature: signature.into(),
-            seed: seed.into(),
+            view_signature,
+            seed_signature,
         };
         self.broadcast_nullification = true;
         Some(nullification)
@@ -541,7 +545,25 @@ impl<
             let Some(notarization) = &self.notarization else {
                 continue;
             };
-            let seed = notarization.seed.clone();
+            let seed_signature = notarization.seed_signature.clone();
+
+            // Check notarization and finalization proposal match
+            let notarization_proposal = notarization.proposal.as_ref().unwrap();
+            let message = proposal_message(
+                notarization_proposal.view,
+                notarization_proposal.parent,
+                &notarization_proposal.payload,
+            );
+            self.hasher.update(&message);
+            let digest = self.hasher.finalize();
+            if digest != *proposal {
+                warn!(
+                    view = self.view,
+                    proposal = hex(proposal),
+                    notarization = hex(&digest),
+                    "finalization proposal does not match notarization"
+                );
+            }
 
             // There should never exist enough finalizes for multiple proposals, so it doesn't
             // matter which one we choose.
@@ -565,18 +587,19 @@ impl<
             // Recover threshold signature
             let mut finalization = Vec::new();
             for finalize in finalizes.values() {
-                let eval = Eval::deserialize(&finalize.signature).unwrap();
+                let eval = Eval::deserialize(&finalize.proposal_signature).unwrap();
                 finalization.push(eval);
             }
-            let signature = ops::threshold_signature_recover(threshold, finalization)
+            let proposal_signature = ops::threshold_signature_recover(threshold, finalization)
                 .unwrap()
-                .serialize();
+                .serialize()
+                .into();
 
             // Construct finalization
             let finalization = wire::Finalization {
                 proposal: Some(proposal.clone()),
-                signature: signature.into(),
-                seed,
+                proposal_signature,
+                seed_signature,
             };
             // self.finalization = Some(finalization.clone());
             self.broadcast_finalization = true;
@@ -959,15 +982,18 @@ impl<
         // Construct nullify
         let share = self.supervisor.share(self.view).unwrap();
         let message = nullify_message(self.view);
-        let signature =
-            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message).serialize();
+        let view_signature =
+            ops::partial_sign_message(share, Some(&self.nullify_namespace), &message)
+                .serialize()
+                .into();
         let message = seed_message(self.view);
-        let seed =
-            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
+        let seed_signature = ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
+            .serialize()
+            .into();
         let null = wire::Nullify {
             view: self.view,
-            signature: signature.into(),
-            seed: seed.into(),
+            view_signature,
+            seed_signature,
         };
 
         // Handle the nullify
@@ -1009,7 +1035,7 @@ impl<
         };
 
         // Verify signature
-        let Some(signature) = Eval::deserialize(&nullify.signature) else {
+        let Some(signature) = Eval::deserialize(&nullify.view_signature) else {
             debug!(
                 public_key_index,
                 "partial signature is not formatted correctly"
@@ -1037,7 +1063,7 @@ impl<
         }
 
         // Verify seed
-        let Some(seed) = Eval::deserialize(&nullify.seed) else {
+        let Some(seed) = Eval::deserialize(&nullify.seed_signature) else {
             return;
         };
         if seed.index != public_key_index {
@@ -1382,7 +1408,7 @@ impl<
         };
 
         // Verify signature
-        let Some(signature) = Eval::deserialize(&notarize.signature) else {
+        let Some(signature) = Eval::deserialize(&notarize.proposal_signature) else {
             return;
         };
         if signature.index != public_key_index {
@@ -1401,7 +1427,7 @@ impl<
         }
 
         // Verify seed
-        let Some(seed) = Eval::deserialize(&notarize.seed) else {
+        let Some(seed) = Eval::deserialize(&notarize.seed_signature) else {
             return;
         };
         if seed.index != public_key_index {
@@ -1493,7 +1519,7 @@ impl<
         }
         .encode_to_vec()
         .into();
-        let seed = group::Signature::deserialize(&notarization.seed).unwrap();
+        let seed = group::Signature::deserialize(&notarization.seed_signature).unwrap();
         if round.add_verified_notarization(notarization) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1553,7 +1579,7 @@ impl<
         }
         .encode_to_vec()
         .into();
-        let seed = group::Signature::deserialize(&nullification.seed).unwrap();
+        let seed = group::Signature::deserialize(&nullification.seed_signature).unwrap();
         if round.add_verified_nullification(nullification) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1588,7 +1614,7 @@ impl<
         };
 
         // Verify signature
-        let Some(signature) = Eval::deserialize(&finalize.signature) else {
+        let Some(signature) = Eval::deserialize(&finalize.proposal_signature) else {
             return;
         };
         if signature.index != public_key_index {
@@ -1685,7 +1711,7 @@ impl<
         }
         .encode_to_vec()
         .into();
-        let seed = group::Signature::deserialize(&finalization.seed).unwrap();
+        let seed = group::Signature::deserialize(&finalization.seed_signature).unwrap();
         if round.add_verified_finalization(finalization) && self.journal.is_some() {
             self.journal
                 .as_mut()
@@ -1724,16 +1750,19 @@ impl<
         let share = self.supervisor.share(view).unwrap();
         let proposal = &round.proposal.as_ref().unwrap().1;
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        let signature =
-            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message).serialize();
+        let proposal_signature =
+            ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
+                .serialize()
+                .into();
         let message = seed_message(view);
-        let seed =
-            ops::partial_sign_message(share, Some(&self.seed_namespace), &message).serialize();
+        let seed_signature = ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
+            .serialize()
+            .into();
         round.broadcast_notarize = true;
         Some(wire::Notarize {
             proposal: Some(proposal.clone()),
-            signature: signature.into(),
-            seed: seed.into(),
+            proposal_signature,
+            seed_signature,
         })
     }
 
@@ -1801,12 +1830,14 @@ impl<
             "constructing finalize"
         );
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        let signature =
-            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message).serialize();
+        let proposal_signature =
+            ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
+                .serialize()
+                .into();
         round.broadcast_finalize = true;
         Some(wire::Finalize {
             proposal: Some(proposal.clone()),
-            signature: signature.into(),
+            proposal_signature,
         })
     }
 
@@ -1879,8 +1910,8 @@ impl<
             let proposal = notarization.proposal.as_ref().unwrap();
             let proof = Prover::<H>::serialize_threshold(
                 proposal,
-                &notarization.signature,
-                &notarization.seed,
+                &notarization.proposal_signature,
+                &notarization.seed_signature,
             );
             self.committer
                 .prepared(
@@ -2032,8 +2063,8 @@ impl<
             let proposal = finalization.proposal.as_ref().unwrap();
             let proof = Prover::<H>::serialize_threshold(
                 proposal,
-                &finalization.signature,
-                &finalization.seed,
+                &finalization.proposal_signature,
+                &finalization.seed_signature,
             );
             self.committer
                 .finalized(
@@ -2089,7 +2120,7 @@ impl<
                         // Handle notarize
                         let proposal = notarize.proposal.as_ref().unwrap().clone();
                         let signature: Eval<group::Signature> =
-                            Eval::deserialize(&notarize.signature).unwrap();
+                            Eval::deserialize(&notarize.proposal_signature).unwrap();
                         let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
@@ -2125,7 +2156,7 @@ impl<
                         // Handle nullify
                         let view = nullify.view;
                         let signature: Eval<group::Signature> =
-                            Eval::deserialize(&nullify.signature).unwrap();
+                            Eval::deserialize(&nullify.view_signature).unwrap();
                         let public_key_index = signature.index;
                         let public_key = self
                             .supervisor
@@ -2155,7 +2186,7 @@ impl<
                         // Handle finalize
                         let view = finalize.proposal.as_ref().unwrap().view;
                         let signature: Eval<group::Signature> =
-                            Eval::deserialize(&finalize.signature).unwrap();
+                            Eval::deserialize(&finalize.proposal_signature).unwrap();
                         let public_key_index = signature.index;
                         let public_key = self
                             .supervisor

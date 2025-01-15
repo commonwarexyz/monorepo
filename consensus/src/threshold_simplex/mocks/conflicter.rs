@@ -1,7 +1,7 @@
 //! Byzantine participant that sends conflicting notarize/finalize messages.
 
 use crate::{
-    simplex::{
+    threshold_simplex::{
         encoder::{
             finalize_namespace, notarize_namespace, proposal_message, seed_message, seed_namespace,
         },
@@ -9,6 +9,7 @@ use crate::{
     },
     ThresholdSupervisor,
 };
+use bytes::Bytes;
 use commonware_cryptography::{
     bls12381::primitives::{group, ops},
     Hasher,
@@ -100,50 +101,49 @@ impl<
                     let share = self.supervisor.share(view).unwrap();
                     let parent = proposal.parent;
                     let message = proposal_message(proposal.view, parent, &proposal.payload);
-                    let signature =
-                        ops::partial_sign_message(share, Some(&self.notarize_namespace), &message);
-                    let signature = signature.serialize();
+                    let proposal_signature =
+                        ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
+                            .serialize()
+                            .into();
                     let message = seed_message(view);
-                    let seed =
-                        ops::partial_sign_message(share, Some(&self.seed_namespace), &message);
-                    let seed = seed.serialize();
+                    let seed_signature: Bytes =
+                        ops::partial_sign_message(share, Some(&self.seed_namespace), &message)
+                            .serialize()
+                            .into();
                     let n = wire::Notarize {
                         proposal: Some(proposal),
-                        signature: signature.into(),
-                        seed: seed.clone().into(),
+                        proposal_signature,
+                        seed_signature: seed_signature.clone(),
                     };
                     let msg = wire::Voter {
                         payload: Some(wire::voter::Payload::Notarize(n)),
                     }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
+                    .encode_to_vec()
+                    .into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize random digest
                     let digest = H::random(&mut self.runtime);
                     let message = proposal_message(view, parent, &digest);
-                    let signature =
-                        ops::partial_sign_message(share, Some(&self.notarize_namespace), &message);
-                    let signature = signature.serialize();
+                    let proposal_signature =
+                        ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
+                            .serialize()
+                            .into();
                     let n = wire::Notarize {
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
                             payload: digest,
                         }),
-                        signature: signature.into(),
-                        seed: seed.into(),
+                        proposal_signature,
+                        seed_signature,
                     };
                     let msg = wire::Voter {
                         payload: Some(wire::voter::Payload::Notarize(n)),
                     }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
+                    .encode_to_vec()
+                    .into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 wire::voter::Payload::Finalize(finalize) => {
                     // Get our index
@@ -160,44 +160,41 @@ impl<
                     let share = self.supervisor.share(view).unwrap();
                     let parent = proposal.parent;
                     let message = proposal_message(proposal.view, parent, &proposal.payload);
-                    let signature =
-                        ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
-                    let signature = signature.serialize();
+                    let proposal_signature =
+                        ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
+                            .serialize()
+                            .into();
                     let f = wire::Finalize {
                         proposal: Some(proposal),
-                        signature: signature.into(),
+                        proposal_signature,
                     };
                     let msg = wire::Voter {
                         payload: Some(wire::voter::Payload::Finalize(f)),
                     }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
+                    .encode_to_vec()
+                    .into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize random digest
                     let digest = H::random(&mut self.runtime);
                     let message = proposal_message(view, parent, &digest);
                     let signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
-                    let signature = signature.serialize();
+                    let proposal_signature = signature.serialize().into();
                     let f = wire::Finalize {
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
                             payload: digest,
                         }),
-                        signature: signature.into(),
+                        proposal_signature,
                     };
                     let msg = wire::Voter {
                         payload: Some(wire::voter::Payload::Finalize(f)),
                     }
-                    .encode_to_vec();
-                    sender
-                        .send(Recipients::All, msg.into(), true)
-                        .await
-                        .unwrap();
+                    .encode_to_vec()
+                    .into();
+                    sender.send(Recipients::All, msg, true).await.unwrap();
                 }
                 _ => continue,
             }

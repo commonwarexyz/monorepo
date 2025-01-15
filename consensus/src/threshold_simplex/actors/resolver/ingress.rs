@@ -1,4 +1,4 @@
-use crate::simplex::{wire, View};
+use crate::threshold_simplex::{wire, View};
 use futures::{channel::mpsc, SinkExt};
 
 pub enum Message {

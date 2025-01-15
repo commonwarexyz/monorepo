@@ -1,5 +1,5 @@
 use crate::{
-    simplex::{
+    threshold_simplex::{
         Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
@@ -203,7 +203,7 @@ impl<H: Hasher> TSu for Supervisor<H> {
     type Identity = poly::Public;
     type Share = group::Share;
 
-    fn leader(&self, seed: Self::Seed, index: Self::Index) -> Option<PublicKey> {
+    fn leader(&self, index: Self::Index, seed: Self::Seed) -> Option<PublicKey> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, (_, _, p, _))) => p,
             None => {

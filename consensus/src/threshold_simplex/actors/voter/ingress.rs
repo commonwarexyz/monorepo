@@ -1,4 +1,4 @@
-use crate::simplex::wire;
+use crate::threshold_simplex::wire;
 use futures::{channel::mpsc, SinkExt};
 
 // If either of these requests fails, it will not send a reply.
