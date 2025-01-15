@@ -8,7 +8,11 @@ use crate::{Channel, Message, Recipients};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::{
+    deterministic::{Listener, Sink, Stream},
+    Clock, Listener as _, Network as RNetwork, Spawner,
+};
+use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::hex;
 use futures::{
     channel::{mpsc, oneshot},
@@ -22,10 +26,13 @@ use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
     collections::{BTreeMap, HashMap},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
 };
 use tracing::{error, trace};
+
+const SIZE_OF_CHANNEL: usize = size_of::<Channel>();
 
 /// Task type representing a message to be sent within the network.
 type Task = (
@@ -36,49 +43,54 @@ type Task = (
     oneshot::Sender<Vec<PublicKey>>,
 );
 
-/// Implementation of a simulated network.
-pub struct Network<E: Spawner + Rng + Clock> {
-    runtime: E,
-
-    ingress: mpsc::UnboundedReceiver<ingress::Message>,
-
-    sender: mpsc::UnboundedSender<Task>,
-    receiver: mpsc::UnboundedReceiver<Task>,
-    links: HashMap<PublicKey, HashMap<PublicKey, (Normal<f64>, f64)>>,
-    peers: BTreeMap<PublicKey, HashMap<Channel, (usize, mpsc::UnboundedSender<Message>)>>,
-
-    received_messages: Family<metrics::Message, Counter>,
-    sent_messages: Family<metrics::Message, Counter>,
-}
-
-/// Describes a connection between two peers.
-///
-/// Links are unidirectional (and must be set up in both directions
-/// for a bidirectional connection).
-pub struct Link {
-    /// Mean latency for the delivery of a message in milliseconds.
-    pub latency: f64,
-
-    /// Standard deviation of the latency for the delivery of a message in milliseconds.
-    pub jitter: f64,
-
-    /// Probability of a message being delivered successfully (in range \[0,1\]).
-    pub success_rate: f64,
-}
-
 /// Configuration for the simulated network.
 pub struct Config {
     /// Registry for prometheus metrics.
     pub registry: Arc<Mutex<Registry>>,
+
+    /// Maximum size of a message that can be sent over the network.
+    pub max_size: usize,
 }
 
-impl<E: Spawner + Rng + Clock> Network<E> {
+/// Implementation of a simulated network.
+pub struct Network<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> {
+    runtime: E,
+
+    // Maximum size of a message that can be sent over the network
+    max_size: usize,
+
+    // Next socket address to assign to a new peer
+    // Incremented for each new peer
+    next_addr: SocketAddr,
+
+    // Channel to receive messages from the oracle
+    ingress: mpsc::UnboundedReceiver<ingress::Message>,
+
+    // A channel to receive tasks from peers
+    // The sender is cloned and given to each peer
+    // The receiver is polled in the main loop
+    sender: mpsc::UnboundedSender<Task>,
+    receiver: mpsc::UnboundedReceiver<Task>,
+
+    // A map from a pair of public keys (from, to) to a link between the two peers
+    links: HashMap<(PublicKey, PublicKey), Link>,
+
+    // A map from a public key to a peer
+    peers: BTreeMap<PublicKey, Peer>,
+
+    // Metrics for received and sent messages
+    received_messages: Family<metrics::Message, Counter>,
+    sent_messages: Family<metrics::Message, Counter>,
+}
+
+impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
     /// Create a new simulated network with a given runtime and configuration.
     ///
     /// Returns a tuple containing the network instance and the oracle that can
     /// be used to modify the state of the network during runtime.
     pub fn new(runtime: E, cfg: Config) -> (Self, Oracle) {
         let (sender, receiver) = mpsc::unbounded();
+        let (oracle_sender, oracle_receiver) = mpsc::unbounded();
         let sent_messages = Family::<metrics::Message, Counter>::default();
         let received_messages = Family::<metrics::Message, Counter>::default();
         {
@@ -90,10 +102,17 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 received_messages.clone(),
             );
         }
-        let (oracle_sender, oracle_receiver) = mpsc::unbounded();
+
+        // Start with a pseudo-random IP address to assign sockets to for new peers
+        let next_addr = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::from_bits(runtime.clone().next_u32())),
+            0,
+        );
         (
             Self {
                 runtime,
+                max_size: cfg.max_size,
+                next_addr,
                 ingress: oracle_receiver,
                 sender,
                 receiver,
@@ -106,54 +125,82 @@ impl<E: Spawner + Rng + Clock> Network<E> {
         )
     }
 
-    fn handle_ingress(&mut self, message: ingress::Message) {
-        // Handle ingress message
-        //
+    /// Returns (and increments) the next available socket address.
+    ///
+    /// The port number is incremented for each call, and the IP address is incremented if the port
+    /// number overflows.
+    fn get_next_socket(&mut self) -> SocketAddr {
+        let result = self.next_addr;
+
+        // Increment the port number, or the IP address if the port number overflows.
+        // Allows the ip address to overflow (wrapping).
+        match self.next_addr.port().checked_add(1) {
+            Some(port) => {
+                self.next_addr.set_port(port);
+            }
+            None => {
+                let ip = match self.next_addr.ip() {
+                    IpAddr::V4(ipv4) => ipv4,
+                    _ => unreachable!(),
+                };
+                let next_ip = Ipv4Addr::to_bits(ip).wrapping_add(1);
+                self.next_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::from_bits(next_ip)), 0);
+            }
+        }
+
+        result
+    }
+
+    /// Handle an ingress message.
+    ///
+    /// This method is called when a message is received from the oracle.
+    async fn handle_ingress(&mut self, message: ingress::Message) {
         // It is important to ensure that no failed receipt of a message will cause us to exit.
         // This could happen if the caller drops the `Oracle` after updating the network topology.
+        // Thus, we create a helper function to send the result to the oracle and log any errors.
+        fn send_result<T: std::fmt::Debug>(
+            result: oneshot::Sender<Result<T, Error>>,
+            value: Result<T, Error>,
+        ) {
+            let success = value.is_ok();
+            if let Err(e) = result.send(value) {
+                error!(?e, "failed to send result to oracle (ok = {})", success);
+            }
+        }
+
         match message {
             ingress::Message::Register {
                 public_key,
                 channel,
-                max_size,
                 result,
             } => {
-                // Ensure doesn't already exist
-                let entry = self.peers.entry(public_key.clone()).or_default();
-                if entry.get(&channel).is_some() {
-                    if let Err(err) = result.send(Err(Error::ChannelAlreadyRegistered(channel))) {
-                        error!(?err, "failed to send register err to oracle");
-                    }
-                    return;
+                // If peer does not exist, then create it.
+                if !self.peers.contains_key(&public_key) {
+                    let peer = Peer::new(
+                        &mut self.runtime.clone(),
+                        public_key.clone(),
+                        self.get_next_socket(),
+                        self.max_size,
+                    );
+                    self.peers.insert(public_key.clone(), peer);
                 }
 
-                // Initialize agent channel
-                let (sender, receiver) = mpsc::unbounded();
-                entry.insert(channel, (max_size, sender));
-                let result = result.send(Ok((
-                    Sender::new(
-                        self.runtime.clone(),
-                        public_key,
-                        channel,
-                        max_size,
-                        self.sender.clone(),
-                    ),
-                    Receiver { receiver },
-                )));
-                if let Err(err) = result {
-                    error!(?err, "failed to send register ack to oracle");
-                }
-            }
-            ingress::Message::Deregister { public_key, result } => {
-                if self.peers.remove(&public_key).is_none() {
-                    if let Err(err) = result.send(Err(Error::PeerMissing)) {
-                        error!(?err, "failed to send deregister err to oracle");
-                    }
-                    return;
-                }
-                if let Err(err) = result.send(Ok(())) {
-                    error!(?err, "failed to send deregister ack to oracle");
-                }
+                // Create a receiver that allows receiving messages from the network for a certain channel
+                let peer = self.peers.get_mut(&public_key).unwrap();
+                let receiver = match peer.register(channel).await {
+                    Ok(receiver) => Receiver { receiver },
+                    Err(err) => return send_result(result, Err(err)),
+                };
+
+                // Create a sender that allows sending messages to the network for a certain channel
+                let sender = Sender::new(
+                    self.runtime.clone(),
+                    public_key,
+                    channel,
+                    self.max_size,
+                    self.sender.clone(),
+                );
+                send_result(result, Ok((sender, receiver)))
             }
             ingress::Message::AddLink {
                 sender,
@@ -162,41 +209,50 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 success_rate,
                 result,
             } => {
-                self.links
-                    .entry(sender)
-                    .or_default()
-                    .insert(receiver, (sampler, success_rate));
-                if let Err(err) = result.send(()) {
-                    error!(?err, "failed to send add link ack to oracle");
+                // Require both peers to be registered
+                if !self.peers.contains_key(&sender) {
+                    return send_result(result, Err(Error::PeerMissing));
                 }
+                let peer = match self.peers.get(&receiver) {
+                    Some(peer) => peer,
+                    None => return send_result(result, Err(Error::PeerMissing)),
+                };
+
+                // Require link to not already exist
+                let key = (sender.clone(), receiver);
+                if self.links.contains_key(&key) {
+                    return send_result(result, Err(Error::LinkExists));
+                }
+
+                let link = Link::new(
+                    &mut self.runtime,
+                    sender,
+                    peer.socket,
+                    sampler,
+                    success_rate,
+                    self.max_size,
+                );
+                self.links.insert(key, link);
+                send_result(result, Ok(()))
             }
             ingress::Message::RemoveLink {
                 sender,
                 receiver,
                 result,
             } => {
-                let recipients = match self.links.get_mut(&sender) {
-                    Some(entry) => entry,
-                    None => {
-                        if let Err(err) = result.send(Err(Error::LinkMissing)) {
-                            error!(?err, "failed to send remove link err to oracle");
-                        }
-                        return;
-                    }
-                };
-                if recipients.remove(&receiver).is_none() {
-                    if let Err(err) = result.send(Err(Error::LinkMissing)) {
-                        error!(?err, "failed to send remove link err to oracle");
-                    }
-                    return;
+                match self.links.remove(&(sender, receiver)) {
+                    Some(_) => (),
+                    None => return send_result(result, Err(Error::LinkMissing)),
                 }
-                if let Err(err) = result.send(Ok(())) {
-                    error!(?err, "failed to send remove link ack to oracle");
-                }
+                send_result(result, Ok(()))
             }
         }
     }
 
+    /// Handle a task.
+    ///
+    /// This method is called when a task is received from the sender, which can come from
+    /// any peer in the network.
     fn handle_task(&mut self, task: Task) {
         // Collect recipients
         let (channel, origin, recipients, message, reply) = task;
@@ -220,28 +276,16 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 continue;
             }
 
-            // Determine if recipient exists
-            let sender = match self.peers.get(&recipient) {
-                Some(sender) => sender,
-                None => {
-                    trace!(
-                        recipient = hex(&recipient),
-                        reason = "no agent",
-                        "dropping message",
-                    );
-                    continue;
-                }
-            };
-
             // Determine if there is a link between the sender and recipient
-            let link = match self
+            let mut link = match self
                 .links
-                .get(&origin)
-                .and_then(|links| links.get(&recipient))
+                .get(&(origin.clone(), recipient.clone()))
+                .cloned()
             {
                 Some(link) => link,
                 None => {
                     trace!(
+                        origin = hex(&origin),
                         recipient = hex(&recipient),
                         reason = "no link",
                         "dropping message",
@@ -257,8 +301,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                 .inc();
 
             // Apply link settings
-            let delay = link.0.sample(&mut self.runtime);
-            let should_deliver = self.runtime.gen_bool(link.1);
+            let delay = link.sampler.sample(&mut self.runtime);
+            let should_deliver = self.runtime.gen_bool(link.success_rate);
             trace!(
                 origin = hex(&origin),
                 recipient = hex(&recipient),
@@ -270,7 +314,6 @@ impl<E: Spawner + Rng + Clock> Network<E> {
             self.runtime.spawn("messenger", {
                 let runtime = self.runtime.clone();
                 let recipient = recipient.clone();
-                let sender = sender.get(&channel).cloned();
                 let message = message.clone();
                 let mut acquired_sender = acquired_sender.clone();
                 let origin = origin.clone();
@@ -295,35 +338,8 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                         return;
                     }
 
-                    // Drop message if not listening on channel
-                    let (max_size, mut sender) = match sender {
-                        Some(sender) => sender,
-                        None => {
-                            trace!(
-                                recipient = hex(&recipient),
-                                channel,
-                                reason = "missing channel",
-                                "dropping message",
-                            );
-                            return;
-                        }
-                    };
-
-                    // Drop message if too large
-                    if message.len() > max_size {
-                        trace!(
-                            recipient = hex(&recipient),
-                            channel,
-                            size = message.len(),
-                            max_size,
-                            reason = "message too large",
-                            "dropping message",
-                        );
-                        return;
-                    }
-
                     // Send message
-                    if let Err(err) = sender.send((origin.clone(), message)).await {
+                    if let Err(err) = link.send(channel, message).await {
                         // This can only happen if the receiver exited.
                         error!(
                             origin = hex(&origin),
@@ -371,8 +387,7 @@ impl<E: Spawner + Rng + Clock> Network<E> {
                         Some(message) => message,
                         None => break,
                     };
-
-                    self.handle_ingress(message);
+                    self.handle_ingress(message).await;
                 },
                 task = self.receiver.next() => {
                     // If receiver is closed, exit
@@ -390,10 +405,9 @@ impl<E: Spawner + Rng + Clock> Network<E> {
 /// Implementation of a [`crate::Sender`] for the simulated network.
 #[derive(Clone, Debug)]
 pub struct Sender {
+    me: PublicKey,
     channel: Channel,
     max_size: usize,
-
-    me: PublicKey,
     high: mpsc::UnboundedSender<Task>,
     low: mpsc::UnboundedSender<Task>,
 }
@@ -437,10 +451,9 @@ impl Sender {
 
         // Return sender
         Self {
+            me,
             channel,
             max_size,
-
-            me,
             high,
             low,
         }
@@ -472,16 +485,315 @@ impl crate::Sender for Sender {
     }
 }
 
+type MessageReceiver = mpsc::UnboundedReceiver<Message>;
+type MessageReceiverResult = Result<MessageReceiver, Error>;
+
 /// Implementation of a [`crate::Receiver`] for the simulated network.
 #[derive(Debug)]
 pub struct Receiver {
-    receiver: mpsc::UnboundedReceiver<Message>,
+    receiver: MessageReceiver,
 }
 
 impl crate::Receiver for Receiver {
     type Error = Error;
 
     async fn recv(&mut self) -> Result<Message, Error> {
-        self.receiver.next().await.ok_or(Error::PeerClosed)
+        self.receiver.next().await.ok_or(Error::NetworkClosed)
+    }
+}
+
+/// A peer in the simulated network.
+///
+/// The peer can register channels, which allows it to receive messages sent to the channel from other peers.
+struct Peer {
+    // Socket address that the peer is listening on
+    socket: SocketAddr,
+
+    // Control to register new channels
+    control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult>)>,
+}
+
+impl Peer {
+    /// Create and return a new peer.
+    ///
+    /// The peer will listen for incoming connections on the given `socket` address.
+    /// `max_size` is the maximum size of a message that can be sent to the peer.
+    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
+        runtime: &mut E,
+        public_key: PublicKey,
+        socket: SocketAddr,
+        max_size: usize,
+    ) -> Self {
+        // The control is used to register channels.
+        // There is exactly one mailbox created for each channel that the peer is registered for.
+        let (control_sender, mut control_receiver) = mpsc::unbounded();
+
+        // Whenever a message is received from a peer, it is placed in the inbox.
+        // The router polls the inbox and forwards the message to the appropriate mailbox.
+        let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
+
+        // Spawn router
+        runtime.spawn("router", async move {
+            // Map of channels to mailboxes (senders to particular channels)
+            let mut mailboxes = HashMap::new();
+
+            // Continually listen for control messages and outbound messages
+            loop {
+                select! {
+                    // Listen for control messages, which are used to register channels
+                    control = control_receiver.next() => {
+                        // If control is closed, exit
+                        let (channel, result): (Channel, oneshot::Sender<MessageReceiverResult>) = match control {
+                            Some(control) => control,
+                            None => break,
+                        };
+
+                        // Check if channel is registered
+                        if mailboxes.contains_key(&channel) {
+                            result.send(Err(Error::ChannelAlreadyRegistered(channel))).unwrap();
+                            continue;
+                        }
+
+                        // Register channel
+                        let (sender, receiver) = mpsc::unbounded();
+                        mailboxes.insert(channel, sender);
+                        result.send(Ok(receiver)).unwrap();
+                    },
+
+                    // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
+                    inbox = inbox_receiver.next() => {
+                        // If inbox is closed, exit
+                        let (channel, message) = match inbox {
+                            Some(message) => message,
+                            None => break,
+                        };
+
+                        // Send message to mailbox
+                        match mailboxes.get_mut(&channel) {
+                            Some(mailbox) => {
+                                if let Err(err) = mailbox.send(message).await {
+                                    error!(?err, "failed to send message to mailbox");
+                                }
+                            }
+                            None => {
+                                trace!(
+                                    recipient = hex(&public_key),
+                                    channel,
+                                    reason = "missing channel",
+                                    "dropping message",
+                                );
+                            }
+                        }
+                    },
+                }
+            }
+        });
+
+        // Spawn a task that accepts new connections and spawns a task for each connection
+        runtime.spawn("listener", {
+            let runtime = runtime.clone();
+            let inbox_sender = inbox_sender.clone();
+            async move {
+                // Initialize listener
+                let mut listener = runtime.bind(socket).await.unwrap();
+
+                // Continually accept new connections
+                while let Ok((_, _, mut stream)) = listener.accept().await {
+                    // New connection accepted. Spawn a task for this connection
+                    runtime.spawn("receiver", {
+                        let mut inbox_sender = inbox_sender.clone();
+                        async move {
+                            // Receive dialer's public key as a handshake
+                            let dialer = match recv_frame(&mut stream, max_size).await {
+                                Ok(data) => data,
+                                Err(_) => {
+                                    error!("failed to receive public key from dialer");
+                                    return;
+                                }
+                            };
+
+                            // Continually receive messages from the dialer and send them to the inbox
+                            while let Ok(data) = recv_frame(&mut stream, max_size).await {
+                                let channel = Channel::from_be_bytes(
+                                    data[..SIZE_OF_CHANNEL].try_into().unwrap(),
+                                );
+                                let message = data.slice(SIZE_OF_CHANNEL..);
+                                if let Err(err) = inbox_sender
+                                    .send((channel, (dialer.clone(), message)))
+                                    .await
+                                {
+                                    error!(?err, "failed to send message to mailbox");
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+        // Return peer
+        Self {
+            socket,
+            control: control_sender,
+        }
+    }
+
+    /// Register a channel with the peer.
+    ///
+    /// This allows the peer to receive messages sent to the channel.
+    /// Returns a receiver that can be used to receive messages sent to the channel.
+    async fn register(&mut self, channel: Channel) -> MessageReceiverResult {
+        let (sender, receiver) = oneshot::channel();
+        self.control
+            .send((channel, sender))
+            .await
+            .map_err(|_| Error::NetworkClosed)?;
+        receiver.await.map_err(|_| Error::NetworkClosed)?
+    }
+}
+
+// A unidirectional link between two peers.
+// Messages can be sent over the link with a given latency, jitter, and success rate.
+#[derive(Clone)]
+struct Link {
+    sampler: Normal<f64>,
+    success_rate: f64,
+    inbox: mpsc::UnboundedSender<(Channel, Bytes)>,
+}
+
+impl Link {
+    fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
+        runtime: &mut E,
+        dialer: PublicKey,
+        socket: SocketAddr,
+        sampler: Normal<f64>,
+        success_rate: f64,
+        max_size: usize,
+    ) -> Self {
+        let (inbox, mut outbox) = mpsc::unbounded();
+        let result = Self {
+            sampler,
+            success_rate,
+            inbox,
+        };
+
+        // Spawn a task that will wait for messages to be sent to the link and then send them
+        // over the network.
+        runtime.spawn("link", {
+            let runtime = runtime.clone();
+            async move {
+                // Dial the peer and handshake by sending it the dialer's public key
+                let (mut sink, _) = runtime.dial(socket).await.unwrap();
+                if let Err(err) = send_frame(&mut sink, &dialer, max_size).await {
+                    error!(?err, "failed to send public key to dialee");
+                    return;
+                }
+
+                // For any item placed in the inbox, send it to the sink
+                while let Some((channel, message)) = outbox.next().await {
+                    let mut data = bytes::BytesMut::with_capacity(SIZE_OF_CHANNEL + message.len());
+                    data.extend_from_slice(&channel.to_be_bytes());
+                    data.extend_from_slice(&message);
+                    let data = data.freeze();
+                    send_frame(&mut sink, &data, max_size).await.unwrap();
+                }
+            }
+        });
+
+        result
+    }
+
+    // Send a message over the link.
+    async fn send(&mut self, channel: Channel, message: Bytes) -> Result<(), Error> {
+        self.inbox
+            .send((channel, message))
+            .await
+            .map_err(|_| Error::NetworkClosed)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{Ed25519, Scheme};
+    use commonware_runtime::{deterministic::Executor, Runner};
+
+    const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
+    #[test]
+    fn test_register_and_link() {
+        let (executor, runtime, _) = Executor::default();
+        executor.start(async move {
+            let cfg = Config {
+                registry: Arc::new(Mutex::new(Registry::default())),
+                max_size: MAX_MESSAGE_SIZE,
+            };
+            let (network, mut oracle) = Network::new(runtime.clone(), cfg);
+            runtime.spawn("network", network.run());
+
+            // Create two public keys
+            let pk1 = Ed25519::from_seed(1).public_key();
+            let pk2 = Ed25519::from_seed(2).public_key();
+
+            // Register
+            oracle.register(pk1.clone(), 0).await.unwrap();
+            oracle.register(pk1.clone(), 1).await.unwrap();
+            oracle.register(pk2.clone(), 0).await.unwrap();
+            oracle.register(pk2.clone(), 1).await.unwrap();
+
+            // Expect error when registering again
+            assert!(matches!(
+                oracle.register(pk1.clone(), 1).await,
+                Err(Error::ChannelAlreadyRegistered(_))
+            ));
+
+            // Add link
+            let link = ingress::Link {
+                latency: 2.0,
+                jitter: 1.0,
+                success_rate: 0.9,
+            };
+            oracle
+                .add_link(pk1.clone(), pk2.clone(), link.clone())
+                .await
+                .unwrap();
+
+            // Expect error when adding link again
+            assert!(matches!(
+                oracle.add_link(pk1.clone(), pk2.clone(), link).await,
+                Err(Error::LinkExists)
+            ));
+        });
+    }
+
+    #[test]
+    fn test_get_next_socket() {
+        let cfg = Config {
+            registry: Arc::new(Mutex::new(Registry::default())),
+            max_size: MAX_MESSAGE_SIZE,
+        };
+        let (_, runtime, _) = Executor::default();
+        let (mut network, _) = Network::new(runtime.clone(), cfg);
+
+        // Test that the next socket address is incremented correctly
+        let mut original = network.next_addr;
+        let next = network.get_next_socket();
+        assert_eq!(next, original);
+        let next = network.get_next_socket();
+        original.set_port(1);
+        assert_eq!(next, original);
+
+        // Test that the port number overflows correctly
+        let max_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 0, 255, 255)), 65535);
+        network.next_addr = max_addr;
+        let next = network.get_next_socket();
+        assert_eq!(next, max_addr);
+        let next = network.get_next_socket();
+        assert_eq!(
+            next,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(255, 1, 0, 0)), 0)
+        );
     }
 }

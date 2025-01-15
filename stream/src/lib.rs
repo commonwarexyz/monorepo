@@ -1,6 +1,7 @@
 //! Exchange messages over arbitrary transport.
 
 pub mod public_key;
+pub mod utils;
 
 use bytes::Bytes;
 use prost::DecodeError;

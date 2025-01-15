@@ -84,7 +84,7 @@ use std::time::Duration;
 mod connection;
 pub use connection::{Connection, IncomingConnection, Receiver, Sender};
 mod handshake;
-mod utils;
+mod nonce;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
