@@ -124,17 +124,15 @@
 //!
 //! #### Succinct Consensus Certificates
 //!
-//! All broadcast consensus messages are partial signatures (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) for a `2f+1` of `3f+1`
+//! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) are partial signatures for a `2f+1` of `3f+1`
 //! shared secret. As soon as `2f+1` messages are received, a threshold signature over `notarization(c,v)`, `nullification(v)`, and
 //! `finalization(c,v)` can be recovered, respectively. Using a DKG and resharing scheme, a static public key can be maintained
 //! across reconfiguration to ensure any of these certificates can be verified with a static public by an external process without
 //! following consensus and/or tracking the current set of participants.
 //!
-//!
-//! are all recovered threshold signatures (of a static public key). This makes it possible for an external
-//! process to verify that a block is canonical in a given consensus instance without actually following that consensus instance.
-//!
-//! This can be used both to secure interopability between different consensus instances and to secure user interactions with an RPC provider.
+//! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
+//! can be used to secure interopability between different consensus instances and user interactions with an RPC provider (where any data
+//! returned is proven to derive from some finalized block of a known consensus instance).
 //!
 //! #### Bias-Resistant VRF
 //!
