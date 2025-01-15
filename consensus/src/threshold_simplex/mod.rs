@@ -13,19 +13,6 @@
 //!
 //! # Features
 //!
-//! Stateless => don't need to know anything about current validator set or block history to verify
-//! a block was finalized.
-//!
-//!
-//! `threshold-simplex`
-//! provides this functionality with zero message overhead by employing threshold cryptography.
-//!
-//!
-//! view with zero bandwidth overhead (i.e. consensus messages are
-//! just partial signatures that can be transformed into a threshold signature) and a bias-resistant
-//! beacon for leader election and block execution.
-//!
-//!
 //! * Wicked Fast Block Times (2 Network Hops)
 //! * Optimal Finalization Latency (3 Network Hops)
 //! * Externalized Uptime and Fault Proofs
