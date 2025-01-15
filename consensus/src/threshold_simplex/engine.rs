@@ -16,7 +16,7 @@ use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
 
-/// Instance of `simplex` consensus engine.
+/// Instance of `threshold-simplex` consensus engine.
 pub struct Engine<
     B: Blob,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
@@ -56,7 +56,7 @@ impl<
         >,
     > Engine<B, E, C, H, A, R, F, S>
 {
-    /// Create a new `simplex` consensus engine.
+    /// Create a new `threshold-simplex` consensus engine.
     pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
@@ -112,7 +112,7 @@ impl<
         }
     }
 
-    /// Start the `simplex` consensus engine.
+    /// Start the `threshold-simplex` consensus engine.
     ///
     /// This will also rebuild the state of the engine from provided `Journal`.
     pub async fn run(

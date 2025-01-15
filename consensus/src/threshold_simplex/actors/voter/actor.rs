@@ -72,6 +72,7 @@ struct Round<
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
+    // Track nullifies (ensuring any participant only has one recorded nullify)
     nullifies: HashMap<u32, wire::Nullify>,
     nullification: Option<wire::Nullification>,
     broadcast_nullify: bool,

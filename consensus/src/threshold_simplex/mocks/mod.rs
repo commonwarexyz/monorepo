@@ -1,4 +1,4 @@
-//! Collection of mocks used to test `simplex`.
+//! Collection of mocks used to test `threshold-simplex`.
 
 pub mod application;
 pub mod conflicter;

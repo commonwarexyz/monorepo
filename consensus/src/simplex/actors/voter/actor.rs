@@ -64,6 +64,7 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
+    // Track nullifies (ensuring any participant only has one recorded nullify)
     nullifies: HashMap<u32, wire::Nullify>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,

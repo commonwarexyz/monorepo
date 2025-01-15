@@ -1,26 +1,42 @@
-//! Simple and fast BFT agreement inspired by Simplex Consensus.
+//! Extension of Simplex Consensus with stateless consensus certificates and a bias-resistant VRF.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
-//! simple and fast BFT agreement that seeks to minimize view latency (i.e. block time)
-//! and to provide optimal finalization latency in a partially synchronous setting.
+//! simple and fast BFT agreement that minimizes both view latency (i.e. block time)
+//! and finalization latency in a partially synchronous setting. Unlike Simplex Consensus,
+//! `threshold-simplex` emits both stateless consensus certificates and a bias-resistant beacon
+//! during each view using threshold cryptography (specifically BLS12-381 threshold signatures).
 //!
-//! _For a non-threshold version of this, checkout `simplex`._
+//! _If you want to deploy Simplex Consensus but can't employ threshold signatures, see
+//! [Simplex](crate::simplex)._
 //!
 //! # Features
+//!
+//! Stateless => don't need to know anything about current validator set or block history to verify
+//! a block was finalized.
+//!
+//!
+//! `threshold-simplex`
+//! provides this functionality with zero message overhead by employing threshold cryptography.
+//!
+//!
+//! view with zero bandwidth overhead (i.e. consensus messages are
+//! just partial signatures that can be transformed into a threshold signature) and a bias-resistant
+//! beacon for leader election and block execution.
+//!
 //!
 //! * Wicked Fast Block Times (2 Network Hops)
 //! * Optimal Finalization Latency (3 Network Hops)
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
 //! * Flexible Block Format
-//! * VRF for Block-Ahead Leader Election
-//! * Threshold Certificates for Notarization and Finality
+//! * Stateless Consensus Certificates for Notarization and Finality
+//! * VRF for Leader Election and Post-Facto Execution Modifications
 //!
 //! # Design
 //!
 //! ## Architecture
 //!
-//! All logic is split into two components: the `Voter` and the `Resolver` (and the user of `simplex`
+//! All logic is split into two components: the `Voter` and the `Resolver` (and the user of `threshold-simplex`
 //! provides `Application`). The `Voter` is responsible for participating in the latest view and the
 //! `Resolver` is responsible for fetching artifacts from previous views required to verify proposed
 //! blocks in the latest view.
@@ -48,7 +64,7 @@
 //! ```
 //!
 //! _Application is usually a single object that implements the `Automaton`, `Relay`, `Committer`,
-//! and `Supervisor` traits._
+//! and `ThresholdSupervisor` traits._
 //!
 //! ## Joining Consensus
 //!
