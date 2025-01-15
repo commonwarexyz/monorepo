@@ -93,6 +93,9 @@
 //!
 //! ## Start Validators
 //!
+//! Each network has an `identity` (the group polynomial generated above) and each validator has a `share` that can be used to create partial signatures that can be verified on said `identity`. The `other-identity` is the public
+//! key (constant term) of the other network's group polynomial. This value would remain static across a reshare (not implemented in this demo).
+//!
 //! ### Network 1
 //!
 //! #### Participant 1 (Bootstrapper)
