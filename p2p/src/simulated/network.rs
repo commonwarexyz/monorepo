@@ -154,7 +154,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
     /// Handle an ingress message.
     ///
     /// This method is called when a message is received from the oracle.
-    fn handle_ingress(&mut self, message: ingress::Message) {
+    async fn handle_ingress(&mut self, message: ingress::Message) {
         // It is important to ensure that no failed receipt of a message will cause us to exit.
         // This could happen if the caller drops the `Oracle` after updating the network topology.
         // Thus, we create a helper function to send the result to the oracle and log any errors.
@@ -187,7 +187,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
 
                 // Create a receiver that allows receiving messages from the network for a certain channel
                 let peer = self.peers.get_mut(&public_key).unwrap();
-                let receiver = match peer.register(channel) {
+                let receiver = match peer.register(channel).await {
                     Ok(receiver) => Receiver { receiver },
                     Err(err) => return send_result(result, Err(err)),
                 };
@@ -387,8 +387,7 @@ impl<E: RNetwork<Listener, Sink, Stream> + Spawner + Rng + Clock> Network<E> {
                         Some(message) => message,
                         None => break,
                     };
-
-                    self.handle_ingress(message);
+                    self.handle_ingress(message).await;
                 },
                 task = self.receiver.next() => {
                     // If receiver is closed, exit
@@ -486,10 +485,13 @@ impl crate::Sender for Sender {
     }
 }
 
+type MessageReceiver = mpsc::UnboundedReceiver<Message>;
+type MessageReceiverResult = Result<MessageReceiver, Error>;
+
 /// Implementation of a [`crate::Receiver`] for the simulated network.
 #[derive(Debug)]
 pub struct Receiver {
-    receiver: mpsc::UnboundedReceiver<Message>,
+    receiver: MessageReceiver,
 }
 
 impl crate::Receiver for Receiver {
@@ -500,39 +502,106 @@ impl crate::Receiver for Receiver {
     }
 }
 
-// A peer in the simulated network.
-// The peer can receive messages over any registered channel.
+/// A peer in the simulated network.
+///
+/// The peer can register channels, which allows it to receive messages sent to the channel from other peers.
 struct Peer {
     // Socket address that the peer is listening on
     socket: SocketAddr,
 
-    // Map from channel to a sender that can deliver messages to that channel
-    mailboxes: Arc<Mutex<HashMap<Channel, mpsc::UnboundedSender<Message>>>>,
+    // Control to register new channels
+    control: mpsc::UnboundedSender<(Channel, oneshot::Sender<MessageReceiverResult>)>,
 }
 
 impl Peer {
+    /// Create and return a new peer.
+    ///
+    /// The peer will listen for incoming connections on the given `socket` address.
+    /// `max_size` is the maximum size of a message that can be sent to the peer.
     fn new<E: Spawner + RNetwork<Listener, Sink, Stream>>(
         runtime: &mut E,
         public_key: PublicKey,
         socket: SocketAddr,
         max_size: usize,
     ) -> Self {
-        let result = Self {
-            socket,
-            mailboxes: Arc::new(Mutex::new(HashMap::new())),
-        };
+        // The control is used to register channels.
+        // There is exactly one mailbox created for each channel that the peer is registered for.
+        let (control_sender, mut control_receiver) = mpsc::unbounded();
 
-        // Continually listen for incoming connections on the socket
+        // Whenever a message is received from a peer, it is placed in the inbox.
+        // The router polls the inbox and forwards the message to the appropriate mailbox.
+        let (inbox_sender, mut inbox_receiver) = mpsc::unbounded();
+
+        // Spawn router
+        runtime.spawn("router", async move {
+            // Map of channels to mailboxes (senders to particular channels)
+            let mut mailboxes = HashMap::new();
+
+            // Continually listen for control messages and outbound messages
+            loop {
+                select! {
+                    // Listen for control messages, which are used to register channels
+                    control = control_receiver.next() => {
+                        // If control is closed, exit
+                        let (channel, result): (Channel, oneshot::Sender<MessageReceiverResult>) = match control {
+                            Some(control) => control,
+                            None => break,
+                        };
+
+                        // Check if channel is registered
+                        if mailboxes.contains_key(&channel) {
+                            result.send(Err(Error::ChannelAlreadyRegistered(channel))).unwrap();
+                            continue;
+                        }
+
+                        // Register channel
+                        let (sender, receiver) = mpsc::unbounded();
+                        mailboxes.insert(channel, sender);
+                        result.send(Ok(receiver)).unwrap();
+                    },
+
+                    // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
+                    inbox = inbox_receiver.next() => {
+                        // If inbox is closed, exit
+                        let (channel, message) = match inbox {
+                            Some(message) => message,
+                            None => break,
+                        };
+
+                        // Send message to mailbox
+                        match mailboxes.get_mut(&channel) {
+                            Some(mailbox) => {
+                                if let Err(err) = mailbox.send(message).await {
+                                    error!(?err, "failed to send message to mailbox");
+                                }
+                            }
+                            None => {
+                                trace!(
+                                    recipient = hex(&public_key),
+                                    channel,
+                                    reason = "missing channel",
+                                    "dropping message",
+                                );
+                            }
+                        }
+                    },
+                }
+            }
+        });
+
+        // Spawn a task that accepts new connections and spawns a task for each connection
         runtime.spawn("listener", {
             let runtime = runtime.clone();
-            let mailboxes = result.mailboxes.clone();
+            let inbox_sender = inbox_sender.clone();
             async move {
+                // Initialize listener
                 let mut listener = runtime.bind(socket).await.unwrap();
+
+                // Continually accept new connections
                 while let Ok((_, _, mut stream)) = listener.accept().await {
-                    // Spawn a task for this connection
+                    // New connection accepted. Spawn a task for this connection
                     runtime.spawn("receiver", {
-                        let mailboxes = mailboxes.clone();
-                        let public_key = public_key.clone();
+                        let mut inbox_sender = inbox_sender.clone();
                         async move {
                             // Receive dialer's public key as a handshake
                             let dialer = match recv_frame(&mut stream, max_size).await {
@@ -543,25 +612,16 @@ impl Peer {
                                 }
                             };
 
-                            // Continually receive messages from the dialer and send them to the appropriate mailbox
+                            // Continually receive messages from the dialer and send them to the inbox
                             while let Ok(data) = recv_frame(&mut stream, max_size).await {
                                 let channel = Channel::from_be_bytes(
                                     data[..SIZE_OF_CHANNEL].try_into().unwrap(),
                                 );
                                 let message = data.slice(SIZE_OF_CHANNEL..);
-                                let mut mailbox = match mailboxes.lock().unwrap().get(&channel) {
-                                    Some(s) => s.clone(),
-                                    None => {
-                                        trace!(
-                                            recipient = hex(&public_key),
-                                            channel,
-                                            reason = "missing channel",
-                                            "dropping message",
-                                        );
-                                        continue;
-                                    }
-                                };
-                                if let Err(err) = mailbox.send((dialer.clone(), message)).await {
+                                if let Err(err) = inbox_sender
+                                    .send((channel, (dialer.clone(), message)))
+                                    .await
+                                {
                                     error!(?err, "failed to send message to mailbox");
                                     break;
                                 }
@@ -572,21 +632,24 @@ impl Peer {
             }
         });
 
-        result
+        // Return peer
+        Self {
+            socket,
+            control: control_sender,
+        }
     }
 
-    fn register(&mut self, channel: Channel) -> Result<mpsc::UnboundedReceiver<Message>, Error> {
-        let mut mailboxes = self.mailboxes.lock().unwrap();
-
-        // Error if channel already exists
-        if mailboxes.contains_key(&channel) {
-            return Err(Error::ChannelAlreadyRegistered(channel));
-        }
-
-        // Insert new channel
-        let (sender, receiver) = mpsc::unbounded();
-        mailboxes.insert(channel, sender);
-        Ok(receiver)
+    /// Register a channel with the peer.
+    ///
+    /// This allows the peer to receive messages sent to the channel.
+    /// Returns a receiver that can be used to receive messages sent to the channel.
+    async fn register(&mut self, channel: Channel) -> MessageReceiverResult {
+        let (sender, receiver) = oneshot::channel();
+        self.control
+            .send((channel, sender))
+            .await
+            .map_err(|_| Error::NetworkClosed)?;
+        receiver.await.map_err(|_| Error::NetworkClosed)?
     }
 }
 
