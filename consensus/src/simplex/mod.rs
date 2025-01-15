@@ -4,7 +4,7 @@
 //! simple and fast BFT agreement that minimizes both view latency (i.e. block time)
 //! and finalization latency in a partially synchronous setting.
 //!
-//! _If your application would benefit from stateless consensus certificates or a bias-resistant
+//! _If your application would benefit from succinct consensus certificates or a bias-resistant
 //! VRF, see [Threshold Simplex](crate::threshold_simplex)._
 //!
 //! # Features

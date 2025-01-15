@@ -1,10 +1,10 @@
-//! Extension of Simplex Consensus with stateless consensus certificates and a bias-resistant VRF.
+//! Extension of Simplex Consensus with succinct consensus certificates and a bias-resistant VRF.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
 //! simple and fast BFT agreement that minimizes both view latency (i.e. block time)
 //! and finalization latency in a partially synchronous setting. Unlike Simplex Consensus,
-//! `threshold-simplex` emits both stateless consensus certificates and a bias-resistant beacon
-//! during each view using threshold cryptography (specifically BLS12-381 threshold signatures).
+//! `threshold-simplex` emits both succinct consensus certificates and a bias-resistant beacon
+//! during each view without any additional message overhead.
 //!
 //! _If you want to deploy Simplex Consensus but can't employ threshold signatures, see
 //! [Simplex](crate::simplex)._
@@ -120,7 +120,7 @@
 //! * Every `t_r` after `(part(v), nullify(v))` broadcast that we are still in view `v`:
 //!    * Rebroadcast `(part(v), nullify(v))` and either `(seed(v-1), notarization(v-1))` or `(seed(v-1), nullification(v-1))`
 //!
-//! ### VRF
+//! #### Bias-Resistant VRF
 //!
 //! When broadcasting a `notarize(c,v)` or `nullify(v)` message, a validator must also include a `part(v)` message (a partial
 //! signature over the view `v` index). When `2f+1` `notarize(c,v)` or `nullify(v)` messages are received, a validator can
@@ -130,7 +130,7 @@
 //! `seed(v)` can be used as bias-resistant randomness to select the leader for `v+1` and in the execution of `c` (at view `v`).
 //! TODO: more elaboration on why this is safe.
 //!
-//! ### Threshold Certificates
+//! #### Succinct Consensus Certificates
 //!
 //! Because all messages are partial signatures (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`), `notarization(c,v)`, `nullification(v)`,
 //! and `finalization(c,v)` are all recovered threshold signatures (of a static public key). This makes it possible for an external
