@@ -1,14 +1,13 @@
-//! Simple and fast BFT agreement (with succinct consensus certificates and a bias-resistant VRF) inspired by Simplex Consensus.
+//! [Simplex](crate::simplex)-like BFT agreement with an embedded VRF and succinct consensus certificates.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
-//! simple and fast BFT agreement that minimizes both view latency (i.e. block time)
-//! and finalization latency in a partially synchronous setting. Unlike Simplex Consensus,
-//! `threshold-simplex` employs a `2f+1` threshold to
+//! simple and fast BFT agreement that minimizes both view (i.e. block time) and finalization latency in
+//! a partially synchronous setting. Unlike Simplex Consensus, however, `threshold-simplex` employs threshold
+//! cryptography (specifically BLS12-381 threshold signatures with a `2f+1` of `3f+1` quorum) to generate both
+//! a bias-resistant beacon (for leader election and post-facto execution randomness) and succinct consensus certificates
+//! (any certificate can be verified with just the static public key of the consensus instance) for each view.
 //!
-//! emits both succinct consensus certificates and a bias-resistant beacon
-//! during each view (without any additional message overhead).
-//!
-//! _If you want to deploy Simplex Consensus but can't employ threshold signatures, see
+//! _If you wish to deploy Simplex Consensus but can't employ threshold signatures, see
 //! [Simplex](crate::simplex)._
 //!
 //! # Features
@@ -18,8 +17,8 @@
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
 //! * Flexible Block Format
-//! * Succinct Consensus Certificates for Notarization, Nullification, and Finality
 //! * Embedded VRF for Leader Election and Post-Facto Execution Randomness
+//! * Succinct Consensus Certificates for Notarization, Nullification, and Finality
 //!
 //! # Design
 //!
@@ -109,6 +108,17 @@
 //! * Every `t_r` after `(part(v), nullify(v))` broadcast that we are still in view `v`:
 //!    * Rebroadcast `(part(v), nullify(v))` and either `(seed(v-1), notarization(v-1))` or `(seed(v-1), nullification(v-1))`
 //!
+//! #### Embedded VRF
+//!
+//! When broadcasting a `notarize(c,v)` or `nullify(v)` message, a participant must also include a `part(v)` message (a partial
+//! signature over the view `v` index). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are received from unique participants,
+//! `seed(v)` can be derived. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
+//! whether or not a block was notarized in said view `v`.
+//!
+//! Because the value of `seed(v)` cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it
+//! can be used both as a beacon for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness for in
+//! execution (where `seed(v)` impacts a block in `v`).
+//!
 //! #### Succinct Consensus Certificates
 //!
 //! All broadcast consensus messages (`notarize(c,v)`, `nullify(v)`, `finalize(c,v)`) are partial signatures for a `2f+1` of `3f+1`
@@ -120,17 +130,6 @@
 //! These threshold signatures over `notarization(c,v)`, `nullification(v)`, and `finalization(c,v)` (i.e. the consensus certificates)
 //! can be used to secure interopability between different consensus instances and user interactions with an RPC provider (where any data
 //! returned is proven to derive from some finalized block of a known consensus instance).
-//!
-//! #### Bias-Resistant VRF
-//!
-//! When broadcasting a `notarize(c,v)` or `nullify(v)` message, a participant must also include a `part(v)` message (a partial
-//! signature over the view `v` index). After `2f+1` `notarize(c,v)` or `nullify(v)` messages are received from unique participants,
-//! `seed(v)` can be derived. Because `part(v)` is only over the view `v`, the seed derived for a given view `v` is the same regardless of
-//! whether or not a block was notarized in said view `v`.
-//!
-//! Because the value of `seed(v)` cannot be manipulated by any participant (deterministic for any `2f+1` signers at a given view `v`), it
-//! can be used both as a beacon for leader election (where `seed(v)` determines the leader for `v+1`) and a source of randomness for in
-//! execution (where `seed(v)` impacts a block in `v`).
 //!
 //! ### Deviations from Simplex Consensus
 //!
