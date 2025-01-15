@@ -218,7 +218,7 @@ mod tests {
     use futures::{channel::mpsc, StreamExt};
     use governor::Quota;
     use prometheus_client::registry::Registry;
-    use rand::Rng;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
         num::NonZeroU32,
@@ -531,6 +531,11 @@ mod tests {
         let activity_timeout = 10;
         let namespace = b"consensus".to_vec();
 
+        // Derive threshold
+        let mut rng = StdRng::seed_from_u64(0);
+        let (public, shares) = ops::generate_shares(&mut rng, None, n, threshold);
+        let pk = poly::public(&public);
+
         // Random restarts every x seconds
         let shutdowns: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
         let notarized = Arc::new(Mutex::new(HashMap::new()));
@@ -547,6 +552,8 @@ mod tests {
             let supervised = supervised.clone();
             executor.start({
                 let mut runtime = runtime.clone();
+                let public = public.clone();
+                let shares = shares.clone();
                 async move {
                 // Create simulated network
                 let (network, mut oracle) = Network::new(
@@ -581,12 +588,8 @@ mod tests {
                 };
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
-                // Derive threshold
-                let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
-                let pk = poly::public(&public);
-                let prover = Prover::new(pk, &namespace);
-
                 // Create engines
+                let prover = Prover::new(pk, &namespace);
                 let hasher = Sha256::default();
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
