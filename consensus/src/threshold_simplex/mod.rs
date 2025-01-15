@@ -1,4 +1,4 @@
-//! Extension of [Simplex](crate::simplex) with succinct consensus certificates and a bias-resistant VRF.
+//! Simple and fast BFT agreement (with succinct consensus certificates and a bias-resistant VRF) inspired by Simplex Consensus.
 //!
 //! Inspired by [Simplex Consensus](https://eprint.iacr.org/2023/463), `threshold-simplex` provides
 //! simple and fast BFT agreement that minimizes both view latency (i.e. block time)
@@ -18,8 +18,8 @@
 //! * Externalized Uptime and Fault Proofs
 //! * Decoupled Block Broadcast and Sync
 //! * Flexible Block Format
-//! * Succinct Consensus Certificates for Notarization and Finality
-//! * VRF for Leader Election and Post-Facto Execution Modifications
+//! * Succinct Consensus Certificates for Notarization, Nullification, and Finality
+//! * Embedded VRF for Leader Election and Post-Facto Execution Randomness
 //!
 //! # Design
 //!
