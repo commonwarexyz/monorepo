@@ -253,7 +253,7 @@ mod tests {
         oracle: &mut Oracle,
         validators: &[PublicKey],
         action: Action,
-        restrict_to: Option<fn(usize, usize) -> bool>,
+        restrict_to: Option<fn(usize, usize, usize) -> bool>,
     ) {
         for (i1, v1) in validators.iter().enumerate() {
             for (i2, v2) in validators.iter().enumerate() {
@@ -264,7 +264,7 @@ mod tests {
 
                 // Restrict to certain connections
                 if let Some(f) = restrict_to {
-                    if !f(i1, i2) {
+                    if !f(validators.len(), i1, i2) {
                         continue;
                     }
                 }
@@ -790,7 +790,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Link(link),
-                Some(|i, j| ![i, j].contains(&0usize)),
+                Some(|_, i, j| ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -908,7 +908,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Update(link.clone()),
-                Some(|i, j| ![i, j].contains(&0usize)),
+                Some(|_, i, j| ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -920,7 +920,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Unlink,
-                Some(|i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
+                Some(|_, i, j| [i, j].contains(&1usize) && ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -933,7 +933,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Link(link),
-                Some(|i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
+                Some(|_, i, j| [i, j].contains(&0usize) && ![i, j].contains(&1usize)),
             )
             .await;
 
@@ -947,7 +947,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Update(link),
-                Some(|i, j| ![i, j].contains(&1usize)),
+                Some(|_, i, j| ![i, j].contains(&1usize)),
             )
             .await;
 
@@ -1088,7 +1088,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Link(link),
-                Some(|i, j| ![i, j].contains(&0usize)),
+                Some(|_, i, j| ![i, j].contains(&0usize)),
             )
             .await;
 
@@ -1611,7 +1611,6 @@ mod tests {
     fn test_partition() {
         // Create runtime
         let n = 10;
-        const N: usize = 10;
         let threshold = quorum(n).expect("unable to calculate threshold");
         let required_containers = 50;
         let activity_timeout = 10;
@@ -1762,17 +1761,11 @@ mod tests {
             }
 
             // Cut all links between validator halves
-            fn are_separated(a: usize, b: usize) -> bool {
-                let m = N / 2;
+            fn separated(n: usize, a: usize, b: usize) -> bool {
+                let m = n / 2;
                 (a < m && b >= m) || (a >= m && b < m)
             }
-            link_validators(
-                &mut oracle,
-                &validators,
-                Action::Unlink,
-                Some(are_separated),
-            )
-            .await;
+            link_validators(&mut oracle, &validators, Action::Unlink, Some(separated)).await;
 
             // Wait for any in-progress notarizations/finalizations to finish
             runtime.sleep(Duration::from_secs(10)).await;
@@ -1797,7 +1790,7 @@ mod tests {
                 &mut oracle,
                 &validators,
                 Action::Link(link),
-                Some(are_separated),
+                Some(separated),
             )
             .await;
 
