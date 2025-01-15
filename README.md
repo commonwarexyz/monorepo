@@ -5,6 +5,22 @@
 [![Discussions](https://img.shields.io/github/discussions/commonwarexyz/monorepo?label=Discussions&color=purple)](https://github.com/commonwarexyz/monorepo/discussions)
 [![Coverage](https://codecov.io/gh/commonwarexyz/monorepo/graph/badge.svg?token=847TBNH49H)](https://codecov.io/gh/commonwarexyz/monorepo)
 
+Commonware is a comprehensive library of cryptographic primitives and tools designed for building secure, distributed systems. Our focus is on providing robust, well-tested implementations that can be safely deployed in adversarial environments.
+
+## Quick Start
+
+To get started with Commonware:
+
+1. Clone the repository:
+```bash
+git clone https://github.com/commonwarexyz/monorepo.git
+cd monorepo
+```
+
+2. Choose the primitive or example that matches your needs
+3. Follow the specific README in the chosen module's directory
+4. Join our [discussions](https://github.com/commonwarexyz/monorepo/discussions) for support
+
 ## Primitives
 
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
@@ -38,7 +54,24 @@ This repository is dual-licensed under both the [Apache 2.0](./LICENSE-APACHE) a
 
 ## Contributing
 
-We encourage external contributors to submit issues and pull requests to the Commonware Library. To learn more, please refer to our [contributing guidelines](./CONTRIBUTING.md).
+We welcome contributions from the community! Here's how you can help:
+
+1. **Find an Issue**: Check our [project tracker](https://github.com/orgs/commonwarexyz/projects/2) for open issues or features in [the backlog](https://github.com/orgs/commonwarexyz/projects/2/views/3)
+2. **Development Setup**:
+   - Fork the repository
+   - Create a new branch for your feature
+   - Follow our coding standards (described in [CONTRIBUTING.md](./CONTRIBUTING.md))
+3. **Submit Changes**:
+   - Ensure all tests pass
+   - Update documentation as needed
+   - Submit a Pull Request with a clear description of your changes
+4. **Code Review**: Participate in the review process and address any feedback
+
+For detailed guidelines, please refer to our [contributing guidelines](./CONTRIBUTING.md).
+
+## Security
+
+If you discover a security vulnerability, please follow our [security policy](./SECURITY.md) for responsible disclosure. We take security issues seriously and appreciate your help in making Commonware safer for everyone.
 
 All work is coordinated via the [tracker](https://github.com/orgs/commonwarexyz/projects/2). If something in [the backlog](https://github.com/orgs/commonwarexyz/projects/2/views/3) looks particularly useful, leave a comment so we can prioritize it!
 
