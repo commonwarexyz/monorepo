@@ -29,8 +29,8 @@ use std::{str::FromStr, time::Duration};
 
 fn main() {
     // Parse arguments
-    let matches = Command::new("commonware-log")
-        .about("generate secret logs and agree on their hash")
+    let matches = Command::new("validator")
+        .about("produce finality certificates and verify external finality certificates")
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
@@ -229,8 +229,7 @@ fn main() {
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let hasher = Sha256::default();
         let prover: Prover<Sha256> = Prover::new(public, &consensus_namespace);
-        let other_consensus_namespace = union(&other_identity.serialize(), CONSENSUS_SUFFIX);
-        let other_prover: Prover<Sha256> = Prover::new(other_identity, &other_consensus_namespace);
+        let other_prover: Prover<Sha256> = Prover::new(other_identity, &consensus_namespace);
         let (application, supervisor, mailbox) = application::Application::new(
             runtime.clone(),
             application::Config {

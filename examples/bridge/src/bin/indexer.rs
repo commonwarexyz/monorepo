@@ -46,7 +46,7 @@ enum Message {
 fn main() {
     // Parse arguments
     let matches = Command::new("indexer")
-        .about("collect blocks and signatures")
+        .about("collect blocks and finality certificates")
         .arg(Arg::new("me").long("me").required(true))
         .arg(
             Arg::new("participants")
