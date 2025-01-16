@@ -11,15 +11,17 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/broadcast"
 documentation = "https://docs.rs/commonware-broadcast"
 
 [dependencies]
+bytes = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
+commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
-thiserror = { workspace = true }
-bytes = { workspace = true }
 futures = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }

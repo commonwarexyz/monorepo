@@ -6,7 +6,7 @@ message Signature {
     bytes signature = 2;
 }
 
-message AckPart {
+message Ack {
     Signature signature = 1;
     bytes car_hash = 2;
 }

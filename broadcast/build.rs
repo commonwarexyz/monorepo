@@ -3,7 +3,7 @@ fn main() -> Result<()> {
     // Proto compilation rules for `linked` dialect
     let mut config = prost_build::Config::new();
     config.bytes([
-        "AckPart.car_hash",
+        "Ack.car_hash",
         "Car.payload",
         "Car.parent",
         "Signature.public_key",

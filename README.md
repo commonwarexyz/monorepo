@@ -10,6 +10,7 @@
 
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
+* [broadcast](./broadcast/README.md): Pre-consensus reliable broadcast.
 * [consensus](./consensus/README.md): Order opaque messages in a Byzantine environment.
 * [cryptography](./cryptography/README.md): Generate keys, sign arbitrary messages, and deterministically verify signatures.
 * [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.

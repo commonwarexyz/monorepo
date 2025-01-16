@@ -400,6 +400,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-broadcast"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "commonware-cryptography",
+ "commonware-macros",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "futures",
+ "prost",
+ "prost-build",
+ "rand",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "commonware-chat"
 version = "0.0.34"
 dependencies = [
