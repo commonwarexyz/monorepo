@@ -363,7 +363,7 @@ impl<E: Spawner + Rng + Clock + GClock, C: Scheme> Actor<E, C> {
         //
         // It is not safe to rate limit how many times this can happen
         // over some interval because a malicious peer may just replay
-        // old IPs to prevent us from propogating a new one.
+        // old IPs to prevent us from propagating a new one.
         let record = self.peers.get_mut(peer).unwrap();
         let wire_time = address.peer.timestamp;
         if !record.set_network(address) {
@@ -741,7 +741,7 @@ mod tests {
             let msg = peer_receiver.next().await.unwrap();
             assert!(matches!(msg, peer::Message::Kill));
 
-            // Find sorted indicies
+            // Find sorted indices
             let mut peers = vec![
                 peer0.public_key(),
                 peer1.clone(),

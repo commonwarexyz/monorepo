@@ -285,7 +285,7 @@ mod tests {
             // Wait to connect to all peers, and then send messages to everyone
             runtime.spawn("network", network.run());
 
-            // Send/Recieve messages
+            // Send/Receive messages
             let handler = runtime.spawn("agent", {
                 let addresses = addresses.clone();
                 let runtime = runtime.clone();
@@ -508,7 +508,7 @@ mod tests {
                 // Wait to connect to all peers, and then send messages to everyone
                 runtime.spawn("network", network.run());
 
-                // Send/Recieve messages
+                // Send/Receive messages
                 let handler = runtime.spawn("agent", {
                     let runtime = runtime.clone();
                     async move {
