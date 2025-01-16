@@ -15,6 +15,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+commonware-broadcast = { version = "0.0.2", path = "broadcast" }
 commonware-consensus = { version = "0.0.9", path = "consensus" }
 commonware-cryptography = { version = "0.0.20", path = "cryptography" }
 commonware-macros = { version = "0.0.11", path = "macros" }

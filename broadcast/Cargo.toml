@@ -1,0 +1,28 @@
+[package]
+name = "commonware-broadcast"
+edition = "2021"
+publish = true
+version = "0.0.1"
+license = "MIT OR Apache-2.0"
+description = "Pre-consensus reliable broadcast."
+readme = "README.md"
+homepage = "https://commonware.xyz"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/broadcast"
+documentation = "https://docs.rs/commonware-broadcast"
+
+[dependencies]
+commonware-cryptography = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-utils = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+
+[lib]
+bench = false
