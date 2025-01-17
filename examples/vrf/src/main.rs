@@ -185,7 +185,7 @@ fn main() {
         .get_many::<u64>("participants")
         .expect("Please provide allowed keys")
         .copied();
-    if participants.len() == 0 {
+    if participants.is_empty() {
         panic!("Please provide at least one participant");
     }
     for peer in participants {
@@ -237,7 +237,7 @@ fn main() {
             .get_many::<u64>("contributors")
             .expect("Please provide contributors")
             .copied();
-        if participants.len() == 0 {
+        if participants.is_empty() {
             panic!("Please provide at least one contributor");
         }
         for peer in participants {
