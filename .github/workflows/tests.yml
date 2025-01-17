@@ -58,3 +58,20 @@ jobs:
       run: cargo +nightly install cargo-udeps --version ${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
       run: cargo +nightly udeps --all-targets
+
+  WASM:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Get Rust version
+      id: rust-version
+      run: echo "rust_version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+    - name: Run setup
+      uses: ./.github/actions/setup
+      with:
+        rust-version: ${{ steps.rust-version.outputs.rust_version}}
+    - name: Add WASM target
+      run: rustup target add wasm32-unknown-unknown
+    - name: Build cryptography
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_cryptography.wasm

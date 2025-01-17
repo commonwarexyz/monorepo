@@ -22,15 +22,20 @@ zeroize = "1.5.7"
 rayon = "1.10"
 p256 = { version = "0.13.2", features = ["ecdsa"] }
 
+# Enable "js" feature when WASM is target
+[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
+version = "0.2.15"
+features = ["js"]
+
 [dev-dependencies]
 criterion = { workspace = true }
-proptest = "1"
 
 [build-dependencies]
 prost-build = { workspace = true }
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]
 
 [features]
 portable = ["blst/portable"]
