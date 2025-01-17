@@ -35,6 +35,7 @@ prost-build = { workspace = true }
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]
 
 [features]
 portable = ["blst/portable"]
