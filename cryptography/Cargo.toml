@@ -29,7 +29,6 @@ features = ["js"]
 
 [dev-dependencies]
 criterion = { workspace = true }
-proptest = "1"
 
 [build-dependencies]
 prost-build = { workspace = true }

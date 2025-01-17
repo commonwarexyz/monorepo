@@ -274,7 +274,6 @@ pub fn public(public: &Public) -> group::Public {
 #[cfg(test)]
 pub mod tests {
     // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/poly.rs#L355-L604
-
     use super::*;
     use crate::bls12381::primitives::group::{Scalar, G2};
 
@@ -335,70 +334,95 @@ pub mod tests {
         res
     }
 
-    use proptest::prelude::*;
-    proptest! {
-        #[test]
-        fn addition(deg1 in 0..100u32, deg2 in 0..100u32) {
-            dbg!(deg1, deg2);
-            let p1 = new(deg1);
-            let p2 = new(deg2);
-            let mut res = p1.clone();
-            res.add(&p2);
+    #[test]
+    fn addition() {
+        for deg1 in 0..100u32 {
+            for deg2 in 0..100u32 {
+                let p1 = new(deg1);
+                let p2 = new(deg2);
+                let mut res = p1.clone();
+                res.add(&p2);
 
-            let (larger, smaller) = if p1.degree() > p2.degree() {
-                (&p1, &p2)
-            } else {
-                (&p2, &p1)
-            };
-
-            for i in 0..larger.degree()+1 {
-                let i = i as usize;
-                if i < (smaller.degree() + 1) as usize{
-                    let mut coeff_sum = p1.0[i];
-                    coeff_sum.add(&p2.0[i]);
-                    assert_eq!(res.0[i], coeff_sum);
+                let (larger, smaller) = if p1.degree() > p2.degree() {
+                    (&p1, &p2)
                 } else {
-                    assert_eq!(res.0[i], larger.0[i]);
+                    (&p2, &p1)
+                };
+
+                for i in 0..larger.degree() + 1 {
+                    let i = i as usize;
+                    if i < (smaller.degree() + 1) as usize {
+                        let mut coeff_sum = p1.0[i];
+                        coeff_sum.add(&p2.0[i]);
+                        assert_eq!(res.0[i], coeff_sum);
+                    } else {
+                        assert_eq!(res.0[i], larger.0[i]);
+                    }
+                }
+                assert_eq!(
+                    res.degree(),
+                    larger.degree(),
+                    "deg1={}, deg2={}",
+                    deg1,
+                    deg2
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn interpolation() {
+        for degree in 0..100u32 {
+            for num_evals in 0..100u32 {
+                let poly = new(degree);
+                let expected = poly.0[0];
+
+                let shares = (0..num_evals).map(|i| poly.evaluate(i)).collect::<Vec<_>>();
+                let recovered_constant = Poly::recover(num_evals, shares).unwrap();
+
+                if num_evals > degree {
+                    assert_eq!(
+                        expected, recovered_constant,
+                        "degree={}, num_evals={}",
+                        degree, num_evals
+                    );
+                } else {
+                    assert_ne!(
+                        expected, recovered_constant,
+                        "degree={}, num_evals={}",
+                        degree, num_evals
+                    );
                 }
             }
-            assert_eq!(res.degree(), larger.degree());
         }
+    }
 
-        #[test]
-        fn interpolation(degree in 0..100u32, num_evals in 0..100u32) {
-            let poly = new(degree);
-            let expected = poly.0[0];
+    #[test]
+    fn evaluate() {
+        for d in 0..100u32 {
+            for idx in 0..100_u32 {
+                let mut x = Scalar::zero();
+                x.set_int(idx + 1);
 
-            let shares = (0..num_evals)
-                .map(|i| poly.evaluate(i))
-                .collect::<Vec<_>>();
-            let recovered_constant = Poly::recover(num_evals, shares).unwrap();
+                let p1 = new(d);
+                let evaluation = p1.evaluate(idx).value;
 
-            if num_evals > degree {
-                assert_eq!(expected, recovered_constant);
-            } else {
-                assert_ne!(expected, recovered_constant);
+                let coeffs = p1.0;
+                let mut sum = coeffs[0];
+                for (i, coeff) in coeffs
+                    .into_iter()
+                    .enumerate()
+                    .take((d + 1) as usize)
+                    .skip(1)
+                {
+                    let xi = pow(x, i);
+                    let mut var = coeff;
+                    var.mul(&xi);
+                    sum.add(&var);
+                }
+
+                assert_eq!(sum, evaluation, "degree={}, idx={}", d, idx);
             }
-        }
-
-        #[test]
-        fn evaluate(d in 0..100u32, idx in 0..100_u32) {
-            let mut x = Scalar::zero();
-            x.set_int(idx + 1);
-
-            let p1 = new(d);
-            let evaluation = p1.evaluate(idx).value;
-
-            let coeffs = p1.0;
-            let mut sum = coeffs[0];
-            for (i, coeff) in coeffs.into_iter().enumerate().take((d + 1) as usize).skip(1) {
-                let xi = pow(x, i);
-                let mut var = coeff;
-                var.mul(&xi);
-                sum.add(&var);
-            }
-
-            assert_eq!(sum, evaluation);
         }
     }
 }
