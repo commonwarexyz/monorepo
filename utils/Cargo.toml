@@ -20,3 +20,4 @@ rand = { workspace = true }
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]
