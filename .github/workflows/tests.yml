@@ -74,4 +74,4 @@ jobs:
     - name: Add WASM target
       run: rustup target add wasm32-unknown-unknown
     - name: Build cryptography
-      run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h target/wasm32-unknown-unknown/release/cryptography.wasm
