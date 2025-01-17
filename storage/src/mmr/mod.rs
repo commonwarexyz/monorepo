@@ -1,14 +1,14 @@
 mod mem;
-pub use mem::{verify_proof, InMemoryMMR};
+pub use mem::{verify_proof, verify_range_proof, InMemoryMMR};
 
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Hash<const N: usize>([u8; N]);
 
-#[derive(Clone, Debug)]
-/// A Proof contains the information necessary for proving the inclusion of an element at some leaf
-/// position in the MMR.
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// A Proof contains the information necessary for proving the inclusion of an element, or some
+/// range of elements, in the MMR.
 pub struct Proof<const N: usize> {
     sz: u64, // total # of nodes in the MMR
     hashes: Vec<Hash<N>>,

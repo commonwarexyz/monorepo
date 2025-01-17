@@ -37,6 +37,25 @@ struct PeakIterator {
     two_h: u64,    // 2^(height+1) of the current node
 }
 
+impl PeakIterator {
+    /// Return a new PeakIterator over the peaks of a MMR with the given number of nodes.
+    fn new(sz: u64) -> PeakIterator {
+        if sz == 0 {
+            return PeakIterator::default();
+        }
+        // Compute the position at which to start the search for peaks. This starting position will not
+        // be in the MMR unless it happens to be a single perfect binary tree, but that's OK as we will
+        // descend leftward until we find the first peak.
+        let start = u64::MAX >> sz.leading_zeros();
+        let two_h = 1 << start.trailing_ones();
+        PeakIterator {
+            sz,
+            node_pos: start - 1,
+            two_h,
+        }
+    }
+}
+
 impl Iterator for PeakIterator {
     type Item = (u64, u32); // (peak, height)
 
@@ -58,29 +77,11 @@ impl Iterator for PeakIterator {
     }
 }
 
-/// Return a new PeakIterator over the peaks of a MMR with the given number of nodes.
-fn peak_iterator(sz: u64) -> PeakIterator {
-    if sz == 0 {
-        return PeakIterator::default();
-    }
-    // Compute the position at which to start the search for peaks. This starting position will not
-    // be in the MMR unless it happens to be a single perfect binary tree, but that's OK as we will
-    // descend leftward until we find the first peak.
-    let start = u64::MAX >> sz.leading_zeros();
-    let two_h = 1 << start.trailing_ones();
-    PeakIterator {
-        sz,
-        node_pos: start - 1,
-        two_h,
-    }
-}
-
-/// A PathIterator returns a (is_left, position) tuple for the sibling of each node along the path
-/// from a given perfect binary tree peak to a designated leaf, not including the peak itself.
-/// is_left is true if the returned node is the left child of its parent.
+/// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
+/// path from a given perfect binary tree peak to a designated leaf, not including the peak itself.
 ///
 /// For example, for the tree below, the path from the peak to leaf node 3 would produce:
-/// [(true, 2), (false, 4)]
+/// [(6, 2), (5, 4)]
 ///          6
 ///        /   \
 ///       2     5
@@ -93,8 +94,20 @@ struct PathIterator {
     two_h: u64,    // 2^height of the current node
 }
 
+impl PathIterator {
+    /// Return a PathIterator over the siblings of nodes along the path from peak to leaf in the perfect
+    /// binary tree with peak `peak_pos` and having height `height`, not including the peak itself.
+    fn new(leaf_pos: u64, peak_pos: u64, height: u32) -> PathIterator {
+        PathIterator {
+            leaf_pos,
+            node_pos: peak_pos,
+            two_h: 1 << height,
+        }
+    }
+}
+
 impl Iterator for PathIterator {
-    type Item = (bool, u64); // (is_left, node_pos)
+    type Item = (u64, u64); // (parent_pos, sibling_pos)
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.two_h <= 1 {
@@ -106,22 +119,13 @@ impl Iterator for PathIterator {
         self.two_h >>= 1;
 
         if left_pos < self.leaf_pos {
+            let r = Some((self.node_pos, left_pos));
             self.node_pos = right_pos;
-            return Some((false, left_pos));
+            return r;
         }
-
+        let r = Some((self.node_pos, right_pos));
         self.node_pos = left_pos;
-        Some((true, right_pos))
-    }
-}
-
-/// Return a PathIterator over the siblings of nodes along the path from peak to leaf in the perfect
-/// binary tree with peak `peak_pos` and having height `height`, not including the peak itself.
-fn path_iterator(leaf_pos: u64, peak_pos: u64, height: u32) -> PathIterator {
-    PathIterator {
-        leaf_pos,
-        node_pos: peak_pos,
-        two_h: 1 << height,
+        r
     }
 }
 
@@ -138,13 +142,19 @@ pub fn verify_proof<const N: usize, H: Hasher<N>>(
     let mut proof_hashes = proof.hashes.iter();
     let mut missing_peak_height = u32::MAX;
 
-    for (peak_pos, height) in peak_iterator(proof.sz) {
+    for (peak_pos, height) in PeakIterator::new(proof.sz) {
         if missing_peak_height == u32::MAX && peak_pos >= element_pos {
             // Found the peak of the tree whose hash we must reconstruct.
             missing_peak_height = height;
             let mut hashes = proof.hashes.iter().rev();
-            match reconstruct_peak_hash(peak_pos, height, element, element_pos, &mut hashes, hasher)
-            {
+            match peak_hash_from_element(
+                peak_pos,
+                height,
+                element,
+                element_pos,
+                &mut hashes,
+                hasher,
+            ) {
                 Ok(peak_hash) => peak_hashes.push(peak_hash),
                 Err(_) => return false, // missing proof hashes
             }
@@ -164,28 +174,142 @@ pub fn verify_proof<const N: usize, H: Hasher<N>>(
 /// Computes the peak hash of the perfect tree with peak `peak_pos` from one of its elements and its
 /// sibling hashes along the path from leaf to peak, returning the result unless some hashes were
 /// missing.
-fn reconstruct_peak_hash<'a, const N: usize, H: Hasher<N>>(
+fn peak_hash_from_element<'a, const N: usize, H: Hasher<N>>(
     peak_pos: u64,
     height: u32,
     element: &Hash<N>,
     element_pos: u64,
-    hashes: &mut impl Iterator<Item = &'a Hash<N>>,
+    sibling_hashes: &mut impl Iterator<Item = &'a Hash<N>>,
     hasher: &mut H,
 ) -> Result<Hash<N>, ()> {
     let mut hash = hasher.leaf_hash(element_pos, element);
-    let path_vec = path_iterator(element_pos, peak_pos, height).collect::<Vec<_>>();
+    let path_vec: Vec<(u64, u64)> =
+        PathIterator::new(element_pos, peak_pos, height).collect::<Vec<_>>();
     let mut two_h = 2;
 
-    for (is_left, pos) in path_vec.into_iter().rev() {
-        let proof_hash = hashes.next().ok_or(())?;
-        hash = if is_left {
-            hasher.node_hash(pos + 1, &hash, proof_hash)
+    for (parent_pos, pos) in path_vec.into_iter().rev() {
+        let sibling_hash = sibling_hashes.next().ok_or(())?;
+        hash = if parent_pos == pos + 1 {
+            hasher.node_hash(pos + 1, &hash, sibling_hash)
         } else {
-            hasher.node_hash(pos + two_h, proof_hash, &hash)
+            hasher.node_hash(pos + two_h, sibling_hash, &hash)
         };
         two_h <<= 1;
     }
     Ok(hash)
+}
+
+/// Return true if `proof` proves that the `elements` appear consecutively at positions
+/// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root hash
+/// `root_hash`.
+pub fn verify_range_proof<const N: usize, H: Hasher<N>>(
+    proof: &Proof<N>,
+    elements: &[Hash<N>],
+    start_element_pos: u64,
+    end_element_pos: u64,
+    root_hash: &Hash<N>,
+    hasher: &mut H,
+) -> bool {
+    let mut proof_hashes_iter = proof.hashes.iter();
+    let mut elements_iter = elements.iter();
+    let mut siblings_iter = proof.hashes.iter().rev();
+
+    // Include peak hashes only for trees that have no elements from the range, and keep track
+    // of the starting and ending trees of those that do contain some.
+    let mut peak_hashes: Vec<Hash<N>> = Vec::new();
+    for (peak_pos, height) in PeakIterator::new(proof.sz) {
+        let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
+        if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
+            match peak_hash_from_range(
+                peak_pos,
+                1 << height,
+                start_element_pos,
+                end_element_pos,
+                &mut elements_iter,
+                &mut siblings_iter,
+                hasher,
+            ) {
+                Ok(peak_hash) => peak_hashes.push(peak_hash),
+                Err(_) => return false, // missing hashes
+            }
+        } else if let Some(hash) = proof_hashes_iter.next() {
+            peak_hashes.push(*hash);
+        } else {
+            return false;
+        }
+    }
+    // TODO: eliminate any potential for proof malleability
+    *root_hash == hasher.root_hash(proof.sz, peak_hashes.iter())
+}
+
+fn peak_hash_from_range<'a, const N: usize, H: Hasher<N>>(
+    node_pos: u64,      // current node position in the tree
+    two_h: u64,         // 2^height of the current node
+    leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
+    rightmost_pos: u64, // rightmost leaf in the tree to be traversed
+    elements: &mut impl Iterator<Item = &'a Hash<N>>,
+    sibling_hashes: &mut impl Iterator<Item = &'a Hash<N>>,
+    hasher: &mut H,
+) -> Result<Hash<N>, ()> {
+    assert_ne!(two_h, 0);
+    if two_h == 1 {
+        // we are at a leaf
+        assert!(node_pos >= leftmost_pos);
+        match elements.next() {
+            Some(element) => return Ok(hasher.leaf_hash(node_pos, element)),
+            None => return Err(()),
+        }
+    }
+
+    let left_pos = node_pos - two_h;
+    let mut left_hash: Option<Hash<N>> = None;
+    let right_pos = left_pos + two_h - 1;
+    let mut right_hash: Option<Hash<N>> = None;
+
+    if left_pos >= leftmost_pos {
+        // Descend left
+        match peak_hash_from_range(
+            left_pos,
+            two_h >> 1,
+            leftmost_pos,
+            rightmost_pos,
+            elements,
+            sibling_hashes,
+            hasher,
+        ) {
+            Ok(h) => left_hash = Some(h),
+            Err(_) => return Err(()),
+        }
+    }
+    if left_pos < rightmost_pos {
+        // Descend right
+        match peak_hash_from_range(
+            right_pos,
+            two_h >> 1,
+            leftmost_pos,
+            rightmost_pos,
+            elements,
+            sibling_hashes,
+            hasher,
+        ) {
+            Ok(h) => right_hash = Some(h),
+            Err(_) => return Err(()),
+        }
+    }
+
+    if left_hash.is_none() {
+        match sibling_hashes.next() {
+            Some(hash) => left_hash = Some(*hash),
+            None => return Err(()),
+        }
+    }
+    if right_hash.is_none() {
+        match sibling_hashes.next() {
+            Some(hash) => right_hash = Some(*hash),
+            None => return Err(()),
+        }
+    }
+    Ok(hasher.node_hash(node_pos, &left_hash.unwrap(), &right_hash.unwrap()))
 }
 
 impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
@@ -199,7 +323,7 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
 
     /// Return a new iterator over the peaks of the MMR.
     fn peak_iterator(&self) -> PeakIterator {
-        peak_iterator(self.nodes.len() as u64)
+        PeakIterator::new(self.nodes.len() as u64)
     }
 
     /// Returns the set of peaks that will require a new parent after adding the next leaf to the
@@ -274,8 +398,67 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
         }
 
         // Add sibling hashes of nodes along the path from peak to leaf in the tree with the leaf.
-        let path_iter = path_iterator(element_pos, tree_with_leaf.0, tree_with_leaf.1);
+        let path_iter = PathIterator::new(element_pos, tree_with_leaf.0, tree_with_leaf.1);
         hashes.extend(path_iter.map(|(_, pos)| self.nodes[pos as usize]));
+        Proof {
+            sz: self.nodes.len() as u64,
+            hashes,
+        }
+    }
+
+    // Return an inclusion proof for the specified range of elements. The range is inclusive of
+    // both endpoints.
+    pub fn range_proof(&self, start_element_pos: u64, end_element_pos: u64) -> Proof<N> {
+        let mut hashes: Vec<Hash<N>> = Vec::new();
+        let mut start_tree_with_element = (u64::MAX, 0);
+        let mut end_tree_with_element = (u64::MAX, 0);
+
+        // Include peak hashes only for trees that have no elements from the range, and keep track
+        // of the starting and ending trees of those that do contain some.
+        let mut peak_iterator = self.peak_iterator();
+        while let Some(item) = peak_iterator.next() {
+            if start_tree_with_element.0 == u64::MAX && item.0 >= start_element_pos {
+                // found the first tree to contain an element in the range
+                start_tree_with_element = item;
+                if item.0 >= end_element_pos {
+                    // start and end tree are the same
+                    end_tree_with_element = item;
+                    continue;
+                }
+                for item in peak_iterator.by_ref() {
+                    if item.0 >= end_element_pos {
+                        // found the last tree to contain an element in the range
+                        end_tree_with_element = item;
+                        break;
+                    }
+                }
+            } else {
+                hashes.push(self.nodes[item.0 as usize]);
+            }
+        }
+        assert!(start_tree_with_element.0 != u64::MAX);
+        assert!(end_tree_with_element.0 != u64::MAX);
+
+        let left_path_iter = PathIterator::new(
+            start_element_pos,
+            start_tree_with_element.0,
+            start_tree_with_element.1,
+        );
+        let right_path_iter = PathIterator::new(
+            end_element_pos,
+            end_tree_with_element.0,
+            end_tree_with_element.1,
+        );
+
+        let mut siblings = Vec::<(u64, u64)>::new();
+        siblings.extend(right_path_iter.filter(|(parent_pos, pos)| *parent_pos == *pos + 1));
+        siblings.extend(left_path_iter.filter(|(parent_pos, pos)| *parent_pos != *pos + 1));
+        if start_tree_with_element.0 == end_tree_with_element.0 {
+            siblings.sort_by(|a, b| b.0.cmp(&a.0));
+        }
+
+        hashes.extend(siblings.iter().map(|(_, pos)| self.nodes[*pos as usize]));
+
         Proof {
             sz: self.nodes.len() as u64,
             hashes,
@@ -285,7 +468,9 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
 
 #[cfg(test)]
 mod tests {
-    use crate::mmr::{mem::InMemoryMMR, verify_proof, Hash, Hasher, Sha256Hasher};
+    use crate::mmr::{
+        mem::InMemoryMMR, verify_proof, verify_range_proof, Hash, Hasher, Sha256Hasher,
+    };
 
     #[test]
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR. The resulting MMR
@@ -338,7 +523,7 @@ mod tests {
         );
 
         // Test nodes_needing_parents on the final MMR. Since there's a height gap between the
-        // heighest peak (14) and the next, only the lower two peaks (17, 18) should be returned.
+        // highest peak (14) and the next, only the lower two peaks (17, 18) should be returned.
         let peaks_needing_parents = mmr.nodes_needing_parents();
         assert_eq!(
             peaks_needing_parents,
@@ -348,7 +533,7 @@ mod tests {
 
         // verify leaf hashes
         let mut hasher = Sha256Hasher::default();
-        for leaf in leaves.iter() {
+        for leaf in leaves.iter().by_ref() {
             let hash = hasher.leaf_hash(*leaf, &element);
             assert_eq!(mmr.nodes[*leaf as usize], hash);
         }
@@ -384,11 +569,27 @@ mod tests {
         assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
 
         // confirm the proof of inclusion for each leaf successfully verifies
-        for leaf in leaves {
-            let proof = mmr.proof(leaf);
+        for leaf in leaves.iter().by_ref() {
+            let proof = mmr.proof(*leaf);
             assert!(
-                verify_proof::<32, Sha256Hasher>(&proof, &element, leaf, &root_hash, &mut hasher),
+                verify_proof::<32, Sha256Hasher>(&proof, &element, *leaf, &root_hash, &mut hasher),
                 "valid proof should verify successfully"
+            );
+            let range_proof = mmr.range_proof(*leaf, *leaf);
+            assert_eq!(
+                proof, range_proof,
+                "single element range proof should be identical to single element proof"
+            );
+            assert!(
+                verify_range_proof::<32, Sha256Hasher>(
+                    &range_proof,
+                    &[element],
+                    *leaf,
+                    *leaf,
+                    &root_hash,
+                    &mut hasher
+                ),
+                "valid proof should verify successfully with verify_range_proof"
             );
         }
 
@@ -458,5 +659,26 @@ mod tests {
             !verify_proof::<32, Sha256Hasher>(&proof2, &element, POS, &root_hash, &mut hasher),
             "proof verification should fail with extra hash even if it's unused by the computation"
         );
+
+        // test range proofs over all possible ranges of at least two elements
+        let mut outer_iter = leaves.iter();
+        while let Some(leaf1) = outer_iter.next() {
+            let inner_iter = outer_iter.clone();
+            for leaf2 in inner_iter {
+                let elements = vec![element; leaves.len()];
+                let range_proof = mmr.range_proof(*leaf1, *leaf2);
+                assert!(
+                    verify_range_proof::<32, Sha256Hasher>(
+                        &range_proof,
+                        &elements,
+                        *leaf1,
+                        *leaf2,
+                        &root_hash,
+                        &mut hasher,
+                    ),
+                    "valid range proof should verify successfully"
+                );
+            }
+        }
     }
 }
