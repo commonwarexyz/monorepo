@@ -59,6 +59,6 @@ pub enum Error {
     InvalidRecovery,
     #[error("no inverse")]
     NoInverse,
-    #[error("duplicate eval")]
+    #[error("duplicate polynomial evaluation point")]
     DuplicateEval,
 }
