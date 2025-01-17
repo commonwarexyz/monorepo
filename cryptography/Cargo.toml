@@ -22,6 +22,11 @@ zeroize = "1.5.7"
 rayon = "1.10"
 p256 = { version = "0.13.2", features = ["ecdsa"] }
 
+# Add support for WASM in "rand"
+[dependencies.getrandom]
+version = "0.2.15"
+features = ["js"]
+
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = "1"
