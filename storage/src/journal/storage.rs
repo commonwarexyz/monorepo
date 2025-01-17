@@ -143,7 +143,7 @@ impl<B: Blob, E: Storage<B>> Journal<B, E> {
     /// # Warning
     ///
     /// This method bypasses the checksum verification and the caller is responsible for ensuring
-    /// the integrity of any data read. If `exact` exceeds the size of an item (and runs over the blob
+    /// the integrity of any data read. If `prefix` exceeds the size of an item (and runs over the blob
     /// length), it will lead to unintentional truncation of data.
     async fn read_prefix(blob: &B, offset: u32, prefix: u32) -> Result<(u32, u32, Bytes), Error> {
         // Read item size and first `prefix` bytes
