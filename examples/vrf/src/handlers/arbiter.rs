@@ -143,7 +143,7 @@ impl<E: Clock> Arbiter<E> {
                                 };
                                 let payload = payload(round, &sender, &msg.commitment);
                                 if !C::verify(Some(ACK_NAMESPACE), &payload, public_key, &ack.signature) {
-                                    disqualify= true;
+                                    disqualify = true;
                                     break;
                                 }
                                 acks.push(ack.public_key);
