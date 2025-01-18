@@ -481,7 +481,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
                         commitments.insert(idx, commitment);
                     }
                     if should_deal && !commitments.contains_key(&me_idx) {
-                        warn!(round, "commitment was not included");
+                        warn!(round, "commitment not included");
                     }
                     let mut reveals = HashMap::new();
                     for (idx, share) in msg.reveals {
