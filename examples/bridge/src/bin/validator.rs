@@ -85,7 +85,7 @@ fn main() {
         .get_many::<u64>("participants")
         .expect("Please provide allowed keys")
         .copied();
-    if participants.clone().next().is_none() {
+    if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
     for peer in participants {
