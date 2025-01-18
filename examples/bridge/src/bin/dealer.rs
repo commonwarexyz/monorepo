@@ -29,7 +29,7 @@ fn main() {
         )
         .get_matches();
 
-    // Parse arguments
+    // Setup parsing
     let seed = *matches.get_one::<u64>("seed").expect("seed is required");
     let mut validators = Vec::new();
     let participants = matches
