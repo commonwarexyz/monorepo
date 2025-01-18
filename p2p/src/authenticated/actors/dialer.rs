@@ -86,7 +86,7 @@ impl<
         supervisor: &mut spawner::Mailbox<E, Si, St>,
     ) {
         for (peer, address, reservation) in tracker.dialable().await {
-            // Check if we have hit the rate limit for dialing and if so, skip (we don't
+            // Check if we have hit rate limit for dialing and if so, skip (we don't
             // want to block the loop)
             if self.dial_limiter.check().is_err() {
                 debug!("dial rate limit exceeded");
