@@ -132,7 +132,7 @@ fn main() {
         .get_many::<u64>("friends")
         .expect("Please provide friends to chat with")
         .copied();
-    if allowed_keys.len() == 0 {
+    if allowed_keys.is_empty() {
         panic!("Please provide at least one friend");
     }
     for peer in allowed_keys {
