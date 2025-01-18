@@ -1,7 +1,7 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
 use crate::{Digest, Hasher};
-use sha2::{Digest as _, Sha256 as ISha256};
+use sha2::Sha256 as ISha256;
 
 const DIGEST_LENGTH: usize = 32;
 
