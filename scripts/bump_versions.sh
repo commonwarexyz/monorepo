@@ -50,9 +50,6 @@ find . -name "Cargo.toml" | while read -r cargo_file; do
 
   # If we changed anything, overwrite the file
   if $changed; then
-    # Fix: Use a loop to write each line separately to avoid formatting issues.
-    # This is important because if the lines in the `content` array contain formatting symbols (e.g., %s, %d),
-    # they may be misinterpreted by `printf`, causing errors.
     for line in "${content[@]}"; do
       printf "%s\n" "$line"
     done > "$cargo_file"
