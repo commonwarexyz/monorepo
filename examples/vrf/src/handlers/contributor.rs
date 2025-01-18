@@ -91,7 +91,7 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
             match receiver.recv().await {
                 Ok((sender, msg)) => {
                     if sender != self.arbiter {
-                        debug!("dropping messages until receiving start message from arbiter");
+                        debug!("dropping messages until receive start message from arbiter");
                         continue;
                     }
                     let msg = match wire::Dkg::decode(msg) {
