@@ -21,7 +21,7 @@ pub struct Config<C: Scheme, H: Hasher> {
     /// Participants active in consensus.
     pub participants: Vec<PublicKey>,
 
-    /// Number of messages received from consensus to hold in our backlog
+    /// Number of messages from consensus to hold in our backlog
     /// before blocking.
     pub mailbox_size: usize,
 }
