@@ -7,7 +7,7 @@ const MODULES: &[&str] = &["symbiotic"];
 fn main() -> Result<(), String> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     for elem in MODULES {
-        let _ = execute_forge_build(&manifest_dir, &elem);
+        let _ = execute_forge_build(&manifest_dir, elem);
     }
     Ok(())
 }
@@ -35,23 +35,3 @@ fn execute_forge_build(manifest_dir: &str, module: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
-//fn build_contracts(input_dir: &str, output_dir: &str, cache_path: &str) -> Result<(), String> {
-//    let forge_status = Command::new("forge")
-//        .arg("build")
-//        .arg("--build-info")
-//        .arg("false")
-//        .arg("--cache-path")
-//        .arg(cache_path)
-//        .arg(format!("{}", input_dir))
-//        .arg("-o")
-//        .arg(format!("{}", output_dir))
-//        .current_dir(input_dir)
-//        .status()
-//        .expect("Failed to compiler testutils contracts.");
-//
-//    if !forge_status.success() {
-//        panic!("Force contracts compilation failed. Check contracts for errors.")
-//    }
-//    Ok(())
-//}

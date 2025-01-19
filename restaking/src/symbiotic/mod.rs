@@ -22,10 +22,10 @@ pub struct SymbioticStakingClient<T: Transport + std::clone::Clone, N: Network> 
 
 impl<T: Transport + std::clone::Clone, N: Network> SymbioticStakingClient<T, N> {
     pub fn new(provider: RootProvider<T, N>, network_middleware_address: Address) -> Option<Self> {
-        return Some(Self {
+        Some(Self {
             provider,
             network_middleware_address,
-        });
+        })
     }
 
     pub async fn get_operators(&self, block_number: u64) -> HashSet<Address> {
@@ -77,7 +77,7 @@ mod tests {
         let address1 = generate_random_address();
         let address2 = generate_random_address();
         let _ = mocked_network_middleware
-            .setActiveOperators(vec![address1.clone(), address2.clone()])
+            .setActiveOperators(vec![address1, address2])
             .send()
             .await
             .unwrap()
@@ -93,11 +93,9 @@ mod tests {
             ._0;
         assert_eq!(addresses.len(), 2);
 
-        let symbiotic_client = SymbioticStakingClient::new(
-            anvil_provider,
-            mocked_network_middleware.address().clone(),
-        )
-        .unwrap();
+        let symbiotic_client =
+            SymbioticStakingClient::new(anvil_provider, *mocked_network_middleware.address())
+                .unwrap();
         let operators_set = symbiotic_client.get_operators(1).await;
         assert_eq!(operators_set.len(), 2);
         assert!(operators_set.contains(&address1));
@@ -108,6 +106,6 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mut address = [0u8; 20];
         rng.fill(&mut address);
-        return Address::from(address);
+        Address::from(address)
     }
 }
