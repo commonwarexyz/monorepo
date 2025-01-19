@@ -1,4 +1,4 @@
-name: Shell-Lint
+name: Bash-Lint
 on:
   pull_request:
     branches:
