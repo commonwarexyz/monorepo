@@ -1,27 +1,57 @@
-use std::env;
 use std::path::Path;
 use std::process::Command;
 use std::result::Result;
 
+const MODULES: &[&str] = &["symbiotic"];
+
 fn main() -> Result<(), String> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let out_dir = env::var("OUT_DIR").unwrap();
-    let input_contract_dir = Path::new(&manifest_dir).join("src/solidity_interfaces");
-    let output_contract_dir = Path::new(&manifest_dir).join("src/abi");
+    for elem in MODULES {
+        let _ = execute_forge_build(&manifest_dir, &elem);
+    }
+    Ok(())
+}
+
+fn execute_forge_build(manifest_dir: &str, module: &str) -> Result<(), String> {
+    let module_src = Path::new("src").join(module);
+    let artifacts_path = module_src.join("artifacts");
+    let current_dir = Path::new(manifest_dir).join(module_src);
+
     let forge_status = Command::new("forge")
         .arg("build")
+        .arg("--root")
+        .arg(manifest_dir)
+        .arg("--cache-path")
+        .arg("forge_cache")
         .arg(".")
         .arg("-o")
-        .arg(format!("{}", output_contract_dir.to_str().unwrap()))
-        .current_dir(input_contract_dir)
+        .arg(artifacts_path.to_str().unwrap())
+        .current_dir(current_dir.to_str().unwrap())
         .status()
         .expect("Failed to compiler testutils contracts.");
 
     if !forge_status.success() {
-        panic!("Force compilation failed. Check contracts for errors.")
+        panic!("Force contracts compilation failed. Check contracts for errors.")
     }
-
-    println!("The build output directory is: {}", out_dir);
-
     Ok(())
 }
+
+//fn build_contracts(input_dir: &str, output_dir: &str, cache_path: &str) -> Result<(), String> {
+//    let forge_status = Command::new("forge")
+//        .arg("build")
+//        .arg("--build-info")
+//        .arg("false")
+//        .arg("--cache-path")
+//        .arg(cache_path)
+//        .arg(format!("{}", input_dir))
+//        .arg("-o")
+//        .arg(format!("{}", output_dir))
+//        .current_dir(input_dir)
+//        .status()
+//        .expect("Failed to compiler testutils contracts.");
+//
+//    if !forge_status.success() {
+//        panic!("Force contracts compilation failed. Check contracts for errors.")
+//    }
+//    Ok(())
+//}
