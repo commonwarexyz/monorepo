@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-# Function: bump the patch number in e.g. 0.0.14 -> 0.0.15
+# Function: bump the patch number in e.g., 0.0.14 -> 0.0.15
 bump_version() {
   local old="$1"
   local major minor patch
@@ -50,7 +50,9 @@ find . -name "Cargo.toml" | while read -r cargo_file; do
 
   # If we changed anything, overwrite the file
   if $changed; then
-    printf "%s\n" "${content[@]}" > "$cargo_file"
+    for line in "${content[@]}"; do
+      printf "%s\n" "$line"
+    done > "$cargo_file"
     echo "Updated $cargo_file"
   fi
 done
