@@ -32,24 +32,24 @@ pub struct InMemoryMMR<const N: usize, H: Hasher<N>> {
 /// initialization if new elements are added to the MMR between iterations.
 #[derive(Default)]
 struct PeakIterator {
-    sz: u64,       // number of nodes in the MMR at the point the iterator was initialized
+    size: u64,     // number of nodes in the MMR at the point the iterator was initialized
     node_pos: u64, // position of the current node
     two_h: u64,    // 2^(height+1) of the current node
 }
 
 impl PeakIterator {
     /// Return a new PeakIterator over the peaks of a MMR with the given number of nodes.
-    fn new(sz: u64) -> PeakIterator {
-        if sz == 0 {
+    fn new(size: u64) -> PeakIterator {
+        if size == 0 {
             return PeakIterator::default();
         }
         // Compute the position at which to start the search for peaks. This starting position will
         // not be in the MMR unless it happens to be a single perfect binary tree, but that's OK as
         // we will descend leftward until we find the first peak.
-        let start = u64::MAX >> sz.leading_zeros();
+        let start = u64::MAX >> size.leading_zeros();
         let two_h = 1 << start.trailing_ones();
         PeakIterator {
-            sz,
+            size,
             node_pos: start - 1,
             two_h,
         }
@@ -61,12 +61,12 @@ impl Iterator for PeakIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.two_h > 1 {
-            if self.node_pos < self.sz {
+            if self.node_pos < self.size {
                 // found a peak
                 let peak_item = (self.node_pos, self.two_h.trailing_zeros() - 1);
                 // move to the right sibling
                 self.node_pos += self.two_h - 1;
-                assert!(self.node_pos >= self.sz); // sibling shouldn't be in the MMR if MMR is valid
+                assert!(self.node_pos >= self.size); // sibling shouldn't be in the MMR if MMR is valid
                 return Some(peak_item);
             }
             // descend to the left child
@@ -143,7 +143,7 @@ pub fn verify_proof<const N: usize, H: Hasher<N>>(
     let mut proof_hashes = proof.hashes.iter();
     let mut missing_peak_height = u32::MAX;
 
-    for (peak_pos, height) in PeakIterator::new(proof.sz) {
+    for (peak_pos, height) in PeakIterator::new(proof.size) {
         if missing_peak_height == u32::MAX && peak_pos >= element_pos {
             // Found the peak of the tree whose hash we must reconstruct.
             missing_peak_height = height;
@@ -170,7 +170,7 @@ pub fn verify_proof<const N: usize, H: Hasher<N>>(
     if proof.hashes.len() != peak_hashes.len() - 1 + (missing_peak_height as usize) {
         return false;
     }
-    *root_hash == hasher.root_hash(proof.sz, peak_hashes.iter())
+    *root_hash == hasher.root_hash(proof.size, peak_hashes.iter())
 }
 
 /// Computes the peak hash of the perfect tree with peak `peak_pos` from one of its elements and its
@@ -220,7 +220,7 @@ pub fn verify_range_proof<const N: usize, H: Hasher<N>>(
     // of the starting and ending trees of those that do contain some.
     let mut peak_hashes: Vec<Hash<N>> = Vec::new();
     let mut proof_hashes_used = 0;
-    for (peak_pos, height) in PeakIterator::new(proof.sz) {
+    for (peak_pos, height) in PeakIterator::new(proof.size) {
         let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
         if peak_pos >= start_element_pos && leftmost_pos <= end_element_pos {
             match peak_hash_from_range(
@@ -254,7 +254,7 @@ pub fn verify_range_proof<const N: usize, H: Hasher<N>>(
         // proof malleability attacks.
         return false;
     }
-    *root_hash == hasher.root_hash(proof.sz, peak_hashes.iter())
+    *root_hash == hasher.root_hash(proof.size, peak_hashes.iter())
 }
 
 fn peak_hash_from_range<'a, const N: usize, H: Hasher<N>>(
@@ -415,7 +415,7 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
         let path_iter = PathIterator::new(element_pos, tree_with_leaf.0, tree_with_leaf.1);
         hashes.extend(path_iter.map(|(_, pos)| self.nodes[pos as usize]));
         Proof {
-            sz: self.nodes.len() as u64,
+            size: self.nodes.len() as u64,
             hashes,
         }
     }
@@ -474,7 +474,7 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
         hashes.extend(siblings.iter().map(|(_, pos)| self.nodes[*pos as usize]));
 
         Proof {
-            sz: self.nodes.len() as u64,
+            size: self.nodes.len() as u64,
             hashes,
         }
     }
@@ -644,7 +644,7 @@ mod tests {
             "proof verification should fail with mangled proof hash"
         );
         proof2 = proof.clone();
-        proof2.sz = 10;
+        proof2.size = 10;
         assert!(
             !verify_proof::<32, Sha256Hasher>(&proof2, &element, POS, &root_hash, &mut hasher),
             "proof verification should fail with incorrect size"

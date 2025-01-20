@@ -10,7 +10,7 @@ pub struct Hash<const N: usize>([u8; N]);
 /// A Proof contains the information necessary for proving the inclusion of an element, or some
 /// range of elements, in the MMR.
 pub struct Proof<const N: usize> {
-    sz: u64, // total # of nodes in the MMR
+    size: u64, // total # of nodes in the MMR
     hashes: Vec<Hash<N>>,
 }
 
