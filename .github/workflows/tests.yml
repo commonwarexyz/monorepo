@@ -58,3 +58,11 @@ jobs:
       run: cargo +nightly install cargo-udeps --version ${{ env.UDEPS_VERSION }}
     - name: Check for unused dependencies
       run: cargo +nightly udeps --all-targets
+
+  Scripts:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run shellcheck
+      run: find scripts -name "*.sh" -exec shellcheck -o all {} +
