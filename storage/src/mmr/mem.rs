@@ -1,22 +1,65 @@
 //! A bare-bones MMR structure without pruning and where all nodes are hashes & maintained in
 //! memory.
 //!
-//! TERMINOLOGY:
+//! # Terminology
 //!
 //! An MMR is a list of perfect binary trees of strictly decreasing height. The roots of these trees
-//! are called the "peaks" of the MMR.
+//! are called the "peaks" of the MMR. Each "element" stored in the MMR is represented by some leaf
+//! node in one of these perfect trees, storing a positioned hash of the element. Non-leaf nodes
+//! store a positioned hash of their children.
 //!
-//! Each "element" stored in the MMR is represented by some leaf node in one of these perfect trees.
+//! The nodes of the MMR are laid out within a single vector according to a post-order traversal of
+//! the MMR trees, starting from the from tallest tree to shortest. The "position" of a node in the
+//! MMR is defined as the 0-based index of the node in this vector. This implies the positions of
+//! elements, which are always leaves, may not be contiguous even if they were consecutively added.
 //!
-//! The "position" of a node in the MMR is defined as the 0-based index of the node in the
-//! underlying nodes vector. As the MMR is an append-only data structure, node positions never
-//! change and can be used as stable identifiers.
+//! As the MMR is an append-only data structure, node positions never change and can be used as
+//! stable identifiers.
 //!
 //! The "height" of a node is 0 for a leaf, 1 for the parent of 2 leaves, and so on.
 //!
 //! The "root hash" of an MMR is the result of hashing together the size of the MMR and the hashes
 //! of every peak in decreasing order of height.
-
+//!
+//! # Examples
+//!
+//! (Taken from  https://docs.grin.mw/wiki/chain-state/merkle-mountain-range/): After adding 11
+//! elements to an MMR, it will have 19 nodes total with 3 peaks corresponding to 3 perfect binary
+//! trees as pictured below, with nodes identified by their positions:
+//!
+//! ```text
+//!    Height
+//!      3              14
+//!                   /    \
+//!                  /      \
+//!                 /        \
+//!                /          \
+//!      2        6            13
+//!             /   \        /    \
+//!      1     2     5      9     12     17
+//!           / \   / \    / \   /  \   /  \
+//!      0   0   1 3   4  7   8 10  11 15  16 18
+//! ```
+//!
+//! The root hash in this example is computed as:
+//!
+//! ```text
+//!
+//! Hash(19,
+//!   Hash(14,                                                  // first peak
+//!     Hash(6,
+//!       Hash(2, Hash(0, element_0), Hash(1, element_1)),
+//!       Hash(5, Hash(3, element_2), Hash(4, element_4))
+//!     )
+//!     Hash(13,
+//!       Hash(9, Hash(7, element_0), Hash(8, element_8)),
+//!       Hash(12, Hash(10, element_10), Hash(11, element_11))
+//!     )
+//!   )
+//!   Hash(17, Hash(15, element_15), Hash(16, element_16))      // second peak
+//!   Hash(18, element_18)                                      // third peak
+//! )
+//! ```
 use crate::mmr::{Hash, Hasher, Proof};
 
 /// Implementation of `InMemoryMMR`.
@@ -30,6 +73,11 @@ pub struct InMemoryMMR<const N: usize, H: Hasher<N>> {
 /// A PeakIterator returns a (position, height) tuple for each peak in the MMR, in decreasing order
 /// of height. The iterator will only return the peaks that existed at the time of its
 /// initialization if new elements are added to the MMR between iterations.
+///
+/// For the example MMR depicted at the top of this file, the PeakIterator would yield:
+/// ```text
+/// [(14, 3), (17, 1), (18, 0)]
+/// ```
 #[derive(Default)]
 struct PeakIterator {
     size: u64,     // number of nodes in the MMR at the point the iterator was initialized
@@ -80,13 +128,20 @@ impl Iterator for PeakIterator {
 /// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
 /// path from a given perfect binary tree peak to a designated leaf, not including the peak itself.
 ///
-/// For example, for the tree below, the path from the peak to leaf node 3 would produce:
-/// [(6, 2), (5, 4)]
-///          6
+/// For example, consider the tree below and the path from the peak to leaf node 3. Nodes on the
+/// path are [6, 5, 3] and tagged with '*' in the diagram):
+///
+/// ```text
+///
+///          6*
 ///        /   \
-///       2     5
+///       2     5*
 ///      / \   / \
-///     0   1 3   4
+///     0   1 3*  4
+///
+/// A PathIterator for this example yields:
+///    [(6, 2), (5, 4)]
+/// ```
 #[derive(Debug)]
 struct PathIterator {
     leaf_pos: u64, // position of the leaf node in the path
@@ -216,8 +271,8 @@ pub fn verify_range_proof<const N: usize, H: Hasher<N>>(
     let mut elements_iter = elements.iter();
     let mut siblings_iter = proof.hashes.iter().rev();
 
-    // Include peak hashes only for trees that have no elements from the range, and keep track
-    // of the starting and ending trees of those that do contain some.
+    // Include peak hashes only for trees that have no elements from the range, and keep track of
+    // the starting and ending trees of those that do contain some.
     let mut peak_hashes: Vec<Hash<N>> = Vec::new();
     let mut proof_hashes_used = 0;
     for (peak_pos, height) in PeakIterator::new(proof.size) {
@@ -453,6 +508,9 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
         assert!(start_tree_with_element.0 != u64::MAX);
         assert!(end_tree_with_element.0 != u64::MAX);
 
+        // For the trees containing elements in the range, add left-sibling hashes of nodes along
+        // the leftmost path, and right-sibling hashes of nodes along the rightmost path, in
+        // decreasing order of the position of the parent node.
         let left_path_iter = PathIterator::new(
             start_element_pos,
             start_tree_with_element.0,
@@ -467,12 +525,13 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
         let mut siblings = Vec::<(u64, u64)>::new();
         siblings.extend(right_path_iter.filter(|(parent_pos, pos)| *parent_pos == *pos + 1));
         siblings.extend(left_path_iter.filter(|(parent_pos, pos)| *parent_pos != *pos + 1));
+
+        // If the range spans more than one tree, then the hashes must already be in the correct
+        // order. Otherwise, we enforce the desired order through sorting.
         if start_tree_with_element.0 == end_tree_with_element.0 {
             siblings.sort_by(|a, b| b.0.cmp(&a.0));
         }
-
         hashes.extend(siblings.iter().map(|(_, pos)| self.nodes[*pos as usize]));
-
         Proof {
             size: self.nodes.len() as u64,
             hashes,
@@ -487,24 +546,8 @@ mod tests {
     };
 
     #[test]
-    /// Test MMR building by consecutively adding 11 equal elements to a new MMR. The resulting MMR
-    /// should have 19 nodes total with 3 peaks corresponding to 3 perfect binary trees exactly as
-    /// pictured in the MMR example here:
-    /// https://docs.grin.mw/wiki/chain-state/merkle-mountain-range/
-    ///
-    /// Pasted here for convenience:
-    ///
-    ///    Height
-    ///      3              14
-    ///                   /    \
-    ///                  /      \
-    ///                 /        \
-    ///                /          \
-    ///      2        6            13
-    ///             /   \        /    \
-    ///      1     2     5      9     12     17
-    ///           / \   / \    / \   /  \   /  \
-    ///      0   0   1 3   4  7   8 10  11 15  16 18
+    /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
+    /// structure in the example documented at the top of this file with 19 nodes and 3 peaks.
     fn test_add_eleven_values() {
         let mut mmr: InMemoryMMR<32, Sha256Hasher> = InMemoryMMR::new(Sha256Hasher::new());
         assert_eq!(
