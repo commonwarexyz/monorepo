@@ -4,6 +4,10 @@ pragma solidity ^0.8.12;
 contract MockedMiddlewareReader {
     address[] public _operators;
 
+    function activeOperators() external view returns (address[] memory) {
+        return _operators;
+    }
+
     function activeOperatorsAt(
         uint48 /*timestamp*/
     ) external view returns (address[] memory) {

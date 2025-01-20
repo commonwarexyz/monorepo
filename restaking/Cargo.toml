@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 alloy = { version = "0.9.2", features = ["full"] }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

@@ -3572,6 +3572,7 @@ dependencies = [
  "alloy",
  "alloy-node-bindings",
  "rand",
+ "thiserror 1.0.63",
  "tokio",
 ]
 
