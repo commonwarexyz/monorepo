@@ -75,6 +75,8 @@ jobs:
       run: rustup target add wasm32-unknown-unknown
     - name: Build cryptography
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_cryptography.wasm
+    - name: Build macros
+      run: cargo build --target wasm32-unknown-unknown --release --manifest-path macros/Cargo.toml # can't check size because it is a proc-macro
     - name: Build utils
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_utils.wasm
 
