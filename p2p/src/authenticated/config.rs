@@ -96,7 +96,7 @@ pub struct Config<C: Scheme> {
     /// Quota for bit vector messages a peer can send us.
     pub allowed_bit_vec_rate: Quota,
 
-    /// Maximum number of peers we will send or consider valid when receiving in a single messsage.
+    /// Maximum number of peers we will send or consider valid when receiving in a single message.
     ///
     /// This is used to prevent malicious peers from sending us a large number of peers at one time (each
     /// of which requires a signature verification).

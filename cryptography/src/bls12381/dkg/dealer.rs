@@ -7,6 +7,7 @@ use crate::bls12381::{
 };
 use crate::PublicKey;
 use commonware_utils::quorum;
+use rand::RngCore;
 use std::collections::{HashMap, HashSet};
 
 /// Dealer output of a DKG/Resharing procedure.
@@ -30,7 +31,8 @@ pub struct Dealer {
 
 impl Dealer {
     /// Create a new dealer for a DKG/Resharing procedure.
-    pub fn new(
+    pub fn new<R: RngCore>(
+        rng: &mut R,
         share: Option<Share>,
         mut players: Vec<PublicKey>,
     ) -> (Self, poly::Public, Vec<Share>) {
@@ -45,7 +47,7 @@ impl Dealer {
         // Generate shares and commitment
         let players_len = players.len() as u32;
         let threshold = quorum(players_len).expect("insufficient players");
-        let (commitment, shares) = ops::generate_shares(share, players_len, threshold);
+        let (commitment, shares) = ops::generate_shares(rng, share, players_len, threshold);
         (
             Self {
                 threshold,

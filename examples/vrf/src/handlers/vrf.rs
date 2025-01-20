@@ -5,7 +5,7 @@ use commonware_cryptography::{
         primitives::{
             group::{self, Element},
             ops,
-            poly::Eval,
+            poly::PartialSignature,
         },
     },
     PublicKey,
@@ -124,7 +124,7 @@ impl<E: Clock> Vrf<E> {
                                 );
                                 continue;
                             }
-                            let signature: Eval<group::Signature> = match Eval::deserialize(&msg.signature) {
+                            let signature = match PartialSignature::deserialize(&msg.signature) {
                                 Some(signature) => signature,
                                 None => {
                                     warn!(round, dealer, "received invalid signature");

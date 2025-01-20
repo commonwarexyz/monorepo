@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-/// is_global is a re-implementation of the `is_global` method from the `std::net` crate.
+/// is_global is a reimplementation of the `is_global` method from the `std::net` crate.
 /// Once the method is no longer experimental, this function should be removed.
 pub const fn is_global(ip: IpAddr) -> bool {
     match ip {
@@ -68,7 +68,7 @@ const fn is_global_v6(ip: Ipv6Addr) -> bool {
         || ip.is_loopback()
         // IPv4-mapped Address (`::ffff:0:0/96`)
         || matches!(ip.segments(), [0, 0, 0, 0, 0, 0xffff, _, _])
-        // IPv4-IPv6 Translat. (`64:ff9b:1::/48`)
+        // IPv4-IPv6 Translation (`64:ff9b:1::/48`)
         || matches!(ip.segments(), [0x64, 0xff9b, 1, _, _, _, _, _])
         // Discard-Only Address Block (`100::/64`)
         || matches!(ip.segments(), [0x100, 0, 0, 0, _, _, _, _])

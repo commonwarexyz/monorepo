@@ -53,9 +53,8 @@ impl<C: Scheme, H: Hasher> Supervisor<C, H> {
 
 impl<C: Scheme, H: Hasher> Su for Supervisor<C, H> {
     type Index = View;
-    type Seed = ();
 
-    fn leader(&self, index: Self::Index, _seed: Self::Seed) -> Option<PublicKey> {
+    fn leader(&self, index: Self::Index) -> Option<PublicKey> {
         let closest = match self.participants.range(..=index).next_back() {
             Some((_, p)) => p,
             None => {

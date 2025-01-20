@@ -52,7 +52,7 @@ impl SinkTrait for Sink {
             if channel
                 .waiter
                 .as_ref()
-                .map_or(false, |(requested, _)| *requested <= channel.buffer.len())
+                .is_some_and(|(requested, _)| *requested <= channel.buffer.len())
             {
                 let (requested, os_send) = channel.waiter.take().unwrap();
                 let data: Vec<u8> = channel.buffer.drain(0..requested).collect();

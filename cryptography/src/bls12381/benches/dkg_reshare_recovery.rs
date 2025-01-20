@@ -4,10 +4,12 @@ use commonware_cryptography::{
 };
 use commonware_utils::quorum;
 use criterion::{criterion_group, BatchSize, Criterion};
+use rand::{rngs::StdRng, SeedableRng};
 use std::collections::HashMap;
 use std::hint::black_box;
 
 fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
+    let mut rng = StdRng::seed_from_u64(0);
     for &n in &[5, 10, 20, 50, 100, 250, 500] {
         // Perform DKG
         //
@@ -37,7 +39,7 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
         let t = quorum(n as u32).unwrap();
         let mut commitments = HashMap::new();
         for (dealer_idx, dealer) in contributors.iter().take(t as usize).enumerate() {
-            let (_, commitment, shares) = Dealer::new(None, contributors.clone());
+            let (_, commitment, shares) = Dealer::new(&mut rng, None, contributors.clone());
             for (player_idx, player) in players.iter_mut().enumerate() {
                 player
                     .share(dealer.clone(), commitment.clone(), shares[player_idx])
@@ -75,8 +77,11 @@ fn benchmark_dkg_reshare_recovery(c: &mut Criterion) {
                             // Create commitments and send shares to player
                             let mut commitments = HashMap::new();
                             for (idx, dealer) in contributors.iter().take(t as usize).enumerate() {
-                                let (_, commitment, shares) =
-                                    Dealer::new(Some(outputs[idx].share), contributors.clone());
+                                let (_, commitment, shares) = Dealer::new(
+                                    &mut rng,
+                                    Some(outputs[idx].share),
+                                    contributors.clone(),
+                                );
                                 player
                                     .share(dealer.clone(), commitment.clone(), shares[0])
                                     .unwrap();

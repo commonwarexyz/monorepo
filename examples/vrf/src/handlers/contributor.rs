@@ -166,7 +166,8 @@ impl<E: Clock + Rng, C: Scheme> Contributor<E, C> {
         // Create dealer
         let mut dealer_obj = if should_deal {
             let previous = previous.map(|previous| previous.share);
-            let (dealer, commitment, shares) = Dealer::new(previous, self.contributors.clone());
+            let (dealer, commitment, shares) =
+                Dealer::new(&mut self.runtime, previous, self.contributors.clone());
             let serialized_commitment = commitment.serialize();
             Some((
                 dealer,

@@ -15,7 +15,7 @@ pub struct Config<
     A: Automaton<Context = Context>,
     R: Relay,
     F: Committer,
-    S: Supervisor<Seed = (), Index = View>,
+    S: Supervisor<Index = View>,
 > {
     /// Cryptographic primitives.
     pub crypto: C,
@@ -88,7 +88,7 @@ impl<
         A: Automaton<Context = Context>,
         R: Relay,
         F: Committer,
-        S: Supervisor<Seed = (), Index = View>,
+        S: Supervisor<Index = View>,
     > Config<C, H, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
