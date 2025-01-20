@@ -10,7 +10,7 @@ use commonware_utils::{hex, quorum};
 use rand::{rngs::StdRng, SeedableRng};
 
 fn main() {
-    // Parse arguments
+    // Setup parsing
     let matches = Command::new("dealer")
         .about("generate threshold secret")
         .arg(
@@ -29,7 +29,7 @@ fn main() {
         )
         .get_matches();
 
-    // Parse args
+    // Parse arguments
     let seed = *matches.get_one::<u64>("seed").expect("seed is required");
     let mut validators = Vec::new();
     let participants = matches
