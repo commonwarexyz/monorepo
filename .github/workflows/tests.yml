@@ -77,3 +77,11 @@ jobs:
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_cryptography.wasm
     - name: Build utils
       run: cargo build --target wasm32-unknown-unknown --release --manifest-path utils/Cargo.toml && du -h target/wasm32-unknown-unknown/release/commonware_utils.wasm
+
+  Scripts:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    - name: Run shellcheck
+      run: find scripts -name "*.sh" -exec shellcheck -o all {} +
