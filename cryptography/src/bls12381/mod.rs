@@ -21,17 +21,19 @@ mod tests {
     };
     use primitives::poly::public;
     use primitives::Error;
+    use rand::{rngs::StdRng, SeedableRng};
 
     #[test]
     fn test_partial_aggregate_signature() {
         let (n, t) = (5, 4);
+        let mut rng = StdRng::seed_from_u64(0);
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares.
         //
         // If receiving a share from an untrusted party, the recipient
         // should verify the share is on the public polynomial.
-        let (group, shares) = generate_shares(None, n, t);
+        let (group, shares) = generate_shares(&mut rng, None, n, t);
 
         // Generate the partial signatures
         let namespace = Some(&b"test"[..]);
@@ -55,13 +57,14 @@ mod tests {
     #[test]
     fn test_partial_aggregate_signature_bad_namespace() {
         let (n, t) = (5, 4);
+        let mut rng = StdRng::seed_from_u64(0);
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares.
         //
         // If receiving a share from an untrusted party, the recipient
         // should verify the share is on the public polynomial.
-        let (group, shares) = generate_shares(None, n, t);
+        let (group, shares) = generate_shares(&mut rng, None, n, t);
 
         // Generate the partial signatures
         let namespace = Some(&b"test"[..]);
@@ -92,10 +95,11 @@ mod tests {
     #[test]
     fn test_partial_aggregate_signature_insufficient() {
         let (n, t) = (5, 4);
+        let mut rng = StdRng::seed_from_u64(0);
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares
-        let (group, shares) = generate_shares(None, n, t);
+        let (group, shares) = generate_shares(&mut rng, None, n, t);
 
         // Only take t-1 shares
         let shares = shares.into_iter().take(t as usize - 1).collect::<Vec<_>>();
@@ -123,10 +127,11 @@ mod tests {
     #[test]
     fn test_partial_aggregate_signature_insufficient_duplicates() {
         let (n, t) = (5, 4);
+        let mut rng = StdRng::seed_from_u64(0);
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares
-        let (group, shares) = generate_shares(None, n, t);
+        let (group, shares) = generate_shares(&mut rng, None, n, t);
 
         // Only take t-1 shares
         let mut shares = shares.into_iter().take(t as usize - 1).collect::<Vec<_>>();
@@ -156,10 +161,11 @@ mod tests {
     #[should_panic(expected = "InvalidSignature")]
     fn test_partial_aggregate_signature_bad_share() {
         let (n, t) = (5, 4);
+        let mut rng = StdRng::seed_from_u64(0);
 
         // Create the private key polynomial and evaluate it at `n`
         // points to generate the shares
-        let (group, mut shares) = generate_shares(None, n, t);
+        let (group, mut shares) = generate_shares(&mut rng, None, n, t);
 
         // Corrupt a share
         let share = shares.get_mut(3).unwrap();

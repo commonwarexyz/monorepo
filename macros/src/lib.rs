@@ -121,7 +121,7 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
                 .finish();
             let dispatcher = tracing::Dispatch::new(subscriber);
 
-            // Set the subcriber for the scope of the test
+            // Set the subscriber for the scope of the test
             tracing::dispatcher::with_default(&dispatcher, || {
                 #block
             });

@@ -64,6 +64,7 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
+    // Track nullifies (ensuring any participant only has one recorded nullify)
     nullifies: HashMap<u32, wire::Nullify>,
     broadcast_nullify: bool,
     broadcast_nullification: bool,
@@ -75,11 +76,9 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, H: Hasher, S: Supervisor<Index = View, Seed = ()>> Round<C, H, S> {
+impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
     pub fn new(hasher: H, supervisor: S, view: View) -> Self {
-        let leader = supervisor
-            .leader(view, ())
-            .expect("unable to compute leader");
+        let leader = supervisor.leader(view).expect("unable to compute leader");
         Self {
             hasher,
             supervisor,
@@ -463,7 +462,7 @@ impl<
         A: Automaton<Context = Context>,
         R: Relay,
         F: Committer,
-        S: Supervisor<Seed = (), Index = View>,
+        S: Supervisor<Index = View>,
     > Actor<B, E, C, H, A, R, F, S>
 {
     pub fn new(
@@ -1739,7 +1738,7 @@ impl<
                 if parent >= self.last_finalized {
                     // Compute missing nullifications
                     let mut missing_notarizations = Vec::new();
-                    if self.is_notarized(parent).is_none() {
+                    if parent != GENESIS_VIEW && self.is_notarized(parent).is_none() {
                         missing_notarizations.push(parent);
                     }
                     let missing_nullifications = self.missing_nullifications(parent);
@@ -1760,10 +1759,10 @@ impl<
                 } else {
                     // Broadcast last finalized
                     debug!(
-                    parent,
-                    last_finalized = self.last_finalized,
-                    "not backfilling because parent is behind finalized tip, broadcasting finalized"
-                );
+                        parent,
+                        last_finalized = self.last_finalized,
+                        "not backfilling because parent is behind finalized tip, broadcasting finalized"
+                    );
                     let finalization = self.construct_finalization(self.last_finalized, true);
                     if let Some(finalization) = finalization {
                         let msg = wire::Voter {

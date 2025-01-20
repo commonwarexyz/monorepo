@@ -1,7 +1,7 @@
 //! Commit to a secret log and agree to its hash.
 //!
-//! This example demonstrates how to build an application that employs [commonware-consensus::simplex`](https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html).
-//! Whenever it is a participants turn to build a block, they randomly generate a 16-byte secret message and send the
+//! This example demonstrates how to build an application that employs [commonware_consensus::simplex].
+//! Whenever it is a participant's turn to build a block, they randomly generate a 16-byte secret message and send the
 //! hashed message to other participants. Participants use consensus to ensure everyone agrees on the same hash in the same
 //! view.
 //!
@@ -12,7 +12,7 @@
 //!
 //! # Broadcast and Backfilling
 //!
-//! This example demonstrates how `commonware-consensus` can minimally be used. It purposely avoids introducing
+//! This example demonstrates how [commonware_consensus::simplex] can minimally be used. It purposely avoids introducing
 //! logic to handle broadcasting secret messages and/or backfilling old hashes/messages. Think of this as an exercise
 //! for the reader.
 //!
@@ -23,25 +23,25 @@
 //! ## Participant 0 (Bootstrapper)
 //!
 //! ```sh
-//! cargo run --release -- --me 0@3000 --participants 0,1,2,3 --storage-dir /tmp/log/0
+//! cargo run --release -- --me 0@3000 --participants 0,1,2,3 --storage-dir /tmp/commonware-log/0
 //! ```
 //!
 //! ## Participant 1
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3001 --participants 0,1,2,3 --storage-dir /tmp/log/1
+//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 1@3001 --participants 0,1,2,3 --storage-dir /tmp/commonware-log/1
 //! ```
 //!
-//! # Participant 2
+//! ## Participant 2
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participants 0,1,2,3 --storage-dir /tmp/log/2
+//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 2@3002 --participants 0,1,2,3 --storage-dir /tmp/commonware-log/2
 //! ```
 //!
-//! # Participant 3
+//! ## Participant 3
 //!
 //! ```sh
-//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3 --storage-dir /tmp/log/3
+//! cargo run --release -- --bootstrappers 0@127.0.0.1:3000 --me 3@3003 --participants 0,1,2,3 --storage-dir /tmp/commonware-log/3
 //! ```
 
 mod application;

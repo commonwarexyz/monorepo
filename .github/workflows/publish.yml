@@ -72,3 +72,8 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish bridge
+      run: cargo publish --manifest-path examples/bridge/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

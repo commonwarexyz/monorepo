@@ -83,8 +83,8 @@ pub trait Spawner: Clone + Send + Sync + 'static {
     /// Enqueues a task to be executed.
     ///
     /// Label can be used to track how many instances of a specific type of
-    /// task have been spawned or are running concurrently (and is appened to all
-    /// metrics). Label is automatially appended to the parent task labels (i.e. spawning
+    /// task have been spawned or are running concurrently (and is appended to all
+    /// metrics). Label is automatically appended to the parent task labels (i.e. spawning
     /// "fun" from "have" will be labeled "have_fun").
     ///
     /// Unlike a future, a spawned task will start executing immediately (even if the caller
@@ -372,7 +372,7 @@ mod tests {
             // Prefer not reading channel without losing messages
             select! {
                 _ = async {} => {
-                    // Skip reading from channel eventhough populated
+                    // Skip reading from channel even though populated
                 },
                 v = receiver.next() => {
                     panic!("unexpected value: {:?}", v);
