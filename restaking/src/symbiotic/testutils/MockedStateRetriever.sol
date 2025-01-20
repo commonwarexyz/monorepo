@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.12;
 
-import {IBaseMiddlewareReader} from "../contracts/IBaseMiddlewareReader.sol";
+import {IMiddlewareReader} from "../contracts/IMiddlewareReader.sol";
 import {StateRetriever} from "../contracts/StateRetriever.sol";
 
 contract MockedStateRetriever {
@@ -16,7 +16,7 @@ contract MockedStateRetriever {
     }
 
     function getValidatorSet(
-        IBaseMiddlewareReader /*reader*/
+        IMiddlewareReader /*reader*/
     )
         external
         view
@@ -26,7 +26,7 @@ contract MockedStateRetriever {
     }
 
     function getValidatorSetAt(
-        IBaseMiddlewareReader /*reader*/,
+        IMiddlewareReader /*reader*/,
         uint48 /*timestamp*/
     )
         external

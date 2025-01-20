@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.25;
 
-import {IBaseMiddlewareReader} from "./IBaseMiddlewareReader.sol";
+import {IMiddlewareReader} from "./IMiddlewareReader.sol";
 
 contract StateRetriever {
     struct ValidatorData {
@@ -11,7 +11,7 @@ contract StateRetriever {
     }
 
     function getValidatorSet(
-        IBaseMiddlewareReader reader
+        IMiddlewareReader reader
     ) external view returns (ValidatorData[] memory validatorSet) {
         address[] memory operators = reader.activeOperators();
         validatorSet = new ValidatorData[](operators.length); // Initialize the validator set
@@ -41,7 +41,7 @@ contract StateRetriever {
     }
 
     function getValidatorSetAt(
-        IBaseMiddlewareReader reader,
+        IMiddlewareReader reader,
         uint48 timestamp
     ) external view returns (ValidatorData[] memory validatorSet) {
         address[] memory operators = reader.activeOperatorsAt(timestamp);

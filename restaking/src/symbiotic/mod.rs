@@ -7,12 +7,12 @@ use alloy::{
 };
 use std::collections::HashSet;
 
-// Codegen from ABI file to interact with the IBaseMiddlewareReader contract.
+// Codegen from ABI file to interact with the MiddlewareReader contract.
 sol!(
     #[allow(missing_docs)]
     #[sol(rpc)]
-    SymbioticNetworkMiddleware,
-    "src/symbiotic/artifacts/IBaseMiddlewareReader.sol/IBaseMiddlewareReader.json"
+    MiddlewareReader,
+    "src/symbiotic/artifacts/IMiddlewareReader.sol/IMiddlewareReader.json"
 );
 
 // Codegen from ABI file to interact with the StateRetriever contract.
@@ -47,7 +47,7 @@ impl<T: Transport + std::clone::Clone, N: Network> SymbioticStakingClient<T, N> 
         timestamp: Option<u64>,
     ) -> Result<HashSet<Address>, alloy::contract::Error> {
         let network_middleware =
-            SymbioticNetworkMiddleware::new(self.network_middleware_address, self.provider.clone());
+            MiddlewareReader::new(self.network_middleware_address, self.provider.clone());
 
         let addresses = match timestamp {
             None => network_middleware.activeOperators().call().await?._0,
@@ -124,10 +124,10 @@ mod tests {
         #[allow(missing_docs)]
         #[sol(rpc)]
         MockedNetworkMiddleware,
-        "src/symbiotic/artifacts/MockedBaseMiddlewareReader.sol/MockedMiddlewareReader.json"
+        "src/symbiotic/artifacts/MockedMiddlewareReader.sol/MockedMiddlewareReader.json"
     );
 
-    // Codegen from compiled MockedMiddlewareReader contract.
+    // Codegen from compiled MockedStateRetriever contract.
     sol!(
         #[allow(missing_docs)]
         #[sol(rpc)]
