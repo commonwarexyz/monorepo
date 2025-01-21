@@ -1,18 +1,16 @@
 use std::path::Path;
 use std::process::Command;
-use std::result::Result;
 
 const MODULES: &[&str] = &["symbiotic"];
 
-fn main() -> Result<(), String> {
+fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     for elem in MODULES {
-        let _ = execute_forge_build(&manifest_dir, elem);
+        execute_forge_build(&manifest_dir, elem);
     }
-    Ok(())
 }
 
-fn execute_forge_build(manifest_dir: &str, module: &str) -> Result<(), String> {
+fn execute_forge_build(manifest_dir: &str, module: &str) {
     let module_src = Path::new("src").join(module);
     let artifacts_path = module_src.join("artifacts");
     let current_dir = Path::new(manifest_dir).join(module_src);
@@ -33,5 +31,4 @@ fn execute_forge_build(manifest_dir: &str, module: &str) -> Result<(), String> {
     if !forge_status.success() {
         panic!("Force contracts compilation failed. Check contracts for errors.")
     }
-    Ok(())
 }
