@@ -5,7 +5,6 @@ fn main() -> Result<()> {
     config.bytes([
         "Signature.public_key",
         "Signature.signature",
-        "Parent.digest",
         "Proposal.payload",
     ]);
     config.compile_protos(&["src/simplex/wire.proto"], &["src/simplex/"])?;
@@ -13,7 +12,6 @@ fn main() -> Result<()> {
     // Proto compilation rules for `threshold_simplex` dialect
     let mut config = prost_build::Config::new();
     config.bytes([
-        "Parent.digest",
         "Proposal.payload",
         "Notarize.proposal_signature",
         "Notarize.seed_signature",
