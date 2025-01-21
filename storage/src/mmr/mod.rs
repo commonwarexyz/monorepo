@@ -6,6 +6,15 @@ use sha2::{Digest, Sha256};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Hash<const N: usize>([u8; N]);
 
+impl<const N: usize> Hash<N> {
+    pub fn new(from: &[u8; N]) -> Self {
+        Self(*from)
+    }
+    pub fn as_bytes(&self) -> &[u8; N] {
+        &self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// A Proof contains the information necessary for proving the inclusion of an element, or some
 /// range of elements, in the MMR.

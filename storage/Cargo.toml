@@ -37,3 +37,8 @@ bench = false
 name="archive"
 harness = false
 path = "src/archive/benches/bench.rs"
+
+[[bench]]
+name="mmr"
+harness = false
+path = "src/mmr/benches/bench.rs"
