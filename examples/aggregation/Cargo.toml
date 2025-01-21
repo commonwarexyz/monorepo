@@ -2,9 +2,9 @@
 name = "commonware-aggregation"
 edition = "2021"
 publish = true
-version = "0.0.17"
+version = "0.0.1"
 license = "MIT OR Apache-2.0"
-description = "TBD"
+description = "aggregate signatures from multiple contributors over the BN254 curve."
 readme = "README.md"
 homepage = "https://commonware.xyz"
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/aggregation"
