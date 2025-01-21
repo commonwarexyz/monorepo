@@ -1,8 +1,9 @@
 use std::io::Result;
+
 fn main() -> Result<()> {
     // Proto compilation rules for `simplex` dialect
     let mut config = prost_build::Config::new();
-    config.bytes([
+    config.bytes(&[
         "Signature.public_key",
         "Signature.signature",
         "Parent.digest",
@@ -12,7 +13,7 @@ fn main() -> Result<()> {
 
     // Proto compilation rules for `threshold_simplex` dialect
     let mut config = prost_build::Config::new();
-    config.bytes([
+    config.bytes(&[
         "Parent.digest",
         "Proposal.payload",
         "Notarize.proposal_signature",
@@ -31,5 +32,6 @@ fn main() -> Result<()> {
         &["src/threshold_simplex/wire.proto"],
         &["src/threshold_simplex/"],
     )?;
+
     Ok(())
 }
