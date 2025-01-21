@@ -87,8 +87,7 @@ impl Scheme for Bn254 {
     }
 
     fn validate(public_key: &PublicKey) -> bool {
-        let public = G1Affine::deserialize_compressed(public_key.as_ref());
-
+        let public = G2Affine::deserialize_compressed(public_key.as_ref());
         if public.is_err() {
             return false;
         }
