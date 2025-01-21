@@ -201,7 +201,8 @@ fn main() {
                 COMPRESSION_LEVEL,
             );
             let orchestrator = Bn254::from_seed(*orchestrator).public_key();
-            let contributor = handlers::Contributor::new(orchestrator, signer);
+            let contributor =
+                handlers::Contributor::new(orchestrator, signer, contributors, threshold as usize);
             runtime.spawn("contributor", contributor.run(sender, receiver));
         } else {
             let (sender, receiver) = network.register(
