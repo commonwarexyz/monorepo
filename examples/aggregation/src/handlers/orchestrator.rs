@@ -64,7 +64,8 @@ impl<E: Clock> Orchestrator<E> {
             .into();
             sender
                 .send(commonware_p2p::Recipients::All, message, true)
-                .await;
+                .await
+                .expect("failed to broadcast message");
             signatures.insert(current, HashMap::new());
 
             // Listen for messages until the next broadcast
@@ -131,6 +132,11 @@ impl<E: Clock> Orchestrator<E> {
                             signatures.push(signature.clone());
                         }
                         let agg_signature = bn254::aggregate_signatures(&signatures).unwrap();
+
+                        // Verify aggregated signature (already verified individual signatures so should never fail)
+                        if !bn254::aggregate_verify(&participating, None, &payload, &agg_signature) {
+                            panic!("failed to verify aggregated signature");
+                        }
                         info!(
                             round = msg.round,
                             participants = ?pretty_participating,

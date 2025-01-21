@@ -23,8 +23,6 @@ use tracing::info;
 // Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_AGGREGATION_";
 
-const AGGREGATION_FREQUENCY: Duration = Duration::from_secs(10);
-
 fn main() {
     // Initialize runtime
     let runtime_cfg = tokio::Config::default();
@@ -161,46 +159,32 @@ fn main() {
         // Check if I am the arbiter
         const DEFAULT_MESSAGE_BACKLOG: usize = 256;
         const COMPRESSION_LEVEL: Option<i32> = Some(3);
-        const DKG_FREQUENCY: Duration = Duration::from_secs(10);
-        const DKG_PHASE_TIMEOUT: Duration = Duration::from_secs(1);
+        const AGGREGATION_FREQUENCY: Duration = Duration::from_secs(10);
         if let Some(orchestrator) = matches.get_one::<u64>("orchestrator") {
             // Create contributor
-            let (contributor_sender, contributor_receiver) = network.register(
-                handlers::DKG_CHANNEL,
-                Quota::per_second(NonZeroU32::new(10).unwrap()),
-                DEFAULT_MESSAGE_BACKLOG,
-                COMPRESSION_LEVEL,
-            );
-            let arbiter = Ed25519::from_seed(*arbiter).public_key();
-            let (contributor, requests) = handlers::Contributor::new(
-                runtime.clone(),
-                signer,
-                DKG_PHASE_TIMEOUT,
-                arbiter,
-                contributors.clone(),
-            );
-            runtime.spawn(
-                "contributor",
-                contributor.run(contributor_sender, contributor_receiver),
-            );
-        } else {
-            let (orchestrator_sender, orchestrator_receiver) = network.register(
+            let (sender, receiver) = network.register(
                 0,
                 Quota::per_second(NonZeroU32::new(10).unwrap()),
                 DEFAULT_MESSAGE_BACKLOG,
                 COMPRESSION_LEVEL,
             );
-            let arbiter = handlers::orchestrator::new(
+            let orchestrator = Bn254::from_seed(*orchestrator).public_key();
+            let contributor = handlers::Contributor::new(orchestrator, signer);
+            runtime.spawn("contributor", contributor.run(sender, receiver));
+        } else {
+            let (sender, receiver) = network.register(
+                0,
+                Quota::per_second(NonZeroU32::new(10).unwrap()),
+                DEFAULT_MESSAGE_BACKLOG,
+                COMPRESSION_LEVEL,
+            );
+            let orchestrator = handlers::Orchestrator::new(
                 runtime.clone(),
-                DKG_FREQUENCY,
-                DKG_PHASE_TIMEOUT,
+                AGGREGATION_FREQUENCY,
                 contributors,
-                threshold,
+                threshold as usize,
             );
-            runtime.spawn(
-                "orchestrator",
-                arbiter.run::<Ed25519>(arbiter_sender, arbiter_receiver),
-            );
+            runtime.spawn("orchestrator", orchestrator.run(sender, receiver));
         }
         network.run().await;
     });

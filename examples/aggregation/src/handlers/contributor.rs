@@ -54,7 +54,7 @@ impl Contributor {
             let message = wire::Aggregation {
                 round,
                 payload: Some(wire::aggregation::Payload::Signature(wire::Signature {
-                    signature: signature.into(),
+                    signature,
                 })),
             }
             .encode_to_vec()
@@ -65,7 +65,8 @@ impl Contributor {
                     message,
                     true,
                 )
-                .await;
+                .await
+                .expect("failed to broadcast signature");
             info!(round, "broadcast signature");
         }
     }
