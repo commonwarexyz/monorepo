@@ -1,11 +1,11 @@
 use commonware_cryptography::{Hasher, PublicKey, Scheme, Sha256};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
-use commonware_runtime::{Clock, Spawner};
+use commonware_runtime::Clock;
 use commonware_utils::hex;
 use prost::Message;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     time::{Duration, UNIX_EPOCH},
 };
 use tracing::info;
@@ -71,7 +71,7 @@ impl<E: Clock> Orchestrator<E> {
             let continue_time = self.runtime.current() + self.aggregation_frequency;
             loop {
                 select! {
-                    _ = self.runtime.sleep_until(continue_time) => {break},
+                    _ = self.runtime.sleep_until(continue_time) => {break;},
                     msg = receiver.recv() => {
                         // Parse message
                         let (sender, msg) = match msg {
@@ -102,9 +102,9 @@ impl<E: Clock> Orchestrator<E> {
                             Some(wire::aggregation::Payload::Signature(signature)) => signature.signature,
                             _ => continue,
                         };
-                        let payload= msg.round.to_be_bytes();
+                        let payload = msg.round.to_be_bytes();
                         hasher.update(&payload);
-                        let payload= hasher.finalize();
+                        let payload = hasher.finalize();
                         if !Bn254::verify(None, &payload, &sender, &signature) {
                             continue;
                         }
