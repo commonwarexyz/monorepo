@@ -53,7 +53,9 @@ impl<E: Clock> Orchestrator<E> {
             // Generate payload
             let current = self.runtime.current();
             let current = current.duration_since(UNIX_EPOCH).unwrap().as_secs();
-            info!("generated message: {}", current);
+            hasher.update(&current.to_be_bytes());
+            let payload = hasher.finalize();
+            info!(round = current, msg = hex(&payload), "generated message",);
 
             // Broadcast payload
             let message = wire::Aggregation {
@@ -139,6 +141,7 @@ impl<E: Clock> Orchestrator<E> {
                         }
                         info!(
                             round = msg.round,
+                            msg = hex(&payload),
                             participants = ?pretty_participating,
                             signature = hex(&agg_signature),
                             "aggregated signatures",

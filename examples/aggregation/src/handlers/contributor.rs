@@ -108,6 +108,7 @@ impl Contributor {
                 }
                 info!(
                     round,
+                    msg = hex(&payload),
                     participants = ?pretty_participating,
                     signature = hex(&agg_signature),
                     "aggregated signatures",
