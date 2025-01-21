@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use ark_bn254::{Fr as Scalar, G1Affine, G2Affine, G2Projective};
+use ark_bn254::{Fr as Scalar, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{AdditiveGroup, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -150,4 +150,48 @@ impl Scheme for Bn254 {
     fn len() -> (usize, usize) {
         (PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH)
     }
+}
+
+pub fn aggregate_signatures(signatures: &[G1Affine]) -> Option<G1Affine> {
+    let mut agg_signature = G1Projective::ZERO;
+    for sig in signatures {
+        agg_signature += sig.into_group();
+    }
+    Some(agg_signature.into_affine())
+}
+
+pub fn aggregate_verify(
+    public: &[G2Affine],
+    namespace: Option<&[u8]>,
+    message: &[u8],
+    signature: &G1Affine,
+) -> bool {
+    // Aggregate public keys
+    let mut agg_public = G2Projective::ZERO;
+    for pk in public {
+        agg_public += pk.into_group();
+    }
+    let public = agg_public.into_affine();
+
+    // Generate payload
+    let hash: [u8; DIGEST_LENGTH] = if namespace.is_none() && message.len() == DIGEST_LENGTH {
+        message.try_into().unwrap()
+    } else {
+        let payload = match namespace {
+            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
+            None => Cow::Borrowed(message),
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(payload.as_ref());
+        let hash = hasher.finalize();
+        hash.as_ref().try_into().unwrap()
+    };
+
+    // Map to curve
+    let msg_on_g1 = map_to_curve(&hash);
+
+    // Pairing check
+    let lhs = ark_bn254::Bn254::pairing(msg_on_g1, public);
+    let rhs = ark_bn254::Bn254::pairing(signature, G2Affine::generator());
+    lhs == rhs
 }
