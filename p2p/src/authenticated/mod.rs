@@ -26,7 +26,7 @@
 //!
 //! Because this representation is so efficient/small, peers send bit vectors to each other periodically as a "ping" to keep
 //! the connection alive. Because it may be useful to be connected to multiple indexes of peers at a given time (i.e. to
-//! perform a DKG with a new set of peers), it is possible to configure this crate to maintain connections to multiple
+//! perform a DKG with a new set of peers), it is possible to configure this create to maintain connections to multiple
 //! indexes (and pings are a random index we are trying to connect to).
 //!
 //! ```protobuf
