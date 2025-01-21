@@ -7,21 +7,11 @@ message Aggregation {
   oneof payload {
     Start start = 2;
     Signature signature = 3;
-    Success success = 4;
   }
 }
 
 // Send by orchestrator to start aggregation
-message Start { bytes message = 1; }
+message Start {}
 
 // Sent by signer to all others
-message Signature {
-  bytes public_key = 1;
-  bytes signature = 2;
-}
-
-// Sent by anyone to all others if round is successful
-message Success {
-  bytes signers = 1;
-  bytes signature = 2;
-}
+message Signature { bytes signature = 1; }

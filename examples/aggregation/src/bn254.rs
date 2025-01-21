@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use ark_bn254::{Fr as Scalar, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{AdditiveGroup, UniformRand};
@@ -8,6 +6,7 @@ use commonware_cryptography::{Hasher, PrivateKey, PublicKey, Scheme, Sha256, Sig
 use commonware_utils::union_unique;
 use eigen_crypto_bn254::utils::map_to_curve;
 use rand::{CryptoRng, Rng};
+use std::borrow::Cow;
 
 const DIGEST_LENGTH: usize = 32;
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -152,46 +151,48 @@ impl Scheme for Bn254 {
     }
 }
 
-pub fn aggregate_signatures(signatures: &[G1Affine]) -> Option<G1Affine> {
+pub fn aggregate_signatures(signatures: &[Signature]) -> Option<Signature> {
     let mut agg_signature = G1Projective::ZERO;
-    for sig in signatures {
-        agg_signature += sig.into_group();
+    for signature in signatures {
+        let Ok(signature) = G1Affine::deserialize_compressed(signature.as_ref()) else {
+            return None;
+        };
+        if !signature.is_in_correct_subgroup_assuming_on_curve()
+            || !signature.is_on_curve()
+            || signature.is_zero()
+        {
+            return None;
+        }
+        agg_signature += signature.into_group();
     }
-    Some(agg_signature.into_affine())
+    let mut bytes = Vec::with_capacity(SIGNATURE_LENGTH);
+    agg_signature.serialize_compressed(&mut bytes).unwrap();
+    Some(bytes.into())
 }
 
 pub fn aggregate_verify(
-    public: &[G2Affine],
+    publics: &[PublicKey],
     namespace: Option<&[u8]>,
     message: &[u8],
-    signature: &G1Affine,
+    signature: &Signature,
 ) -> bool {
     // Aggregate public keys
     let mut agg_public = G2Projective::ZERO;
-    for pk in public {
-        agg_public += pk.into_group();
-    }
-    let public = agg_public.into_affine();
-
-    // Generate payload
-    let hash: [u8; DIGEST_LENGTH] = if namespace.is_none() && message.len() == DIGEST_LENGTH {
-        message.try_into().unwrap()
-    } else {
-        let payload = match namespace {
-            Some(namespace) => Cow::Owned(union_unique(namespace, message)),
-            None => Cow::Borrowed(message),
+    for public in publics {
+        let Ok(public) = G2Affine::deserialize_compressed(public.as_ref()) else {
+            return false;
         };
-        let mut hasher = Sha256::new();
-        hasher.update(payload.as_ref());
-        let hash = hasher.finalize();
-        hash.as_ref().try_into().unwrap()
-    };
+        if !public.is_in_correct_subgroup_assuming_on_curve()
+            || !public.is_on_curve()
+            || public.is_zero()
+        {
+            return false;
+        }
+        agg_public += public.into_group();
+    }
+    let mut public = Vec::with_capacity(PUBLIC_KEY_LENGTH);
+    agg_public.serialize_compressed(&mut public).unwrap();
 
-    // Map to curve
-    let msg_on_g1 = map_to_curve(&hash);
-
-    // Pairing check
-    let lhs = ark_bn254::Bn254::pairing(msg_on_g1, public);
-    let rhs = ark_bn254::Bn254::pairing(signature, G2Affine::generator());
-    lhs == rhs
+    // Verify signature
+    Bn254::verify(namespace, message, &public.into(), signature)
 }
