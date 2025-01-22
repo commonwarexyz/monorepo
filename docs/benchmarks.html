@@ -72,7 +72,6 @@
     </div>
     <div class="content">
         <h1>Benchmarks</h1>
-
         <div class="meta">
             <div class="date">Last Updated: <span id="last-update"></span></div>
         </div>
@@ -93,26 +92,12 @@
         // Global variable to track unit usage
         window.USE_MS = true;
 
+        // Toggle function to switch between expanding/collapsing all <details> elements
         function updateExpandButton() {
             const expandBtn = document.getElementById('toggle-expand');
             // If *any* detail is open, switch to "collapse all"
             const anyOpen = Array.from(document.querySelectorAll('details')).some(d => d.open);
             expandBtn.textContent = anyOpen ? 'collapse all' : 'expand all';
-        }
-
-        // Toggle function to switch between ns/iter and ms/iter
-        function toggleUnits() {
-            window.USE_MS = !window.USE_MS;
-            const unitsBtn = document.getElementById('toggle-units');
-            unitsBtn.textContent = window.USE_MS ? 'display nanoseconds' : 'display milliseconds';
-            // Re-run setup to regenerate all charts with the updated unit
-            // Or, for a more efficient approach, you could store references
-            // to your charts and only update their config + re-render.
-
-            // For simplicity, let's just remove existing <canvas> elements
-            // from #main and re-run the entire chart creation:
-            document.getElementById('main').innerHTML = '';
-            setupBenchmark();
         }
 
         // Toggle function to expand all <details> elements
@@ -123,10 +108,19 @@
             updateExpandButton();
         }
 
+        // Toggle function to switch between ns/iter and ms/iter
+        function toggleUnits() {
+            // Update button
+            window.USE_MS = !window.USE_MS;
+            const unitsBtn = document.getElementById('toggle-units');
+            unitsBtn.textContent = window.USE_MS ? 'display nanoseconds' : 'display milliseconds';
+
+            // Re-run setup to regenerate all charts with the updated unit
+            document.getElementById('main').innerHTML = '';
+            setupBenchmark();
+        }
+
         // Compute all-time and 7-day performance changes for a single benchmark
-        // benches = array of { commit, date, tool, bench }
-        // We'll treat "value" as the performance measure in ns. A lower number => faster.
-        // The % change is computed as (new - old)/old. Negative => faster, positive => slower.
         function computeSingleBenchSummary(benches) {
             if (!benches || benches.length < 1) {
                 return { pctAllTime: "N/A", pct7Day: "N/A", latest: "N/A" };
