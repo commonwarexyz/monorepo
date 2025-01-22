@@ -78,8 +78,8 @@
         <div id="main"></div>
         <div>
             <p>
-                <button id="toggle-units" onclick="toggleUnits()">switch to ns</button>
                 <button id="toggle-expand" onclick="toggleExpand()">expand all</button>
+                <button id="toggle-units" onclick="toggleUnits()">show nanosecond units</button>
             </p>
         </div>
     </div>
@@ -113,7 +113,7 @@
             // Update button
             window.USE_MS = !window.USE_MS;
             const unitsBtn = document.getElementById('toggle-units');
-            unitsBtn.textContent = window.USE_MS ? 'switch to ns' : 'switch to ms';
+            unitsBtn.textContent = window.USE_MS ? 'show nanosecond units' : 'show millisecond units';
 
             // Re-run setup to regenerate all charts with the updated unit
             document.getElementById('main').innerHTML = '';
