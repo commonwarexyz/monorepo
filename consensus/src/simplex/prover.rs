@@ -150,9 +150,13 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let count = count as usize;
         let message = proposal_message(view, parent, &payload);
 
-        // Decode signatures
+        // Check for integer overflow in size calculation
         let (public_key_len, signature_len) = C::len();
-        if proof.remaining() != count * (public_key_len + signature_len) {
+        let item_size = public_key_len.checked_add(signature_len)?;
+        let total_size = count.checked_mul(item_size)?;
+        
+        // Decode signatures
+        if proof.remaining() != total_size {
             return None;
         }
         let mut seen = HashSet::with_capacity(count);
