@@ -185,8 +185,7 @@
                                     const { index } = items[0];
                                     const data = dataset[index];
                                     return '\n' + data.commit.message
-                                        + '\n\n' + data.commit.timestamp
-                                        + ' committed by @' + data.commit.committer.username + '\n';
+                                        + '\n\nCommitted by ' + data.commit.author.name + ' (@' + data.commit.author.username + ') at ' + data.commit.timestamp + '\n';
                                 },
                                 label: function (item) {
                                     let rawVal = Number(item.value);
