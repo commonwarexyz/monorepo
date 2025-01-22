@@ -116,7 +116,7 @@ cfg_if::cfg_if! {
         /// Implementations that do not work this way (like `simplex`) must introduce some synchrony bound for changes
         /// (where it is assumed all participants have finalized some previous set change by some point) or "sync points"
         /// (i.e. epochs) where participants agree that some finalization occurred at some point in the past.
-        pub trait Supervisor: Clone + Send + 'static {
+        pub trait Supervisor: Clone + Send + Sync + 'static {
             /// Index is the type used to indicate the in-progress consensus decision.
             type Index;
 

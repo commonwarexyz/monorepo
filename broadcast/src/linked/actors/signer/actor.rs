@@ -1,12 +1,14 @@
 use super::{Config, Mailbox, Message};
-use crate::linked::{encoder, wire};
+use crate::linked::{encoder, wire, View};
 use bytes::Bytes;
+use commonware_consensus::ThresholdSupervisor;
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{Element, Share},
+        group::{Element, Share, Signature},
         ops::{self},
+        poly::Public,
     },
-    Digest, Hasher, PublicKey,
+    Digest, Hasher, PublicKey, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -17,13 +19,20 @@ use prost::Message as _;
 use std::collections::HashMap;
 use tracing::{debug, error};
 
-pub struct Signer<E: Spawner, H: Hasher> {
+pub struct Actor<
+    E: Spawner,
+    C: Scheme,
+    H: Hasher,
+    S: ThresholdSupervisor<Seed = Signature, Index = View, Share = Share, Identity = Public>,
+> {
     runtime: E,
-
+    crypto: C,
     hasher: H,
-    share: Share,
+    supervisor: S,
 
     ack_namespace: Vec<u8>,
+    car_namespace: Vec<u8>,
+
     mailbox_receiver: mpsc::Receiver<Message>,
 
     ////////////////////////////////////////
@@ -43,16 +52,25 @@ pub struct Signer<E: Spawner, H: Hasher> {
     proofs: HashMap<Digest, Bytes>,
 }
 
-impl<E: Spawner, H: Hasher> Signer<E, H> {
-    pub fn new(runtime: E, cfg: Config<H>) -> (Self, Mailbox) {
+impl<
+        E: Spawner,
+        C: Scheme,
+        H: Hasher,
+        S: ThresholdSupervisor<Seed = Signature, Index = View, Share = Share, Identity = Public>,
+    > Actor<E, C, H, S>
+{
+    pub fn new(runtime: E, cfg: Config<C, H, S>) -> (Self, Mailbox) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         (
             Self {
                 runtime,
+                crypto: cfg.crypto,
                 hasher: cfg.hasher,
-                share: cfg.share,
+                supervisor: cfg.supervisor,
+
                 ack_namespace: encoder::ack_namespace(&cfg.namespace),
+                car_namespace: encoder::car_namespace(&cfg.namespace),
                 mailbox_receiver,
                 lanes: HashMap::new(),
                 cars: HashMap::new(),
@@ -178,7 +196,7 @@ impl<E: Spawner, H: Hasher> Signer<E, H> {
         // TODO
     }
 
-    async fn handle_ack(&self, _ack: wire::Ack) {
+    async fn handle_ack(&mut self, _ack: wire::Ack) {
         // TODO
     }
 
@@ -207,13 +225,14 @@ impl<E: Spawner, H: Hasher> Signer<E, H> {
         // TODO
 
         // Sign the plate
+        let share = self.supervisor.share(0).unwrap();
         let partial_signature: Bytes =
-            ops::partial_sign_message(&self.share, Some(&self.ack_namespace), &plate)
+            ops::partial_sign_message(&share, Some(&self.ack_namespace), &plate)
                 .serialize()
                 .into();
 
         // Store the ack
-        let public_key: Bytes = self.share.public().serialize().into();
+        let public_key: Bytes = share.public().serialize().into();
         self.acks
             .entry(plate.clone())
             .or_default()

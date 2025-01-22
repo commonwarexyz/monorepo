@@ -12,12 +12,14 @@ documentation = "https://docs.rs/commonware-broadcast"
 
 [dependencies]
 bytes = { workspace = true }
+commonware-consensus = { workspace = true }
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
 commonware-p2p = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
 futures = { workspace = true }
+prometheus-client = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
