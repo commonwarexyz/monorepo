@@ -23,9 +23,9 @@
 //!
 //! # Examples
 //!
-//! From  https://docs.grin.mw/wiki/chain-state/merkle-mountain-range/: After adding 11 elements to
-//! an MMR, it will have 19 nodes total with 3 peaks corresponding to 3 perfect binary trees as
-//! pictured below, with nodes identified by their positions:
+//! (Borrowed from <https://docs.grin.mw/wiki/chain-state/merkle-mountain-range/>): After adding 11
+//! elements to an MMR, it will have 19 nodes total with 3 peaks corresponding to 3 perfect binary
+//! trees as pictured below, with nodes identified by their positions:
 //!
 //! ```text
 //!    Height
@@ -60,14 +60,16 @@
 //!   Hash(18, element_18)                                      // third peak
 //! )
 //! ```
-use crate::mmr::{Hash, Hasher, Proof};
+use crate::mmr::{MmrHasher, Proof};
 
-/// Implementation of `InMemoryMMR`.
-pub struct InMemoryMMR<const N: usize, H: Hasher<N>> {
+use commonware_cryptography::{Digest, Hasher};
+
+/// Implementation of `InMemoryMmr`.
+pub struct InMemoryMmr<H: Hasher> {
     hasher: H,
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
     // from the from tallest tree to shortest.
-    nodes: Vec<Hash<N>>,
+    nodes: Vec<Digest>,
 }
 
 /// A PeakIterator returns a (position, height) tuple for each peak in the MMR, in decreasing order
@@ -187,16 +189,16 @@ impl Iterator for PathIterator {
 
 /// Return true if `proof` proves that `element` appears at position `element_pos` within the MMR
 /// with root hash `root_hash`.
-pub fn verify_proof<const N: usize, H: Hasher<N>>(
-    proof: &Proof<N>,
-    element: &Hash<N>,
+pub fn verify_proof<H: Hasher>(
+    proof: &Proof,
+    element: &Digest,
     element_pos: u64,
-    root_hash: &Hash<N>,
+    root_hash: &Digest,
     hasher: &mut H,
 ) -> bool {
     verify_range_proof(
         proof,
-        &[*element],
+        &[element.clone()],
         element_pos,
         element_pos,
         root_hash,
@@ -207,21 +209,22 @@ pub fn verify_proof<const N: usize, H: Hasher<N>>(
 /// Return true if `proof` proves that the `elements` appear consecutively between positions
 /// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root hash
 /// `root_hash`.
-pub fn verify_range_proof<const N: usize, H: Hasher<N>>(
-    proof: &Proof<N>,
-    elements: &[Hash<N>],
+pub fn verify_range_proof<H: Hasher>(
+    proof: &Proof,
+    elements: &[Digest],
     start_element_pos: u64,
     end_element_pos: u64,
-    root_hash: &Hash<N>,
+    root_hash: &Digest,
     hasher: &mut H,
 ) -> bool {
     let mut proof_hashes_iter = proof.hashes.iter();
     let mut elements_iter = elements.iter();
     let mut siblings_iter = proof.hashes.iter().rev();
+    let mut mmr_hasher = MmrHasher::<H>::new(hasher);
 
     // Include peak hashes only for trees that have no elements from the range, and keep track of
     // the starting and ending trees of those that do contain some.
-    let mut peak_hashes: Vec<Hash<N>> = Vec::new();
+    let mut peak_hashes: Vec<Digest> = Vec::new();
     let mut proof_hashes_used = 0;
     for (peak_pos, height) in PeakIterator::new(proof.size) {
         let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
@@ -233,14 +236,14 @@ pub fn verify_range_proof<const N: usize, H: Hasher<N>>(
                 end_element_pos,
                 &mut elements_iter,
                 &mut siblings_iter,
-                hasher,
+                &mut mmr_hasher,
             ) {
                 Ok(peak_hash) => peak_hashes.push(peak_hash),
                 Err(_) => return false, // missing hashes
             }
         } else if let Some(hash) = proof_hashes_iter.next() {
             proof_hashes_used += 1;
-            peak_hashes.push(*hash);
+            peak_hashes.push(hash.clone());
         } else {
             return false;
         }
@@ -257,18 +260,18 @@ pub fn verify_range_proof<const N: usize, H: Hasher<N>>(
         // proof malleability attacks.
         return false;
     }
-    *root_hash == hasher.root_hash(proof.size, peak_hashes.iter())
+    *root_hash == mmr_hasher.root_hash(proof.size, peak_hashes.iter())
 }
 
-fn peak_hash_from_range<'a, const N: usize, H: Hasher<N>>(
+fn peak_hash_from_range<'a, H: Hasher>(
     node_pos: u64,      // current node position in the tree
     two_h: u64,         // 2^height of the current node
     leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
-    elements: &mut impl Iterator<Item = &'a Hash<N>>,
-    sibling_hashes: &mut impl Iterator<Item = &'a Hash<N>>,
-    hasher: &mut H,
-) -> Result<Hash<N>, ()> {
+    elements: &mut impl Iterator<Item = &'a Digest>,
+    sibling_hashes: &mut impl Iterator<Item = &'a Digest>,
+    hasher: &mut MmrHasher<H>,
+) -> Result<Digest, ()> {
     assert_ne!(two_h, 0);
     if two_h == 1 {
         // we are at a leaf
@@ -279,9 +282,9 @@ fn peak_hash_from_range<'a, const N: usize, H: Hasher<N>>(
     }
 
     let left_pos = node_pos - two_h;
-    let mut left_hash: Option<Hash<N>> = None;
+    let mut left_hash: Option<Digest> = None;
     let right_pos = left_pos + two_h - 1;
-    let mut right_hash: Option<Hash<N>> = None;
+    let mut right_hash: Option<Digest> = None;
 
     if left_pos >= leftmost_pos {
         // Descend left
@@ -294,7 +297,7 @@ fn peak_hash_from_range<'a, const N: usize, H: Hasher<N>>(
             sibling_hashes,
             hasher,
         ) {
-            Ok(h) => left_hash = Some(h),
+            Ok(h) => left_hash = Some(h.clone()),
             Err(_) => return Err(()),
         }
     }
@@ -309,31 +312,37 @@ fn peak_hash_from_range<'a, const N: usize, H: Hasher<N>>(
             sibling_hashes,
             hasher,
         ) {
-            Ok(h) => right_hash = Some(h),
+            Ok(h) => right_hash = Some(h.clone()),
             Err(_) => return Err(()),
         }
     }
 
     if left_hash.is_none() {
         match sibling_hashes.next() {
-            Some(hash) => left_hash = Some(*hash),
+            Some(hash) => left_hash = Some(hash.clone()),
             None => return Err(()),
         }
     }
     if right_hash.is_none() {
         match sibling_hashes.next() {
-            Some(hash) => right_hash = Some(*hash),
+            Some(hash) => right_hash = Some(hash.clone()),
             None => return Err(()),
         }
     }
     Ok(hasher.node_hash(node_pos, &left_hash.unwrap(), &right_hash.unwrap()))
 }
 
-impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
-    /// Return a new (empty) `InMemoryMMR`.
-    pub fn new(hasher: H) -> Self {
+impl<H: Hasher> Default for InMemoryMmr<H> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<H: Hasher> InMemoryMmr<H> {
+    /// Return a new (empty) `InMemoryMmr`.
+    pub fn new() -> Self {
         Self {
-            hasher,
+            hasher: H::new(),
             nodes: Vec::new(),
         }
     }
@@ -372,31 +381,31 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
     }
 
     /// Add an element to the MMR and return its position in the MMR.
-    pub fn add(&mut self, element: &Hash<N>) -> u64 {
+    pub fn add(&mut self, element: &Digest) -> u64 {
         let peaks = self.nodes_needing_parents();
         let element_pos = self.nodes.len() as u64;
+        let hasher = &mut MmrHasher::new(&mut self.hasher);
 
         // Insert the element into the MMR as a leaf.
-        let mut hash = self.hasher.leaf_hash(element_pos, element);
-        self.nodes.push(hash);
+        let mut hash = hasher.leaf_hash(element_pos, element);
+        self.nodes.push(hash.clone());
 
         // Compute the new parent nodes, if any, and insert them into the MMR.
         for sibling_pos in peaks.into_iter().rev() {
             let parent_pos = self.nodes.len() as u64;
-            hash = self
-                .hasher
-                .node_hash(parent_pos, &self.nodes[sibling_pos as usize], &hash);
-            self.nodes.push(hash);
+            hash = hasher.node_hash(parent_pos, &self.nodes[sibling_pos as usize], &hash);
+            self.nodes.push(hash.clone());
         }
         element_pos
     }
 
     /// Computes the root hash of the MMR.
-    pub fn root_hash(&mut self) -> Hash<N> {
+    pub fn root_hash(&mut self) -> Digest {
         let peaks = self
             .peak_iterator()
             .map(|(peak_pos, _)| &self.nodes[peak_pos as usize]);
-        self.hasher.root_hash(self.nodes.len() as u64, peaks)
+        let hasher = &mut MmrHasher::new(&mut self.hasher);
+        hasher.root_hash(self.nodes.len() as u64, peaks)
     }
 
     /// Return an inclusion proof for the specified element that consists of the size of the MMR and
@@ -404,14 +413,14 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
     /// the perfect tree containing the element, followed by: (2) the nodes in the remaining perfect
     /// tree necessary for reconstructing its peak hash from the specified element. Both segments
     /// are ordered by decreasing height.
-    pub fn proof(&self, element_pos: u64) -> Proof<N> {
+    pub fn proof(&self, element_pos: u64) -> Proof {
         self.range_proof(element_pos, element_pos)
     }
 
     // Return an inclusion proof for the specified range of elements. The range is inclusive of
     // both endpoints.
-    pub fn range_proof(&self, start_element_pos: u64, end_element_pos: u64) -> Proof<N> {
-        let mut hashes: Vec<Hash<N>> = Vec::new();
+    pub fn range_proof(&self, start_element_pos: u64, end_element_pos: u64) -> Proof {
+        let mut hashes: Vec<Digest> = Vec::new();
         let mut start_tree_with_element = (u64::MAX, 0);
         let mut end_tree_with_element = (u64::MAX, 0);
 
@@ -435,7 +444,7 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
                     }
                 }
             } else {
-                hashes.push(self.nodes[item.0 as usize]);
+                hashes.push(self.nodes[item.0 as usize].clone());
             }
         }
         assert!(start_tree_with_element.0 != u64::MAX);
@@ -472,7 +481,11 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
                 siblings.sort_by(|a, b| b.0.cmp(&a.0));
             }
         }
-        hashes.extend(siblings.iter().map(|(_, pos)| self.nodes[*pos as usize]));
+        hashes.extend(
+            siblings
+                .iter()
+                .map(|(_, pos)| self.nodes[*pos as usize].clone()),
+        );
         Proof {
             size: self.nodes.len() as u64,
             hashes,
@@ -482,22 +495,21 @@ impl<const N: usize, H: Hasher<N>> InMemoryMMR<N, H> {
 
 #[cfg(test)]
 mod tests {
-    use crate::mmr::{
-        mem::InMemoryMMR, verify_proof, verify_range_proof, Hash, Hasher, Sha256Hasher,
-    };
+    use crate::mmr::{mem::InMemoryMmr, verify_proof, verify_range_proof, MmrHasher};
+    use commonware_cryptography::{Digest, Hasher, Sha256};
 
     #[test]
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
     /// structure in the example documented at the top of this file with 19 nodes and 3 peaks.
     fn test_add_eleven_values() {
-        let mut mmr: InMemoryMMR<32, Sha256Hasher> = InMemoryMMR::new(Sha256Hasher::new());
+        let mut mmr: InMemoryMmr<Sha256> = InMemoryMmr::<Sha256>::new();
         assert_eq!(
             mmr.peak_iterator().next(),
             None,
             "empty iterator should have no peaks"
         );
 
-        let element: Hash<32> = Hash(*b"01234567012345670123456701234567");
+        let element = Digest::from_static(b"01234567012345670123456701234567");
         let mut leaves: Vec<u64> = Vec::new();
         for _ in 0..11 {
             leaves.push(mmr.add(&element));
@@ -530,47 +542,48 @@ mod tests {
         );
 
         // verify leaf hashes
-        let mut hasher = Sha256Hasher::default();
+        let mut hasher = Sha256::default();
+        let mut mmr_hasher = MmrHasher::new(&mut hasher);
         for leaf in leaves.iter().by_ref() {
-            let hash = hasher.leaf_hash(*leaf, &element);
+            let hash = mmr_hasher.leaf_hash(*leaf, &element);
             assert_eq!(mmr.nodes[*leaf as usize], hash);
         }
 
         // verify height=1 hashes
-        let hash2 = hasher.node_hash(2, &mmr.nodes[0], &mmr.nodes[1]);
+        let hash2 = mmr_hasher.node_hash(2, &mmr.nodes[0], &mmr.nodes[1]);
         assert_eq!(mmr.nodes[2], hash2);
-        let hash5 = hasher.node_hash(5, &mmr.nodes[3], &mmr.nodes[4]);
+        let hash5 = mmr_hasher.node_hash(5, &mmr.nodes[3], &mmr.nodes[4]);
         assert_eq!(mmr.nodes[5], hash5);
-        let hash9 = hasher.node_hash(9, &mmr.nodes[7], &mmr.nodes[8]);
+        let hash9 = mmr_hasher.node_hash(9, &mmr.nodes[7], &mmr.nodes[8]);
         assert_eq!(mmr.nodes[9], hash9);
-        let hash12 = hasher.node_hash(12, &mmr.nodes[10], &mmr.nodes[11]);
+        let hash12 = mmr_hasher.node_hash(12, &mmr.nodes[10], &mmr.nodes[11]);
         assert_eq!(mmr.nodes[12], hash12);
-        let hash17 = hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
+        let hash17 = mmr_hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
         assert_eq!(mmr.nodes[17], hash17);
 
         // verify height=2 hashes
-        let hash6 = hasher.node_hash(6, &mmr.nodes[2], &mmr.nodes[5]);
+        let hash6 = mmr_hasher.node_hash(6, &mmr.nodes[2], &mmr.nodes[5]);
         assert_eq!(mmr.nodes[6], hash6);
-        let hash13 = hasher.node_hash(13, &mmr.nodes[9], &mmr.nodes[12]);
+        let hash13 = mmr_hasher.node_hash(13, &mmr.nodes[9], &mmr.nodes[12]);
         assert_eq!(mmr.nodes[13], hash13);
-        let hash17 = hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
+        let hash17 = mmr_hasher.node_hash(17, &mmr.nodes[15], &mmr.nodes[16]);
         assert_eq!(mmr.nodes[17], hash17);
 
         // verify topmost hash
-        let hash14 = hasher.node_hash(14, &mmr.nodes[6], &mmr.nodes[13]);
+        let hash14 = mmr_hasher.node_hash(14, &mmr.nodes[6], &mmr.nodes[13]);
         assert_eq!(mmr.nodes[14], hash14);
 
         // verify root hash
         let root_hash = mmr.root_hash();
-        let peak_hashes = [hash14, hash17, mmr.nodes[18]];
-        let expected_root_hash = hasher.root_hash(19, peak_hashes.iter());
+        let peak_hashes = [hash14, hash17, mmr.nodes[18].clone()];
+        let expected_root_hash = mmr_hasher.root_hash(19, peak_hashes.iter());
         assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
 
         // confirm the proof of inclusion for each leaf successfully verifies
         for leaf in leaves.iter().by_ref() {
             let proof = mmr.proof(*leaf);
             assert!(
-                verify_proof::<32, Sha256Hasher>(&proof, &element, *leaf, &root_hash, &mut hasher),
+                verify_proof::<Sha256>(&proof, &element, *leaf, &root_hash, &mut hasher),
                 "valid proof should verify successfully"
             );
         }
@@ -579,55 +592,55 @@ mod tests {
         const POS: u64 = 18;
         let proof = mmr.proof(POS);
         assert!(
-            verify_proof::<32, Sha256Hasher>(&proof, &element, POS, &root_hash, &mut hasher),
+            verify_proof::<Sha256>(&proof, &element, POS, &root_hash, &mut hasher),
             "proof verification should be successful"
         );
         assert!(
-            !verify_proof::<32, Sha256Hasher>(&proof, &element, POS + 1, &root_hash, &mut hasher),
+            !verify_proof::<Sha256>(&proof, &element, POS + 1, &root_hash, &mut hasher),
             "proof verification should fail with incorrect element position"
         );
         assert!(
-            !verify_proof::<32, Sha256Hasher>(&proof, &element, POS - 1, &root_hash, &mut hasher),
+            !verify_proof::<Sha256>(&proof, &element, POS - 1, &root_hash, &mut hasher),
             "proof verification should fail with incorrect element position 2"
         );
         assert!(
-            !verify_proof::<32, Sha256Hasher>(
+            !verify_proof::<Sha256>(
                 &proof,
-                &Hash([0u8; 32]),
+                &Digest::from(vec![0u8; Sha256::len()]),
                 POS,
                 &root_hash,
                 &mut hasher
             ),
-            "proof verification should fail with mangled leaf element"
+            "proof verification should fail with mangled element"
         );
-        let root_hash2 = Hash([0u8; 32]);
+        let root_hash2 = Digest::from(vec![0u8; Sha256::len()]);
         assert!(
-            !verify_proof::<32, Sha256Hasher>(&proof, &element, POS, &root_hash2, &mut hasher),
+            !verify_proof::<Sha256>(&proof, &element, POS, &root_hash2, &mut hasher),
             "proof verification should fail with mangled root_hash"
         );
         let mut proof2 = proof.clone();
-        proof2.hashes[0] = Hash([0u8; 32]);
+        proof2.hashes[0] = Digest::from(vec![0u8; Sha256::len()]);
         assert!(
-            !verify_proof::<32, Sha256Hasher>(&proof2, &element, POS, &root_hash, &mut hasher),
+            !verify_proof::<Sha256>(&proof2, &element, POS, &root_hash, &mut hasher),
             "proof verification should fail with mangled proof hash"
         );
         proof2 = proof.clone();
         proof2.size = 10;
         assert!(
-            !verify_proof::<32, Sha256Hasher>(&proof2, &element, POS, &root_hash, &mut hasher),
+            !verify_proof::<Sha256>(&proof2, &element, POS, &root_hash, &mut hasher),
             "proof verification should fail with incorrect size"
         );
         proof2 = proof.clone();
-        proof2.hashes.push(Hash([0u8; 32]));
+        proof2.hashes.push(Digest::from(vec![0u8; Sha256::len()]));
         assert!(
-            !verify_proof::<32, Sha256Hasher>(&proof2, &element, POS, &root_hash, &mut hasher),
+            !verify_proof::<Sha256>(&proof2, &element, POS, &root_hash, &mut hasher),
             "proof verification should fail with extra hash"
         );
         proof2 = proof.clone();
         while !proof2.hashes.is_empty() {
             proof2.hashes.pop();
             assert!(
-                !verify_proof::<32, Sha256Hasher>(&proof2, &element, 7, &root_hash, &mut hasher),
+                !verify_proof::<Sha256>(&proof2, &element, 7, &root_hash, &mut hasher),
                 "proof verification should fail with missing hashes"
             );
         }
@@ -635,14 +648,14 @@ mod tests {
         proof2.hashes.clear();
         proof2
             .hashes
-            .extend(&mut proof.hashes[0..peak_hashes.len() - 1].iter());
+            .extend(proof.hashes[0..peak_hashes.len() - 1].iter().cloned());
         // sneak in an extra hash that won't be used in the computation and make sure it's detected
-        proof2.hashes.push(Hash([0u8; 32]));
+        proof2.hashes.push(Digest::from(vec![0u8; Sha256::len()]));
         proof2
             .hashes
-            .extend(proof.hashes[peak_hashes.len() - 1..].iter());
+            .extend(proof.hashes[peak_hashes.len() - 1..].iter().cloned());
         assert!(
-            !verify_proof::<32, Sha256Hasher>(&proof2, &element, POS, &root_hash, &mut hasher),
+            !verify_proof::<Sha256>(&proof2, &element, POS, &root_hash, &mut hasher),
             "proof verification should fail with extra hash even if it's unused by the computation"
         );
     }
@@ -650,24 +663,23 @@ mod tests {
     #[test]
     fn test_range_proofs() {
         // create a new MMR and add a non-trivial amount (47) of elements
-        let mut mmr: InMemoryMMR<32, Sha256Hasher> = InMemoryMMR::new(Sha256Hasher::new());
-        let mut elements = Vec::<Hash<32>>::new();
+        let mut mmr: InMemoryMmr<Sha256> = InMemoryMmr::default();
+        let mut elements = Vec::<Digest>::new();
         let mut element_positions = Vec::<u64>::new();
         for i in 0..49 {
-            elements.push(Hash([i as u8; 32]));
-            let element: Hash<32> = Hash([i as u8; 32]);
-            element_positions.push(mmr.add(&element));
+            elements.push(Digest::from(vec![i as u8; Sha256::len()]));
+            element_positions.push(mmr.add(elements.last().unwrap()));
         }
         // test range proofs over all possible ranges of at least 2 elements
         let root_hash = mmr.root_hash();
-        let mut hasher = Sha256Hasher::default();
+        let mut hasher = Sha256::default();
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
                 let start_pos = element_positions[i];
                 let end_pos = element_positions[j];
                 let range_proof = mmr.range_proof(start_pos, end_pos);
                 assert!(
-                    verify_range_proof::<32, Sha256Hasher>(
+                    verify_range_proof::<Sha256>(
                         &range_proof,
                         &elements[i..j + 1],
                         start_pos,
@@ -690,7 +702,7 @@ mod tests {
         let range_proof = mmr.range_proof(start_pos, end_pos);
         let valid_elements = &elements[start_index..end_index + 1];
         assert!(
-            verify_range_proof::<32, Sha256Hasher>(
+            verify_range_proof::<Sha256>(
                 &range_proof,
                 valid_elements,
                 start_pos,
@@ -704,7 +716,7 @@ mod tests {
         for _i in 0..range_proof.hashes.len() {
             invalid_proof.hashes.remove(0);
             assert!(
-                !verify_range_proof::<32, Sha256Hasher>(
+                !verify_range_proof::<Sha256>(
                     &range_proof,
                     &Vec::new(),
                     start_pos,
@@ -720,7 +732,7 @@ mod tests {
             for j in i..elements.len() {
                 assert!(
                     (i == start_index && j == end_index) // exclude the valid element range
-                        || !verify_range_proof::<32, Sha256Hasher>(
+                        || !verify_range_proof::<Sha256>(
                             &range_proof,
                             &elements[i..j + 1],
                             start_pos,
@@ -735,24 +747,24 @@ mod tests {
             }
         }
         // confirm proof fails with invalid root hash
-        let mut invalid_root_hash = root_hash;
-        invalid_root_hash.0[29] = root_hash.0[29] + 1;
+        let mut invalid_root_hash = vec![0; Sha256::len()];
+        invalid_root_hash[29] = root_hash[29] + 1;
         assert!(
-            !verify_range_proof::<32, Sha256Hasher>(
+            !verify_range_proof::<Sha256>(
                 &range_proof,
                 valid_elements,
                 start_pos,
                 end_pos,
-                &invalid_root_hash,
+                &Digest::from(invalid_root_hash),
                 &mut hasher,
             ),
             "range proof with invalid proof should fail"
         );
         // mangle the proof and confirm it fails
         let mut invalid_proof = range_proof.clone();
-        invalid_proof.hashes[1] = Hash([0u8; 32]);
+        invalid_proof.hashes[1] = Digest::from(vec![0u8; Sha256::len()]);
         assert!(
-            !verify_range_proof::<32, Sha256Hasher>(
+            !verify_range_proof::<Sha256>(
                 &invalid_proof,
                 valid_elements,
                 start_pos,
@@ -765,9 +777,11 @@ mod tests {
         // inserting elements into the proof should also cause it to fail (malleability check)
         for i in 0..range_proof.hashes.len() {
             let mut invalid_proof = range_proof.clone();
-            invalid_proof.hashes.insert(i, Hash([0u8; 32]));
+            invalid_proof
+                .hashes
+                .insert(i, Digest::from(vec![0u8; Sha256::len()]));
             assert!(
-                !verify_range_proof::<32, Sha256Hasher>(
+                !verify_range_proof::<Sha256>(
                     &invalid_proof,
                     valid_elements,
                     start_pos,
@@ -784,7 +798,7 @@ mod tests {
         for _ in 0..range_proof.hashes.len() {
             invalid_proof.hashes.remove(0);
             assert!(
-                !verify_range_proof::<32, Sha256Hasher>(
+                !verify_range_proof::<Sha256>(
                     &invalid_proof,
                     valid_elements,
                     start_pos,
@@ -804,7 +818,7 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    !verify_range_proof::<32, Sha256Hasher>(
+                    !verify_range_proof::<Sha256>(
                         &range_proof,
                         valid_elements,
                         start_pos2,

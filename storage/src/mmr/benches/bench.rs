@@ -1,11 +1,11 @@
-use commonware_storage::mmr::{verify_proof, verify_range_proof, Hash, InMemoryMMR, Sha256Hasher};
+use commonware_cryptography::{Digest, Hasher, Sha256};
+use commonware_storage::mmr::{verify_proof, verify_range_proof, InMemoryMmr};
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn bench_build_mmr(c: &mut Criterion) {
-    let element = Hash::new(&[100u8; 32]);
+    let element = Digest::from_static(&[100u8; 32]);
     c.bench_function("build_mmr", |b| {
-        let hasher = Sha256Hasher::new();
-        let mut mmr = InMemoryMMR::new(hasher);
+        let mut mmr = InMemoryMmr::<Sha256>::new();
         // bootstrap w/ 5M elements
         for _ in 0..5_000_000 {
             mmr.add(&element);
@@ -20,16 +20,15 @@ fn bench_build_mmr(c: &mut Criterion) {
 }
 
 fn bench_prove(c: &mut Criterion) {
-    let hasher = Sha256Hasher::new();
-    let mut mmr = InMemoryMMR::new(hasher);
+    let mut mmr = InMemoryMmr::<Sha256>::new();
     let mut leaf_sample = Vec::new();
-    let element = Hash::new(&[100u8; 32]);
+    let element = Digest::from_static(&[100u8; 32]);
     const NUM_ELEMENTS: usize = 5_000_000;
     const SAMPLE_SIZE: usize = 100;
     let mut elements = Vec::with_capacity(NUM_ELEMENTS);
     for i in 0..NUM_ELEMENTS {
         let pos = mmr.add(&element);
-        elements.push(element);
+        elements.push(element.clone());
         if i % SAMPLE_SIZE == 0 {
             leaf_sample.push(pos);
         }
@@ -37,7 +36,7 @@ fn bench_prove(c: &mut Criterion) {
     let root_hash = mmr.root_hash();
 
     c.bench_function("prove_single_element", |b| {
-        let mut hasher = Sha256Hasher::new();
+        let mut hasher = Sha256::new();
         b.iter(|| {
             for pos in &leaf_sample {
                 let proof = mmr.proof(*pos);
@@ -53,7 +52,7 @@ fn bench_prove(c: &mut Criterion) {
     });
 
     c.bench_function("prove_range", |b| {
-        let mut hasher = Sha256Hasher::new();
+        let mut hasher = Sha256::new();
         b.iter(|| {
             let mut iter = leaf_sample.iter();
             let mut pos1 = iter.next().unwrap();
