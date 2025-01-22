@@ -108,8 +108,8 @@
         // We'll treat "value" as the performance measure in ns. A lower number => faster.
         // The % change is computed as (new - old)/old. Negative => faster, positive => slower.
         function computeSingleBenchSummary(benches) {
-            if (!benches || benches.length < 2) {
-                return { pctAllTime: "N/A", pct7Day: "N/A" };
+            if (!benches || benches.length < 1) {
+                return { pctAllTime: "N/A", pct7Day: "N/A", latest: "N/A" };
             }
             // Sort by date ascending
             const sorted = [...benches].sort((a, b) => a.date - b.date);
@@ -117,6 +117,9 @@
             const earliestDate = sorted[0].date;
             const latestVal = sorted[sorted.length - 1].bench.value; // last
             const latestDate = sorted[sorted.length - 1].date;
+            if (benches.length < 2) {
+                return { pctAllTime: "N/A", pct7Day: "N/A", latest: latestVal };
+            }
 
             // All-time ratio
             let pctAllTime = "N/A";
@@ -151,7 +154,7 @@
                 pct7Day = (ratio7 * 100).toFixed(1) + "%";
             }
 
-            return { pctAllTime, pct7Day };
+            return { pctAllTime, pct7Day, latest: latestVal };
         }
 
         function setupBenchmark() {
@@ -200,11 +203,13 @@
                     // <summary> that shows/hides the graph
                     const summary = document.createElement('summary');
                     summary.textContent = name;
-                    const { pctAllTime, pct7Day } = computeSingleBenchSummary(dataset);
+                    const { pctAllTime, pct7Day, latest } = computeSingleBenchSummary(dataset);
+                    const value = window.USE_MS ? latest / 1e6 : latest;
+                    const units = window.USE_MS ? "ms" : "ns";
                     summary.innerHTML = `
                         <span class="benchmark-graph-title">${name}</span>
                         <br>
-                        <span class="benchmark-performance">All-time: ${pctAllTime} 7-day: ${pct7Day}</span>
+                        <span class="benchmark-performance">${value} ${units} | All-Time: ${pctAllTime} (Last 7 Days: ${pct7Day})</span>
                     `;
                     graphDetails.appendChild(summary);
 
