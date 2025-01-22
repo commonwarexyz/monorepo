@@ -119,6 +119,7 @@ function insertFooter() {
     const footerHTML = `
     <div class="footer">
         <div class="socials">
+            <a href="/benchmarks.html">Benchmarks</a>
             <a href="https://github.com/commonwarexyz/monorepo">GitHub</a>
             <a href="https://github.com/commonwarexyz/monorepo/discussions">Discussions</a>
             <a href="https://x.com/commonwarexyz">X</a>

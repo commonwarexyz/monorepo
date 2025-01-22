@@ -77,7 +77,10 @@
             <div class="date">Last Updated: <span id="last-update"></span></div>
         </div>
         <div>
-            <p>Options: <input type="checkbox" id="toggle-units" onchange="toggleUnits()" /> ns/iter</p>
+            <p>
+                <button id="toggle-units" onclick="toggleUnits()">display nanoseconds</button>
+                <button id="toggle-expand" onclick="toggleExpand()">expand all</button>
+            </p>
         </div>
         <div id="main"></div>
     </div>
@@ -90,9 +93,18 @@
         // Global variable to track unit usage
         window.USE_MS = true;
 
+        function updateExpandButton() {
+            const expandBtn = document.getElementById('toggle-expand');
+            // If *any* detail is open, switch to "collapse all"
+            const anyOpen = Array.from(document.querySelectorAll('details')).some(d => d.open);
+            expandBtn.textContent = anyOpen ? 'collapse all' : 'expand all';
+        }
+
         // Toggle function to switch between ns/iter and ms/iter
         function toggleUnits() {
             window.USE_MS = !window.USE_MS;
+            const unitsBtn = document.getElementById('toggle-units');
+            unitsBtn.textContent = window.USE_MS ? 'display nanoseconds' : 'display milliseconds';
             // Re-run setup to regenerate all charts with the updated unit
             // Or, for a more efficient approach, you could store references
             // to your charts and only update their config + re-render.
@@ -101,6 +113,14 @@
             // from #main and re-run the entire chart creation:
             document.getElementById('main').innerHTML = '';
             setupBenchmark();
+        }
+
+        // Toggle function to expand all <details> elements
+        function toggleExpand() {
+            const detailsList = document.querySelectorAll('details');
+            const anyOpen = Array.from(detailsList).some(d => d.open);
+            detailsList.forEach(d => d.open = !anyOpen);
+            updateExpandButton();
         }
 
         // Compute all-time and 7-day performance changes for a single benchmark
@@ -199,6 +219,9 @@
                     const graphDetails = document.createElement('details');
                     graphDetails.className = 'benchmark-graph-details';
                     parent.appendChild(graphDetails);
+
+                    // Listen for "toggle" events on each details to update button state
+                    graphDetails.addEventListener('toggle', updateExpandButton);
 
                     // <summary> that shows/hides the graph
                     const summary = document.createElement('summary');
@@ -316,6 +339,9 @@
                     const detailsElem = document.createElement('details');
                     detailsElem.className = 'benchmark-set';
                     main.appendChild(detailsElem);
+
+                    // Listen to "toggle" so button updates if a single set is opened/closed
+                    detailsElem.addEventListener('toggle', updateExpandButton);
 
                     const summaryElem = document.createElement('summary');
                     summaryElem.className = 'benchmark-title';
