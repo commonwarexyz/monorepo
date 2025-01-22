@@ -480,4 +480,59 @@ mod tests {
         );
         assert!(result.is_some(), "Should handle valid proof with 0 signatures");
     }
+
+    #[test]
+    fn test_deserialize_aggregation_malicious_count() {
+        // Create a proof with a maliciously crafted count that would cause overflow
+        // when multiplied by (public_key_len + signature_len)
+        let mut proof = Vec::new();
+        proof.put_u64(1); // view
+        proof.put_u64(0); // parent
+        proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
+        
+        // Calculate a count that would cause overflow
+        // If public_key_len + signature_len = k, we want count such that
+        // count * k > usize::MAX
+        let (public_key_len, signature_len) = Ed25519::len();
+        let item_size = public_key_len + signature_len;
+        let malicious_count = (usize::MAX / item_size) + 1;
+        proof.put_u32(malicious_count as u32);
+        
+        // Add some signature data (doesn't need to be valid since overflow check happens first)
+        proof.extend_from_slice(&vec![0; 100]);
+        
+        let result = Prover::<Ed25519, Sha256>::deserialize_aggregation(
+            proof.into(),
+            u32::MAX, // Allow any count to test overflow protection
+            false,
+            &notarize_namespace(b"test"),
+        );
+        assert!(result.is_none(), "Should return None on malicious count that would cause overflow");
+    }
+
+    #[test]
+    fn test_deserialize_aggregation_max_valid_count() {
+        // Create a proof with the maximum valid count that won't cause overflow
+        let mut proof = Vec::new();
+        proof.put_u64(1); // view
+        proof.put_u64(0); // parent
+        proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
+        
+        // Calculate maximum safe count
+        let (public_key_len, signature_len) = Ed25519::len();
+        let item_size = public_key_len + signature_len;
+        let max_safe_count = usize::MAX / item_size;
+        proof.put_u32(max_safe_count as u32);
+        
+        // Add exactly the right amount of signature data
+        proof.extend_from_slice(&vec![0; max_safe_count * item_size]);
+        
+        let result = Prover::<Ed25519, Sha256>::deserialize_aggregation(
+            proof.into(),
+            u32::MAX, // Allow any count to test overflow protection
+            false,
+            &notarize_namespace(b"test"),
+        );
+        assert!(result.is_some(), "Should accept maximum valid count that doesn't cause overflow");
+    }
 }
