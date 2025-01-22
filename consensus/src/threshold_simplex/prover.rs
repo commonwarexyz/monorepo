@@ -79,7 +79,11 @@ impl<H: Hasher> Prover<H> {
         partial_signature: &Signature,
     ) -> Proof {
         // Setup proof
-        let len = 8 + 8 + proposal.payload.len() + partial_signature.len();
+        let len = 8
+            .checked_add(8)
+            .and_then(|len| len.checked_add(proposal.payload.len()))
+            .and_then(|len| len.checked_add(partial_signature.len()))
+            .expect("proposal proof length overflow");
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -97,7 +101,11 @@ impl<H: Hasher> Prover<H> {
     ) -> Option<(View, View, Digest, Verifier)> {
         // Ensure proof is big enough
         let digest_len = H::len();
-        if proof.len() != 8 + 8 + digest_len + poly::PARTIAL_SIGNATURE_LENGTH {
+        let expected_len = 8
+            .checked_add(8)?
+            .checked_add(digest_len)?
+            .checked_add(poly::PARTIAL_SIGNATURE_LENGTH)?;
+        if proof.len() != expected_len {
             return None;
         }
 
@@ -134,8 +142,12 @@ impl<H: Hasher> Prover<H> {
         seed: &Signature,
     ) -> Proof {
         // Setup proof
-        let len =
-            8 + 8 + proposal.payload.len() + group::SIGNATURE_LENGTH + group::SIGNATURE_LENGTH;
+        let len = 8
+            .checked_add(8)
+            .and_then(|len| len.checked_add(proposal.payload.len()))
+            .and_then(|len| len.checked_add(group::SIGNATURE_LENGTH))
+            .and_then(|len| len.checked_add(group::SIGNATURE_LENGTH))
+            .expect("threshold proof length overflow");
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -155,8 +167,12 @@ impl<H: Hasher> Prover<H> {
     ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
         // Ensure proof prefix is big enough
         let digest_len = H::len();
-        let len = 8 + 8 + digest_len + group::SIGNATURE_LENGTH + group::SIGNATURE_LENGTH;
-        if proof.len() < len {
+        let expected_len = 8
+            .checked_add(8)?
+            .checked_add(digest_len)?
+            .checked_add(group::SIGNATURE_LENGTH)?
+            .checked_add(group::SIGNATURE_LENGTH)?;
+        if proof.len() < expected_len {
             return None;
         }
 
@@ -424,5 +440,74 @@ impl<H: Hasher> Prover<H> {
             Some(signature_finalize.index)
         };
         Some((view, Verifier::new(callback)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{bls12381::primitives::group, Sha256};
+
+    #[test]
+    fn test_deserialize_proposal_size_overflow() {
+        let public = group::Public::default();
+        let prover = Prover::<Sha256>::new(public, b"test");
+        
+        // Create a proof with a length that would cause overflow
+        let mut proof = Vec::new();
+        proof.put_u64(1); // view
+        proof.put_u64(0); // parent
+        proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
+        proof.extend_from_slice(&vec![0; usize::MAX / 2]); // oversized signature
+        
+        let result = Prover::<Sha256>::deserialize_proposal(proof.into(), &prover.notarize_namespace);
+        assert!(result.is_none(), "Should return None on size overflow");
+    }
+
+    #[test]
+    fn test_deserialize_threshold_size_overflow() {
+        let public = group::Public::default();
+        let prover = Prover::<Sha256>::new(public, b"test");
+        
+        // Create a proof with a length that would cause overflow
+        let mut proof = Vec::new();
+        proof.put_u64(1); // view
+        proof.put_u64(0); // parent
+        proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
+        proof.extend_from_slice(&vec![0; usize::MAX / 2]); // oversized signature
+        
+        let result = prover.deserialize_threshold(proof.into(), &prover.notarize_namespace);
+        assert!(result.is_none(), "Should return None on size overflow");
+    }
+
+    #[test]
+    fn test_serialize_proposal_size_overflow() {
+        let proposal = wire::Proposal {
+            view: 1,
+            parent: 0,
+            payload: vec![0; usize::MAX / 2], // Very large payload
+        };
+        let partial_signature = vec![0; usize::MAX / 2].into(); // Very large signature
+        
+        std::panic::catch_unwind(|| {
+            Prover::<Sha256>::serialize_proposal(&proposal, &partial_signature)
+        })
+        .expect_err("Should panic on size overflow");
+    }
+
+    #[test]
+    fn test_serialize_threshold_size_overflow() {
+        let proposal = wire::Proposal {
+            view: 1,
+            parent: 0,
+            payload: vec![0; usize::MAX / 2], // Very large payload
+        };
+        let signature = vec![0; group::SIGNATURE_LENGTH].into();
+        let seed = vec![0; group::SIGNATURE_LENGTH].into();
+        
+        std::panic::catch_unwind(|| {
+            Prover::<Sha256>::serialize_threshold(&proposal, &signature, &seed)
+        })
+        .expect_err("Should panic on size overflow");
     }
 }
