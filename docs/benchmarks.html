@@ -72,6 +72,14 @@
     </div>
     <div class="content">
         <h1>Benchmarks</h1>
+
+        <div style="padding: 1em;">
+            <label for="toggle-units">
+                <input type="checkbox" id="toggle-units" onchange="toggleUnits()" />
+                View in ns/iter
+            </label>
+        </div>
+
         <div class="meta">
             <div class="date">Last Updated: <span id="last-update"></span></div>
         </div>
@@ -82,6 +90,9 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.2/dist/Chart.min.js"></script>
     <script>
         'use strict';
+        // Global variable to track unit usage
+        window.USE_MS = true;
+
         function setupBenchmark() {
             // Set Chart.js default font family
             Chart.defaults.global.defaultFontFamily = 'Consolas, monospace';
@@ -157,10 +168,13 @@
                             yAxes: [{
                                 scaleLabel: {
                                     display: true,
-                                    labelString: dataset.length > 0 ? dataset[0].bench.unit : '',
+                                    labelString: window.USE_MS ? 'ms/iter' : 'ns/iter',
                                 },
                                 ticks: {
                                     beginAtZero: true,
+                                    callback: function (value) {
+                                        return window.USE_MS ? (value / 1e6) : value;
+                                    }
                                 }
                             }]
                         },
@@ -174,12 +188,34 @@
                                         + '\n\n' + data.commit.timestamp
                                         + ' committed by @' + data.commit.committer.username + '\n';
                                 },
-                                label: item => {
-                                    let label = item.value;
+                                label: function (item) {
+                                    let rawVal = Number(item.value);
+                                    // If toggling to ms, convert from ns -> ms (divide by 1e6)
+                                    let val = window.USE_MS ? rawVal / 1e6 : rawVal;
+
+                                    // Format numeric output
+                                    let label = val.toLocaleString(undefined, {
+                                        minimumFractionDigits: 3,
+                                        maximumFractionDigits: 3
+                                    });
+
                                     const { range, unit } = dataset[item.index].bench;
-                                    label += ' ' + unit;
+                                    // If in ms mode, show "ms/iter", else "ns/iter"
+                                    const labelUnit = window.USE_MS ? 'ms/iter' : 'ns/iter';
+                                    label += ' ' + labelUnit;
+
                                     if (range) {
-                                        label += ' (' + range + ')';
+                                        // parse numeric range if it exists, also convert to ms if needed
+                                        let rangeVal = range.replace(/[^\d.]/g, '');
+                                        let rangeNum = Number(rangeVal);
+                                        if (!isNaN(rangeNum) && window.USE_MS) {
+                                            rangeNum = rangeNum / 1e6;
+                                        }
+                                        const rangeUnit = window.USE_MS ? 'ms' : 'ns';
+                                        label += ' (' + rangeNum.toLocaleString(undefined, {
+                                            minimumFractionDigits: 3,
+                                            maximumFractionDigits: 3
+                                        }) + ' ' + rangeUnit + ')';
                                     }
                                     return label;
                                 },
@@ -236,6 +272,20 @@
         };
     </script>
     <script src="https://commonwarexyz.github.io/benchmarks/data.js" onload="setupBenchmark()"></script>
+    <script>
+        // Toggle function to switch between ns/iter and ms/iter
+        function toggleUnits() {
+            window.USE_MS = !window.USE_MS;
+            // Re-run setup to regenerate all charts with the updated unit
+            // Or, for a more efficient approach, you could store references
+            // to your charts and only update their config + re-render.
+
+            // For simplicity, let's just remove existing <canvas> elements
+            // from #main and re-run the entire chart creation:
+            document.getElementById('main').innerHTML = '';
+            setupBenchmark();
+        }
+    </script>
     <script src="shared.js"></script>
     <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "07159b86f75b4af18e54dd0cda2fb4a7"}'></script>
 </body>
