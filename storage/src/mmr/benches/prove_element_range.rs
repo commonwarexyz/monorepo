@@ -1,5 +1,5 @@
 use commonware_cryptography::{Digest, Hasher, Sha256};
-use commonware_storage::mmr::{mem::Mmr, verify_range_proof};
+use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
 
 fn bench_prove_element_range(c: &mut Criterion) {
@@ -26,8 +26,7 @@ fn bench_prove_element_range(c: &mut Criterion) {
             let mut count: usize = 0;
             for pos2 in iter {
                 let proof = mmr.range_proof(*pos1, *pos2);
-                assert!(verify_range_proof(
-                    &proof,
+                assert!(proof.verify_range_inclusion(
                     &elements[count..count + SAMPLE_SIZE + 1],
                     *pos1,
                     *pos2,

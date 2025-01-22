@@ -2,7 +2,7 @@ use commonware_cryptography::{Digest, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
 
-fn bench_build_mmr(c: &mut Criterion) {
+fn bench_build(c: &mut Criterion) {
     let element = Digest::from_static(&[100u8; 32]);
     c.bench_function(module_path!(), |b| {
         let mut mmr = Mmr::<Sha256>::new();
@@ -22,5 +22,5 @@ fn bench_build_mmr(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_build_mmr
+    targets = bench_build
 }

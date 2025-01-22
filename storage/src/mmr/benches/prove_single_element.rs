@@ -1,5 +1,5 @@
 use commonware_cryptography::{Digest, Hasher, Sha256};
-use commonware_storage::mmr::{mem::Mmr, verify_proof};
+use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
 
 fn bench_prove_single_element(c: &mut Criterion) {
@@ -23,13 +23,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
         b.iter(|| {
             for pos in &leaf_sample {
                 let proof = mmr.proof(*pos);
-                assert!(verify_proof(
-                    &proof,
-                    &element,
-                    *pos,
-                    &root_hash,
-                    &mut hasher
-                ));
+                assert!(proof.verify_element_inclusion(&element, *pos, &root_hash, &mut hasher));
             }
         })
     });
