@@ -435,3 +435,49 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         Some((public_key, view))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_cryptography::{Ed25519, Sha256};
+
+    #[test]
+    fn test_deserialize_aggregation_overflow() {
+        let prover = Prover::<Ed25519, Sha256>::new(b"test");
+        
+        // Create a proof with a very large count that would cause overflow
+        let mut proof = Vec::new();
+        proof.put_u64(1); // view
+        proof.put_u64(0); // parent
+        proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
+        proof.put_u32(u32::MAX); // count - this would cause overflow when multiplied by signature size
+        
+        let result = Prover::<Ed25519, Sha256>::deserialize_aggregation(
+            proof.into(),
+            u32::MAX,
+            false,
+            &prover.notarize_namespace,
+        );
+        assert!(result.is_none(), "Should return None on potential overflow");
+    }
+
+    #[test]
+    fn test_deserialize_aggregation_valid() {
+        let prover = Prover::<Ed25519, Sha256>::new(b"test");
+        
+        // Create a proof with a reasonable count
+        let mut proof = Vec::new();
+        proof.put_u64(1); // view
+        proof.put_u64(0); // parent
+        proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
+        proof.put_u32(0); // count of 0 signatures is valid
+        
+        let result = Prover::<Ed25519, Sha256>::deserialize_aggregation(
+            proof.into(),
+            10,
+            false,
+            &prover.notarize_namespace,
+        );
+        assert!(result.is_some(), "Should handle valid proof with 0 signatures");
+    }
+}
