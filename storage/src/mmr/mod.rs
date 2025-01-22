@@ -6,8 +6,9 @@
 //! An MMR is a list of perfect binary trees of strictly decreasing height. The roots of these trees
 //! are called the "peaks" of the MMR. Each "element" stored in the MMR is represented by some leaf
 //! node in one of these perfect trees, storing a positioned hash of the element. Non-leaf nodes
-//! node in one of these perfect trees, storing a positioned hash of the element. Non-leaf nodes
 //! store a positioned hash of their children.
+//!
+//! The "size" of an MMR is the total number of nodes summed over all trees.
 //!
 //! The nodes of the MMR are ordered by a post-order traversal of the MMR trees, starting from the
 //! from tallest tree to shortest. The "position" of a node in the MMR is defined as the 0-based
@@ -64,7 +65,7 @@
 
 pub mod mem;
 
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{Digest, Hasher as CHasher};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// A Proof contains the information necessary for proving the inclusion of an element, or some
@@ -75,11 +76,11 @@ pub struct Proof {
 }
 
 /// Hasher decorator the MMR uses for computing leaf, node and root hashes.
-struct MmrHasher<'a, H: Hasher> {
+struct Hasher<'a, H: CHasher> {
     hasher: &'a mut H,
 }
 
-impl<'a, H: Hasher> MmrHasher<'a, H> {
+impl<'a, H: CHasher> Hasher<'a, H> {
     fn new(hasher: &'a mut H) -> Self {
         Self { hasher }
     }
@@ -122,7 +123,7 @@ impl<'a, H: Hasher> MmrHasher<'a, H> {
 
 /// Return true if `proof` proves that `element` appears at position `element_pos` within the MMR
 /// with root hash `root_hash`.
-pub fn verify_proof<H: Hasher>(
+pub fn verify_proof<H: CHasher>(
     proof: &Proof,
     element: &Digest,
     element_pos: u64,
@@ -142,7 +143,7 @@ pub fn verify_proof<H: Hasher>(
 /// Return true if `proof` proves that the `elements` appear consecutively between positions
 /// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root hash
 /// `root_hash`.
-pub fn verify_range_proof<H: Hasher>(
+pub fn verify_range_proof<H: CHasher>(
     proof: &Proof,
     elements: &[Digest],
     start_element_pos: u64,
@@ -153,7 +154,7 @@ pub fn verify_range_proof<H: Hasher>(
     let mut proof_hashes_iter = proof.hashes.iter();
     let mut elements_iter = elements.iter();
     let mut siblings_iter = proof.hashes.iter().rev();
-    let mut mmr_hasher = MmrHasher::<H>::new(hasher);
+    let mut mmr_hasher = Hasher::<H>::new(hasher);
 
     // Include peak hashes only for trees that have no elements from the range, and keep track of
     // the starting and ending trees of those that do contain some.
@@ -196,14 +197,14 @@ pub fn verify_range_proof<H: Hasher>(
     *root_hash == mmr_hasher.root_hash(proof.size, peak_hashes.iter())
 }
 
-fn peak_hash_from_range<'a, H: Hasher>(
+fn peak_hash_from_range<'a, H: CHasher>(
     node_pos: u64,      // current node position in the tree
     two_h: u64,         // 2^height of the current node
     leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
     elements: &mut impl Iterator<Item = &'a Digest>,
     sibling_hashes: &mut impl Iterator<Item = &'a Digest>,
-    hasher: &mut MmrHasher<H>,
+    hasher: &mut Hasher<H>,
 ) -> Result<Digest, ()> {
     assert_ne!(two_h, 0);
     if two_h == 1 {
@@ -265,9 +266,8 @@ fn peak_hash_from_range<'a, H: Hasher>(
     Ok(hasher.node_hash(node_pos, &left_hash.unwrap(), &right_hash.unwrap()))
 }
 
-/// A PeakIterator returns a (position, height) tuple for each peak in the MMR, in decreasing order
-/// of height. The iterator will only return the peaks that existed at the time of its
-/// initialization if new elements are added to the MMR between iterations.
+/// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
+/// in decreasing order of height.
 ///
 /// For the example MMR depicted at the top of this file, the PeakIterator would yield:
 /// ```text
@@ -320,10 +320,10 @@ impl Iterator for PeakIterator {
     }
 }
 
-/// Returns the set of peaks that will require a new parent after adding the next leaf to the
-/// MMR. This set is non-empty only if there is a height-0 (leaf) peak in the MMR. The result
-/// will contain this leaf peak plus the other MMR peaks with contiguously increasing height.
-/// Nodes in the result are ordered by decreasing height.
+/// Returns the set of peaks that will require a new parent after adding the next leaf to an MMR
+/// with the given peaks. This set is non-empty only if there is a height-0 (leaf) peak in the MMR.
+/// The result will contain this leaf peak plus the other MMR peaks with contiguously increasing
+/// height. Nodes in the result are ordered by decreasing height.
 fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<u64> {
     let mut peaks = Vec::new();
     let mut last_height = u32::MAX;
@@ -406,7 +406,7 @@ impl Iterator for PathIterator {
 
 #[cfg(test)]
 mod tests {
-    use commonware_cryptography::{Digest, Hasher, Sha256};
+    use commonware_cryptography::{Digest, Hasher as CHasher, Sha256};
 
     #[test]
     fn test_leaf_hash_sha256() {
@@ -423,9 +423,9 @@ mod tests {
         test_root_hash::<Sha256>();
     }
 
-    fn test_leaf_hash<H: Hasher>() {
+    fn test_leaf_hash<H: CHasher>() {
         let mut hasher = H::new();
-        let mut mmr_hasher = super::MmrHasher::new(&mut hasher);
+        let mut mmr_hasher = super::Hasher::new(&mut hasher);
         // input hashes to use
         let hash1 = Digest::from(vec![1u8; H::len()]);
         let hash2 = Digest::from(vec![2u8; H::len()]);
@@ -447,9 +447,9 @@ mod tests {
         assert_ne!(out, out2, "hash should change with different input hash");
     }
 
-    fn test_node_hash<H: Hasher>() {
+    fn test_node_hash<H: CHasher>() {
         let mut hasher = H::new();
-        let mut mmr_hasher = super::MmrHasher::new(&mut hasher);
+        let mut mmr_hasher = super::Hasher::new(&mut hasher);
         // input hashes to use
 
         let hash1 = Digest::from(vec![1u8; H::len()]);
@@ -488,9 +488,9 @@ mod tests {
         );
     }
 
-    fn test_root_hash<H: Hasher>() {
+    fn test_root_hash<H: CHasher>() {
         let mut hasher = H::new();
-        let mut mmr_hasher = super::MmrHasher::new(&mut hasher);
+        let mut mmr_hasher = super::Hasher::new(&mut hasher);
         // input hashes to use
         let hash1 = Digest::from(vec![1u8; H::len()]);
         let hash2 = Digest::from(vec![2u8; H::len()]);

@@ -18,7 +18,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
     }
     let root_hash = mmr.root_hash();
 
-    c.bench_function("prove_single_element", |b| {
+    c.bench_function(module_path!(), |b| {
         let mut hasher = Sha256::new();
         b.iter(|| {
             for pos in &leaf_sample {

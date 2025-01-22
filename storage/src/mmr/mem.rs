@@ -1,24 +1,24 @@
 //! A bare-bones MMR structure without pruning and where all nodes are hashes & maintained in
 //! memory within a single vector.
-use crate::mmr::{nodes_needing_parents, MmrHasher, PathIterator, PeakIterator, Proof};
 
-use commonware_cryptography::{Digest, Hasher};
+use crate::mmr::{nodes_needing_parents, Hasher, PathIterator, PeakIterator, Proof};
+use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// Implementation of `Mmr`.
-pub struct Mmr<H: Hasher> {
+pub struct Mmr<H: CHasher> {
     hasher: H,
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
     // from the from tallest tree to shortest.
     nodes: Vec<Digest>,
 }
 
-impl<H: Hasher> Default for Mmr<H> {
+impl<H: CHasher> Default for Mmr<H> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<H: Hasher> Mmr<H> {
+impl<H: CHasher> Mmr<H> {
     /// Return a new (empty) `Mmr`.
     pub fn new() -> Self {
         Self {
@@ -40,7 +40,7 @@ impl<H: Hasher> Mmr<H> {
     pub fn add(&mut self, element: &Digest) -> u64 {
         let peaks = nodes_needing_parents(self.peak_iterator());
         let element_pos = self.nodes.len() as u64;
-        let hasher = &mut MmrHasher::new(&mut self.hasher);
+        let hasher = &mut Hasher::new(&mut self.hasher);
 
         // Insert the element into the MMR as a leaf.
         let mut hash = hasher.leaf_hash(element_pos, element);
@@ -60,7 +60,7 @@ impl<H: Hasher> Mmr<H> {
         let peaks = self
             .peak_iterator()
             .map(|(peak_pos, _)| &self.nodes[peak_pos as usize]);
-        let hasher = &mut MmrHasher::new(&mut self.hasher);
+        let hasher = &mut Hasher::new(&mut self.hasher);
         hasher.root_hash(self.nodes.len() as u64, peaks)
     }
 
@@ -152,13 +152,13 @@ impl<H: Hasher> Mmr<H> {
 #[cfg(test)]
 mod tests {
     use crate::mmr::mem::Mmr;
-    use crate::mmr::{nodes_needing_parents, verify_proof, verify_range_proof, MmrHasher};
-    use commonware_cryptography::{Digest, Hasher, Sha256};
+    use crate::mmr::{nodes_needing_parents, verify_proof, verify_range_proof, Hasher};
+    use commonware_cryptography::{Digest, Hasher as CHasher, Sha256};
 
     #[test]
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
-    /// structure in the example documented at the top of the mmr crate's mod.rs file. The resulting
-    /// MMR should contain 19 nodes and 3 peaks.
+    /// structure in the example documented at the top of the mmr crate's mod.rs file with 19 nodes
+    /// and 3 peaks.
     fn test_add_eleven_values() {
         let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
         assert_eq!(
@@ -201,7 +201,7 @@ mod tests {
 
         // verify leaf hashes
         let mut hasher = Sha256::default();
-        let mut mmr_hasher = MmrHasher::new(&mut hasher);
+        let mut mmr_hasher = Hasher::new(&mut hasher);
         for leaf in leaves.iter().by_ref() {
             let hash = mmr_hasher.leaf_hash(*leaf, &element);
             assert_eq!(mmr.nodes[*leaf as usize], hash);

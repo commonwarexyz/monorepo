@@ -18,7 +18,7 @@ fn bench_prove_element_range(c: &mut Criterion) {
     }
     let root_hash = mmr.root_hash();
 
-    c.bench_function("prove_range", |b| {
+    c.bench_function(module_path!(), |b| {
         let mut hasher = Sha256::new();
         b.iter(|| {
             let mut iter = leaf_sample.iter();

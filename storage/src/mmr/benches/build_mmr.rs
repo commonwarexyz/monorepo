@@ -4,7 +4,7 @@ use criterion::{criterion_group, Criterion};
 
 fn bench_build_mmr(c: &mut Criterion) {
     let element = Digest::from_static(&[100u8; 32]);
-    c.bench_function("build_mmr", |b| {
+    c.bench_function(module_path!(), |b| {
         let mut mmr = Mmr::<Sha256>::new();
         // bootstrap w/ 5M elements
         for _ in 0..5_000_000 {
