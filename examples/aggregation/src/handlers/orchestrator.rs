@@ -3,6 +3,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::Clock;
 use commonware_utils::hex;
+use eigen_crypto_bls::{convert_to_g1_point, convert_to_g2_point};
 use prost::Message;
 use std::{
     collections::HashMap,
@@ -21,6 +22,7 @@ pub struct Orchestrator<E: Clock> {
     aggregation_frequency: Duration,
 
     contributors: Vec<PublicKey>,
+    g1_map: HashMap<PublicKey, PublicKey>, // g2 (PublicKey) -> g1 (PublicKey)
     ordered_contributors: HashMap<PublicKey, usize>,
     t: usize,
 }
@@ -30,6 +32,7 @@ impl<E: Clock> Orchestrator<E> {
         runtime: E,
         aggregation_frequency: Duration,
         mut contributors: Vec<PublicKey>,
+        g1_map: HashMap<PublicKey, PublicKey>,
         t: usize,
     ) -> Self {
         contributors.sort();
@@ -41,6 +44,7 @@ impl<E: Clock> Orchestrator<E> {
             runtime,
             aggregation_frequency,
             contributors,
+            g1_map,
             ordered_contributors,
             t,
         }
@@ -122,6 +126,7 @@ impl<E: Clock> Orchestrator<E> {
 
                         // Aggregate signatures
                         let mut participating = Vec::new();
+                        let mut participating_g1 = Vec::new();
                         let mut pretty_participating = Vec::new();
                         let mut signatures = Vec::new();
                         for i in 0..self.contributors.len() {
@@ -129,6 +134,7 @@ impl<E: Clock> Orchestrator<E> {
                                 continue;
                             };
                             let contributor = &self.contributors[i];
+                            participating_g1.push(self.g1_map[contributor].clone());
                             participating.push(contributor.clone());
                             pretty_participating.push(hex(contributor));
                             signatures.push(signature.clone());
@@ -139,13 +145,26 @@ impl<E: Clock> Orchestrator<E> {
                         if !bn254::aggregate_verify(&participating, None, &payload, &agg_signature) {
                             panic!("failed to verify aggregated signature");
                         }
+
+                        // Log points
+                        let (apk, apk_g2, asig) = bn254::get_points(&participating_g1, &participating, &signatures).unwrap();
+                        let apk = convert_to_g1_point(apk).unwrap();
+                        let apk_g2 = convert_to_g2_point(apk_g2).unwrap();
+                        let asig = convert_to_g1_point(asig).unwrap();
                         info!(
                             round = msg.round,
                             msg = hex(&payload),
                             participants = ?pretty_participating,
                             signature = hex(&agg_signature),
+                            apk_x = ?apk.X,
+                            apk_y = ?apk.Y,
+                            apk_g2_x = ?apk_g2.X,
+                            apk_g2_y = ?apk_g2.Y,
+                            asig_x = ?asig.X,
+                            asig_y = ?asig.Y,
                             "aggregated signatures",
                         );
+                        println!(r#"[eth verification] cast c -r https://eth.llamarpc.com 0xb7ba8bbc36AA5684fC44D02aD666dF8E23BEEbF8 "trySignatureAndApkVerification(bytes32,(uint256,uint256),(uint256[2],uint256[2]),(uint256,uint256))" "{:?}" "({:?},{:?})" "({:?},{:?})" "({:?},{:?})""#, hex(&payload), apk.X, apk.Y, apk_g2.X, apk_g2.Y, asig.X, asig.Y);
                     },
                 }
             }
