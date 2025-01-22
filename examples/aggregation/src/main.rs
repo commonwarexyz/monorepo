@@ -44,7 +44,10 @@ use commonware_runtime::{
 use commonware_utils::{hex, quorum};
 use governor::Quota;
 use prometheus_client::registry::Registry;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroU32,
@@ -171,6 +174,7 @@ fn main() {
 
         // Parse contributors
         let mut contributors = Vec::new();
+        let mut contributors_map = HashMap::new();
         let participants = matches
             .get_many::<u64>("contributors")
             .expect("Please provide contributors")
@@ -179,9 +183,12 @@ fn main() {
             panic!("Please provide at least one contributor");
         }
         for peer in participants {
-            let verifier = Bn254::from_seed(peer).public_key();
+            let signer = Bn254::from_seed(peer);
+            let verifier = signer.public_key();
+            let verifier_g1 = signer.public_g1();
             tracing::info!(key = hex(&verifier), "registered contributor",);
-            contributors.push(verifier);
+            contributors.push(verifier.clone());
+            contributors_map.insert(verifier, verifier_g1);
         }
 
         // Infer threshold
@@ -215,6 +222,7 @@ fn main() {
                 runtime.clone(),
                 AGGREGATION_FREQUENCY,
                 contributors,
+                contributors_map,
                 threshold as usize,
             );
             runtime.spawn("orchestrator", orchestrator.run(sender, receiver));

@@ -10,8 +10,10 @@ use std::borrow::Cow;
 
 const DIGEST_LENGTH: usize = 32;
 const PRIVATE_KEY_LENGTH: usize = 32;
-const PUBLIC_KEY_LENGTH: usize = 64;
-const SIGNATURE_LENGTH: usize = 32;
+const G1_LENGTH: usize = 32;
+const SIGNATURE_LENGTH: usize = G1_LENGTH;
+const G2_LENGTH: usize = 64;
+const PUBLIC_KEY_LENGTH: usize = G2_LENGTH;
 
 /// If message provided is exactly 32 bytes, it is assumed to be a hash digest.
 #[derive(Clone)]
@@ -148,6 +150,67 @@ impl Scheme for Bn254 {
     fn len() -> (usize, usize) {
         (PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH)
     }
+}
+
+impl Bn254 {
+    pub fn public_g1(&self) -> PublicKey {
+        let pk = G1Projective::generator() * self.private;
+        let mut bytes = Vec::with_capacity(G1_LENGTH);
+        pk.into_affine().serialize_compressed(&mut bytes).unwrap();
+        bytes.into()
+    }
+}
+
+pub fn get_points(
+    g1: &[PublicKey],
+    g2: &[PublicKey],
+    signatures: &[Signature],
+) -> Option<(G1Affine, G2Affine, G1Affine)> {
+    let mut agg_public_g1 = G1Projective::ZERO;
+    for public in g1 {
+        let Ok(public) = G1Affine::deserialize_compressed(public.as_ref()) else {
+            return None;
+        };
+        if !public.is_in_correct_subgroup_assuming_on_curve()
+            || !public.is_on_curve()
+            || public.is_zero()
+        {
+            return None;
+        }
+        agg_public_g1 += public.into_group();
+    }
+    let agg_public_g1 = agg_public_g1.into_affine();
+
+    let mut agg_public_g2 = G2Projective::ZERO;
+    for public in g2 {
+        let Ok(public) = G2Affine::deserialize_compressed(public.as_ref()) else {
+            return None;
+        };
+        if !public.is_in_correct_subgroup_assuming_on_curve()
+            || !public.is_on_curve()
+            || public.is_zero()
+        {
+            return None;
+        }
+        agg_public_g2 += public.into_group();
+    }
+    let agg_public_g2 = agg_public_g2.into_affine();
+
+    let mut agg_signature = G1Projective::ZERO;
+    for signature in signatures {
+        let Ok(signature) = G1Affine::deserialize_compressed(signature.as_ref()) else {
+            return None;
+        };
+        if !signature.is_in_correct_subgroup_assuming_on_curve()
+            || !signature.is_on_curve()
+            || signature.is_zero()
+        {
+            return None;
+        }
+        agg_signature += signature.into_group();
+    }
+    let agg_signature = agg_signature.into_affine();
+    Some((agg_public_g1, agg_public_g2, agg_signature))
 }
 
 pub fn aggregate_signatures(signatures: &[Signature]) -> Option<Signature> {
