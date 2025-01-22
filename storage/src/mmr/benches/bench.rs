@@ -1,11 +1,11 @@
 use commonware_cryptography::{Digest, Hasher, Sha256};
-use commonware_storage::mmr::{verify_proof, verify_range_proof, InMemoryMmr};
+use commonware_storage::mmr::{mem::Mmr, verify_proof, verify_range_proof};
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn bench_build_mmr(c: &mut Criterion) {
     let element = Digest::from_static(&[100u8; 32]);
     c.bench_function("build_mmr", |b| {
-        let mut mmr = InMemoryMmr::<Sha256>::new();
+        let mut mmr = Mmr::<Sha256>::new();
         // bootstrap w/ 5M elements
         for _ in 0..5_000_000 {
             mmr.add(&element);
@@ -20,7 +20,7 @@ fn bench_build_mmr(c: &mut Criterion) {
 }
 
 fn bench_prove(c: &mut Criterion) {
-    let mut mmr = InMemoryMmr::<Sha256>::new();
+    let mut mmr = Mmr::<Sha256>::new();
     let mut leaf_sample = Vec::new();
     let element = Digest::from_static(&[100u8; 32]);
     const NUM_ELEMENTS: usize = 5_000_000;
