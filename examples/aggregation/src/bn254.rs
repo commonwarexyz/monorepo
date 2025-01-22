@@ -3,10 +3,11 @@ use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{AdditiveGroup, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use commonware_cryptography::{Hasher, PrivateKey, PublicKey, Scheme, Sha256, Signature};
-use commonware_utils::union_unique;
+use commonware_utils::{union_unique, hex};
 use eigen_crypto_bn254::utils::map_to_curve;
 use rand::{CryptoRng, Rng};
 use std::borrow::Cow;
+use tracing::info;
 
 const DIGEST_LENGTH: usize = 32;
 const PRIVATE_KEY_LENGTH: usize = 32;
@@ -72,7 +73,7 @@ impl Scheme for Bn254 {
             let hash = hasher.finalize();
             hash.as_ref().try_into().unwrap()
         };
-
+        println!("INFO FOR VERIFICATION: Hash: {}", hex(&hash));
         // Map to curve
         let msg_on_g1 = map_to_curve(&hash);
 
@@ -138,6 +139,9 @@ impl Scheme for Bn254 {
 
         // Map to curve
         let msg_on_g1 = map_to_curve(&hash);
+        println!("INFO FOR VERIFICATION: Message on G1: {:?}", msg_on_g1);
+        println!("INFO FOR VERIFICATION: Signature: {:?}", signature);
+        println!("INFO FOR VERIFICATION: G2 public key: {:?}", public);
 
         // Pairing check
         let lhs = ark_bn254::Bn254::pairing(msg_on_g1, public);
@@ -191,7 +195,12 @@ pub fn aggregate_verify(
     }
     let mut public = Vec::with_capacity(PUBLIC_KEY_LENGTH);
     agg_public.serialize_compressed(&mut public).unwrap();
-
+    // Print lengths
+    info!(
+        public_keys_len = publics.len(),
+        aggregate_public_key_g2 = ?agg_public.into_affine(),
+        "public key info"
+    );
     // Verify signature
     Bn254::verify(namespace, message, &public.into(), signature)
 }

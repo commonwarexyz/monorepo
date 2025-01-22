@@ -5,6 +5,8 @@ use commonware_utils::hex;
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use tracing::info;
+use ark_serialize::CanonicalDeserialize;
+use ark_ec::{PrimeGroup, CurveGroup};
 
 use super::wire;
 
@@ -110,6 +112,7 @@ impl Contributor {
                     round,
                     msg = hex(&payload),
                     participants = ?pretty_participating,
+                    num_participants = pretty_participating.len(),
                     signature = hex(&agg_signature),
                     "aggregated signatures",
                 );
@@ -132,6 +135,19 @@ impl Contributor {
             hasher.update(&payload);
             let payload = hasher.finalize();
             let signature = self.signer.sign(None, &payload);
+            // Print public key as G2 point
+            let Ok(public) = ark_bn254::G2Affine::deserialize_compressed(self.signer.public_key().as_ref()) else {
+                panic!("failed to deserialize public key");
+            };
+            info!(round, public_key = ?public, "public key as G2 point");
+
+            // Print G1 public key (g1 * private_key)
+            let Ok(private_scalar) = ark_bn254::Fr::deserialize_compressed(self.signer.private_key().as_ref()) else {
+                panic!("failed to deserialize private key");
+            };
+            let g1_pubkey = (ark_bn254::G1Projective::generator() * private_scalar).into_affine();
+            info!(round, g1_public_key = ?g1_pubkey, "public key as G1 point");
+            println!("private_scalar: {:?}", private_scalar);
 
             // Store signature
             signatures
