@@ -86,8 +86,73 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.2/dist/Chart.min.js"></script>
     <script>
         'use strict';
+
         // Global variable to track unit usage
         window.USE_MS = true;
+
+        // Toggle function to switch between ns/iter and ms/iter
+        function toggleUnits() {
+            window.USE_MS = !window.USE_MS;
+            // Re-run setup to regenerate all charts with the updated unit
+            // Or, for a more efficient approach, you could store references
+            // to your charts and only update their config + re-render.
+
+            // For simplicity, let's just remove existing <canvas> elements
+            // from #main and re-run the entire chart creation:
+            document.getElementById('main').innerHTML = '';
+            setupBenchmark();
+        }
+
+        // Compute all-time and 7-day performance changes for a single benchmark
+        // benches = array of { commit, date, tool, bench }
+        // We'll treat "value" as the performance measure in ns. A lower number => faster.
+        // The % change is computed as (new - old)/old. Negative => faster, positive => slower.
+        function computeSingleBenchSummary(benches) {
+            if (!benches || benches.length < 2) {
+                return { pctAllTime: "N/A", pct7Day: "N/A" };
+            }
+            // Sort by date ascending
+            const sorted = [...benches].sort((a, b) => a.date - b.date);
+            const earliestVal = sorted[0].bench.value;      // first
+            const earliestDate = sorted[0].date;
+            const latestVal = sorted[sorted.length - 1].bench.value; // last
+            const latestDate = sorted[sorted.length - 1].date;
+
+            // All-time ratio
+            let pctAllTime = "N/A";
+            if (earliestVal > 0) {
+                const ratioAll = (latestVal - earliestVal) / earliestVal;
+                pctAllTime = (ratioAll * 100).toFixed(1) + "%";
+            }
+
+            // 7-day ratio
+            const sevenDaysInMs = 7 * 24 * 3600 * 1000;
+            const cutoffDate = latestDate - sevenDaysInMs;
+            // find the bench value for the point in time just after or near that date
+            let sevenDayVal = null;
+            let minDelta = Number.MAX_VALUE;
+            for (const point of sorted) {
+                if (point.date >= cutoffDate) {
+                    const delta = point.date - cutoffDate;
+                    if (delta < minDelta) {
+                        minDelta = delta;
+                        sevenDayVal = point.bench.value;
+                    }
+                }
+            }
+            // if we never found anything after the cutoffDate, fallback to earliest
+            if (!sevenDayVal) {
+                sevenDayVal = earliestVal;
+            }
+
+            let pct7Day = "N/A";
+            if (sevenDayVal > 0) {
+                const ratio7 = (latestVal - sevenDayVal) / sevenDayVal;
+                pct7Day = (ratio7 * 100).toFixed(1) + "%";
+            }
+
+            return { pctAllTime, pct7Day };
+        }
 
         function setupBenchmark() {
             // Set Chart.js default font family
@@ -133,10 +198,15 @@
                     parent.appendChild(graphDetails);
 
                     // <summary> that shows/hides the graph
-                    const summaryElem = document.createElement('summary');
-                    summaryElem.className = 'benchmark-graph-title';
-                    summaryElem.textContent = name;
-                    graphDetails.appendChild(summaryElem);
+                    const summary = document.createElement('summary');
+                    summary.textContent = name;
+                    const { pctAllTime, pct7Day } = computeSingleBenchSummary(dataset);
+                    summary.innerHTML = `
+                        <span class="benchmark-graph-title">${name}</span>
+                        <br>
+                        <span class="benchmark-performance">All-time: ${pctAllTime} 7-day: ${pct7Day}</span>
+                    `;
+                    graphDetails.appendChild(summary);
 
                     // Create the <canvas> inside the <details>
                     const canvas = document.createElement('canvas');
@@ -267,20 +337,6 @@
         };
     </script>
     <script src="https://commonwarexyz.github.io/benchmarks/data.js" onload="setupBenchmark()"></script>
-    <script>
-        // Toggle function to switch between ns/iter and ms/iter
-        function toggleUnits() {
-            window.USE_MS = !window.USE_MS;
-            // Re-run setup to regenerate all charts with the updated unit
-            // Or, for a more efficient approach, you could store references
-            // to your charts and only update their config + re-render.
-
-            // For simplicity, let's just remove existing <canvas> elements
-            // from #main and re-run the entire chart creation:
-            document.getElementById('main').innerHTML = '';
-            setupBenchmark();
-        }
-    </script>
     <script src="shared.js"></script>
     <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "07159b86f75b4af18e54dd0cda2fb4a7"}'></script>
 </body>

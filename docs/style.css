@@ -147,13 +147,16 @@ details.benchmark-set {
 
 details.benchmark-set summary {
     font-size: 1.2em;
-    font-weight: bold;
     cursor: pointer;
     outline: none;
     overflow-wrap: anywhere;
     white-space: normal;
     max-width: 100%;
     list-style: none;
+}
+
+details.benchmark-set .benchmark-title {
+    font-weight: bold;
     color: -webkit-link;
     text-decoration: underline;
 }
@@ -166,7 +169,13 @@ details.benchmark-graph-details {
     padding: 8px;
 }
 
-details.benchmark-graph-details summary.benchmark-graph-title {
+.benchmark-performance {
+    font-size: 0.8em;
+    color: gray;
+    font-style: italic;
+}
+
+.benchmark-graph-title {
     font-size: 1em;
     font-weight: bold;
     cursor: pointer;
