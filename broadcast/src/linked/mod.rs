@@ -1,3 +1,5 @@
+use commonware_cryptography::{Digest, PublicKey};
+
 mod actors;
 mod config;
 mod encoder;
@@ -8,7 +10,14 @@ mod wire {
 
 pub mod engine;
 
-pub type View = u64;
+pub type Index = u64;
+
+/// Context is a collection of metadata from consensus about a given payload.
+#[derive(Clone)]
+pub struct Context {
+    pub sequencer: PublicKey,
+    pub index: Index,
+}
 
 #[cfg(test)]
 mod tests {
@@ -19,11 +28,7 @@ mod tests {
     };
 
     use super::{config::Config, engine::Engine, mocks};
-    use bytes::Bytes;
-    use commonware_cryptography::{
-        bls12381::{dkg::ops, primitives::group::Share},
-        Ed25519, PublicKey, Scheme, Sha256,
-    };
+    use commonware_cryptography::{bls12381::dkg::ops, Ed25519, PublicKey, Scheme, Sha256};
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic::Executor, Runner, Spawner};
     use prometheus_client::registry::Registry;
@@ -32,22 +37,12 @@ mod tests {
     async fn register_validators(
         oracle: &mut Oracle,
         validators: &[PublicKey],
-    ) -> HashMap<
-        PublicKey,
-        (
-            (Sender, Receiver),
-            (Sender, Receiver),
-            (Sender, Receiver),
-            (Sender, Receiver),
-        ),
-    > {
+    ) -> HashMap<PublicKey, ((Sender, Receiver), (Sender, Receiver))> {
         let mut registrations = HashMap::new();
         for validator in validators.iter() {
             let (a1, a2) = oracle.register(validator.clone(), 0).await.unwrap();
             let (b1, b2) = oracle.register(validator.clone(), 1).await.unwrap();
-            let (c1, c2) = oracle.register(validator.clone(), 2).await.unwrap();
-            let (d1, d2) = oracle.register(validator.clone(), 3).await.unwrap();
-            registrations.insert(validator.clone(), ((a1, a2), (b1, b2), (c1, c2), (d1, d2)));
+            registrations.insert(validator.clone(), ((a1, a2), (b1, b2)));
         }
         registrations
     }
@@ -129,13 +124,13 @@ mod tests {
 
                 // Create validators
                 let mut validators = Vec::new();
-                let shares = HashMap::new();
-                let schemes = HashMap::new();
+                let mut shares = HashMap::new();
+                let mut schemes = HashMap::new();
                 for i in 0..num_validators {
                     let scheme = Ed25519::from_seed(i as u64);
                     let pk = scheme.public_key();
-                    validators.push(pk);
-                    schemes.insert(pk, scheme);
+                    validators.push(pk.clone());
+                    schemes.insert(pk.clone(), scheme);
                     shares.insert(pk, shares_vec[i as usize]);
                 }
                 validators.sort();
@@ -148,15 +143,16 @@ mod tests {
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
                 // Create engines
-                let hasher = Sha256::default();
                 let mut engine_handlers = Vec::new();
                 for validator in validators.iter() {
                     // Supervisor
-                    let share = shares.get(validator).unwrap().clone();
-                    let supervisor =
-                        mocks::supervisor::Supervisor::new(identity, validators, share);
-                    let ((a1, a2), (b1, b2), (c1, c2), (d1, d2)) =
-                        registrations.remove(validator).unwrap();
+                    let share = shares.remove(validator).unwrap();
+                    let supervisor = mocks::supervisor::Supervisor::new(
+                        identity.clone(),
+                        validators.clone(),
+                        share,
+                    );
+                    let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
 
                     // Engine
                     let scheme = schemes.get(validator).unwrap().clone();
@@ -165,12 +161,11 @@ mod tests {
                         supervisor,
                         mailbox_size: 1,
                         hasher: Sha256::default(),
-                        share: Share::deserialize(&Bytes::from_static(&[0; 96])).unwrap(),
+                        share,
                         namespace: b"test".to_vec(),
                     };
                     let engine = Engine::new(runtime.clone(), cfg);
-                    let engine_handler =
-                        runtime.spawn("engine", engine.run((a1, a2), (b1, b2), (c1, c2), (d1, d2)));
+                    let engine_handler = runtime.spawn("engine", engine.run((a1, a2), (b1, b2)));
                     engine_handlers.push(engine_handler);
                 }
             }

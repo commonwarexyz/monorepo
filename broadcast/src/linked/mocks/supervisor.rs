@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use crate::linked::View;
-use commonware_consensus::{Activity, Proof, Supervisor as Su, ThresholdSupervisor as TSu};
+use commonware_consensus::{
+    threshold_simplex::View, Activity, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
+};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},

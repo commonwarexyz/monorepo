@@ -11,8 +11,6 @@ fn main() -> Result<()> {
         "Ack.plate",
         "Ack.public_key",
         "Ack.signature",
-        "Proof.threshold",
-        "Backfill.public_key",
     ]);
     config.compile_protos(&["src/linked/wire.proto"], &["src/linked/"])?;
     Ok(())

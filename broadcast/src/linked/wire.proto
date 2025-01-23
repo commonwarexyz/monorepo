@@ -10,39 +10,27 @@ message Car {
     // Sequencer-specific sequential index
     uint64 index = 2;
 
-    // View number
-    uint64 view = 3;
-
     // Payload data
-    bytes payload = 4;
+    bytes payload = 3;
 
     // Hash of the previous car that has `index` of `this.index-1`
-    bytes parent_plate = 5;
+    bytes parent_plate = 4;
 
     // Threshold signature of the parent car
-    bytes parent_threshold = 6;
+    bytes parent_threshold = 5;
 
     // Signature of the sequencer over the hash of the car
-    bytes signature = 7;
+    bytes signature = 6;
 }
 
 // Ack is a message sent by a validator to acknowledge the receipt of a Car.
 message Ack {
+    // Plate (hash) of the car being acknowledged
     bytes plate = 1;
 
+    // Public key of the validator
     bytes public_key = 2;
+
+    // Signature of the validator over the hash of the car
     bytes signature = 3;
-}
-
-// Proof is a combination of a car and its threshold signature.
-// The threshold signature is constructed by a quorum of Acks.
-message Proof {
-    Car car = 1;
-    bytes threshold = 2;
-}
-
-// Backfill is a request for a Proof.
-message Backfill {
-    bytes public_key = 1;
-    repeated uint64 indexes = 2;
 }

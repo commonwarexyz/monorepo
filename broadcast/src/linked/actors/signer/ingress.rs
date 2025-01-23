@@ -1,10 +1,16 @@
-use crate::linked::wire;
-use futures::{channel::mpsc, SinkExt};
+use crate::{linked::Context, Broadcaster, Error};
+use bytes::Bytes;
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt,
+};
 
 // If either of these requests fails, it will not send a reply.
 pub enum Message {
-    BroadcastCar { car: wire::Car },
-    RequestProvenCar { request: wire::Backfill },
+    Broadcast {
+        payload: Bytes,
+        result: oneshot::Sender<bool>,
+    },
 }
 
 #[derive(Clone)]
@@ -16,18 +22,18 @@ impl Mailbox {
     pub(super) fn new(sender: mpsc::Sender<Message>) -> Self {
         Self { sender }
     }
+}
 
-    pub async fn broadcast_car(&mut self, car: wire::Car) {
-        self.sender
-            .send(Message::BroadcastCar { car })
-            .await
-            .expect("Failed to send car");
-    }
+impl Broadcaster for Mailbox {
+    type Context = Context;
 
-    pub async fn request_proven_car(&mut self, request: wire::Backfill) {
-        self.sender
-            .send(Message::RequestProvenCar { request })
-            .await
-            .expect("Failed to send proven car request");
+    async fn broadcast(&mut self, payload: Bytes) -> oneshot::Receiver<bool> {
+        let (sender, receiver) = oneshot::channel();
+        let msg = Message::Broadcast {
+            payload,
+            result: sender,
+        };
+        self.sender.send(msg).await.map_err(|_| Error::MailboxError);
+        receiver
     }
 }

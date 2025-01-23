@@ -1,5 +1,7 @@
-use super::{actors::signer, config::Config, View};
-use commonware_consensus::ThresholdSupervisor;
+use crate::Application;
+
+use super::{actors::signer, config::Config};
+use commonware_consensus::{threshold_simplex::View, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
     Hasher, Scheme,
@@ -13,6 +15,7 @@ pub struct Engine<
     E: Clock + Rng + CryptoRng + Spawner + Send + Sync,
     C: Scheme,
     H: Hasher,
+    A: Application,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -22,7 +25,7 @@ pub struct Engine<
 > {
     runtime: E,
 
-    signer: signer::Actor<E, C, H, S>,
+    signer: signer::Actor<E, C, H, A, S>,
     signer_mailbox: signer::Mailbox,
 }
 
@@ -30,21 +33,23 @@ impl<
         E: Clock + Rng + CryptoRng + Spawner,
         C: Scheme,
         H: Hasher,
+        A: Application,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,
             Share = group::Share,
             Identity = poly::Public,
         >,
-    > Engine<E, C, H, S>
+    > Engine<E, C, H, A, S>
 {
-    pub fn new(runtime: E, cfg: Config<C, H, S>) -> Self {
+    pub fn new(runtime: E, cfg: Config<C, H, A, S>) -> Self {
         cfg.assert();
         let (signer, signer_mailbox) = signer::Actor::new(
             runtime.clone(),
             signer::Config {
                 crypto: cfg.crypto,
                 hasher: cfg.hasher,
+                app: cfg.app,
                 supervisor: cfg.supervisor,
                 mailbox_size: cfg.mailbox_size,
                 namespace: cfg.namespace,
@@ -62,13 +67,9 @@ impl<
         self,
         car_network: (impl Sender, impl Receiver),
         ack_network: (impl Sender, impl Receiver),
-        proof_network: (impl Sender, impl Receiver),
-        backfill_network: (impl Sender, impl Receiver),
     ) {
         self.runtime.spawn("signer", async move {
-            self.signer
-                .run(car_network, ack_network, proof_network, backfill_network)
-                .await;
+            self.signer.run(car_network, ack_network).await;
         });
     }
 }
