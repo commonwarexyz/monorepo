@@ -22,6 +22,7 @@ tracing = { workspace = true }
 zstd = { workspace = true }
 crc32fast = "1.4.2"
 rangemap = "1.5.1"
+cfg-if = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 commonware-runtime = { workspace = true }

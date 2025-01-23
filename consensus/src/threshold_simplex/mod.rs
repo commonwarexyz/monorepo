@@ -146,30 +146,30 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
+use cfg_if::cfg_if;
 use commonware_cryptography::Digest;
 
-#[cfg(not(target_arch = "wasm32"))]
-mod actors;
-#[cfg(not(target_arch = "wasm32"))]
-mod config;
-#[cfg(not(target_arch = "wasm32"))]
-pub use config::Config;
 mod encoder;
-#[cfg(not(target_arch = "wasm32"))]
-mod engine;
-#[cfg(not(target_arch = "wasm32"))]
-pub use engine::Engine;
-#[cfg(not(target_arch = "wasm32"))]
-mod metrics;
 mod prover;
 pub use prover::Prover;
-#[cfg(test)]
-pub mod mocks;
-#[cfg(not(target_arch = "wasm32"))]
-mod verifier;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/threshold_simplex.wire.rs"));
 }
+
+cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+        mod actors;
+        mod config;
+        pub use config::Config;
+        mod engine;
+        pub use engine::Engine;
+        mod metrics;
+        mod verifier;
+    }
+}
+
+#[cfg(test)]
+pub mod mocks;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
