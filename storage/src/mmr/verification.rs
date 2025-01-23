@@ -2,9 +2,13 @@ use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::PeakIterator;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
+/// A `Proof` contains the information necessary for proving the inclusion of an element, or some
+/// range of elements, in the MMR from its root hash. The `hashes` vector contains: (1) the peak
+/// hashes other than those belonging to trees containing some elements within the range being
+/// proven, followed by: (2) the nodes in the remaining perfect trees necessary for reconstructing
+/// their peak hashes from the elements within the range. Both segments are ordered by decreasing
+/// height.
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// A Proof contains the information necessary for proving the inclusion of an element, or some
-/// range of elements, in the MMR.
 pub struct Proof {
     pub size: u64, // total # of nodes in the MMR
     pub hashes: Vec<Digest>,
@@ -163,9 +167,6 @@ mod tests {
     use commonware_cryptography::{Digest, Hasher as CHasher, Sha256};
 
     #[test]
-    /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
-    /// structure in the example documented at the top of the mmr crate's mod.rs file with 19 nodes
-    /// and 3 peaks.
     fn test_verify_element() {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
         let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
@@ -180,7 +181,7 @@ mod tests {
 
         // confirm the proof of inclusion for each leaf successfully verifies
         for leaf in leaves.iter().by_ref() {
-            let proof = mmr.proof(*leaf);
+            let proof = mmr.proof(*leaf).unwrap();
             assert!(
                 proof.verify_element_inclusion::<Sha256>(&element, *leaf, &root_hash, &mut hasher),
                 "valid proof should verify successfully"
@@ -189,7 +190,7 @@ mod tests {
 
         // confirm mangling the proof or proof args results in failed validation
         const POS: u64 = 18;
-        let proof = mmr.proof(POS);
+        let proof = mmr.proof(POS).unwrap();
         assert!(
             proof.verify_element_inclusion::<Sha256>(&element, POS, &root_hash, &mut hasher),
             "proof verification should be successful"
@@ -261,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_verify_range() {
-        // create a new MMR and add a non-trivial amount (47) of elements
+        // create a new MMR and add a non-trivial amount (49) of elements
         let mut mmr: Mmr<Sha256> = Mmr::default();
         let mut elements = Vec::<Digest>::new();
         let mut element_positions = Vec::<u64>::new();
@@ -276,7 +277,7 @@ mod tests {
             for j in i + 1..elements.len() {
                 let start_pos = element_positions[i];
                 let end_pos = element_positions[j];
-                let range_proof = mmr.range_proof(start_pos, end_pos);
+                let range_proof = mmr.range_proof(start_pos, end_pos).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion::<Sha256>(
                         &elements[i..j + 1],
@@ -297,7 +298,7 @@ mod tests {
         let end_index = 39;
         let start_pos = element_positions[start_index];
         let end_pos = element_positions[end_index];
-        let range_proof = mmr.range_proof(start_pos, end_pos);
+        let range_proof = mmr.range_proof(start_pos, end_pos).unwrap();
         let valid_elements = &elements[start_index..end_index + 1];
         assert!(
             range_proof.verify_range_inclusion::<Sha256>(
@@ -352,7 +353,7 @@ mod tests {
                 &Digest::from(invalid_root_hash),
                 &mut hasher,
             ),
-            "range proof with invalid proof should fail"
+            "range proof with invalid root hash should fail"
         );
         // mangle the proof and confirm it fails
         let mut invalid_proof = range_proof.clone();
@@ -422,5 +423,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_range_proofs_after_forgetting() {
+        // create a new MMR and add a non-trivial amount (49) of elements
+        let mut mmr: Mmr<Sha256> = Mmr::default();
+        let mut elements = Vec::<Digest>::new();
+        let mut element_positions = Vec::<u64>::new();
+        for i in 0..49 {
+            elements.push(Digest::from(vec![i as u8; Sha256::len()]));
+            element_positions.push(mmr.add(elements.last().unwrap()));
+        }
+
+        // forget the max # of elements
+        assert_eq!(mmr.forget_max(), 57);
+
+        // Prune the elements from our lists that can no longer be proven after forgetting.
+        for i in 0..elements.len() {
+            if element_positions[i] > 57 {
+                elements = elements[i..elements.len()].to_vec();
+                element_positions = element_positions[i..element_positions.len()].to_vec();
+                break;
+            }
+        }
+
+        // test range proofs over all possible ranges of at least 2 elements
+        let root_hash = mmr.root_hash();
+        let mut hasher = Sha256::default();
+        for i in 0..elements.len() {
+            for j in i + 1..elements.len() {
+                let start_pos = element_positions[i];
+                let end_pos = element_positions[j];
+                let range_proof = mmr.range_proof(start_pos, end_pos).unwrap();
+                assert!(
+                    range_proof.verify_range_inclusion::<Sha256>(
+                        &elements[i..j + 1],
+                        start_pos,
+                        end_pos,
+                        &root_hash,
+                        &mut hasher,
+                    ),
+                    "valid range proof over remaining elements should verify successfully",
+                );
+            }
+        }
+
+        // add a few more nodes, forget again, and test again to make sure repeated forgetting works
+        for i in 0..37 {
+            elements.push(Digest::from(vec![i as u8; Sha256::len()]));
+            element_positions.push(mmr.add(elements.last().unwrap()));
+        }
+        let updated_root_hash = mmr.root_hash();
+        assert_eq!(mmr.oldest_required_element(), 120);
+        assert!(mmr.forget(120).is_ok());
+        for i in 0..elements.len() {
+            if element_positions[i] > 120 {
+                elements = elements[i..elements.len()].to_vec();
+                element_positions = element_positions[i..element_positions.len()].to_vec();
+                break;
+            }
+        }
+        let start_pos = element_positions[0];
+        let end_pos = *element_positions.last().unwrap();
+        let range_proof = mmr.range_proof(start_pos, end_pos).unwrap();
+        assert!(
+            range_proof.verify_range_inclusion::<Sha256>(
+                &elements,
+                start_pos,
+                end_pos,
+                &updated_root_hash,
+                &mut hasher,
+            ),
+            "valid range proof over remaining elements after 2 forgetting rounds should verify successfully",
+        );
     }
 }

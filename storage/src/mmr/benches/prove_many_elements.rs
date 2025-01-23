@@ -51,7 +51,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                         |samples| {
                             let mut hasher = Sha256::new();
                             for ((start_index, end_index), (start_pos, end_pos)) in samples {
-                                let proof = mmr.range_proof(start_pos, end_pos);
+                                let proof = mmr.range_proof(start_pos, end_pos).unwrap();
                                 assert!(proof.verify_range_inclusion(
                                     &elements[start_index..=end_index],
                                     start_pos,
