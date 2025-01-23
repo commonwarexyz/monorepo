@@ -39,4 +39,3 @@ tracing-subscriber = { workspace = true }
 [lib]
 bench = false
 crate-type = ["rlib", "cdylib"]
-
