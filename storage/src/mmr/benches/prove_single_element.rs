@@ -1,45 +1,49 @@
 use commonware_cryptography::{Digest, Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
+
+const SAMPLE_SIZE: usize = 100;
 
 fn bench_prove_single_element(c: &mut Criterion) {
-    let mut mmr = Mmr::<Sha256>::new();
-    let mut leaf_sample = Vec::new();
-    let element = Digest::from_static(&[100u8; 32]);
-    const NUM_ELEMENTS: usize = 5_000_000;
-    const SAMPLE_SIZE: usize = 100;
-    let mut elements = Vec::with_capacity(NUM_ELEMENTS);
-    for i in 0..NUM_ELEMENTS {
-        let pos = mmr.add(&element);
-        elements.push(element.clone());
-        if i % SAMPLE_SIZE == 0 {
-            leaf_sample.push(pos);
-        }
+    for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
+        c.bench_function(
+            &format!("{}/n={} samples={}", module_path!(), n, SAMPLE_SIZE),
+            |b| {
+                b.iter_batched(
+                    || {
+                        let mut mmr = Mmr::<Sha256>::new();
+                        let mut elements = Vec::new();
+                        let mut sampler = StdRng::seed_from_u64(0);
+                        for i in 0..n {
+                            let mut digest = vec![0u8; Sha256::len()];
+                            sampler.fill_bytes(&mut digest);
+                            let element = Digest::from(digest);
+                            let pos = mmr.add(&element);
+                            if i % SAMPLE_SIZE == 0 {
+                                elements.push((pos, element));
+                            }
+                        }
+                        let root_hash = mmr.root_hash();
+                        (mmr, root_hash, elements)
+                    },
+                    |(mmr, mmr_root, elements)| {
+                        let mut hasher = Sha256::new();
+                        for (pos, element) in elements {
+                            let proof = mmr.proof(pos);
+                            assert!(proof.verify_element_inclusion(
+                                &element,
+                                pos,
+                                &mmr_root,
+                                &mut hasher
+                            ));
+                        }
+                    },
+                    criterion::BatchSize::SmallInput,
+                )
+            },
+        );
     }
-    let root_hash = mmr.root_hash();
-
-    c.bench_function(
-        &format!(
-            "{}/n={} samples={}",
-            module_path!(),
-            NUM_ELEMENTS,
-            SAMPLE_SIZE
-        ),
-        |b| {
-            b.iter(|| {
-                let mut hasher = Sha256::new();
-                for pos in &leaf_sample {
-                    let proof = mmr.proof(*pos);
-                    assert!(proof.verify_element_inclusion(
-                        &element,
-                        *pos,
-                        &root_hash,
-                        &mut hasher
-                    ));
-                }
-            })
-        },
-    );
 }
 criterion_group! {
     name = benches;

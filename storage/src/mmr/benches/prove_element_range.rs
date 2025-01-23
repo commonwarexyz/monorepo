@@ -1,10 +1,11 @@
 use commonware_cryptography::{Digest, Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
+
+const SAMPLE_SIZE: usize = 100;
 
 fn bench_prove_element_range(c: &mut Criterion) {
-    const SAMPLE_SIZE: usize = 100;
     for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
         c.bench_function(
             &format!("{}/n={} samples={}", module_path!(), n, SAMPLE_SIZE),
@@ -13,11 +14,12 @@ fn bench_prove_element_range(c: &mut Criterion) {
                     || {
                         let mut mmr = Mmr::<Sha256>::new();
                         let mut leaf_sample = Vec::new();
-                        let mut sampler = StdRng::seed_from_u64(0);
                         let mut elements = Vec::with_capacity(n);
+                        let mut sampler = StdRng::seed_from_u64(0);
                         for i in 0..n {
-                            let digest: [u8; 32] = sampler.gen();
-                            let element = Digest::from(digest.to_vec());
+                            let mut digest = vec![0u8; Sha256::len()];
+                            sampler.fill_bytes(&mut digest);
+                            let element = Digest::from(digest);
                             let pos = mmr.add(&element);
                             elements.push(element.clone());
                             if i % SAMPLE_SIZE == 0 {

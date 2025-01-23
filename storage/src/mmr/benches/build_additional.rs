@@ -1,25 +1,27 @@
-use commonware_cryptography::{Digest, Sha256};
+use commonware_cryptography::{Digest, Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 fn bench_build_additional(c: &mut Criterion) {
     for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
         for a in [100, 1_000, 10_000, 50_000] {
-            c.bench_function(&format!("{}/base={} new={}", module_path!(), n, a), |b| {
+            c.bench_function(&format!("{}/start={} add={}", module_path!(), n, a), |b| {
                 b.iter_batched(
                     || {
                         let mut mmr = Mmr::<Sha256>::new();
                         let mut sampler = StdRng::seed_from_u64(0);
                         for _ in 0..n {
-                            let digest: [u8; 32] = sampler.gen();
-                            let element = Digest::from(digest.to_vec());
+                            let mut digest = vec![0u8; Sha256::len()];
+                            sampler.fill_bytes(&mut digest);
+                            let element = Digest::from(digest);
                             mmr.add(&element);
                         }
                         let mut additional = Vec::with_capacity(a);
                         for _ in 0..a {
-                            let digest: [u8; 32] = sampler.gen();
-                            let element = Digest::from(digest.to_vec());
+                            let mut digest = vec![0u8; Sha256::len()];
+                            sampler.fill_bytes(&mut digest);
+                            let element = Digest::from(digest);
                             additional.push(element);
                         }
                         (mmr, additional)
