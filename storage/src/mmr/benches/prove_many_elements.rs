@@ -35,7 +35,8 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let starts = positions
+                            let start_positions = &positions[0..n - range];
+                            let starts = start_positions
                                 .choose_multiple(&mut sampler, SAMPLE_SIZE)
                                 .cloned()
                                 .collect::<Vec<_>>();
