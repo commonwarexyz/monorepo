@@ -54,3 +54,8 @@ path = "src/ed25519/benches/bench.rs"
 name = "secp256r1"
 harness = false
 path = "src/secp256r1/benches/bench.rs"
+
+[[bench]]
+name = "sha256"
+harness = false
+path = "src/sha256/benches/bench.rs"
