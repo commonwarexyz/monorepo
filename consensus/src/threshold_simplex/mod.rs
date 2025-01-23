@@ -146,7 +146,6 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use cfg_if::cfg_if;
 use commonware_cryptography::Digest;
 
 mod encoder;
@@ -156,7 +155,7 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/threshold_simplex.wire.rs"));
 }
 
-cfg_if! {
+cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         mod actors;
         mod config;
