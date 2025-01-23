@@ -3,7 +3,7 @@ use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 
-fn bench_build_additional(c: &mut Criterion) {
+fn bench_append_additional(c: &mut Criterion) {
     for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
         for a in [100, 1_000, 10_000, 50_000] {
             c.bench_function(&format!("{}/start={} add={}", module_path!(), n, a), |b| {
@@ -41,5 +41,5 @@ fn bench_build_additional(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_build_additional
+    targets = bench_append_additional
 }
