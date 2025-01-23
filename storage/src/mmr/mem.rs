@@ -7,20 +7,20 @@ use crate::mmr::verification::Proof;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// Implementation of `Mmr`.
-pub struct Mmr<H: CHasher> {
+pub struct Mmr<H: CHasher<N>, const N: usize> {
     hasher: H,
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
     // from the from tallest tree to shortest.
-    nodes: Vec<Digest>,
+    nodes: Vec<Digest<N>>,
 }
 
-impl<H: CHasher> Default for Mmr<H> {
+impl<H: CHasher<N>, const N: usize> Default for Mmr<H, N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<H: CHasher> Mmr<H> {
+impl<H: CHasher<N>, const N: usize> Mmr<H, N> {
     /// Return a new (empty) `Mmr`.
     pub fn new() -> Self {
         Self {
@@ -39,7 +39,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Add an element to the MMR and return its position in the MMR.
-    pub fn add(&mut self, element: &Digest) -> u64 {
+    pub fn add(&mut self, element: &Digest<N>) -> u64 {
         let peaks = nodes_needing_parents(self.peak_iterator());
         let element_pos = self.nodes.len() as u64;
         let hasher = &mut Hasher::new(&mut self.hasher);
@@ -58,7 +58,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Computes the root hash of the MMR.
-    pub fn root_hash(&mut self) -> Digest {
+    pub fn root_hash(&mut self) -> Digest<N> {
         let peaks = self
             .peak_iterator()
             .map(|(peak_pos, _)| &self.nodes[peak_pos as usize]);
@@ -71,14 +71,14 @@ impl<H: CHasher> Mmr<H> {
     /// the perfect tree containing the element, followed by: (2) the nodes in the remaining perfect
     /// tree necessary for reconstructing its peak hash from the specified element. Both segments
     /// are ordered by decreasing height.
-    pub fn proof(&self, element_pos: u64) -> Proof {
+    pub fn proof(&self, element_pos: u64) -> Proof<N> {
         self.range_proof(element_pos, element_pos)
     }
 
     // Return an inclusion proof for the specified range of elements. The range is inclusive of
     // both endpoints.
-    pub fn range_proof(&self, start_element_pos: u64, end_element_pos: u64) -> Proof {
-        let mut hashes: Vec<Digest> = Vec::new();
+    pub fn range_proof(&self, start_element_pos: u64, end_element_pos: u64) -> Proof<N> {
+        let mut hashes: Vec<Digest<N>> = Vec::new();
         let mut start_tree_with_element = (u64::MAX, 0);
         let mut end_tree_with_element = (u64::MAX, 0);
 
@@ -156,21 +156,23 @@ mod tests {
     use crate::mmr::hasher::Hasher;
     use crate::mmr::iterator::nodes_needing_parents;
     use crate::mmr::mem::Mmr;
-    use commonware_cryptography::{Digest, Sha256};
+    use commonware_cryptography::{sha256, Digest, Sha256};
 
     #[test]
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
     /// structure in the example documented at the top of the mmr crate's mod.rs file with 19 nodes
     /// and 3 peaks.
     fn test_add_eleven_values() {
-        let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
+        let mut mmr: Mmr<Sha256, { sha256::DIGEST_LENGTH }> =
+            Mmr::<Sha256, { sha256::DIGEST_LENGTH }>::new();
         assert_eq!(
             mmr.peak_iterator().next(),
             None,
             "empty iterator should have no peaks"
         );
 
-        let element = Digest::from_static(b"01234567012345670123456701234567");
+        let element: Digest<{ sha256::DIGEST_LENGTH }> = core::array::from_fn(|i| (i % 7) as u8);
+        //from_static(b"01234567012345670123456701234567");
         let mut leaves: Vec<u64> = Vec::new();
         for _ in 0..11 {
             leaves.push(mmr.add(&element));
