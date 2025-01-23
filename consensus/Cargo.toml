@@ -14,8 +14,6 @@ documentation = "https://docs.rs/commonware-consensus"
 commonware-cryptography = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
-futures = { workspace = true }
-tracing = { workspace = true }
 prost = { workspace = true }
 cfg-if = { workspace = true }
 
@@ -27,8 +25,10 @@ commonware-storage = { workspace = true }
 prometheus-client = { workspace = true }
 governor = { workspace = true }
 thiserror = { workspace = true }
+futures = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
+tracing = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }

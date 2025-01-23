@@ -8,9 +8,7 @@ use super::{
 use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme, Signature};
-use commonware_utils::hex;
 use std::{collections::HashSet, marker::PhantomData};
-use tracing::debug;
 
 /// Encode and decode proofs of activity.
 ///
@@ -82,16 +80,9 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let proposal_message = proposal_message(view, parent, &payload);
         if check_sig {
             if !C::validate(&public_key) {
-                debug!(public_key = hex(&public_key), "invalid public key");
                 return None;
             }
             if !C::verify(Some(namespace), &proposal_message, &public_key, &signature) {
-                debug!(
-                    namespace = hex(namespace),
-                    public_key = hex(&public_key),
-                    signature = hex(&signature),
-                    "signature verification failed"
-                );
                 return None;
             }
         }
