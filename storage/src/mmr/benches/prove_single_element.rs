@@ -1,7 +1,7 @@
 use commonware_cryptography::{Digest, Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
 
@@ -12,24 +12,31 @@ fn bench_prove_single_element(c: &mut Criterion) {
             |b| {
                 b.iter_batched(
                     || {
+                        // Populate MMR
                         let mut mmr = Mmr::<Sha256>::new();
-                        let mut elements = Vec::new();
+                        let mut elements = Vec::with_capacity(n);
                         let mut sampler = StdRng::seed_from_u64(0);
-                        for i in 0..n {
+                        for _ in 0..n {
                             let mut digest = vec![0u8; Sha256::len()];
                             sampler.fill_bytes(&mut digest);
                             let element = Digest::from(digest);
                             let pos = mmr.add(&element);
-                            if i % SAMPLE_SIZE == 0 {
-                                elements.push((pos, element));
-                            }
+                            elements.push((pos, element));
                         }
                         let root_hash = mmr.root_hash();
-                        (mmr, root_hash, elements)
+
+                        // Generate samples
+                        let mut samples = Vec::with_capacity(SAMPLE_SIZE);
+                        for _ in 0..SAMPLE_SIZE {
+                            let index = sampler.gen_range(0..n);
+                            let (pos, element) = &elements[index];
+                            samples.push((*pos, element.clone()));
+                        }
+                        (mmr, root_hash, samples)
                     },
-                    |(mmr, mmr_root, elements)| {
+                    |(mmr, mmr_root, samples)| {
                         let mut hasher = Sha256::new();
-                        for (pos, element) in elements {
+                        for (pos, element) in samples {
                             let proof = mmr.proof(pos);
                             assert!(proof.verify_element_inclusion(
                                 &element,
