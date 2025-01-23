@@ -5,7 +5,7 @@ use rand::{rngs::StdRng, seq::SliceRandom, RngCore, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
 
-fn bench_prove_element_range(c: &mut Criterion) {
+fn bench_prove_many_elements(c: &mut Criterion) {
     for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
         for range in [2, 5, 10, 25, 50, 100] {
             c.bench_function(
@@ -71,5 +71,5 @@ fn bench_prove_element_range(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_prove_element_range
+    targets = bench_prove_many_elements
 }
