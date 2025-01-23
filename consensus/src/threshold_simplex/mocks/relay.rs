@@ -50,3 +50,9 @@ impl Relay {
         }
     }
 }
+
+impl Default for Relay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
