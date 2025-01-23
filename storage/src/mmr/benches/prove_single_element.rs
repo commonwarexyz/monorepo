@@ -18,15 +18,28 @@ fn bench_prove_single_element(c: &mut Criterion) {
     }
     let root_hash = mmr.root_hash();
 
-    c.bench_function(module_path!(), |b| {
-        let mut hasher = Sha256::new();
-        b.iter(|| {
-            for pos in &leaf_sample {
-                let proof = mmr.proof(*pos);
-                assert!(proof.verify_element_inclusion(&element, *pos, &root_hash, &mut hasher));
-            }
-        })
-    });
+    c.bench_function(
+        &format!(
+            "{}/n={} samples={}",
+            module_path!(),
+            NUM_ELEMENTS,
+            SAMPLE_SIZE
+        ),
+        |b| {
+            b.iter(|| {
+                let mut hasher = Sha256::new();
+                for pos in &leaf_sample {
+                    let proof = mmr.proof(*pos);
+                    assert!(proof.verify_element_inclusion(
+                        &element,
+                        *pos,
+                        &root_hash,
+                        &mut hasher
+                    ));
+                }
+            })
+        },
+    );
 }
 criterion_group! {
     name = benches;
