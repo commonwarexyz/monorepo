@@ -1,22 +1,32 @@
 use commonware_cryptography::{Digest, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
 fn bench_build(c: &mut Criterion) {
-    let element = Digest::from_static(&[100u8; 32]);
-    c.bench_function(module_path!(), |b| {
-        let mut mmr = Mmr::<Sha256>::new();
-        // bootstrap w/ 5M elements
-        for _ in 0..5_000_000 {
-            mmr.add(&element);
-        }
-        // time adding 1M more
-        b.iter(|| {
-            for _ in 0..1_000_000 {
-                mmr.add(&element);
-            }
-        })
-    });
+    for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
+        c.bench_function(&format!("{}/n={}", module_path!(), n), |b| {
+            b.iter_batched(
+                || {
+                    let mut elements = Vec::with_capacity(n);
+                    let mut sampler = StdRng::seed_from_u64(0);
+                    for _ in 0..n {
+                        let digest: [u8; 32] = sampler.gen();
+                        let element = Digest::from(digest.to_vec());
+                        elements.push(element);
+                    }
+                    elements
+                },
+                |digests| {
+                    let mut mmr = Mmr::<Sha256>::new();
+                    for digest in digests {
+                        mmr.add(&digest);
+                    }
+                },
+                criterion::BatchSize::SmallInput,
+            )
+        });
+    }
 }
 
 criterion_group! {
