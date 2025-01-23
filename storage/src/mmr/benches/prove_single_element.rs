@@ -1,7 +1,7 @@
 use commonware_cryptography::{Digest, Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, seq::SliceRandom, RngCore, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
 
@@ -25,13 +25,11 @@ fn bench_prove_single_element(c: &mut Criterion) {
                         }
                         let root_hash = mmr.root_hash();
 
-                        // Generate samples
-                        let mut samples = Vec::with_capacity(SAMPLE_SIZE);
-                        for _ in 0..SAMPLE_SIZE {
-                            let index = sampler.gen_range(0..n);
-                            let (pos, element) = &elements[index];
-                            samples.push((*pos, element.clone()));
-                        }
+                        // Select SAMPLE_SIZE random elements without replacement
+                        let samples = elements
+                            .choose_multiple(&mut sampler, SAMPLE_SIZE)
+                            .cloned()
+                            .collect::<Vec<_>>();
                         (mmr, root_hash, samples)
                     },
                     |(mmr, mmr_root, samples)| {

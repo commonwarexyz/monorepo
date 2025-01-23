@@ -1,7 +1,7 @@
 use commonware_cryptography::{Digest, Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, seq::SliceRandom, RngCore, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
 
@@ -24,23 +24,25 @@ fn bench_prove_element_range(c: &mut Criterion) {
                             let mut positions = Vec::with_capacity(n);
                             let mut elements = Vec::with_capacity(n);
                             let mut sampler = StdRng::seed_from_u64(0);
-                            for _ in 0..n {
+                            for i in 0..n {
                                 let mut digest = vec![0u8; Sha256::len()];
                                 sampler.fill_bytes(&mut digest);
                                 let element = Digest::from(digest);
                                 let pos = mmr.add(&element);
-                                positions.push(pos);
+                                positions.push((i, pos));
                                 elements.push(element);
                             }
                             let root_hash = mmr.root_hash();
 
-                            // Generate samples
+                            // Generate SAMPLE_SIZE random starts without replacement
+                            let starts = positions
+                                .choose_multiple(&mut sampler, SAMPLE_SIZE)
+                                .cloned()
+                                .collect::<Vec<_>>();
                             let mut samples = Vec::with_capacity(SAMPLE_SIZE);
-                            for _ in 0..SAMPLE_SIZE {
-                                let start_index = sampler.gen_range(0..(n - range));
-                                let start_pos = positions[start_index];
+                            for (start_index, start_pos) in starts {
                                 let end_index = start_index + range;
-                                let end_pos = positions[end_index];
+                                let end_pos = positions[end_index].1;
                                 samples.push(((start_index, end_index), (start_pos, end_pos)));
                             }
                             (mmr, root_hash, elements, samples)
