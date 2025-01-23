@@ -549,6 +549,7 @@ name = "commonware-storage"
 version = "0.0.9"
 dependencies = [
  "bytes",
+ "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
  "commonware-utils",
