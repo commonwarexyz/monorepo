@@ -13,19 +13,21 @@ documentation = "https://docs.rs/commonware-consensus"
 [dependencies]
 commonware-cryptography = { workspace = true }
 commonware-macros = { workspace = true }
-commonware-p2p = { workspace = true }
-commonware-runtime = { workspace = true }
-commonware-storage = { workspace = true }
 commonware-utils = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+sha2 = { workspace = true }
 tracing = { workspace = true }
 prost = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+commonware-p2p = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-storage = { workspace = true }
 prometheus-client = { workspace = true }
-sha2 = { workspace = true }
 governor = { workspace = true }
 
 [build-dependencies]
@@ -36,3 +38,5 @@ tracing-subscriber = { workspace = true }
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]
+

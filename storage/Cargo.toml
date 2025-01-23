@@ -12,20 +12,20 @@ documentation = "https://docs.rs/commonware-storage"
 
 [dependencies]
 commonware-cryptography = {workspace = true}
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 commonware-macros = { workspace = true }
-commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
-prometheus-client = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 zstd = { workspace = true }
 crc32fast = "1.4.2"
 rangemap = "1.5.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+commonware-runtime = { workspace = true }
+prometheus-client = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

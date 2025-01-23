@@ -117,17 +117,24 @@
 
 use commonware_cryptography::Digest;
 
+#[cfg(not(target_arch = "wasm32"))]
 mod actors;
+#[cfg(not(target_arch = "wasm32"))]
 mod config;
+#[cfg(not(target_arch = "wasm32"))]
 pub use config::Config;
 mod encoder;
+#[cfg(not(target_arch = "wasm32"))]
 mod engine;
+#[cfg(not(target_arch = "wasm32"))]
 pub use engine::Engine;
+#[cfg(not(target_arch = "wasm32"))]
 mod metrics;
 #[cfg(test)]
 mod mocks;
 mod prover;
 pub use prover::Prover;
+#[cfg(not(target_arch = "wasm32"))]
 mod verifier;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/simplex.wire.rs"));
