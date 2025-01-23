@@ -6,7 +6,7 @@ use super::{
     wire, View,
 };
 use crate::Proof;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
@@ -79,7 +79,7 @@ impl<H: Hasher> Prover<H> {
         partial_signature: &Signature,
     ) -> Proof {
         // Setup proof
-        let len = 8
+        let len = (8_usize)
             .checked_add(8)
             .and_then(|len| len.checked_add(proposal.payload.len()))
             .and_then(|len| len.checked_add(partial_signature.len()))
@@ -101,7 +101,7 @@ impl<H: Hasher> Prover<H> {
     ) -> Option<(View, View, Digest, Verifier)> {
         // Ensure proof is big enough
         let digest_len = H::len();
-        let expected_len = 8
+        let expected_len = (8_usize)
             .checked_add(8)?
             .checked_add(digest_len)?
             .checked_add(poly::PARTIAL_SIGNATURE_LENGTH)?;
@@ -142,7 +142,7 @@ impl<H: Hasher> Prover<H> {
         seed: &Signature,
     ) -> Proof {
         // Setup proof
-        let len = 8
+        let len = (8_usize)
             .checked_add(8)
             .and_then(|len| len.checked_add(proposal.payload.len()))
             .and_then(|len| len.checked_add(group::SIGNATURE_LENGTH))
@@ -167,7 +167,7 @@ impl<H: Hasher> Prover<H> {
     ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
         // Ensure proof prefix is big enough
         let digest_len = H::len();
-        let expected_len = 8
+        let expected_len = (8_usize)
             .checked_add(8)?
             .checked_add(digest_len)?
             .checked_add(group::SIGNATURE_LENGTH)?
@@ -448,9 +448,14 @@ mod tests {
     use super::*;
     use commonware_cryptography::{bls12381::primitives::group, Sha256};
 
+    fn create_test_public() -> group::Public {
+        // Create a dummy public key for testing
+        group::Public::from_bytes(&[0; group::PUBLIC_LENGTH]).unwrap()
+    }
+
     #[test]
     fn test_deserialize_proposal_size_overflow() {
-        let public = group::Public::default();
+        let public = create_test_public();
         let prover = Prover::<Sha256>::new(public, b"test");
         
         // Create a proof with a length that would cause overflow
@@ -466,7 +471,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_threshold_size_overflow() {
-        let public = group::Public::default();
+        let public = create_test_public();
         let prover = Prover::<Sha256>::new(public, b"test");
         
         // Create a proof with a length that would cause overflow
@@ -485,9 +490,9 @@ mod tests {
         let proposal = wire::Proposal {
             view: 1,
             parent: 0,
-            payload: vec![0; usize::MAX / 2], // Very large payload
+            payload: Bytes::from(vec![0; usize::MAX / 2]), // Very large payload
         };
-        let partial_signature = vec![0; usize::MAX / 2].into(); // Very large signature
+        let partial_signature = Bytes::from(vec![0; usize::MAX / 2]); // Very large signature
         
         std::panic::catch_unwind(|| {
             Prover::<Sha256>::serialize_proposal(&proposal, &partial_signature)
@@ -500,10 +505,10 @@ mod tests {
         let proposal = wire::Proposal {
             view: 1,
             parent: 0,
-            payload: vec![0; usize::MAX / 2], // Very large payload
+            payload: Bytes::from(vec![0; usize::MAX / 2]), // Very large payload
         };
-        let signature = vec![0; group::SIGNATURE_LENGTH].into();
-        let seed = vec![0; group::SIGNATURE_LENGTH].into();
+        let signature = Bytes::from(vec![0; group::SIGNATURE_LENGTH]);
+        let seed = Bytes::from(vec![0; group::SIGNATURE_LENGTH]);
         
         std::panic::catch_unwind(|| {
             Prover::<Sha256>::serialize_threshold(&proposal, &signature, &seed)
