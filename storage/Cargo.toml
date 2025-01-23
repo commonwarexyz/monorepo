@@ -12,6 +12,8 @@ documentation = "https://docs.rs/commonware-storage"
 
 [dependencies]
 commonware-cryptography = {workspace = true}
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 commonware-macros = { workspace = true }
 commonware-runtime = { workspace = true }
 commonware-utils = { workspace = true }
@@ -32,6 +34,7 @@ criterion = { workspace = true }
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]
 
 [[bench]]
 name="archive"
