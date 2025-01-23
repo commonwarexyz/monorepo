@@ -7,6 +7,22 @@ const SAMPLE_SIZE: usize = 100;
 
 fn bench_prove_many_elements(c: &mut Criterion) {
     for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
+        // Populate MMR
+        let mut mmr = Mmr::<Sha256>::new();
+        let mut positions = Vec::with_capacity(n);
+        let mut elements = Vec::with_capacity(n);
+        let mut sampler = StdRng::seed_from_u64(0);
+        for i in 0..n {
+            let mut digest = vec![0u8; Sha256::len()];
+            sampler.fill_bytes(&mut digest);
+            let element = Digest::from(digest);
+            let pos = mmr.add(&element);
+            positions.push((i, pos));
+            elements.push(element);
+        }
+        let root_hash = mmr.root_hash();
+
+        // Generate SAMPLE_SIZE random starts without replacement
         for range in [2, 5, 10, 25, 50, 100] {
             c.bench_function(
                 &format!(
@@ -19,22 +35,6 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            // Populate MMR
-                            let mut mmr = Mmr::<Sha256>::new();
-                            let mut positions = Vec::with_capacity(n);
-                            let mut elements = Vec::with_capacity(n);
-                            let mut sampler = StdRng::seed_from_u64(0);
-                            for i in 0..n {
-                                let mut digest = vec![0u8; Sha256::len()];
-                                sampler.fill_bytes(&mut digest);
-                                let element = Digest::from(digest);
-                                let pos = mmr.add(&element);
-                                positions.push((i, pos));
-                                elements.push(element);
-                            }
-                            let root_hash = mmr.root_hash();
-
-                            // Generate SAMPLE_SIZE random starts without replacement
                             let starts = positions
                                 .choose_multiple(&mut sampler, SAMPLE_SIZE)
                                 .cloned()
@@ -45,9 +45,9 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                                 let end_pos = positions[end_index].1;
                                 samples.push(((start_index, end_index), (start_pos, end_pos)));
                             }
-                            (mmr, root_hash, elements, samples)
+                            samples
                         },
-                        |(mmr, mmr_root, elements, samples)| {
+                        |samples| {
                             let mut hasher = Sha256::new();
                             for ((start_index, end_index), (start_pos, end_pos)) in samples {
                                 let proof = mmr.range_proof(start_pos, end_pos);
@@ -55,7 +55,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                                     &elements[start_index..=end_index],
                                     start_pos,
                                     end_pos,
-                                    &mmr_root,
+                                    &root_hash,
                                     &mut hasher
                                 ));
                             }
