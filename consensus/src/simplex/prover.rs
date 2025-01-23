@@ -8,9 +8,7 @@ use super::{
 use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme, Signature};
-use commonware_utils::hex;
 use std::{collections::HashSet, marker::PhantomData};
-use tracing::debug;
 
 /// Encode and decode proofs of activity.
 ///
@@ -40,7 +38,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     }
 
     /// Serialize a proposal proof.
-    pub(crate) fn serialize_proposal(
+    pub fn serialize_proposal(
         proposal: &wire::Proposal,
         public_key: &PublicKey,
         signature: &Signature,
@@ -82,16 +80,9 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let proposal_message = proposal_message(view, parent, &payload);
         if check_sig {
             if !C::validate(&public_key) {
-                debug!(public_key = hex(&public_key), "invalid public key");
                 return None;
             }
             if !C::verify(Some(namespace), &proposal_message, &public_key, &signature) {
-                debug!(
-                    namespace = hex(namespace),
-                    public_key = hex(&public_key),
-                    signature = hex(&signature),
-                    "signature verification failed"
-                );
                 return None;
             }
         }
@@ -100,7 +91,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     }
 
     /// Serialize an aggregation proof.
-    pub(crate) fn serialize_aggregation(
+    pub fn serialize_aggregation(
         proposal: &wire::Proposal,
         signatures: Vec<(&PublicKey, &Signature)>,
     ) -> Proof {
@@ -217,7 +208,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn serialize_conflicting_proposal(
+    pub fn serialize_conflicting_proposal(
         view: View,
         public_key: &PublicKey,
         parent_1: View,
@@ -296,7 +287,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
     /// Serialize a conflicting notarize proof.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn serialize_conflicting_notarize(
+    pub fn serialize_conflicting_notarize(
         view: View,
         public_key: &PublicKey,
         parent_1: View,
@@ -329,7 +320,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
 
     /// Serialize a conflicting finalize proof.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn serialize_conflicting_finalize(
+    pub fn serialize_conflicting_finalize(
         view: View,
         public_key: &PublicKey,
         parent_1: View,
@@ -361,7 +352,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     }
 
     /// Serialize a conflicting nullify and finalize proof.
-    pub(crate) fn serialize_nullify_finalize(
+    pub fn serialize_nullify_finalize(
         view: View,
         public_key: &PublicKey,
         parent: View,

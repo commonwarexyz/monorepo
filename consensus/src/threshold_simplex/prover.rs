@@ -74,10 +74,7 @@ impl<H: Hasher> Prover<H> {
     }
 
     /// Serialize a proposal proof.
-    pub(crate) fn serialize_proposal(
-        proposal: &wire::Proposal,
-        partial_signature: &Signature,
-    ) -> Proof {
+    pub fn serialize_proposal(proposal: &wire::Proposal, partial_signature: &Signature) -> Proof {
         // Setup proof
         let len = 8 + 8 + proposal.payload.len() + partial_signature.len();
 
@@ -128,7 +125,7 @@ impl<H: Hasher> Prover<H> {
     }
 
     /// Serialize an aggregation proof.
-    pub(crate) fn serialize_threshold(
+    pub fn serialize_threshold(
         proposal: &wire::Proposal,
         signature: &Signature,
         seed: &Signature,
@@ -208,7 +205,7 @@ impl<H: Hasher> Prover<H> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn serialize_conflicting_proposal(
+    pub fn serialize_conflicting_proposal(
         view: View,
         parent_1: View,
         payload_1: &Digest,
@@ -300,7 +297,7 @@ impl<H: Hasher> Prover<H> {
 
     /// Serialize a conflicting notarize proof.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn serialize_conflicting_notarize(
+    pub fn serialize_conflicting_notarize(
         view: View,
         parent_1: View,
         payload_1: &Digest,
@@ -327,7 +324,7 @@ impl<H: Hasher> Prover<H> {
 
     /// Serialize a conflicting finalize proof.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn serialize_conflicting_finalize(
+    pub fn serialize_conflicting_finalize(
         view: View,
         parent_1: View,
         payload_1: &Digest,
@@ -353,7 +350,7 @@ impl<H: Hasher> Prover<H> {
     }
 
     /// Serialize a conflicting nullify and finalize proof.
-    pub(crate) fn serialize_nullify_finalize(
+    pub fn serialize_nullify_finalize(
         view: View,
         parent: View,
         payload: &Digest,

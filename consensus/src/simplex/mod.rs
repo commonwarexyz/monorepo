@@ -117,21 +117,27 @@
 
 use commonware_cryptography::Digest;
 
-mod actors;
-mod config;
-pub use config::Config;
 mod encoder;
-mod engine;
-pub use engine::Engine;
-mod metrics;
-#[cfg(test)]
-mod mocks;
 mod prover;
 pub use prover::Prover;
-mod verifier;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/simplex.wire.rs"));
 }
+
+cfg_if::cfg_if! {
+    if #[cfg(not(target_arch = "wasm32"))] {
+        mod actors;
+        mod config;
+        pub use config::Config;
+        mod engine;
+        pub use engine::Engine;
+        mod metrics;
+        mod verifier;
+    }
+}
+
+#[cfg(test)]
+pub mod mocks;
 
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;

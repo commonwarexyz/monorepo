@@ -12,15 +12,18 @@ documentation = "https://docs.rs/commonware-storage"
 
 [dependencies]
 commonware-cryptography = {workspace = true}
-commonware-macros = { workspace = true }
-commonware-runtime = { workspace = true }
-commonware-utils = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
+cfg-if = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bytes = { workspace = true }
+commonware-runtime = { workspace = true }
+commonware-macros = { workspace = true }
+commonware-utils = { workspace = true }
+prometheus-client = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
-prometheus-client = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 zstd = { workspace = true }
 crc32fast = "1.4.2"
 rangemap = "1.5.1"
@@ -32,6 +35,7 @@ criterion = { workspace = true }
 
 [lib]
 bench = false
+crate-type = ["rlib", "cdylib"]
 
 [[bench]]
 name="archive"

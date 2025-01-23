@@ -425,6 +425,7 @@ name = "commonware-consensus"
 version = "0.0.6"
 dependencies = [
  "bytes",
+ "cfg-if",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",
@@ -438,7 +439,6 @@ dependencies = [
  "prost-build",
  "rand",
  "rand_distr",
- "sha2 0.10.8",
  "thiserror",
  "tracing",
  "tracing-subscriber",
@@ -549,6 +549,7 @@ name = "commonware-storage"
 version = "0.0.9"
 dependencies = [
  "bytes",
+ "cfg-if",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-runtime",
