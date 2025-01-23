@@ -23,7 +23,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
         let root_hash = mmr.root_hash();
 
         // Generate SAMPLE_SIZE random starts without replacement
-        for range in [2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000, 10_000] {
+        for range in [2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000] {
             c.bench_function(
                 &format!(
                     "{}/n={} range={} samples={}",
