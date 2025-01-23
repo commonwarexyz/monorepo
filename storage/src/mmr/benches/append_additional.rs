@@ -15,9 +15,8 @@ fn bench_append_additional(c: &mut Criterion) {
             elements.push(element);
         }
 
-        // Append elements to MMR
+        // Generate additional elements and append them to MMR
         for a in [100, 1_000, 10_000, 50_000] {
-            // Generate additional elements
             let mut additional = Vec::with_capacity(a);
             for _ in 0..a {
                 let mut digest = vec![0u8; Sha256::len()];
