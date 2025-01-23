@@ -10,7 +10,7 @@ members = [
     "examples/bridge",
     "examples/chat",
     "examples/log",
-    "examples/vrf",
+    "examples/vrf", "restaking",
 ]
 resolver = "2"
 
