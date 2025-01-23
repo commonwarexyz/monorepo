@@ -5,30 +5,38 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 
 fn bench_append_additional(c: &mut Criterion) {
     for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
+        // Generate random elements
+        let mut elements = Vec::with_capacity(n);
+        let mut sampler = StdRng::seed_from_u64(0);
+        for _ in 0..n {
+            let mut digest = vec![0u8; Sha256::len()];
+            sampler.fill_bytes(&mut digest);
+            let element = Digest::from(digest);
+            elements.push(element);
+        }
+
+        // Append elements to MMR
         for a in [100, 1_000, 10_000, 50_000] {
+            // Generate additional elements
+            let mut additional = Vec::with_capacity(a);
+            for _ in 0..a {
+                let mut digest = vec![0u8; Sha256::len()];
+                sampler.fill_bytes(&mut digest);
+                let element = Digest::from(digest);
+                additional.push(element);
+            }
             c.bench_function(&format!("{}/start={} add={}", module_path!(), n, a), |b| {
                 b.iter_batched(
                     || {
                         let mut mmr = Mmr::<Sha256>::new();
-                        let mut sampler = StdRng::seed_from_u64(0);
-                        for _ in 0..n {
-                            let mut digest = vec![0u8; Sha256::len()];
-                            sampler.fill_bytes(&mut digest);
-                            let element = Digest::from(digest);
-                            mmr.add(&element);
+                        for digest in &elements {
+                            mmr.add(digest);
                         }
-                        let mut additional = Vec::with_capacity(a);
-                        for _ in 0..a {
-                            let mut digest = vec![0u8; Sha256::len()];
-                            sampler.fill_bytes(&mut digest);
-                            let element = Digest::from(digest);
-                            additional.push(element);
-                        }
-                        (mmr, additional)
+                        mmr
                     },
-                    |(mut mmr, additional)| {
-                        for digest in additional {
-                            mmr.add(&digest);
+                    |mut mmr| {
+                        for digest in &additional {
+                            mmr.add(digest);
                         }
                     },
                     criterion::BatchSize::SmallInput,
