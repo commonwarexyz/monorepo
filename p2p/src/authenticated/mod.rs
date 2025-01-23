@@ -589,7 +589,7 @@ mod tests {
             // Wait to connect to all peers, and then send messages to everyone
             runtime.spawn("network", network.run());
 
-            // Crate random message
+            // Create random message
             let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)
             runtime.fill(&mut msg[..]);
 
