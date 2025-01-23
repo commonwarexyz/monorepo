@@ -10,10 +10,10 @@ mod tests {
     #[test]
     fn test_invalid_signature_length() {
         let invalid_signatures = vec![
-            vec![0u8; 95],  // На 1 байт меньше
-            vec![0u8; 97],  // На 1 байт больше
-            vec![0u8; 0],   // Пустая подпись
-            vec![0u8; 48],  // Половина правильной длины
+            vec![0u8; 95],  // 1 byte too short
+            vec![0u8; 97],  // 1 byte too long
+            vec![0u8; 0],   // Empty signature
+            vec![0u8; 48],  // Half the correct length
         ];
 
         let msg = b"test message";
@@ -31,14 +31,14 @@ mod tests {
         let msg = b"test message";
         let (private_key, _) = ops::keypair(&mut rand::thread_rng());
 
-        // Точка на бесконечности
+        // Point at infinity
         let mut infinity_point = group::G1::zero();
         let invalid_sig = infinity_point.serialize();
         assert!(Bls12381::verify(None, msg, &private_key, &invalid_sig).is_err());
 
-        // Точка не на кривой (изменяем координаты)
+        // Point not on the curve (alter coordinates)
         let mut sig = ops::sign_message(&private_key, None, msg);
-        sig[0] ^= 0xFF; // Портим первый байт
+        sig[0] ^= 0xFF; // Corrupt the first byte
         assert!(Bls12381::verify(None, msg, &private_key, &sig).is_err());
     }
 
@@ -53,10 +53,10 @@ mod tests {
         
         let sig = ops::sign_message(&private_key, None, msg1);
         
-        // Подпись должна быть действительна для оригинального сообщения
+        // Signature should be valid for the original message
         assert!(Bls12381::verify(None, msg1, &public_key, &sig).is_ok());
         
-        // Но недействительна для подмененного
+        // But invalid for the substituted message
         assert!(Bls12381::verify(None, msg2, &public_key, &sig).is_err());
     }
 
@@ -67,14 +67,14 @@ mod tests {
         let (private_key, public_key) = ops::keypair(&mut rand::thread_rng());
         let msg = b"test message";
         
-        // Создаем подпись с одним пространством имен
+        // Create a signature in one namespace
         let namespace1 = Some(b"namespace1");
         let sig = ops::sign_message(&private_key, namespace1, msg);
         
-        // Проверяем, что подпись действительна в оригинальном пространстве имен
+        // Verify the signature is valid in the original namespace
         assert!(Bls12381::verify(namespace1, msg, &public_key, &sig).is_ok());
         
-        // Пробуем использовать ту же подпись в другом пространстве имен
+        // Try using the same signature in a different namespace
         let namespace2 = Some(b"namespace2");
         assert!(Bls12381::verify(namespace2, msg, &public_key, &sig).is_err());
     }
@@ -86,14 +86,14 @@ mod tests {
         let msg = b"test message";
         let (private_key, public_key) = ops::keypair(&mut rand::thread_rng());
         
-        // Создаем действительную подпись
+        // Create a valid signature
         let valid_sig = ops::sign_message(&private_key, None, msg);
         
-        // Модифицируем подпись, пытаясь создать точку малого порядка
+        // Modify the signature to attempt creating a small-order point
         let mut invalid_sig = valid_sig.clone();
         invalid_sig[0] = 0x00;
         invalid_sig[1] = 0x00;
         
         assert!(Bls12381::verify(None, msg, &public_key, &invalid_sig).is_err());
     }
-} 
+}
