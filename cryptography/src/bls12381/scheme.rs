@@ -94,7 +94,7 @@ impl Scheme for Bls12381 {
     }
 }
 
-/// Test vectors sources from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
+/// Test vectors sourced from https://github.com/ethereum/bls12-381-tests/releases/tag/v0.1.2.
 #[cfg(test)]
 mod tests {
     use super::{Bls12381, Scheme};
