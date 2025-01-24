@@ -1,25 +1,22 @@
-use commonware_cryptography::{sha256, Digest, Sha256};
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::{rngs::StdRng, SeedableRng};
 
 fn bench_append(c: &mut Criterion) {
     for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
         // Generate random elements
-        const N: usize = sha256::DIGEST_LENGTH;
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         for _ in 0..n {
-            let mut digest = [0u8; N];
-            sampler.fill_bytes(&mut digest);
-            let element = Digest::from(digest);
+            let element = Sha256::random(&mut sampler);
             elements.push(element);
         }
 
         // Append elements to MMR
         c.bench_function(&format!("{}/n={}", module_path!(), n), |b| {
             b.iter(|| {
-                let mut mmr = Mmr::<Sha256, N>::new();
+                let mut mmr = Mmr::<Sha256>::new();
                 for digest in &elements {
                     mmr.add(digest);
                 }
