@@ -19,16 +19,5 @@ pub struct Config<
     pub app: A,
     pub supervisor: S,
     pub mailbox_size: usize,
-    pub share: Share,
     pub namespace: Vec<u8>,
-}
-
-impl<
-        C: Scheme,
-        H: Hasher,
-        A: Application,
-        S: ThresholdSupervisor<Seed = Signature, Index = View, Share = Share, Identity = Public>,
-    > Config<C, H, A, S>
-{
-    pub fn assert(&self) {}
 }

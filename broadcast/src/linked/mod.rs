@@ -1,14 +1,11 @@
 use commonware_cryptography::PublicKey;
 
 mod actors;
-mod config;
 mod encoder;
 mod mocks;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
-
-pub mod engine;
 
 pub type Index = u64;
 
@@ -27,11 +24,16 @@ mod tests {
         time::Duration,
     };
 
-    use super::{config::Config, engine::Engine, mocks};
+    use super::{actors::signer, mocks};
+    use bytes::Bytes;
     use commonware_cryptography::{bls12381::dkg::ops, Ed25519, PublicKey, Scheme, Sha256};
+    use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
-    use commonware_runtime::{deterministic::Executor, Runner, Spawner};
+    use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
+    use commonware_storage::journal::{self, Journal};
+    use commonware_utils::hex;
     use prometheus_client::registry::Registry;
+    use tracing::debug;
 
     /// Registers all validators using the oracle.
     async fn register_validators(
@@ -101,7 +103,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_traced]
     fn test_signer() {
         let num_validators = 4;
         let quorum = 3;
@@ -143,7 +145,6 @@ mod tests {
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
                 // Create engines
-                let mut engine_handlers = Vec::new();
                 for validator in validators.iter() {
                     // Supervisor
                     let share = shares.remove(validator).unwrap();
@@ -152,22 +153,42 @@ mod tests {
                         validators.clone(),
                         share,
                     );
-                    let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
 
-                    // Engine
-                    let scheme = schemes.get(validator).unwrap().clone();
-                    let cfg = Config {
-                        crypto: scheme.clone(),
-                        supervisor,
-                        mailbox_size: 1,
-                        hasher: Sha256::default(),
-                        share,
-                        namespace: b"test".to_vec(),
+                    // Application
+                    let (mut app, mut app_mailbox) = mocks::application::Application::new();
+                    // TODO: remove
+                    let hw = Bytes::from("Hello world");
+                    app_mailbox.broadcast(hw).await;
+
+                    // Signer
+                    let cfg = journal::Config {
+                        registry: Arc::new(Mutex::new(Registry::default())),
+                        partition: hex(validator),
                     };
-                    let engine = Engine::new(runtime.clone(), cfg);
-                    let engine_handler = runtime.spawn("engine", engine.run((a1, a2), (b1, b2)));
-                    engine_handlers.push(engine_handler);
+                    let journal = Journal::init(runtime.clone(), cfg)
+                        .await
+                        .expect("Failed to initialize journal");
+                    let scheme = schemes.get(validator).unwrap().clone();
+                    let (signer, signer_mailbox) = signer::Actor::new(
+                        runtime.clone(),
+                        journal,
+                        signer::Config {
+                            crypto: scheme.clone(),
+                            app: app_mailbox.clone(),
+                            supervisor,
+                            mailbox_size: 1,
+                            hasher: Sha256::default(),
+                            namespace: b"test".to_vec(),
+                        },
+                    );
+
+                    // Run the actors
+                    runtime.spawn("app", async move { app.run(signer_mailbox).await });
+                    let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
+                    runtime.spawn("signer", signer.run((a1, a2), (b1, b2)));
                 }
+                runtime.sleep(Duration::from_secs(10)).await;
+                panic!("Done");
             }
         });
     }

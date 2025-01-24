@@ -9,6 +9,7 @@ fn main() -> Result<()> {
         "Car.parent_threshold",
         "Car.signature",
         "Ack.digest",
+        "Ack.public_key",
         "Ack.signature",
     ]);
     config.compile_protos(&["src/linked/wire.proto"], &["src/linked/"])?;

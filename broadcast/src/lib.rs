@@ -34,7 +34,7 @@ pub trait Broadcaster {
 }
 
 /// Application is the interface responsible for processing messages received from the network.
-pub trait Application: Clone + Send + 'static {
+pub trait Application: Send + 'static {
     /// Context is metadata provided by the broadcast engine to associated with a given payload.
     /// This includes things like the sequencer, height, parent, etc.
     type Context;

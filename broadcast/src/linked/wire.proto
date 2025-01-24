@@ -34,6 +34,9 @@ message Ack {
     // Digest of the car being acknowledged
     bytes digest = 3;
 
+    // Validator's public key
+    bytes public_key = 4;
+
     // Signature of the validator over the hash of the car
-    bytes signature = 4;
+    bytes signature = 5;
 }

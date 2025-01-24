@@ -15,15 +15,22 @@ use commonware_cryptography::{
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
-use commonware_runtime::Spawner;
+use commonware_runtime::{Blob, Spawner, Storage};
+use commonware_storage::journal::Journal;
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use prost::Message as _;
 use std::collections::HashMap;
 use tracing::{debug, error};
 
+enum Evidence {
+    Partials(HashMap<PublicKey, Bytes>),
+    Threshold(Bytes),
+}
+
 pub struct Actor<
-    E: Spawner,
+    B: Blob,
+    E: Spawner + Storage<B>,
     C: Scheme,
     H: Hasher,
     A: Application<Context = Context, Proof = Bytes>,
@@ -35,6 +42,11 @@ pub struct Actor<
     runtime: E,
     crypto: C,
     hasher: H,
+
+    ////////////////////////////////////////
+    // Storage
+    ////////////////////////////////////////
+    journal: Option<Journal<B, E>>,
 
     ////////////////////////////////////////
     // Threshold
@@ -69,20 +81,16 @@ pub struct Actor<
     tips: HashMap<PublicKey, (wire::Car, Evidence)>,
 }
 
-enum Evidence {
-    Partials(HashMap<PublicKey, Bytes>),
-    Threshold(Bytes),
-}
-
 impl<
-        E: Spawner,
+        B: Blob,
+        E: Spawner + Storage<B>,
         C: Scheme,
         H: Hasher,
         A: Application<Context = Context, Proof = Bytes>,
         S: ThresholdSupervisor<Seed = Signature, Index = View, Share = Share, Identity = Public>,
-    > Actor<E, C, H, A, S>
+    > Actor<B, E, C, H, A, S>
 {
-    pub fn new(runtime: E, cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         let result = Self {
@@ -90,6 +98,7 @@ impl<
             crypto: cfg.crypto,
             hasher: cfg.hasher,
             supervisor: cfg.supervisor,
+            journal: Some(journal),
             app: cfg.app,
             ack_namespace: encoder::ack_namespace(&cfg.namespace),
             car_namespace: encoder::car_namespace(&cfg.namespace),
@@ -113,31 +122,45 @@ impl<
             select! {
                 _ = &mut shutdown => {
                     debug!("Signer shutting down");
+                    self.journal
+                        .take()
+                        .unwrap()
+                        .close()
+                        .await
+                        .expect("unable to close journal");
                     return;
                 },
                 msg = car_receiver.recv() => {
                     // Error handling
-                    let Ok((_sender, msg)) = msg else {
+                    let Ok((sender, msg)) = msg else {
+                        error!("car_receiver failed");
                         break;
                     };
                     let Ok(car) = wire::Car::decode(msg) else {
+                        error!("Failed to decode car");
                         continue;
                     };
-
-                    // Logic
+                    if sender != car.sequencer {
+                        error!("Received car from wrong sender");
+                        continue;
+                    };
                     self.handle_car(&car, &mut ack_sender).await;
                 },
                 msg = ack_receiver.recv() => {
                     // Error handling
                     let Ok((sender, msg)) = msg else {
+                        error!("ack_receiver failed");
                         break;
                     };
                     let Ok(ack) = wire::Ack::decode(msg) else {
+                        error!("Failed to decode ack");
                         continue;
                     };
-
-                    // Logic
-                    self.handle_ack(sender, &ack).await;
+                    if sender != ack.public_key {
+                        error!("Received ack from wrong sender");
+                        continue;
+                    }
+                    self.handle_ack(&ack).await;
                 },
                 mail = self.mailbox_receiver.next() => {
                     let msg = match mail {
@@ -146,7 +169,6 @@ impl<
                     };
                     match msg {
                         Message::Broadcast{ payload, result } => {
-                            // TODO
                             self.broadcast(payload, result, &mut car_sender, &mut ack_sender).await;
                         }
                     }
@@ -155,7 +177,7 @@ impl<
         }
     }
 
-    async fn handle_ack(&mut self, sender: Bytes, ack: &wire::Ack) {
+    async fn handle_ack(&mut self, ack: &wire::Ack) {
         // Get the current car and evidence
         let sequencer: Bytes = ack.sequencer.clone().into();
         let Some((_tip, evidence)) = self.tips.get_mut(&sequencer) else {
@@ -170,12 +192,12 @@ impl<
         };
 
         // Return early if we already have this partial
-        if partials.contains_key(&sender) {
+        if partials.contains_key(&ack.public_key) {
             return;
         }
 
         // Store the ack
-        partials.insert(sender, ack.signature.clone());
+        partials.insert(ack.public_key.clone(), ack.signature.clone());
 
         // Return early if we don't have enough partials
         let quorum = self.supervisor.identity(111).unwrap().required();
@@ -255,7 +277,7 @@ impl<
         }
 
         // Insert the car at the tip
-        let digest = self.hash(&car);
+        let digest = self.hash(car);
         self.tips.insert(
             car.sequencer.clone(),
             (car.clone(), Evidence::Partials(HashMap::new())),
@@ -264,18 +286,19 @@ impl<
         // Create an ack for the car
         let share = self.supervisor.share(111).unwrap();
         let partial_signature: Bytes =
-            ops::partial_sign_message(&share, Some(&self.ack_namespace), &digest)
+            ops::partial_sign_message(share, Some(&self.ack_namespace), &digest)
                 .serialize()
                 .into();
         let ack = wire::Ack {
             sequencer: car.sequencer.clone().to_vec(),
             index: car.index,
             digest: digest.to_vec().into(),
+            public_key: self.crypto.public_key(),
             signature: partial_signature,
         };
 
         // Deal with the ack as if it were received over the network
-        self.handle_ack(self.crypto.public_key(), &ack).await;
+        self.handle_ack(&ack).await;
 
         // Send the ack to the network
         if let Err(e) = ack_sender
@@ -332,6 +355,8 @@ impl<
             .await
         {
             error!("Failed to send car: {:?}", e);
+            let _ = result.send(false);
+            return;
         }
 
         // Return success
