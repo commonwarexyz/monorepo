@@ -151,7 +151,7 @@ pub struct Context {
     /// Parent the payload is built on.
     ///
     /// Payloads from views between the current view and the parent view can never be
-    /// directly finalized (must exist some nullification).
+    /// directly finalized (there must exist some nullification).
     pub parent: (View, Digest),
 }
 
