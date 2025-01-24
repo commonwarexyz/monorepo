@@ -50,7 +50,7 @@ pub trait Application: Send + 'static {
     ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
 }
 
-pub trait Acknowledgement: Send + 'static {
+pub trait Collector: Send + 'static {
     type Context;
 
     // Proof is the proof of acknowledgement.
@@ -68,6 +68,8 @@ pub trait Acknowledgement: Send + 'static {
 
 pub trait Coordinator: Clone + Send + Sync + 'static {
     type Index;
+
+    fn index(&self) -> Self::Index;
 
     fn sequencers(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
     fn is_sequencer(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;

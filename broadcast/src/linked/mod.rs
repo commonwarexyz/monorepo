@@ -7,13 +7,13 @@ mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
-pub type Index = u64;
+pub type View = u64;
 
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
 pub struct Context {
     pub sequencer: PublicKey,
-    pub index: Index,
+    pub height: u64,
 }
 
 #[cfg(test)]
@@ -147,11 +147,12 @@ mod tests {
                 for validator in validators.iter() {
                     // Coordinator
                     let share = shares.remove(validator).unwrap();
-                    let coordinator = mocks::coordinator::Coordinator::new(
+                    let mut coordinator = mocks::coordinator::Coordinator::new(
                         identity.clone(),
                         validators.clone(),
                         share,
                     );
+                    coordinator.set_view(111);
 
                     // Application
                     let (mut app, mut app_mailbox) = mocks::application::Application::new();
@@ -173,8 +174,8 @@ mod tests {
                         journal,
                         signer::Config {
                             crypto: scheme.clone(),
-                            app: app_mailbox.clone(),
-                            acknowledgement: app_mailbox.clone(),
+                            application: app_mailbox.clone(),
+                            collector: app_mailbox.clone(),
                             coordinator,
                             mailbox_size: 1,
                             hasher: Sha256::default(),

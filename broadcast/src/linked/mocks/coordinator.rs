@@ -1,4 +1,4 @@
-use crate::{linked::Index, Coordinator as S, ThresholdCoordinator as T};
+use crate::{linked::View, Coordinator as S, ThresholdCoordinator as T};
 use std::collections::HashMap;
 
 use commonware_cryptography::{
@@ -12,10 +12,10 @@ use commonware_cryptography::{
 /// Implementation of `commonware-consensus::Coordinator`.
 #[derive(Clone)]
 pub struct Coordinator {
+    view: u64,
     identity: Poly<Public>,
     signers: Vec<PublicKey>,
     signers_map: HashMap<PublicKey, u32>,
-
     share: Share,
 }
 
@@ -30,16 +30,25 @@ impl Coordinator {
 
         // Return coordinator
         Self {
+            view: 0,
             identity,
             signers,
             signers_map,
             share,
         }
     }
+
+    pub fn set_view(&mut self, view: u64) {
+        self.view = view;
+    }
 }
 
 impl S for Coordinator {
-    type Index = Index;
+    type Index = View;
+
+    fn index(&self) -> Self::Index {
+        self.view
+    }
 
     fn signers(&self, _: Self::Index) -> Option<&Vec<PublicKey>> {
         Some(&self.signers)

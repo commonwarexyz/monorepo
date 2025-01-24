@@ -1,14 +1,14 @@
 use super::{Config, Mailbox, Message};
 use crate::{
-    linked::{encoder, wire, Context, Index},
-    Acknowledgement, Application, ThresholdCoordinator,
+    linked::{encoder, wire, Context, View},
+    Application, Collector, ThresholdCoordinator,
 };
 use bytes::Bytes;
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{Element, Share, G2},
+        group::{self, Element, Share, G2},
         ops::{self},
-        poly::{self, PartialSignature, Public},
+        poly::{self, Eval, PartialSignature, Public},
     },
     Digest, Hasher, PublicKey, Scheme,
 };
@@ -16,6 +16,7 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Spawner, Storage};
 use commonware_storage::journal::Journal;
+use commonware_utils::hex;
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use prost::Message as _;
@@ -33,8 +34,8 @@ pub struct Actor<
     C: Scheme,
     H: Hasher,
     A: Application<Context = Context>,
-    Z: Acknowledgement<Context = Context, Proof = Bytes>,
-    S: ThresholdCoordinator<Index = Index, Share = Share, Identity = Public>,
+    Z: Collector<Context = Context, Proof = Bytes>,
+    S: ThresholdCoordinator<Index = View, Share = Share, Identity = Public>,
 > {
     ////////////////////////////////////////
     // Constants
@@ -56,8 +57,8 @@ pub struct Actor<
     ////////////////////////////////////////
     // Application Mailboxes
     ////////////////////////////////////////
-    app: A,
-    acknowledgement: Z,
+    application: A,
+    collector: Z,
 
     ////////////////////////////////////////
     // Namespace Constants
@@ -74,7 +75,7 @@ pub struct Actor<
     // State
     ////////////////////////////////////////
 
-    // The highest-index chunk for each sequencer.
+    // The highest-height chunk for each sequencer.
     // The chunk must have the threshold signature of its parent.
     // Existence of the chunk implies:
     // - The existence of the sequencer's entire chunk chain (from height zero)
@@ -88,8 +89,8 @@ impl<
         C: Scheme,
         H: Hasher,
         A: Application<Context = Context>,
-        Z: Acknowledgement<Context = Context, Proof = Bytes>,
-        S: ThresholdCoordinator<Index = Index, Share = Share, Identity = Public>,
+        Z: Collector<Context = Context, Proof = Bytes>,
+        S: ThresholdCoordinator<Index = View, Share = Share, Identity = Public>,
     > Actor<B, E, C, H, A, Z, S>
 {
     pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, Z, S>) -> (Self, Mailbox) {
@@ -100,8 +101,8 @@ impl<
             crypto: cfg.crypto,
             hasher: cfg.hasher,
             coordinator: cfg.coordinator,
-            app: cfg.app,
-            acknowledgement: cfg.acknowledgement,
+            application: cfg.application,
+            collector: cfg.collector,
             journal: Some(journal),
             ack_namespace: encoder::ack_namespace(&cfg.namespace),
             chunk_namespace: encoder::chunk_namespace(&cfg.namespace),
@@ -134,6 +135,7 @@ impl<
                     return;
                 },
                 msg = chunk_receiver.recv() => {
+                    debug!("Received chunk");
                     // Error handling
                     let Ok((sender, msg)) = msg else {
                         error!("chunk_receiver failed");
@@ -150,8 +152,9 @@ impl<
                     self.handle_chunk(&chunk, &mut ack_sender).await;
                 },
                 msg = ack_receiver.recv() => {
+                    debug!("Received ack");
                     // Error handling
-                    let Ok((sender, msg)) = msg else {
+                    let Ok((_sender, msg)) = msg else {
                         error!("ack_receiver failed");
                         break;
                     };
@@ -159,13 +162,14 @@ impl<
                         error!("Failed to decode ack");
                         continue;
                     };
-                    if sender != ack.public_key {
-                        error!("Received ack from wrong sender");
+                    let Some(public_key) = self.verify_ack(&ack) else {
+                        error!("Failed to verify ack");
                         continue;
-                    }
-                    self.handle_ack(&ack).await;
+                    };
+                    self.handle_ack(&public_key.clone(), &ack).await;
                 },
                 mail = self.mailbox_receiver.next() => {
+                    debug!("Received mailbox message");
                     let msg = match mail {
                         Some(msg) => msg,
                         None => break,
@@ -180,7 +184,7 @@ impl<
         }
     }
 
-    async fn handle_ack(&mut self, ack: &wire::Ack) {
+    async fn handle_ack(&mut self, signer: &PublicKey, ack: &wire::Ack) {
         // Get the current Chunk and evidence
         let sequencer: Bytes = ack.sequencer.clone().into();
         let Some((_tip, evidence)) = self.tips.get_mut(&sequencer) else {
@@ -195,15 +199,15 @@ impl<
         };
 
         // Return early if we already have this partial
-        if partials.contains_key(&ack.public_key) {
+        if partials.contains_key(signer) {
             return;
         }
 
         // Store the ack
-        partials.insert(ack.public_key.clone(), ack.signature.clone());
+        partials.insert(signer.clone(), ack.partial.clone());
 
         // Return early if we don't have enough partials
-        let quorum = self.coordinator.identity(111).unwrap().required();
+        let quorum = self.coordinator.identity(ack.view).unwrap().required();
         if partials.len() < quorum as usize {
             return;
         }
@@ -221,15 +225,15 @@ impl<
         // Store the threshold
         let (tip, _) = self.tips.remove(&sequencer).unwrap();
         let digest = self.hash(&tip);
-        let index = tip.index;
+        let height = tip.height;
         self.tips.insert(
             sequencer.clone(),
             (tip, Evidence::Threshold(threshold.clone())),
         );
 
         // Emit the proof to the application
-        let context = Context { sequencer, index };
-        self.acknowledgement
+        let context = Context { sequencer, height };
+        self.collector
             .acknowledged(context, digest, threshold)
             .await;
     }
@@ -238,22 +242,25 @@ impl<
         // If Chunk is at or behind the tip, ignore.
         // This check is fast, so we do it before full validation.
         if let Some((tip, _evidence)) = self.tips.get(&chunk.sequencer) {
-            if tip.index >= chunk.index {
+            if tip.height >= chunk.height {
                 return;
             }
         }
 
         // Validate that the chunk is well-formed
-        if !self.verify(chunk) {
+        if !self.verify_chunk(chunk) {
             return;
         }
 
         // Validate the chunk with the application
         let context = Context {
             sequencer: chunk.sequencer.clone(),
-            index: chunk.index,
+            height: chunk.height,
         };
-        let result = self.app.verify(context, chunk.payload.clone()).await;
+        let result = self
+            .application
+            .verify(context, chunk.payload.clone())
+            .await;
         match result.await {
             Ok(true) => {}
             Ok(false) => {
@@ -266,22 +273,18 @@ impl<
             }
         }
 
-        // Emit evidence of parent to the application if the index is greater than 0
-        if chunk.index > 0 {
+        // Emit evidence of parent to the application if the height is greater than 0
+        if let Some(parent) = &chunk.parent {
             let context = Context {
                 sequencer: chunk.sequencer.clone(),
-                index: chunk.index.checked_sub(1).unwrap(),
+                height: chunk.height.checked_sub(1).unwrap(),
             };
-            self.acknowledgement
-                .acknowledged(
-                    context,
-                    chunk.parent_digest.clone(),
-                    chunk.parent_threshold.clone(),
-                )
+            self.collector
+                .acknowledged(context, parent.digest.clone(), parent.threshold.clone())
                 .await;
         }
 
-        // Insert the chunk at the tip
+        // Compute the digest before inserting to avoid borrow conflicts
         let digest = self.hash(chunk);
         self.tips.insert(
             chunk.sequencer.clone(),
@@ -289,21 +292,20 @@ impl<
         );
 
         // Create an ack for the chunk
-        let share = self.coordinator.share(111).unwrap();
-        let partial_signature: Bytes =
-            ops::partial_sign_message(share, Some(&self.ack_namespace), &digest)
-                .serialize()
-                .into();
+        let share = self.coordinator.share(chunk.view).unwrap();
+        let partial: Bytes = ops::partial_sign_message(share, Some(&self.ack_namespace), &digest)
+            .serialize()
+            .into();
         let ack = wire::Ack {
             sequencer: chunk.sequencer.clone().to_vec(),
-            index: chunk.index,
+            height: chunk.height,
+            view: self.coordinator.index(),
             digest: digest.to_vec().into(),
-            public_key: self.crypto.public_key(),
-            signature: partial_signature,
+            partial,
         };
 
         // Deal with the ack as if it were received over the network
-        self.handle_ack(&ack).await;
+        self.handle_ack(&self.crypto.public_key(), &ack).await;
 
         // Send the ack to the network
         if let Err(e) = ack_sender
@@ -327,23 +329,24 @@ impl<
     ) {
         let public_key = self.crypto.public_key();
 
-        // Get parent Chunk and threshold signature, otherwise return.
-        let (parent, parent_threshold) = match self.tips.get(&public_key) {
-            Some((chunk, Evidence::Threshold(threshold))) => (chunk.clone(), threshold.clone()),
-            None | Some((_, Evidence::Partials(_))) => {
-                let _ = result.send(false);
-                return;
-            }
-        };
+        // Get parent Chunk and threshold signature
+        let mut height = 0;
+        let mut parent = None;
+        if let Some((chunk, Evidence::Threshold(threshold))) = self.tips.get(&public_key) {
+            height = chunk.height.checked_add(1).unwrap();
+            parent = Some(wire::Parent {
+                threshold: threshold.clone(),
+                digest: self.hash(&chunk.clone()),
+            });
+        }
 
         // Construct new chunk
-        let parent_digest = self.hash(&parent);
         let mut chunk = wire::Chunk {
             sequencer: public_key,
-            index: parent.index.checked_add(1).unwrap(),
+            height,
+            view: self.coordinator.index(),
             payload,
-            parent_digest,
-            parent_threshold,
+            parent,
             signature: Bytes::new(), // Unsigned
         };
 
@@ -370,16 +373,46 @@ impl<
 
     /// Returns the digest of the given chunk
     fn hash(&mut self, chunk: &wire::Chunk) -> Digest {
+        self.hasher.reset();
         self.hasher.update(&chunk.sequencer);
-        self.hasher.update(&chunk.index.to_be_bytes());
+        self.hasher.update(&chunk.height.to_be_bytes());
+        self.hasher.update(&chunk.view.to_be_bytes());
         self.hasher.update(&chunk.payload);
-        self.hasher.update(&chunk.parent_digest);
-        self.hasher.update(&chunk.parent_threshold);
+        if let Some(parent) = &chunk.parent {
+            self.hasher.update(&parent.digest);
+            self.hasher.update(&parent.threshold);
+        }
         self.hasher.finalize()
     }
 
+    fn verify_ack(&mut self, ack: &wire::Ack) -> Option<PublicKey> {
+        let Some(identity) = self.coordinator.identity(ack.view) else {
+            error!("Failed to get identity for view {:?}", ack.view);
+            return None;
+        };
+        let Some(signers) = self.coordinator.signers(ack.view) else {
+            error!("Failed to get signers for view {:?}", ack.view);
+            return None;
+        };
+        let Some(partial): Option<Eval<group::Signature>> = Eval::deserialize(&ack.partial) else {
+            error!("Failed to deserialize partial signature");
+            return None;
+        };
+        let Some(public_key) = signers.get(partial.index as usize) else {
+            error!("Failed to get public key");
+            return None;
+        };
+        if let Err(e) =
+            ops::partial_verify_message(identity, Some(&self.ack_namespace), &ack.digest, &partial)
+        {
+            error!("Failed to verify partial signature: {:?}", e);
+            return None;
+        }
+        Some(public_key.clone())
+    }
+
     /// Returns true if the chunk is valid.
-    fn verify(&mut self, chunk: &wire::Chunk) -> bool {
+    fn verify_chunk(&mut self, chunk: &wire::Chunk) -> bool {
         // Verify the signature
         let digest = self.hash(chunk);
         if !C::verify(
@@ -393,14 +426,26 @@ impl<
         }
 
         // Verify the parent threshold signature
-        let public_key = match self.coordinator.identity(111) {
+        if chunk.height == 0 {
+            if chunk.parent.is_none() {
+                return true;
+            } else {
+                error!("Genesis chunk must not have a parent");
+                return false;
+            }
+        }
+        let Some(parent) = &chunk.parent else {
+            error!("Chunk must have a parent");
+            return false;
+        };
+        let public_key = match self.coordinator.identity(chunk.view) {
             Some(p) => poly::public(p),
             None => {
                 error!("Failed to get public key");
                 return false;
             }
         };
-        let signature = match G2::deserialize(&chunk.parent_threshold) {
+        let signature = match G2::deserialize(&parent.threshold) {
             Some(s) => s,
             None => {
                 error!("Failed to deserialize signature");
@@ -410,7 +455,7 @@ impl<
         match ops::verify_message(
             &public_key,
             Some(&self.ack_namespace),
-            &chunk.parent_digest,
+            &parent.digest,
             &signature,
         ) {
             Ok(()) => true,

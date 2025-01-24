@@ -8,7 +8,7 @@ use tracing::debug;
 
 use crate::{
     linked::{actors::signer, Context},
-    Acknowledgement as Z, Application as A, Broadcaster,
+    Application as A, Broadcaster, Collector as Z,
 };
 
 #[derive(Clone)]
