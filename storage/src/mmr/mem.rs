@@ -1,5 +1,4 @@
-//! A bare-bones MMR structure without pruning and where all nodes are hashes & maintained in
-//! memory within a single vector.
+//! A basic MMR where all nodes are stored in-memory.
 
 use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::{nodes_needing_parents, PathIterator, PeakIterator};
@@ -8,8 +7,12 @@ use crate::mmr::Error;
 use crate::mmr::Error::{ElementPruned, InvalidElementPosition};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
-/// Implementation of `Mmr`. The maximum number of elements that can be stored is usize::MAX
-/// (u32::MAX on 32 bit architectures).
+/// Implementation of `Mmr`.
+///
+/// # Max Capacity
+///
+/// The maximum number of elements that can be stored is usize::MAX
+/// (u32::MAX on 32-bit architectures).
 pub struct Mmr<H: CHasher> {
     hasher: H,
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
