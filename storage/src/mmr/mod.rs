@@ -67,3 +67,13 @@ mod hasher;
 mod iterator;
 pub mod mem;
 pub mod verification;
+
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("invalid element position")]
+    InvalidElementPosition,
+    #[error("requested element does not follow oldest known: {0}")]
+    ElementPruned(u64),
+}

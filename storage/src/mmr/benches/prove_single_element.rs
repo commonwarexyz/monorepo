@@ -35,7 +35,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                     |samples| {
                         let mut hasher = Sha256::new();
                         for (pos, element) in samples {
-                            let proof = mmr.proof(pos);
+                            let proof = mmr.proof(pos).unwrap();
                             assert!(proof.verify_element_inclusion(
                                 &element,
                                 pos,
