@@ -151,7 +151,8 @@ pub struct Context {
     /// Parent the payload is built on.
     ///
     /// Payloads from views between the current view and the parent view can never be
-    /// directly finalized (there must exist some nullification).
+    /// directly finalized. A nullification is required for each intermediate view
+    /// to safely vote on the current payload.
     pub parent: (View, Digest),
 }
 
