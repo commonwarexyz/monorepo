@@ -1,21 +1,18 @@
-use commonware_cryptography::{sha256, Digest, Hasher, Sha256};
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::mmr::mem::Mmr;
 use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, seq::SliceRandom, RngCore, SeedableRng};
+use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 
 const SAMPLE_SIZE: usize = 100;
 
 fn bench_prove_single_element(c: &mut Criterion) {
     for n in [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000] {
         // Populate MMR
-        const N: usize = sha256::DIGEST_LENGTH;
-        let mut mmr = Mmr::<Sha256, N>::new();
+        let mut mmr = Mmr::<Sha256>::new();
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         for _ in 0..n {
-            let mut digest = [0u8; N];
-            sampler.fill_bytes(&mut digest);
-            let element = Digest::from(digest);
+            let element = Sha256::random(&mut sampler);
             let pos = mmr.add(&element);
             elements.push((pos, element));
         }
