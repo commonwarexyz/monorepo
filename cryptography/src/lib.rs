@@ -5,6 +5,8 @@
 //! `commonware-cryptography` is **ALPHA** software and is not yet recommended for production use. Developers should
 //! expect breaking changes and occasional instability.
 
+use std::fmt::Debug;
+
 use bytes::Bytes;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
 
@@ -122,10 +124,6 @@ pub trait BatchScheme {
     fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool;
 }
 
-/// Byte array representing a hash digest.
-//pub type Digest = Bytes;
-pub type Digest<const N: usize> = [u8; N];
-
 /// Interface that commonware crates rely on for hashing.
 ///
 /// Hash functions in commonware primitives are not typically hardcoded
@@ -138,7 +136,20 @@ pub type Digest<const N: usize> = [u8; N];
 /// part of a struct that is cloned. In practice, implementations do not actually
 /// clone the hasher state but users should not rely on this behavior and call `reset`
 /// after cloning.
-pub trait Hasher<const N: usize>: Clone + Send + Sync + 'static {
+pub trait Hasher: Clone + Send + Sync + 'static {
+    type Digest: AsRef<[u8]>
+        + Clone
+        + Send
+        + Sync
+        + 'static
+        + Eq
+        + PartialEq
+        + Ord
+        + PartialOrd
+        + Debug;
+
+    const DIGEST_LENGTH: usize;
+
     /// Create a new hasher.
     fn new() -> Self;
 
@@ -147,7 +158,7 @@ pub trait Hasher<const N: usize>: Clone + Send + Sync + 'static {
 
     /// Hash all recorded data and reset the hasher
     /// to the initial state.
-    fn finalize(&mut self) -> Digest<N>;
+    fn finalize(&mut self) -> Self::Digest;
 
     /// Reset the hasher without generating a hash.
     ///
@@ -155,10 +166,9 @@ pub trait Hasher<const N: usize>: Clone + Send + Sync + 'static {
     fn reset(&mut self);
 
     /// Validate the digest.
-    fn validate(digest: &Digest<N>) -> bool;
+    fn validate(digest: &Self::Digest) -> bool;
 
-    /// Size of the digest in bytes.
-    fn len() -> usize;
+    fn from(data: &[u8]) -> Self::Digest;
 
     /// Generate a random digest.
     ///
@@ -166,14 +176,17 @@ pub trait Hasher<const N: usize>: Clone + Send + Sync + 'static {
     ///
     /// This function is typically used for testing and is not recommended
     /// for production use.
-    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Digest<N>;
+    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Self::Digest {
+        let mut digest = vec![0u8; Self::DIGEST_LENGTH];
+        rng.fill_bytes(&mut digest);
+        Self::from(&digest)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
-    use Sha256;
 
     fn test_validate<C: Scheme>() {
         let signer = C::new(&mut OsRng);
@@ -414,13 +427,13 @@ mod tests {
         assert_eq!(Secp256r1::len(), (33, 64));
     }
 
-    fn test_hasher_multiple_runs<H: Hasher<N>, const N: usize>() {
+    fn test_hasher_multiple_runs<H: Hasher>() {
         // Generate initial hash
         let mut hasher = H::new();
         hasher.update(b"hello world");
         let digest = hasher.finalize();
         assert!(H::validate(&digest));
-        assert_eq!(digest.len(), H::len());
+        assert_eq!(digest.as_ref().len(), H::DIGEST_LENGTH);
 
         // Reuse hasher without reset
         hasher.update(b"hello world");
@@ -443,7 +456,7 @@ mod tests {
         assert_ne!(digest, digest_mars);
     }
 
-    fn test_hasher_multiple_updates<H: Hasher<N>, const N: usize>() {
+    fn test_hasher_multiple_updates<H: Hasher>() {
         // Generate initial hash
         let mut hasher = H::new();
         hasher.update(b"hello");
@@ -459,13 +472,13 @@ mod tests {
         assert_eq!(digest, digest_oneshot);
     }
 
-    fn test_hasher_empty_input<H: Hasher<N>, const N: usize>() {
+    fn test_hasher_empty_input<H: Hasher>() {
         let mut hasher = H::new();
         let digest = hasher.finalize();
         assert!(H::validate(&digest));
     }
 
-    fn test_hasher_large_input<H: Hasher<N>, const N: usize>() {
+    fn test_hasher_large_input<H: Hasher>() {
         let mut hasher = H::new();
         let data = vec![1; 1024];
         hasher.update(&data);
@@ -475,21 +488,21 @@ mod tests {
 
     #[test]
     fn test_sha256_hasher_multiple_runs() {
-        test_hasher_multiple_runs::<Sha256, { sha256::DIGEST_LENGTH }>();
+        test_hasher_multiple_runs::<Sha256>();
     }
 
     #[test]
     fn test_sha256_hasher_multiple_updates() {
-        test_hasher_multiple_updates::<Sha256, { sha256::DIGEST_LENGTH }>();
+        test_hasher_multiple_updates::<Sha256>();
     }
 
     #[test]
     fn test_sha256_hasher_empty_input() {
-        test_hasher_empty_input::<Sha256, { sha256::DIGEST_LENGTH }>();
+        test_hasher_empty_input::<Sha256>();
     }
 
     #[test]
     fn test_sha256_hasher_large_input() {
-        test_hasher_large_input::<Sha256, { sha256::DIGEST_LENGTH }>();
+        test_hasher_large_input::<Sha256>();
     }
 }
