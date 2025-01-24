@@ -14,9 +14,9 @@ pub struct Mmr<H: CHasher> {
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
     // from the from tallest tree to shortest.
     nodes: Vec<Digest>,
-    // The position of the very oldest element still maintained by the MMR. Will be 0 unless
-    // forgetting has been invoked. If non-zero, then proofs can only be generated for elements with
-    // positions strictly after this point.
+    // The position of the oldest element still maintained by the MMR. Will be 0 unless forgetting
+    // has been invoked. If non-zero, then proofs can only be generated for elements with positions
+    // strictly after this point.
     oldest_remembered_pos: u64,
 }
 
@@ -36,8 +36,15 @@ impl<H: CHasher> Mmr<H> {
         }
     }
 
+    // Return the total number of nodes in the MMR, independent of any forgetting.
     pub fn size(&self) -> usize {
         self.nodes.len() + self.oldest_remembered_pos as usize
+    }
+
+    // Return the position of the oldest remembered node in the MMR. Proofs can only be generated
+    // for elements in ranges that follow this position.
+    pub fn oldest_remembered_node_pos(&self) -> u64 {
+        self.oldest_remembered_pos
     }
 
     /// Return a new iterator over the peaks of the MMR.
@@ -259,6 +266,7 @@ mod tests {
             let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
             assert!(nodes_needing_parents.len() <= peaks.len());
         }
+        assert_eq!(mmr.oldest_remembered_node_pos(), 0);
         assert_eq!(mmr.size(), 19, "mmr not of expected size");
         assert_eq!(
             leaves,
@@ -325,6 +333,7 @@ mod tests {
             11,
             "forget_max should forget to right-most leaf of leftmost peak"
         );
+        assert_eq!(mmr.oldest_remembered_node_pos(), 11);
         assert!(
             mmr.forget(12).is_err(),
             "forgetting too many nodes should fail"
