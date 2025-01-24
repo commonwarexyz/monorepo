@@ -1,2 +1,2 @@
 pub mod application;
-pub mod supervisor;
+pub mod coordinator;

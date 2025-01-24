@@ -404,7 +404,6 @@ name = "commonware-broadcast"
 version = "0.0.1"
 dependencies = [
  "bytes",
- "commonware-consensus",
  "commonware-cryptography",
  "commonware-macros",
  "commonware-p2p",

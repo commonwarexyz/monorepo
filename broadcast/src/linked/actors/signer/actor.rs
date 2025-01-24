@@ -1,13 +1,12 @@
 use super::{Config, Mailbox, Message};
 use crate::{
-    linked::{encoder, wire, Context},
-    Application,
+    linked::{encoder, wire, Context, Index},
+    Acknowledgement, Application, ThresholdCoordinator,
 };
 use bytes::Bytes;
-use commonware_consensus::{threshold_simplex::View, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{Element, Share, Signature, G2},
+        group::{Element, Share, G2},
         ops::{self},
         poly::{self, PartialSignature, Public},
     },
@@ -33,8 +32,9 @@ pub struct Actor<
     E: Spawner + Storage<B>,
     C: Scheme,
     H: Hasher,
-    A: Application<Context = Context, Proof = Bytes>,
-    S: ThresholdSupervisor<Seed = Signature, Index = View, Share = Share, Identity = Public>,
+    A: Application<Context = Context>,
+    Z: Acknowledgement<Context = Context, Proof = Bytes>,
+    S: ThresholdCoordinator<Index = Index, Share = Share, Identity = Public>,
 > {
     ////////////////////////////////////////
     // Constants
@@ -51,18 +51,19 @@ pub struct Actor<
     ////////////////////////////////////////
     // Threshold
     ////////////////////////////////////////
-    supervisor: S,
+    coordinator: S,
 
     ////////////////////////////////////////
     // Application Mailboxes
     ////////////////////////////////////////
     app: A,
+    acknowledgement: Z,
 
     ////////////////////////////////////////
     // Namespace Constants
     ////////////////////////////////////////
     ack_namespace: Vec<u8>,
-    car_namespace: Vec<u8>,
+    chunk_namespace: Vec<u8>,
 
     ////////////////////////////////////////
     // Messaging
@@ -73,12 +74,12 @@ pub struct Actor<
     // State
     ////////////////////////////////////////
 
-    // The most recently seen car for each lane.
-    // The car must have the threshold signature of its parent.
-    // Existence of the car implies:
-    // - The existence of the entire lane.
-    // - That the car has been signed by this actor.
-    tips: HashMap<PublicKey, (wire::Car, Evidence)>,
+    // The highest-index chunk for each sequencer.
+    // The chunk must have the threshold signature of its parent.
+    // Existence of the chunk implies:
+    // - The existence of the sequencer's entire chunk chain (from height zero)
+    // - That the chunk has been acked by this signer.
+    tips: HashMap<PublicKey, (wire::Chunk, Evidence)>,
 }
 
 impl<
@@ -86,22 +87,24 @@ impl<
         E: Spawner + Storage<B>,
         C: Scheme,
         H: Hasher,
-        A: Application<Context = Context, Proof = Bytes>,
-        S: ThresholdSupervisor<Seed = Signature, Index = View, Share = Share, Identity = Public>,
-    > Actor<B, E, C, H, A, S>
+        A: Application<Context = Context>,
+        Z: Acknowledgement<Context = Context, Proof = Bytes>,
+        S: ThresholdCoordinator<Index = Index, Share = Share, Identity = Public>,
+    > Actor<B, E, C, H, A, Z, S>
 {
-    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, S>) -> (Self, Mailbox) {
+    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, Z, S>) -> (Self, Mailbox) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_sender);
         let result = Self {
             runtime,
             crypto: cfg.crypto,
             hasher: cfg.hasher,
-            supervisor: cfg.supervisor,
-            journal: Some(journal),
+            coordinator: cfg.coordinator,
             app: cfg.app,
+            acknowledgement: cfg.acknowledgement,
+            journal: Some(journal),
             ack_namespace: encoder::ack_namespace(&cfg.namespace),
-            car_namespace: encoder::car_namespace(&cfg.namespace),
+            chunk_namespace: encoder::chunk_namespace(&cfg.namespace),
             mailbox_receiver,
             tips: HashMap::new(),
         };
@@ -111,10 +114,10 @@ impl<
 
     pub async fn run(
         mut self,
-        car_network: (impl Sender, impl Receiver),
+        chunk_network: (impl Sender, impl Receiver),
         ack_network: (impl Sender, impl Receiver),
     ) {
-        let (mut car_sender, mut car_receiver) = car_network;
+        let (mut chunk_sender, mut chunk_receiver) = chunk_network;
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.runtime.stopped();
 
@@ -130,21 +133,21 @@ impl<
                         .expect("unable to close journal");
                     return;
                 },
-                msg = car_receiver.recv() => {
+                msg = chunk_receiver.recv() => {
                     // Error handling
                     let Ok((sender, msg)) = msg else {
-                        error!("car_receiver failed");
+                        error!("chunk_receiver failed");
                         break;
                     };
-                    let Ok(car) = wire::Car::decode(msg) else {
-                        error!("Failed to decode car");
+                    let Ok(chunk) = wire::Chunk::decode(msg) else {
+                        error!("Failed to decode chunk");
                         continue;
                     };
-                    if sender != car.sequencer {
-                        error!("Received car from wrong sender");
+                    if sender != chunk.sequencer {
+                        error!("Received chunk from wrong sender");
                         continue;
                     };
-                    self.handle_car(&car, &mut ack_sender).await;
+                    self.handle_chunk(&chunk, &mut ack_sender).await;
                 },
                 msg = ack_receiver.recv() => {
                     // Error handling
@@ -169,7 +172,7 @@ impl<
                     };
                     match msg {
                         Message::Broadcast{ payload, result } => {
-                            self.broadcast(payload, result, &mut car_sender, &mut ack_sender).await;
+                            self.broadcast(payload, result, &mut chunk_sender, &mut ack_sender).await;
                         }
                     }
                 }
@@ -178,7 +181,7 @@ impl<
     }
 
     async fn handle_ack(&mut self, ack: &wire::Ack) {
-        // Get the current car and evidence
+        // Get the current Chunk and evidence
         let sequencer: Bytes = ack.sequencer.clone().into();
         let Some((_tip, evidence)) = self.tips.get_mut(&sequencer) else {
             // Return early if the ack doesn't match the tip
@@ -200,7 +203,7 @@ impl<
         partials.insert(ack.public_key.clone(), ack.signature.clone());
 
         // Return early if we don't have enough partials
-        let quorum = self.supervisor.identity(111).unwrap().required();
+        let quorum = self.coordinator.identity(111).unwrap().required();
         if partials.len() < quorum as usize {
             return;
         }
@@ -226,72 +229,74 @@ impl<
 
         // Emit the proof to the application
         let context = Context { sequencer, index };
-        self.app.broadcasted(context, digest, threshold).await;
+        self.acknowledgement
+            .acknowledged(context, digest, threshold)
+            .await;
     }
 
-    async fn handle_car(&mut self, car: &wire::Car, ack_sender: &mut impl Sender) {
-        // If car is at or behind the tip, ignore.
+    async fn handle_chunk(&mut self, chunk: &wire::Chunk, ack_sender: &mut impl Sender) {
+        // If Chunk is at or behind the tip, ignore.
         // This check is fast, so we do it before full validation.
-        if let Some((tip, _evidence)) = self.tips.get(&car.sequencer) {
-            if tip.index >= car.index {
+        if let Some((tip, _evidence)) = self.tips.get(&chunk.sequencer) {
+            if tip.index >= chunk.index {
                 return;
             }
         }
 
-        // Validate that the car is well-formed
-        if !self.verify(car) {
+        // Validate that the chunk is well-formed
+        if !self.verify(chunk) {
             return;
         }
 
-        // Validate the car with the application
+        // Validate the chunk with the application
         let context = Context {
-            sequencer: car.sequencer.clone(),
-            index: car.index,
+            sequencer: chunk.sequencer.clone(),
+            index: chunk.index,
         };
-        let result = self.app.verify(context, car.payload.clone()).await;
+        let result = self.app.verify(context, chunk.payload.clone()).await;
         match result.await {
             Ok(true) => {}
             Ok(false) => {
-                error!("Application rejected car");
+                error!("Application rejected chunk");
                 return;
             }
             Err(e) => {
-                error!("Failed to verify car with application: {:?}", e);
+                error!("Failed to verify chunk with application: {:?}", e);
                 return;
             }
         }
 
         // Emit evidence of parent to the application if the index is greater than 0
-        if car.index > 0 {
+        if chunk.index > 0 {
             let context = Context {
-                sequencer: car.sequencer.clone(),
-                index: car.index.checked_sub(1).unwrap(),
+                sequencer: chunk.sequencer.clone(),
+                index: chunk.index.checked_sub(1).unwrap(),
             };
-            self.app
-                .broadcasted(
+            self.acknowledgement
+                .acknowledged(
                     context,
-                    car.parent_digest.clone(),
-                    car.parent_threshold.clone(),
+                    chunk.parent_digest.clone(),
+                    chunk.parent_threshold.clone(),
                 )
                 .await;
         }
 
-        // Insert the car at the tip
-        let digest = self.hash(car);
+        // Insert the chunk at the tip
+        let digest = self.hash(chunk);
         self.tips.insert(
-            car.sequencer.clone(),
-            (car.clone(), Evidence::Partials(HashMap::new())),
+            chunk.sequencer.clone(),
+            (chunk.clone(), Evidence::Partials(HashMap::new())),
         );
 
-        // Create an ack for the car
-        let share = self.supervisor.share(111).unwrap();
+        // Create an ack for the chunk
+        let share = self.coordinator.share(111).unwrap();
         let partial_signature: Bytes =
             ops::partial_sign_message(share, Some(&self.ack_namespace), &digest)
                 .serialize()
                 .into();
         let ack = wire::Ack {
-            sequencer: car.sequencer.clone().to_vec(),
-            index: car.index,
+            sequencer: chunk.sequencer.clone().to_vec(),
+            index: chunk.index,
             digest: digest.to_vec().into(),
             public_key: self.crypto.public_key(),
             signature: partial_signature,
@@ -312,28 +317,28 @@ impl<
     /// Broadcast a message to the network.
     ///
     /// The result is returned to the caller via the provided channel.
-    /// The broadcast is only successful if the parent car and threshold signature are known.
+    /// The broadcast is only successful if the parent Chunk and threshold signature are known.
     async fn broadcast(
         &mut self,
         payload: Bytes,
         result: oneshot::Sender<bool>,
-        car_sender: &mut impl Sender,
+        chunk_sender: &mut impl Sender,
         ack_sender: &mut impl Sender,
     ) {
         let public_key = self.crypto.public_key();
 
-        // Get parent car and threshold signature, otherwise return.
+        // Get parent Chunk and threshold signature, otherwise return.
         let (parent, parent_threshold) = match self.tips.get(&public_key) {
-            Some((car, Evidence::Threshold(threshold))) => (car.clone(), threshold.clone()),
+            Some((chunk, Evidence::Threshold(threshold))) => (chunk.clone(), threshold.clone()),
             None | Some((_, Evidence::Partials(_))) => {
                 let _ = result.send(false);
                 return;
             }
         };
 
-        // Construct new car.
+        // Construct new chunk
         let parent_digest = self.hash(&parent);
-        let mut car = wire::Car {
+        let mut chunk = wire::Chunk {
             sequencer: public_key,
             index: parent.index.checked_add(1).unwrap(),
             payload,
@@ -343,18 +348,18 @@ impl<
         };
 
         // Construct full signature
-        let plate = self.hash(&car);
-        car.signature = self.crypto.sign(Some(&self.car_namespace), &plate);
+        let digest = self.hash(&chunk);
+        chunk.signature = self.crypto.sign(Some(&self.chunk_namespace), &digest);
 
-        // Deal with the car as if it were received over the network
-        self.handle_car(&car, ack_sender).await;
+        // Deal with the chunk as if it were received over the network
+        self.handle_chunk(&chunk, ack_sender).await;
 
         // Broadcast to network
-        if let Err(e) = car_sender
-            .send(Recipients::All, car.encode_to_vec().into(), false)
+        if let Err(e) = chunk_sender
+            .send(Recipients::All, chunk.encode_to_vec().into(), false)
             .await
         {
-            error!("Failed to send car: {:?}", e);
+            error!("Failed to send chunk: {:?}", e);
             let _ = result.send(false);
             return;
         }
@@ -363,39 +368,39 @@ impl<
         let _ = result.send(true);
     }
 
-    /// Returns the digest of the given car.
-    fn hash(&mut self, car: &wire::Car) -> Digest {
-        self.hasher.update(&car.sequencer);
-        self.hasher.update(&car.index.to_be_bytes());
-        self.hasher.update(&car.payload);
-        self.hasher.update(&car.parent_digest);
-        self.hasher.update(&car.parent_threshold);
+    /// Returns the digest of the given chunk
+    fn hash(&mut self, chunk: &wire::Chunk) -> Digest {
+        self.hasher.update(&chunk.sequencer);
+        self.hasher.update(&chunk.index.to_be_bytes());
+        self.hasher.update(&chunk.payload);
+        self.hasher.update(&chunk.parent_digest);
+        self.hasher.update(&chunk.parent_threshold);
         self.hasher.finalize()
     }
 
-    /// Returns true if the car is valid.
-    fn verify(&mut self, car: &wire::Car) -> bool {
+    /// Returns true if the chunk is valid.
+    fn verify(&mut self, chunk: &wire::Chunk) -> bool {
         // Verify the signature
-        let digest = self.hash(car);
+        let digest = self.hash(chunk);
         if !C::verify(
-            Some(&self.car_namespace),
+            Some(&self.chunk_namespace),
             &digest,
-            &car.sequencer,
-            &car.signature,
+            &chunk.sequencer,
+            &chunk.signature,
         ) {
             error!("Failed to verify signature");
             return false;
         }
 
         // Verify the parent threshold signature
-        let public_key = match self.supervisor.identity(111) {
+        let public_key = match self.coordinator.identity(111) {
             Some(p) => poly::public(p),
             None => {
                 error!("Failed to get public key");
                 return false;
             }
         };
-        let signature = match G2::deserialize(&car.parent_threshold) {
+        let signature = match G2::deserialize(&chunk.parent_threshold) {
             Some(s) => s,
             None => {
                 error!("Failed to deserialize signature");
@@ -405,7 +410,7 @@ impl<
         match ops::verify_message(
             &public_key,
             Some(&self.ack_namespace),
-            &car.parent_digest,
+            &chunk.parent_digest,
             &signature,
         ) {
             Ok(()) => true,

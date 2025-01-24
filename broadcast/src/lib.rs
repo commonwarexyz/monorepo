@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, PublicKey};
 use futures::channel::oneshot;
 use thiserror::Error;
 
@@ -39,10 +39,6 @@ pub trait Application: Send + 'static {
     /// This includes things like the sequencer, height, parent, etc.
     type Context;
 
-    // Proof is the proof of broadcast.
-    // This may be something like a threshold signature.
-    type Proof;
-
     /// Verify and store (long-term storage) a proposed payload received from the network.
     ///
     /// If it is possible to verify the payload, a boolean should be returned indicating whether
@@ -52,12 +48,38 @@ pub trait Application: Send + 'static {
         context: Self::Context,
         payload: Digest,
     ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+}
+
+pub trait Acknowledgement: Send + 'static {
+    type Context;
+
+    // Proof is the proof of acknowledgement.
+    // This may be something like a threshold signature.
+    type Proof;
 
     /// Event that a payload has been successfully broadcasted to a threshold of signers in the network.
-    fn broadcasted(
+    fn acknowledged(
         &mut self,
         context: Self::Context,
         payload: Digest,
         proof: Self::Proof,
     ) -> impl Future<Output = ()> + Send;
+}
+
+pub trait Coordinator: Clone + Send + Sync + 'static {
+    type Index;
+
+    fn sequencers(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
+    fn is_sequencer(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
+
+    fn signers(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
+    fn is_signer(&self, index: Self::Index, candidate: &PublicKey) -> Option<u32>;
+}
+
+pub trait ThresholdCoordinator: Coordinator {
+    type Identity;
+    type Share;
+
+    fn identity(&self, index: Self::Index) -> Option<&Self::Identity>;
+    fn share(&self, index: Self::Index) -> Option<&Self::Share>;
 }

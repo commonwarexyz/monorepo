@@ -33,7 +33,6 @@ mod tests {
     use commonware_storage::journal::{self, Journal};
     use commonware_utils::hex;
     use prometheus_client::registry::Registry;
-    use tracing::debug;
 
     /// Registers all validators using the oracle.
     async fn register_validators(
@@ -146,9 +145,9 @@ mod tests {
 
                 // Create engines
                 for validator in validators.iter() {
-                    // Supervisor
+                    // Coordinator
                     let share = shares.remove(validator).unwrap();
-                    let supervisor = mocks::supervisor::Supervisor::new(
+                    let coordinator = mocks::coordinator::Coordinator::new(
                         identity.clone(),
                         validators.clone(),
                         share,
@@ -175,7 +174,8 @@ mod tests {
                         signer::Config {
                             crypto: scheme.clone(),
                             app: app_mailbox.clone(),
-                            supervisor,
+                            acknowledgement: app_mailbox.clone(),
+                            coordinator,
                             mailbox_size: 1,
                             hasher: Sha256::default(),
                             namespace: b"test".to_vec(),
@@ -185,8 +185,13 @@ mod tests {
                     // Run the actors
                     runtime.spawn("app", async move { app.run(signer_mailbox).await });
                     let ((a1, a2), (b1, b2)) = registrations.remove(validator).unwrap();
-                    runtime.spawn("signer", signer.run((a1, a2), (b1, b2)));
+                    runtime.spawn(
+                        "signer",
+                        async move { signer.run((a1, a2), (b1, b2)).await },
+                    );
                 }
+
+                // TODO: remove
                 runtime.sleep(Duration::from_secs(10)).await;
                 panic!("Done");
             }

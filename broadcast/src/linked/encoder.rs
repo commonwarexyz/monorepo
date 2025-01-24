@@ -7,6 +7,6 @@ pub fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, ACK_SUFFIX)
 }
 
-pub fn car_namespace(namespace: &[u8]) -> Vec<u8> {
+pub fn chunk_namespace(namespace: &[u8]) -> Vec<u8> {
     union(namespace, CAR_SUFFIX)
 }

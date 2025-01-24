@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
@@ -7,7 +8,7 @@ use tracing::debug;
 
 use crate::{
     linked::{actors::signer, Context},
-    Application as A, Broadcaster,
+    Acknowledgement as Z, Application as A, Broadcaster,
 };
 
 #[derive(Clone)]
@@ -22,6 +23,7 @@ impl Mailbox {
 }
 
 impl A for Mailbox {
+    type Context = Context;
     async fn verify(
         &mut self,
         _context: Self::Context,
@@ -33,19 +35,19 @@ impl A for Mailbox {
             .expect("Failed to send verification result");
         receiver
     }
+}
 
-    async fn broadcasted(
+impl Z for Mailbox {
+    type Context = Context;
+    type Proof = Bytes;
+    async fn acknowledged(
         &mut self,
         _context: Self::Context,
-        _payload: commonware_cryptography::Digest,
+        _payload: Digest,
         _proof: Self::Proof,
     ) {
-        debug!("Broadcasted payload");
+        debug!("acknowledged");
     }
-
-    type Context = Context;
-
-    type Proof = Bytes;
 }
 
 pub struct Application {
