@@ -160,7 +160,7 @@ fn peak_hash_from_range<'a, H: CHasher>(
 #[cfg(test)]
 mod tests {
     use crate::mmr::mem::Mmr;
-    use commonware_cryptography::{Hasher as CHasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Hasher as CHasher, Sha256, Validator};
 
     #[test]
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
@@ -169,7 +169,8 @@ mod tests {
     fn test_verify_element() {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
         let mut mmr = Mmr::<Sha256>::new();
-        let element: <Sha256 as CHasher>::Digest = core::array::from_fn(|i| (i % 7) as u8);
+        let element: [u8; size_of::<Digest>()] = core::array::from_fn(|i| (i % 7) as u8);
+        let element = Digest::from(element);
         let mut leaves: Vec<u64> = Vec::new();
         for _ in 0..11 {
             leaves.push(mmr.add(&element));
@@ -204,20 +205,20 @@ mod tests {
         );
         assert!(
             !proof.verify_element_inclusion(
-                &<Sha256 as CHasher>::from(&[0u8; Sha256::DIGEST_LENGTH]),
+                &Digest::from([0u8; size_of::<Digest>()]),
                 POS,
                 &root_hash,
                 &mut hasher
             ),
             "proof verification should fail with mangled element"
         );
-        let root_hash2 = <Sha256 as CHasher>::from(&[0u8; Sha256::DIGEST_LENGTH]);
+        let root_hash2 = Digest::from([0u8; size_of::<Digest>()]);
         assert!(
             !proof.verify_element_inclusion(&element, POS, &root_hash2, &mut hasher),
             "proof verification should fail with mangled root_hash"
         );
         let mut proof2 = proof.clone();
-        proof2.hashes[0] = <Sha256 as CHasher>::from(&[0u8; Sha256::DIGEST_LENGTH]);
+        proof2.hashes[0] = Digest::from([0u8; size_of::<Digest>()]);
         assert!(
             !proof2.verify_element_inclusion(&element, POS, &root_hash, &mut hasher),
             "proof verification should fail with mangled proof hash"
@@ -229,9 +230,7 @@ mod tests {
             "proof verification should fail with incorrect size"
         );
         proof2 = proof.clone();
-        proof2
-            .hashes
-            .push(<Sha256 as CHasher>::from(&[0u8; Sha256::DIGEST_LENGTH]));
+        proof2.hashes.push(Digest::from([0u8; size_of::<Digest>()]));
         assert!(
             !proof2.verify_element_inclusion(&element, POS, &root_hash, &mut hasher),
             "proof verification should fail with extra hash"
@@ -251,9 +250,7 @@ mod tests {
             .hashes
             .extend(proof.hashes[0..PEAK_COUNT - 1].iter().cloned());
         // sneak in an extra hash that won't be used in the computation and make sure it's detected
-        proof2
-            .hashes
-            .push(<Sha256 as CHasher>::from(&[0u8; Sha256::DIGEST_LENGTH]));
+        proof2.hashes.push(Digest::from([0u8; size_of::<Digest>()]));
         proof2
             .hashes
             .extend(proof.hashes[PEAK_COUNT - 1..].iter().cloned());
@@ -270,7 +267,7 @@ mod tests {
         let mut elements = Vec::<<Sha256 as CHasher>::Digest>::new();
         let mut element_positions = Vec::<u64>::new();
         for i in 0..49 {
-            elements.push(<Sha256 as CHasher>::from(&[i as u8; Sha256::DIGEST_LENGTH]));
+            elements.push(Digest::from([i as u8; size_of::<Digest>()]));
             element_positions.push(mmr.add(elements.last().unwrap()));
         }
         // test range proofs over all possible ranges of at least 2 elements
@@ -346,21 +343,21 @@ mod tests {
             }
         }
         // confirm proof fails with invalid root hash
-        let mut invalid_root_hash = vec![0; Sha256::DIGEST_LENGTH];
+        let mut invalid_root_hash = vec![0; size_of::<Digest>()];
         invalid_root_hash[29] = root_hash[29] + 1;
         assert!(
             !range_proof.verify_range_inclusion(
                 valid_elements,
                 start_pos,
                 end_pos,
-                &<Sha256 as CHasher>::from(&invalid_root_hash),
+                &Digest::validate(&invalid_root_hash).unwrap(),
                 &mut hasher,
             ),
             "range proof with invalid proof should fail"
         );
         // mangle the proof and confirm it fails
         let mut invalid_proof = range_proof.clone();
-        invalid_proof.hashes[1] = <Sha256 as CHasher>::from(&[0u8; Sha256::DIGEST_LENGTH]);
+        invalid_proof.hashes[1] = Digest::from([0u8; size_of::<Digest>()]);
         assert!(
             !invalid_proof.verify_range_inclusion(
                 valid_elements,
@@ -376,7 +373,7 @@ mod tests {
             let mut invalid_proof = range_proof.clone();
             invalid_proof
                 .hashes
-                .insert(i, <Sha256 as CHasher>::from(&[0u8; Sha256::DIGEST_LENGTH]));
+                .insert(i, Digest::from([0u8; size_of::<Digest>()]));
             assert!(
                 !invalid_proof.verify_range_inclusion(
                     valid_elements,

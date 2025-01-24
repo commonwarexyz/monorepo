@@ -57,7 +57,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
 
 #[cfg(test)]
 mod tests {
-    use commonware_cryptography::{Hasher as CHasher, Sha256};
+    use commonware_cryptography::{Hasher as CHasher, Sha256, Validator};
 
     #[test]
     fn test_leaf_hash_sha256() {
@@ -78,13 +78,13 @@ mod tests {
         let mut hasher = H::new();
         let mut mmr_hasher = super::Hasher::new(&mut hasher);
         // input hashes to use
-        let hash1 = H::from(&vec![1u8; H::DIGEST_LENGTH]);
-        let hash2 = H::from(&vec![2u8; H::DIGEST_LENGTH]);
+        let hash1 = H::Digest::validate(&vec![1u8; size_of::<H::Digest>()]).unwrap();
+        let hash2 = H::Digest::validate(&vec![2u8; size_of::<H::Digest>()]).unwrap();
 
         let out = mmr_hasher.leaf_hash(0, &hash1);
         assert_ne!(
             out,
-            H::from(&vec![0u8; H::DIGEST_LENGTH]),
+            H::Digest::validate(&vec![0u8; size_of::<H::Digest>()]).unwrap(),
             "hash should be non-zero"
         );
 
@@ -103,14 +103,14 @@ mod tests {
         let mut mmr_hasher = super::Hasher::new(&mut hasher);
         // input hashes to use
 
-        let hash1 = H::from(&vec![1u8; H::DIGEST_LENGTH]);
-        let hash2 = H::from(&vec![2u8; H::DIGEST_LENGTH]);
-        let hash3 = H::from(&vec![3u8; H::DIGEST_LENGTH]);
+        let hash1 = H::Digest::validate(&vec![1u8; size_of::<H::Digest>()]).unwrap();
+        let hash2 = H::Digest::validate(&vec![2u8; size_of::<H::Digest>()]).unwrap();
+        let hash3 = H::Digest::validate(&vec![3u8; size_of::<H::Digest>()]).unwrap();
 
         let out = mmr_hasher.node_hash(0, &hash1, &hash2);
         assert_ne!(
             out,
-            H::from(&vec![0u8; H::DIGEST_LENGTH]),
+            H::Digest::validate(&vec![0u8; size_of::<H::Digest>()]).unwrap(),
             "hash should be non-zero"
         );
 
@@ -143,16 +143,16 @@ mod tests {
         let mut hasher = H::new();
         let mut mmr_hasher = super::Hasher::new(&mut hasher);
         // input hashes to use
-        let hash1 = H::from(&vec![1u8; H::DIGEST_LENGTH]);
-        let hash2 = H::from(&vec![2u8; H::DIGEST_LENGTH]);
-        let hash3 = H::from(&vec![3u8; H::DIGEST_LENGTH]);
-        let hash4 = H::from(&vec![4u8; H::DIGEST_LENGTH]);
+        let hash1 = H::Digest::validate(&vec![1u8; size_of::<H::Digest>()]).unwrap();
+        let hash2 = H::Digest::validate(&vec![2u8; size_of::<H::Digest>()]).unwrap();
+        let hash3 = H::Digest::validate(&vec![3u8; size_of::<H::Digest>()]).unwrap();
+        let hash4 = H::Digest::validate(&vec![4u8; size_of::<H::Digest>()]).unwrap();
 
         let empty_vec: Vec<H::Digest> = Vec::new();
         let empty_out = mmr_hasher.root_hash(0, empty_vec.iter());
         assert_ne!(
             empty_out,
-            H::from(&vec![0u8; H::DIGEST_LENGTH]),
+            H::Digest::validate(&vec![0u8; size_of::<H::Digest>()]).unwrap(),
             "root hash of empty MMR should be non-zero"
         );
 
@@ -160,7 +160,7 @@ mod tests {
         let out = mmr_hasher.root_hash(10, vec.iter());
         assert_ne!(
             out,
-            H::from(&vec![0u8; H::DIGEST_LENGTH]),
+            H::Digest::validate(&vec![0u8; size_of::<H::Digest>()]).unwrap(),
             "root hash should be non-zero"
         );
         assert_ne!(out, empty_out, "root hash should differ from empty MMR");

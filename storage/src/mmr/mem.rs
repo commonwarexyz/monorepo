@@ -156,7 +156,7 @@ mod tests {
     use crate::mmr::hasher::Hasher;
     use crate::mmr::iterator::nodes_needing_parents;
     use crate::mmr::mem::Mmr;
-    use commonware_cryptography::Sha256;
+    use commonware_cryptography::{sha256::Digest, Sha256};
 
     #[test]
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
@@ -170,8 +170,8 @@ mod tests {
             "empty iterator should have no peaks"
         );
 
-        let element = core::array::from_fn(|i| (i % 7) as u8);
-        //from_static(b"01234567012345670123456701234567");
+        let element: [u8; size_of::<Digest>()] = core::array::from_fn(|i| (i % 7) as u8);
+        let element = Digest::from(element);
         let mut leaves: Vec<u64> = Vec::new();
         for _ in 0..11 {
             leaves.push(mmr.add(&element));
