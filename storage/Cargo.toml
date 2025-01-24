@@ -11,6 +11,7 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
 documentation = "https://docs.rs/commonware-storage"
 
 [dependencies]
+bytes = { workspace = true }
 commonware-cryptography = {workspace = true}
 cfg-if = { workspace = true }
 thiserror = { workspace = true }
