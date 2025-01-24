@@ -95,9 +95,10 @@
         // Toggle function to switch between expanding/collapsing all <details> elements
         function updateExpandButton() {
             const expandBtn = document.getElementById('toggle-expand');
-            // If *any* detail is open, switch to "collapse all"
-            const anyOpen = Array.from(document.querySelectorAll('details')).some(d => d.open);
-            expandBtn.textContent = anyOpen ? 'collapse all' : 'expand all';
+            const detailsList = document.querySelectorAll('details');
+            const anyOpen = Array.from(detailsList).some(d => d.open);
+            const benchmarkCount = document.querySelectorAll('details.benchmark-graph-details').length;
+            expandBtn.textContent = anyOpen ? `collapse all (${benchmarkCount})` : `expand all (${benchmarkCount})`;
         }
 
         // Toggle function to expand all <details> elements
@@ -358,7 +359,11 @@
                 }
             }
 
+            // Render all charts
             renderAllCharts(init());
+
+            // Update buttons
+            updateExpandButton();
         };
     </script>
     <script src="https://commonwarexyz.github.io/benchmarks/data.js" onload="setupBenchmark()"></script>
