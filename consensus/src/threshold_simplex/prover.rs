@@ -79,10 +79,8 @@ impl<H: Hasher> Prover<H> {
         partial_signature: &Signature,
     ) -> Proof {
         // Setup proof
-        let len = (size_of::<u64>() + size_of::<u64>())
-            .checked_add(proposal.payload.len())
-            .and_then(|len| len.checked_add(partial_signature.len()))
-            .expect("proposal proof overflow");
+        let len =
+            size_of::<u64>() + size_of::<u64>() + proposal.payload.len() + partial_signature.len();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -100,9 +98,8 @@ impl<H: Hasher> Prover<H> {
     ) -> Option<(View, View, Digest, Verifier)> {
         // Ensure proof is big enough
         let digest_len = H::len();
-        let expected_len = (size_of::<u64>() + size_of::<u64>())
-            .checked_add(digest_len)?
-            .checked_add(poly::PARTIAL_SIGNATURE_LENGTH)?;
+        let expected_len =
+            size_of::<u64>() + size_of::<u64>() + digest_len + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
         }
@@ -140,11 +137,11 @@ impl<H: Hasher> Prover<H> {
         seed: &Signature,
     ) -> Proof {
         // Setup proof
-        let len = (size_of::<u64>() + size_of::<u64>())
-            .checked_add(proposal.payload.len())
-            .and_then(|len| len.checked_add(group::SIGNATURE_LENGTH))
-            .and_then(|len| len.checked_add(group::SIGNATURE_LENGTH))
-            .expect("threshold proof overflow");
+        let len = size_of::<u64>()
+            + size_of::<u64>()
+            + proposal.payload.len()
+            + group::SIGNATURE_LENGTH
+            + group::SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -164,10 +161,11 @@ impl<H: Hasher> Prover<H> {
     ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
         // Ensure proof prefix is big enough
         let digest_len = H::len();
-        let expected_len = (size_of::<u64>() + size_of::<u64>())
-            .checked_add(digest_len)?
-            .checked_add(group::SIGNATURE_LENGTH)?
-            .checked_add(group::SIGNATURE_LENGTH)?;
+        let expected_len = size_of::<u64>()
+            + size_of::<u64>()
+            + digest_len
+            + group::SIGNATURE_LENGTH
+            + group::SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
         }

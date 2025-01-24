@@ -46,7 +46,11 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         signature: &Signature,
     ) -> Proof {
         // Setup proof
-        let len = 8 + 8 + proposal.payload.len() + public_key.len() + signature.len();
+        let len = size_of::<u64>()
+            + size_of::<u64>()
+            + proposal.payload.len()
+            + public_key.len()
+            + signature.len();
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -67,7 +71,9 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        if proof.len() != 8 + 8 + digest_len + public_key_len + signature_len {
+        if proof.len()
+            != size_of::<u64>() + size_of::<u64>() + digest_len + public_key_len + signature_len
+        {
             return None;
         }
 
@@ -106,10 +112,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     ) -> Proof {
         // Setup proof
         let (public_key_len, signature_len) = C::len();
-        let len = 8
-            + 8
+        let len = size_of::<u64>()
+            + size_of::<u64>()
             + proposal.payload.len()
-            + 4
+            + size_of::<u32>()
             + signatures.len() * (public_key_len + signature_len);
 
         // Encode proof
@@ -134,7 +140,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
         // Ensure proof prefix is big enough
         let digest_len = H::len();
-        let len = 8 + 8 + digest_len + 4;
+        let len = size_of::<u64>() + size_of::<u64>() + digest_len + size_of::<u32>();
         if proof.len() < len {
             return None;
         }
@@ -154,11 +160,11 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let (public_key_len, signature_len) = C::len();
         let item_size = public_key_len.checked_add(signature_len)?;
         let total_size = count.checked_mul(item_size)?;
-        
-        // Decode signatures
         if proof.remaining() != total_size {
             return None;
         }
+
+        // Decode signatures
         let mut seen = HashSet::with_capacity(count);
         for _ in 0..count {
             // Check if already saw public key
@@ -234,8 +240,14 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Setup proof
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        let len =
-            8 + public_key_len + 8 + digest_len + signature_len + 8 + digest_len + signature_len;
+        let len = size_of::<u64>()
+            + public_key_len
+            + size_of::<u64>()
+            + digest_len
+            + signature_len
+            + size_of::<u64>()
+            + digest_len
+            + signature_len;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -258,8 +270,14 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        let len =
-            8 + public_key_len + 8 + digest_len + signature_len + 8 + digest_len + signature_len;
+        let len = size_of::<u64>()
+            + public_key_len
+            + size_of::<u64>()
+            + digest_len
+            + signature_len
+            + size_of::<u64>()
+            + digest_len
+            + signature_len;
         if proof.len() != len {
             return None;
         }
@@ -376,7 +394,12 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Setup proof
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        let len = 8 + public_key_len + 8 + digest_len + signature_len + signature_len;
+        let len = size_of::<u64>()
+            + public_key_len
+            + size_of::<u64>()
+            + digest_len
+            + signature_len
+            + signature_len;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -398,7 +421,12 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Ensure proof is big enough
         let digest_len = H::len();
         let (public_key_len, signature_len) = C::len();
-        let len = 8 + public_key_len + 8 + digest_len + signature_len + signature_len;
+        let len = size_of::<u64>()
+            + public_key_len
+            + size_of::<u64>()
+            + digest_len
+            + signature_len
+            + signature_len;
         if proof.len() != len {
             return None;
         }
@@ -442,97 +470,59 @@ mod tests {
     use commonware_cryptography::{Ed25519, Sha256};
 
     #[test]
-    fn test_deserialize_aggregation_overflow() {
+    fn test_deserialize_aggregation_empty() {
+        // Create a proof with no signers
         let prover = Prover::<Ed25519, Sha256>::new(b"test");
-        
-        // Create a proof with a very large count that would cause overflow
-        let mut proof = Vec::new();
-        proof.put_u64(1); // view
-        proof.put_u64(0); // parent
-        proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
-        proof.put_u32(u32::MAX); // count - this would cause overflow when multiplied by signature size
-        
-        let result = Prover::<Ed25519, Sha256>::deserialize_aggregation(
-            proof.into(),
-            u32::MAX,
-            false,
-            &prover.notarize_namespace,
-        );
-        assert!(result.is_none(), "Should return None on potential overflow");
-    }
-
-    #[test]
-    fn test_deserialize_aggregation_valid() {
-        let prover = Prover::<Ed25519, Sha256>::new(b"test");
-        
-        // Create a proof with a reasonable count
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
         proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
         proof.put_u32(0); // count of 0 signatures is valid
-        
+
+        // Verify that the proof is accepted
         let result = Prover::<Ed25519, Sha256>::deserialize_aggregation(
             proof.into(),
             10,
             false,
             &prover.notarize_namespace,
         );
-        assert!(result.is_some(), "Should handle valid proof with 0 signatures");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_deserialize_aggregation_short_header() {
+        // Create a proof with incorrect signers
+        let mut proof = Vec::new();
+        proof.put_u64(1); // view
+        proof.put_u64(0); // parent
+        proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
+
+        // Verify that the proof is rejected
+        let result = Prover::<Ed25519, Sha256>::deserialize_aggregation(
+            proof.into(),
+            u32::MAX, // Allow any count to test overflow protection
+            false,
+            &notarize_namespace(b"test"),
+        );
+        assert!(result.is_none());
     }
 
     #[test]
     fn test_deserialize_aggregation_malicious_count() {
-        // Create a proof with a maliciously crafted count that would cause overflow
-        // when multiplied by (public_key_len + signature_len)
+        // Create a proof with incorrect signers
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
         proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
-        
-        // Calculate a count that would cause overflow
-        // If public_key_len + signature_len = k, we want count such that
-        // count * k > usize::MAX
-        let (public_key_len, signature_len) = Ed25519::len();
-        let item_size = public_key_len + signature_len;
-        let malicious_count = (usize::MAX / item_size) + 1;
-        proof.put_u32(malicious_count as u32);
-        
-        // Add some signature data (doesn't need to be valid since overflow check happens first)
-        proof.extend_from_slice(&vec![0; 100]);
-        
-        let result = Prover::<Ed25519, Sha256>::deserialize_aggregation(
-            proof.into(),
-            u32::MAX, // Allow any count to test overflow protection
-            false,
-            &notarize_namespace(b"test"),
-        );
-        assert!(result.is_none(), "Should return None on malicious count that would cause overflow");
-    }
+        proof.put_u32(100);
 
-    #[test]
-    fn test_deserialize_aggregation_max_valid_count() {
-        // Create a proof with the maximum valid count that won't cause overflow
-        let mut proof = Vec::new();
-        proof.put_u64(1); // view
-        proof.put_u64(0); // parent
-        proof.extend_from_slice(&vec![0; Sha256::len()]); // payload
-        
-        // Calculate maximum safe count
-        let (public_key_len, signature_len) = Ed25519::len();
-        let item_size = public_key_len + signature_len;
-        let max_safe_count = usize::MAX / item_size;
-        proof.put_u32(max_safe_count as u32);
-        
-        // Add exactly the right amount of signature data
-        proof.extend_from_slice(&vec![0; max_safe_count * item_size]);
-        
+        // Verify that the proof is rejected
         let result = Prover::<Ed25519, Sha256>::deserialize_aggregation(
             proof.into(),
             u32::MAX, // Allow any count to test overflow protection
             false,
             &notarize_namespace(b"test"),
         );
-        assert!(result.is_some(), "Should accept maximum valid count that doesn't cause overflow");
+        assert!(result.is_none());
     }
 }
