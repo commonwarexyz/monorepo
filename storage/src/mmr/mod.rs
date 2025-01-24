@@ -74,4 +74,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("invalid element position")]
     InvalidElementPosition,
+    #[error("requested element does not follow oldest known: {0}")]
+    ElementPruned(u64),
 }

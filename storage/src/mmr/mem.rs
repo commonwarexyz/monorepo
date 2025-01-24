@@ -5,10 +5,11 @@ use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::{nodes_needing_parents, PathIterator, PeakIterator};
 use crate::mmr::verification::Proof;
 use crate::mmr::Error;
-use crate::mmr::Error::InvalidElementPosition;
+use crate::mmr::Error::{ElementPruned, InvalidElementPosition};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
-/// Implementation of `Mmr`.
+/// Implementation of `Mmr`. The maximum number of elements that can be stored is usize::MAX
+/// (u32::MAX on 32 bit architectures).
 pub struct Mmr<H: CHasher> {
     hasher: H,
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
@@ -36,31 +37,31 @@ impl<H: CHasher> Mmr<H> {
         }
     }
 
-    // Return the total number of nodes in the MMR, independent of any forgetting.
-    pub fn size(&self) -> usize {
-        self.nodes.len() + self.oldest_remembered_pos as usize
+    /// Return the total number of nodes in the MMR, independent of any forgetting.
+    pub fn size(&self) -> u64 {
+        self.nodes.len() as u64 + self.oldest_remembered_pos
     }
 
-    // Return the position of the oldest remembered node in the MMR. Proofs can only be generated
-    // for elements in ranges that follow this position.
+    /// Return the position of the oldest remembered node in the MMR. Proofs can only be generated
+    /// for elements in ranges that follow this position.
     pub fn oldest_remembered_node_pos(&self) -> u64 {
         self.oldest_remembered_pos
     }
 
     /// Return a new iterator over the peaks of the MMR.
     fn peak_iterator(&self) -> PeakIterator {
-        PeakIterator::new(self.size() as u64)
+        PeakIterator::new(self.size())
     }
 
-    // Return the position of the element given its index in the current nodes vector.
-    fn index_to_pos(&self, index: usize) -> u64 {
-        index as u64 + self.oldest_remembered_pos
+    /// Return the position of the element given its index in the current nodes vector.
+    fn index_to_pos(&self, index: u64) -> u64 {
+        index + self.oldest_remembered_pos
     }
 
     /// Add an element to the MMR and return its position in the MMR.
     pub fn add(&mut self, element: &Digest) -> u64 {
         let peaks = nodes_needing_parents(self.peak_iterator());
-        let element_pos = self.index_to_pos(self.nodes.len());
+        let element_pos = self.index_to_pos(self.nodes.len() as u64);
         let hasher = &mut Hasher::new(&mut self.hasher);
 
         // Insert the element into the MMR as a leaf.
@@ -82,26 +83,26 @@ impl<H: CHasher> Mmr<H> {
         let peaks = self
             .peak_iterator()
             .map(|(peak_pos, _)| &self.nodes[(peak_pos - self.oldest_remembered_pos) as usize]);
-        let size = self.size() as u64;
+        let size = self.size();
         Hasher::new(&mut self.hasher).root_hash(size, peaks)
     }
 
-    /// Return an inclusion proof for the specified element. Returns `InvalidElementPosition` error
-    /// if the requested element is not currently stored by this MMR.
+    /// Return an inclusion proof for the specified element. Returns `ElementPruned` error if the
+    /// requested element is not currently stored by this MMR.
     pub fn proof(&self, element_pos: u64) -> Result<Proof, Error> {
         self.range_proof(element_pos, element_pos)
     }
 
-    // Return an inclusion proof for the specified range of elements. The range is inclusive of both
-    // endpoints. Returns `InvalidElementPosition` if the requested range is outside the range
-    // currently stored by this MMR.
+    /// Return an inclusion proof for the specified range of elements. The range is inclusive of
+    /// both endpoints. Returns `ElementPruned` if the requested range is outside the range
+    /// currently stored by this MMR.
     pub fn range_proof(
         &self,
         start_element_pos: u64,
         end_element_pos: u64,
     ) -> Result<Proof, Error> {
         if start_element_pos != 0 && start_element_pos <= self.oldest_remembered_pos {
-            return Err(InvalidElementPosition);
+            return Err(ElementPruned(self.oldest_remembered_pos));
         }
         let mut hashes: Vec<Digest> = Vec::new();
         let mut start_tree_with_element = (u64::MAX, 0);
@@ -170,14 +171,15 @@ impl<H: CHasher> Mmr<H> {
                 .map(|(_, pos)| self.nodes[(*pos - self.oldest_remembered_pos) as usize].clone()),
         );
         Ok(Proof {
-            size: self.size() as u64,
+            size: self.size(),
             hashes,
         })
     }
 
-    // Returns the position of the oldest element that must be retained by this MMR in order to
-    // preserve its ability to generate proofs for new elements. This is the position of the
-    // right-most leaf in the left-most peak. For the example tree in mod.rs, this would be node 11.
+    /// Returns the position of the oldest element that must be retained by this MMR in order to
+    /// preserve its ability to generate proofs for new elements. This is the position of the
+    /// right-most leaf in the left-most peak. For the example tree in mod.rs, this would be node
+    /// 11.
     pub fn oldest_required_element(&self) -> u64 {
         match self.peak_iterator().next() {
             None => {
@@ -191,10 +193,10 @@ impl<H: CHasher> Mmr<H> {
         }
     }
 
-    // Removes all nodes up to but not including that with the given position from the MMR. Returns
-    // `InvalidElementPosition` error if removing the nodes would break the ability to generate
-    // proofs for new elements. After forgetting, you will only be able to generate proofs for
-    // (ranges of) nodes non-inclusively following the given node.
+    /// Removes all nodes up to but not including that with the given position from the MMR. Returns
+    /// `InvalidElementPosition` error if removing the nodes would break the ability to generate
+    /// proofs for new elements. After forgetting, you will only be able to generate proofs for
+    /// (ranges of) nodes non-inclusively following the given node.
     pub fn forget(&mut self, oldest_to_remember_pos: u64) -> Result<(), Error> {
         if oldest_to_remember_pos <= self.oldest_remembered_pos {
             return Ok(());
@@ -207,8 +209,8 @@ impl<H: CHasher> Mmr<H> {
         Ok(())
     }
 
-    // Forget as many nodes as possible without breaking proof generation going forward, returning
-    // the position of the oldest remembered node after forgetting, or 0 if nothing was forgotten.
+    /// Forget as many nodes as possible without breaking proof generation going forward, returning
+    /// the position of the oldest remembered node after forgetting, or 0 if nothing was forgotten.
     pub fn forget_max(&mut self) -> u64 {
         let top_peak = self.peak_iterator().next();
         match top_peak {
@@ -262,7 +264,7 @@ mod tests {
             leaves.push(mmr.add(&element));
             let peaks: Vec<(u64, u32)> = mmr.peak_iterator().collect();
             assert_ne!(peaks.len(), 0);
-            assert!(peaks.len() <= mmr.size());
+            assert!(peaks.len() <= mmr.size() as usize);
             let nodes_needing_parents = nodes_needing_parents(mmr.peak_iterator());
             assert!(nodes_needing_parents.len() <= peaks.len());
         }
