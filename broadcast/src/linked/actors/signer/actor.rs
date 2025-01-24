@@ -16,7 +16,6 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Spawner, Storage};
 use commonware_storage::journal::Journal;
-use commonware_utils::hex;
 use futures::channel::{mpsc, oneshot};
 use futures::StreamExt;
 use prost::Message as _;
@@ -334,7 +333,7 @@ impl<
         let mut parent = None;
         if let Some((chunk, Evidence::Threshold(threshold))) = self.tips.get(&public_key) {
             height = chunk.height.checked_add(1).unwrap();
-            parent = Some(wire::Parent {
+            parent = Some(wire::chunk::Parent {
                 threshold: threshold.clone(),
                 digest: self.hash(&chunk.clone()),
             });
