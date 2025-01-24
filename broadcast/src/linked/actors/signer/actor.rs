@@ -7,9 +7,9 @@ use bytes::Bytes;
 use commonware_consensus::{threshold_simplex::View, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{
-        group::{Element, Share, Signature},
+        group::{Element, Share, Signature, G2},
         ops::{self},
-        poly::Public,
+        poly::{self, PartialSignature, Public},
     },
     Digest, Hasher, PublicKey, Scheme,
 };
@@ -123,16 +123,13 @@ impl<
                     let Ok(car) = wire::Car::decode(msg) else {
                         continue;
                     };
-                    if car.car.is_none() {
-                        continue;
-                    }
 
                     // Logic
                     self.handle_car(&car, &mut ack_sender).await;
                 },
                 msg = ack_receiver.recv() => {
                     // Error handling
-                    let Ok((_sender, msg)) = msg else {
+                    let Ok((sender, msg)) = msg else {
                         break;
                     };
                     let Ok(ack) = wire::Ack::decode(msg) else {
@@ -140,7 +137,7 @@ impl<
                     };
 
                     // Logic
-                    self.handle_ack(ack).await;
+                    self.handle_ack(sender, &ack).await;
                 },
                 mail = self.mailbox_receiver.next() => {
                     let msg = match mail {
@@ -150,7 +147,7 @@ impl<
                     match msg {
                         Message::Broadcast{ payload, result } => {
                             // TODO
-                            self.handle_broadcast(payload, result, &mut car_sender).await;
+                            self.broadcast(payload, result, &mut car_sender, &mut ack_sender).await;
                         }
                     }
                 }
@@ -158,42 +155,63 @@ impl<
         }
     }
 
-    async fn handle_ack(&mut self, ack: &wire::Ack) {
-        let entry = self.acks.entry(ack.plate.clone()).or_default();
+    async fn handle_ack(&mut self, sender: Bytes, ack: &wire::Ack) {
+        // Get the current car and evidence
+        let sequencer: Bytes = ack.sequencer.clone().into();
+        let Some((_tip, evidence)) = self.tips.get_mut(&sequencer) else {
+            // Return early if the ack doesn't match the tip
+            return;
+        };
 
-        // If the ack already exists, ignore it.
-        if entry.contains_key(&ack.public_key) {
+        // Get the partial signatures, returning early if we already have a threshold
+        let partials = match evidence {
+            Evidence::Partials(partials) => partials,
+            Evidence::Threshold(_) => return,
+        };
+
+        // Return early if we already have this partial
+        if partials.contains_key(&sender) {
             return;
         }
 
         // Store the ack
-        entry.insert(ack.public_key.clone(), ack.signature.clone());
+        partials.insert(sender, ack.signature.clone());
 
-        // If quorum is not reached, or if the threshold already exists, return.
-        let quorum = self.supervisor.threshold(111);
-        if entry.len() < quorum {
-            return;
-        }
-        if self.proofs.contains_key(&ack.plate) {
+        // Return early if we don't have enough partials
+        let quorum = self.supervisor.identity(111).unwrap().required();
+        if partials.len() < quorum as usize {
             return;
         }
 
         // Construct the threshold signature
-        let sigs = entry.values().collect();
-        let threshold = ops::threshold_signature_recover(quorum, sigs)
-            .expect("Failed to recover threshold signature");
-        self.proofs
-            .insert(ack.plate.clone(), threshold.serialize().into());
+        let partials: Vec<PartialSignature> = partials
+            .values()
+            .map(|p| PartialSignature::deserialize(p).unwrap())
+            .collect();
+        let threshold: Bytes = ops::threshold_signature_recover(quorum, partials)
+            .expect("Failed to recover threshold signature")
+            .serialize()
+            .into();
 
-        // TODO: emit the proof to the application
-        self.app.broadcasted(context, payload, proof).await;
+        // Store the threshold
+        let (tip, _) = self.tips.remove(&sequencer).unwrap();
+        let digest = self.hash(&tip);
+        let index = tip.index;
+        self.tips.insert(
+            sequencer.clone(),
+            (tip, Evidence::Threshold(threshold.clone())),
+        );
+
+        // Emit the proof to the application
+        let context = Context { sequencer, index };
+        self.app.broadcasted(context, digest, threshold).await;
     }
 
     async fn handle_car(&mut self, car: &wire::Car, ack_sender: &mut impl Sender) {
         // If car is at or behind the tip, ignore.
         // This check is fast, so we do it before full validation.
-        if let Some((prev, evidence)) = self.tips.get(&car.sequencer) {
-            if prev.index >= car.index {
+        if let Some((tip, _evidence)) = self.tips.get(&car.sequencer) {
+            if tip.index >= car.index {
                 return;
             }
         }
@@ -201,6 +219,24 @@ impl<
         // Validate that the car is well-formed
         if !self.verify(car) {
             return;
+        }
+
+        // Validate the car with the application
+        let context = Context {
+            sequencer: car.sequencer.clone(),
+            index: car.index,
+        };
+        let result = self.app.verify(context, car.payload.clone()).await;
+        match result.await {
+            Ok(true) => {}
+            Ok(false) => {
+                error!("Application rejected car");
+                return;
+            }
+            Err(e) => {
+                error!("Failed to verify car with application: {:?}", e);
+                return;
+            }
         }
 
         // Emit evidence of parent to the application if the index is greater than 0
@@ -212,14 +248,14 @@ impl<
             self.app
                 .broadcasted(
                     context,
-                    car.parent_plate.clone(),
+                    car.parent_digest.clone(),
                     car.parent_threshold.clone(),
                 )
                 .await;
         }
 
         // Insert the car at the tip
-        let plate = self.hash(&car);
+        let digest = self.hash(&car);
         self.tips.insert(
             car.sequencer.clone(),
             (car.clone(), Evidence::Partials(HashMap::new())),
@@ -228,17 +264,18 @@ impl<
         // Create an ack for the car
         let share = self.supervisor.share(111).unwrap();
         let partial_signature: Bytes =
-            ops::partial_sign_message(&share, Some(&self.car_namespace), &plate)
+            ops::partial_sign_message(&share, Some(&self.ack_namespace), &digest)
                 .serialize()
                 .into();
         let ack = wire::Ack {
-            plate: plate.to_vec().into(),
-            public_key: self.crypto.public_key(),
+            sequencer: car.sequencer.clone().to_vec(),
+            index: car.index,
+            digest: digest.to_vec().into(),
             signature: partial_signature,
         };
 
         // Deal with the ack as if it were received over the network
-        self.handle_ack(&ack).await;
+        self.handle_ack(self.crypto.public_key(), &ack).await;
 
         // Send the ack to the network
         if let Err(e) = ack_sender
@@ -249,31 +286,35 @@ impl<
         }
     }
 
-    async fn handle_broadcast(
+    /// Broadcast a message to the network.
+    ///
+    /// The result is returned to the caller via the provided channel.
+    /// The broadcast is only successful if the parent car and threshold signature are known.
+    async fn broadcast(
         &mut self,
         payload: Bytes,
         result: oneshot::Sender<bool>,
         car_sender: &mut impl Sender,
+        ack_sender: &mut impl Sender,
     ) {
         let public_key = self.crypto.public_key();
 
         // Get parent car and threshold signature, otherwise return.
         let (parent, parent_threshold) = match self.tips.get(&public_key) {
-            Some((car, Evidence::Threshold(threshold))) => (car, threshold),
+            Some((car, Evidence::Threshold(threshold))) => (car.clone(), threshold.clone()),
             None | Some((_, Evidence::Partials(_))) => {
                 let _ = result.send(false);
                 return;
             }
         };
-        let parent_threshold = parent_threshold.clone();
 
         // Construct new car.
-        let parent_plate = self.hash(parent);
+        let parent_digest = self.hash(&parent);
         let mut car = wire::Car {
             sequencer: public_key,
-            index: parent.index + 1,
+            index: parent.index.checked_add(1).unwrap(),
             payload,
-            parent_plate,
+            parent_digest,
             parent_threshold,
             signature: Bytes::new(), // Unsigned
         };
@@ -281,6 +322,9 @@ impl<
         // Construct full signature
         let plate = self.hash(&car);
         car.signature = self.crypto.sign(Some(&self.car_namespace), &plate);
+
+        // Deal with the car as if it were received over the network
+        self.handle_car(&car, ack_sender).await;
 
         // Broadcast to network
         if let Err(e) = car_sender
@@ -294,44 +338,56 @@ impl<
         let _ = result.send(true);
     }
 
-    // Helper Functions
-
+    /// Returns the digest of the given car.
     fn hash(&mut self, car: &wire::Car) -> Digest {
         self.hasher.update(&car.sequencer);
         self.hasher.update(&car.index.to_be_bytes());
         self.hasher.update(&car.payload);
-        self.hasher.update(&car.parent_plate);
+        self.hasher.update(&car.parent_digest);
         self.hasher.update(&car.parent_threshold);
         self.hasher.finalize()
     }
 
-    fn verify(&self, car: &wire::Car) -> bool {
-        let plate = self.hash(car);
-        let partials = self.tips.get(&car.sequencer).unwrap().1.clone();
-        let partials = match partials {
-            Evidence::Partials(partials) => partials,
-            _ => panic!("Expected partials"),
-        };
-        let threshold = ops::threshold_signature_recover(111, partials.values())
-            .expect("Failed to recover threshold signature");
-        let threshold = threshold.serialize().into();
-
+    /// Returns true if the car is valid.
+    fn verify(&mut self, car: &wire::Car) -> bool {
         // Verify the signature
-        if !ops::verify_message(
-            &car.sequencer,
+        let digest = self.hash(car);
+        if !C::verify(
             Some(&self.car_namespace),
-            &plate,
-            &threshold,
+            &digest,
+            &car.sequencer,
+            &car.signature,
         ) {
+            error!("Failed to verify signature");
             return false;
         }
 
-        // Store the threshold
-        self.tips.insert(
-            car.sequencer.clone(),
-            (car.clone(), Evidence::Threshold(threshold)),
-        );
-
-        true
+        // Verify the parent threshold signature
+        let public_key = match self.supervisor.identity(111) {
+            Some(p) => poly::public(p),
+            None => {
+                error!("Failed to get public key");
+                return false;
+            }
+        };
+        let signature = match G2::deserialize(&car.parent_threshold) {
+            Some(s) => s,
+            None => {
+                error!("Failed to deserialize signature");
+                return false;
+            }
+        };
+        match ops::verify_message(
+            &public_key,
+            Some(&self.ack_namespace),
+            &car.parent_digest,
+            &signature,
+        ) {
+            Ok(()) => true,
+            Err(_) => {
+                error!("Failed to verify threshold signature");
+                false
+            }
+        }
     }
 }

@@ -13,8 +13,8 @@ message Car {
     // Payload data
     bytes payload = 3;
 
-    // Hash of the previous car that has `index` of `this.index-1`
-    bytes parent_plate = 4;
+    // Digest previous car that has `index` of `this.index-1`
+    bytes parent_digest = 4;
 
     // Threshold signature of the parent car
     bytes parent_threshold = 5;
@@ -25,12 +25,15 @@ message Car {
 
 // Ack is a message sent by a validator to acknowledge the receipt of a Car.
 message Ack {
-    // Plate (hash) of the car being acknowledged
-    bytes plate = 1;
+    // Public key of the sequencer
+    bytes sequencer = 1;
 
-    // Public key of the validator
-    bytes public_key = 2;
+    // Sequencer-specific sequential index
+    uint64 index = 2;
+
+    // Digest of the car being acknowledged
+    bytes digest = 3;
 
     // Signature of the validator over the hash of the car
-    bytes signature = 3;
+    bytes signature = 4;
 }

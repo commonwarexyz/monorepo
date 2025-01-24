@@ -5,11 +5,10 @@ fn main() -> Result<()> {
     config.bytes([
         "Car.sequencer",
         "Car.payload",
-        "Car.parent_plate",
+        "Car.parent_digest",
         "Car.parent_threshold",
         "Car.signature",
-        "Ack.plate",
-        "Ack.public_key",
+        "Ack.digest",
         "Ack.signature",
     ]);
     config.compile_protos(&["src/linked/wire.proto"], &["src/linked/"])?;

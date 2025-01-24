@@ -22,8 +22,6 @@ pub enum Error {
     ThresholdSignature,
     #[error("Unknown signer")]
     UnknownSigner,
-    #[error("Mailbox error")]
-    MailboxError,
 }
 
 /// A trait for reliable replication of messages across a network.

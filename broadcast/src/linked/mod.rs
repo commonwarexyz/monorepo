@@ -1,4 +1,4 @@
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::PublicKey;
 
 mod actors;
 mod config;

@@ -1,6 +1,7 @@
 use crate::Application;
 
-use super::{actors::signer, config::Config};
+use super::{actors::signer, config::Config, Context};
+use bytes::Bytes;
 use commonware_consensus::{threshold_simplex::View, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
@@ -15,7 +16,7 @@ pub struct Engine<
     E: Clock + Rng + CryptoRng + Spawner + Send + Sync,
     C: Scheme,
     H: Hasher,
-    A: Application,
+    A: Application<Context = Context, Proof = Bytes>,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -33,7 +34,7 @@ impl<
         E: Clock + Rng + CryptoRng + Spawner,
         C: Scheme,
         H: Hasher,
-        A: Application,
+        A: Application<Context = Context, Proof = Bytes>,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,

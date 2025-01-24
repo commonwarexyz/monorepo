@@ -1,4 +1,4 @@
-use crate::{linked::Context, Broadcaster, Error};
+use crate::{linked::Context, Broadcaster};
 use bytes::Bytes;
 use futures::{
     channel::{mpsc, oneshot},
@@ -33,7 +33,10 @@ impl Broadcaster for Mailbox {
             payload,
             result: sender,
         };
-        self.sender.send(msg).await.map_err(|_| Error::MailboxError);
+        self.sender
+            .send(msg)
+            .await
+            .expect("Failed to send broadcast");
         receiver
     }
 }
