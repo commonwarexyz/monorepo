@@ -23,9 +23,7 @@ jobs:
       with:
         rust-version: ${{ steps.rust-version.outputs.rust_version}}
     - name: Lint
-      run: cargo clippy --all-targets --all-features -- -D warnings
-      env:
-          RUSTDOCFLAGS: "-D missing_docs"
+      run: cargo clippy --all-targets --all-features -- -D warnings -D missing_docs
     - name: Fmt
       run: cargo fmt --all -- --check
     - name: Check docs
