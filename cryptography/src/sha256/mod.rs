@@ -1,9 +1,9 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
-use crate::{Digest, Hasher};
+use crate::Hasher;
 use sha2::{Digest as _, Sha256 as ISha256};
 
-pub const DIGEST_LENGTH: usize = 32;
+const DIGEST_LENGTH: usize = 32;
 
 /// SHA-256 hasher.
 pub struct Sha256 {
@@ -23,7 +23,10 @@ impl Clone for Sha256 {
     }
 }
 
-impl Hasher<DIGEST_LENGTH> for Sha256 {
+impl Hasher for Sha256 {
+    type Digest = [u8; DIGEST_LENGTH];
+    const DIGEST_LENGTH: usize = DIGEST_LENGTH;
+
     fn new() -> Self {
         Self {
             hasher: ISha256::new(),
@@ -34,26 +37,22 @@ impl Hasher<DIGEST_LENGTH> for Sha256 {
         self.hasher.update(message);
     }
 
-    fn finalize(&mut self) -> Digest<DIGEST_LENGTH> {
-        self.hasher.finalize_reset().to_vec().try_into().unwrap()
+    fn finalize(&mut self) -> Self::Digest {
+        self.hasher.finalize_reset().into()
     }
 
     fn reset(&mut self) {
         self.hasher = ISha256::new();
     }
 
-    fn validate(digest: &Digest<DIGEST_LENGTH>) -> bool {
+    fn validate(digest: &Self::Digest) -> bool {
         digest.len() == DIGEST_LENGTH
     }
 
-    fn len() -> usize {
-        DIGEST_LENGTH
-    }
-
-    fn random<R: rand::Rng + rand::CryptoRng>(rng: &mut R) -> Digest<DIGEST_LENGTH> {
-        let mut digest = [0u8; DIGEST_LENGTH];
-        rng.fill_bytes(&mut digest);
-        digest.to_vec().try_into().unwrap()
+    fn from(digest: &[u8]) -> Self::Digest {
+        let mut result = [0u8; DIGEST_LENGTH];
+        result.copy_from_slice(digest);
+        result
     }
 }
 
@@ -88,6 +87,6 @@ mod tests {
 
     #[test]
     fn test_sha256_len() {
-        assert_eq!(Sha256::len(), DIGEST_LENGTH);
+        assert_eq!(Sha256::DIGEST_LENGTH, DIGEST_LENGTH);
     }
 }
