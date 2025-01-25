@@ -1,5 +1,6 @@
 use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::PeakIterator;
+use bytes::Buf;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A `Proof` contains the information necessary for proving the inclusion of an element, or some
@@ -90,6 +91,60 @@ impl Proof {
         }
         *root_hash == mmr_hasher.root_hash(self.size, peak_hashes.iter())
     }
+
+    /// Return the maximum size in bytes of any serialized `Proof`.
+    pub fn max_serialization_size<H: CHasher>() -> usize {
+        size_of::<u64>() + 1 + (u8::MAX as usize * H::len())
+    }
+
+    /// Canonically serializes the `Proof` as:
+    /// ```text
+    ///    [0-8): size (u64 big-endian)
+    ///    [9-10): number of hashes (u8)
+    ///    [11-...): raw bytes of each hash, each of length `H::len()`
+    /// ```
+    pub fn serialize<H: CHasher>(&self) -> Vec<u8> {
+        let bytes_len = size_of::<u64>() + 1 + (self.hashes.len() * H::len());
+        let mut bytes = Vec::with_capacity(bytes_len);
+        bytes.extend_from_slice(&self.size.to_be_bytes());
+
+        // A proof should never contain more hashes than the depth of the MMR, thus a single byte
+        // for encoding the length of the hashes array still allows serializing MMRs up to 2^255
+        // elements.
+        assert!(
+            self.hashes.len() <= u8::MAX as usize,
+            "too many hashes in proof"
+        );
+        bytes.push(self.hashes.len() as u8);
+        for hash in self.hashes.iter() {
+            bytes.extend_from_slice(hash);
+        }
+        assert_eq!(bytes.len(), bytes_len, "serialization length mismatch");
+        bytes.to_vec()
+    }
+
+    /// Deserializes a canonically encoded `Proof`. See `serialize` for the serialization format.
+    pub fn deserialize<H: CHasher>(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < size_of::<u64>() + 1 {
+            return None;
+        }
+
+        let size = u64::from_be_bytes(bytes[0..size_of::<u64>()].try_into().unwrap());
+        let hashes_len = bytes[size_of::<u64>()] as usize;
+        let mut hashes = Vec::with_capacity(hashes_len);
+
+        // No need for checked math here since hashes_len is max 255 and H::len is the number of
+        // bytes in a (small) Digest.
+        if bytes.len() != size_of::<u64>() + 1 + hashes_len * H::len() {
+            return None;
+        }
+        let mut buf = &bytes[size_of::<u64>() + 1..];
+        for _ in 0..hashes_len {
+            let hash = buf.copy_to_bytes(H::len());
+            hashes.push(Digest::from(hash));
+        }
+        Some(Self { size, hashes })
+    }
 }
 
 fn peak_hash_from_range<'a, H: CHasher>(
@@ -163,6 +218,7 @@ fn peak_hash_from_range<'a, H: CHasher>(
 
 #[cfg(test)]
 mod tests {
+    use super::Proof;
     use crate::mmr::mem::Mmr;
     use commonware_cryptography::{Digest, Hasher as CHasher, Sha256};
 
@@ -497,5 +553,53 @@ mod tests {
             ),
             "valid range proof over remaining elements after 2 forgetting rounds should verify successfully",
         );
+    }
+
+    #[test]
+    fn test_proof_serialization() {
+        assert_eq!(
+            Proof::max_serialization_size::<Sha256>(),
+            8169,
+            "wrong max serialization size of a Sha256 proof"
+        );
+        // create a new MMR and add a non-trivial amount of elements
+        let mut mmr: Mmr<Sha256> = Mmr::default();
+        let mut elements = Vec::<Digest>::new();
+        let mut element_positions = Vec::<u64>::new();
+        for i in 0..25 {
+            elements.push(Digest::from(vec![i as u8; Sha256::len()]));
+            element_positions.push(mmr.add(elements.last().unwrap()));
+        }
+        // Generate proofs over all possible ranges of elements and confirm each
+        // serializes=>deserializes correctly.
+        for i in 0..elements.len() {
+            for j in i..elements.len() {
+                let start_pos = element_positions[i];
+                let end_pos = element_positions[j];
+                let proof = mmr.range_proof(start_pos, end_pos).unwrap();
+
+                let mut serialized_proof = proof.serialize::<Sha256>();
+                let deserialized_proof = Proof::deserialize::<Sha256>(&serialized_proof);
+                assert!(deserialized_proof.is_some(), "proof didn't deserialize");
+                assert_eq!(
+                    proof,
+                    deserialized_proof.unwrap(),
+                    "deserialized proof should match source proof"
+                );
+
+                let deserialized_truncated =
+                    Proof::deserialize::<Sha256>(&serialized_proof[0..serialized_proof.len() - 1]);
+                assert!(
+                    deserialized_truncated.is_none(),
+                    "proof should not deserialize with truncated data"
+                );
+
+                serialized_proof.push(i as u8);
+                assert!(
+                    Proof::deserialize::<Sha256>(&serialized_proof).is_none(),
+                    "proof should not deserialize with extra data"
+                );
+            }
+        }
     }
 }
