@@ -1,6 +1,6 @@
 use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::PeakIterator;
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A `Proof` contains the information necessary for proving the inclusion of an element, or some
@@ -11,7 +11,9 @@ use commonware_cryptography::{Digest, Hasher as CHasher};
 /// height.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof {
-    pub size: u64, // total # of nodes in the MMR
+    /// The total number of nodes in the MMR.
+    pub size: u64,
+    /// The hashes necessary for proving the inclusion of an element, or range of elements, in the MMR.
     pub hashes: Vec<Digest>,
 }
 
@@ -94,7 +96,7 @@ impl Proof {
 
     /// Return the maximum size in bytes of any serialized `Proof`.
     pub fn max_serialization_size<H: CHasher>() -> usize {
-        size_of::<u64>() + 1 + (u8::MAX as usize * H::len())
+        size_of::<u64>() + (u8::MAX as usize * H::len())
     }
 
     /// Canonically serializes the `Proof` as:
@@ -104,9 +106,9 @@ impl Proof {
     ///    [11-...): raw bytes of each hash, each of length `H::len()`
     /// ```
     pub fn serialize<H: CHasher>(&self) -> Vec<u8> {
-        let bytes_len = size_of::<u64>() + 1 + (self.hashes.len() * H::len());
+        let bytes_len = size_of::<u64>() + (self.hashes.len() * H::len());
         let mut bytes = Vec::with_capacity(bytes_len);
-        bytes.extend_from_slice(&self.size.to_be_bytes());
+        bytes.put_u64(self.size);
 
         // A proof should never contain more hashes than the depth of the MMR, thus a single byte
         // for encoding the length of the hashes array still allows serializing MMRs up to 2^255
@@ -115,7 +117,6 @@ impl Proof {
             self.hashes.len() <= u8::MAX as usize,
             "too many hashes in proof"
         );
-        bytes.push(self.hashes.len() as u8);
         for hash in self.hashes.iter() {
             bytes.extend_from_slice(hash);
         }
@@ -125,20 +126,19 @@ impl Proof {
 
     /// Deserializes a canonically encoded `Proof`. See `serialize` for the serialization format.
     pub fn deserialize<H: CHasher>(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < size_of::<u64>() + 1 {
+        let mut buf = bytes;
+        if buf.len() < size_of::<u64>() {
             return None;
         }
+        let size = buf.get_u64();
 
-        let size = u64::from_be_bytes(bytes[0..size_of::<u64>()].try_into().unwrap());
-        let hashes_len = bytes[size_of::<u64>()] as usize;
+        // A proof should divide neatly into the hash length and not contain more than 255 hashes.
+        let buf_remaining = buf.remaining();
+        let hashes_len = buf_remaining / H::len();
+        if buf_remaining % H::len() != 0 || hashes_len > u8::MAX as usize {
+            return None;
+        }
         let mut hashes = Vec::with_capacity(hashes_len);
-
-        // No need for checked math here since hashes_len is max 255 and H::len is the number of
-        // bytes in a (small) Digest.
-        if bytes.len() != size_of::<u64>() + 1 + hashes_len * H::len() {
-            return None;
-        }
-        let mut buf = &bytes[size_of::<u64>() + 1..];
         for _ in 0..hashes_len {
             let hash = buf.copy_to_bytes(H::len());
             hashes.push(Digest::from(hash));
@@ -559,7 +559,7 @@ mod tests {
     fn test_proof_serialization() {
         assert_eq!(
             Proof::max_serialization_size::<Sha256>(),
-            8169,
+            8168,
             "wrong max serialization size of a Sha256 proof"
         );
         // create a new MMR and add a non-trivial amount of elements
