@@ -10,7 +10,7 @@ use commonware_cryptography::{
         group::{self, Element},
         poly,
     },
-    Digest, Hasher, PublicKey,
+    Hasher, PublicKey,
 };
 use commonware_utils::modulo;
 use std::{
@@ -30,7 +30,7 @@ pub struct Config<H: Hasher> {
     pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<PublicKey>, group::Share)>,
 }
 
-type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
+type Participation<H> = HashMap<View, HashMap<<H as Hasher>::Digest, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
@@ -38,8 +38,8 @@ pub struct Supervisor<H: Hasher> {
     prover: Prover<H>,
     participants: BTreeMap<View, ViewInfo>,
 
-    pub notarizes: Arc<Mutex<Participation>>,
-    pub finalizes: Arc<Mutex<Participation>>,
+    pub notarizes: Arc<Mutex<Participation<H>>>,
+    pub finalizes: Arc<Mutex<Participation<H>>>,
     pub faults: Arc<Mutex<Faults>>,
 }
 

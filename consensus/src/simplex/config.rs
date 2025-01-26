@@ -12,9 +12,9 @@ use std::{
 pub struct Config<
     C: Scheme,
     H: Hasher,
-    A: Automaton<Context = Context>,
-    R: Relay,
-    F: Committer,
+    A: Automaton<H, Context = Context>,
+    R: Relay<H>,
+    F: Committer<H>,
     S: Supervisor<Index = View>,
 > {
     /// Cryptographic primitives.
@@ -85,9 +85,9 @@ pub struct Config<
 impl<
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context>,
-        R: Relay,
-        F: Committer,
+        A: Automaton<H, Context = Context>,
+        R: Relay<H>,
+        F: Committer<H>,
         S: Supervisor<Index = View>,
     > Config<C, H, A, R, F, S>
 {

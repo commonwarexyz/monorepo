@@ -23,20 +23,20 @@ pub type Proof = Bytes;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use commonware_cryptography::{Digest, PublicKey};
+        use commonware_cryptography::{Hasher as CHasher, PublicKey};
         use futures::channel::oneshot;
         use std::future::Future;
 
         /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
         /// and verifying payloads proposed by other participants.
-        pub trait Automaton: Clone + Send + 'static {
+        pub trait Automaton<H: CHasher>: Clone + Send + 'static {
             /// Context is metadata provided by the consensus engine to associated with a given payload.
             ///
             /// This often includes things like the proposer, view number, the height, or the epoch.
             type Context;
 
             /// Payload used to initialize the consensus engine.
-            fn genesis(&mut self) -> impl Future<Output = Digest> + Send;
+            fn genesis(&mut self) -> impl Future<Output = H::Digest> + Send;
 
             /// Generate a new payload for the given context.
             ///
@@ -46,7 +46,7 @@ cfg_if::cfg_if! {
             fn propose(
                 &mut self,
                 context: Self::Context,
-            ) -> impl Future<Output = oneshot::Receiver<Digest>> + Send;
+            ) -> impl Future<Output = oneshot::Receiver<H::Digest>> + Send;
 
             /// Verify the payload is valid.
             ///
@@ -55,7 +55,7 @@ cfg_if::cfg_if! {
             fn verify(
                 &mut self,
                 context: Self::Context,
-                payload: Digest,
+                payload: H::Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
         }
 
@@ -63,24 +63,24 @@ cfg_if::cfg_if! {
         ///
         /// The consensus engine is only aware of a payload's digest, not its contents. It is up
         /// to the relay to efficiently broadcast the full payload to other participants.
-        pub trait Relay: Clone + Send + 'static {
+        pub trait Relay<H: CHasher>: Clone + Send + 'static {
             /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
             /// it isn't dropped).
             ///
             /// Other participants may not begin voting on a proposal until they have the full contents,
             /// so timely delivery often yields better performance.
-            fn broadcast(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
+            fn broadcast(&mut self, payload: H::Digest) -> impl Future<Output = ()> + Send;
         }
 
         /// Committer is the interface responsible for handling notifications of payload status.
-        pub trait Committer: Clone + Send + 'static {
+        pub trait Committer<H: CHasher>: Clone + Send + 'static {
             /// Event that a payload has made some progress towards finalization but is not yet finalized.
             ///
             /// This is often used to provide an early ("best guess") confirmation to users.
-            fn prepared(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
+            fn prepared(&mut self, proof: Proof, payload: H::Digest) -> impl Future<Output = ()> + Send;
 
             /// Event indicating the container has been finalized.
-            fn finalized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
+            fn finalized(&mut self, proof: Proof, payload: H::Digest) -> impl Future<Output = ()> + Send;
         }
 
         /// Supervisor is the interface responsible for managing which participants are active at a given time.

@@ -5,7 +5,7 @@ use crate::{
     },
     Activity, Proof, Supervisor as Su,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Hasher, PublicKey, Scheme};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -16,7 +16,7 @@ pub struct Config<C: Scheme, H: Hasher> {
     pub participants: BTreeMap<View, Vec<PublicKey>>,
 }
 
-type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
+type Participation<H> = HashMap<View, HashMap<<H as Hasher>::Digest, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
@@ -25,8 +25,8 @@ pub struct Supervisor<C: Scheme, H: Hasher> {
 
     prover: Prover<C, H>,
 
-    pub notarizes: Arc<Mutex<Participation>>,
-    pub finalizes: Arc<Mutex<Participation>>,
+    pub notarizes: Arc<Mutex<Participation<H>>>,
+    pub finalizes: Arc<Mutex<Participation<H>>>,
     pub faults: Arc<Mutex<Faults>>,
 }
 

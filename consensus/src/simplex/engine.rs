@@ -19,9 +19,9 @@ pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
     H: Hasher,
-    A: Automaton<Context = Context>,
-    R: Relay,
-    F: Committer,
+    A: Automaton<H, Context = Context>,
+    R: Relay<H>,
+    F: Committer<H>,
     S: Supervisor<Index = View>,
 > {
     runtime: E,
@@ -37,9 +37,9 @@ impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
         H: Hasher,
-        A: Automaton<Context = Context>,
-        R: Relay,
-        F: Committer,
+        A: Automaton<H, Context = Context>,
+        R: Relay<H>,
+        F: Committer<H>,
         S: Supervisor<Index = View>,
     > Engine<B, E, C, H, A, R, F, S>
 {

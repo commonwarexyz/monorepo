@@ -1,21 +1,21 @@
 use bytes::Bytes;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::{Hasher, PublicKey};
 use futures::{channel::mpsc, SinkExt};
 use std::{collections::BTreeMap, sync::Mutex};
 
 /// Relay is a mock for distributing artifacts between applications.
-pub struct Relay {
-    recipients: Mutex<BTreeMap<PublicKey, mpsc::UnboundedSender<(Digest, Bytes)>>>,
+pub struct Relay<H: Hasher> {
+    recipients: Mutex<BTreeMap<PublicKey, mpsc::UnboundedSender<(H::Digest, Bytes)>>>,
 }
 
-impl Relay {
+impl<H: Hasher> Relay<H> {
     pub fn new() -> Self {
         Self {
             recipients: Mutex::new(BTreeMap::new()),
         }
     }
 
-    pub fn register(&self, public_key: PublicKey) -> mpsc::UnboundedReceiver<(Digest, Bytes)> {
+    pub fn register(&self, public_key: PublicKey) -> mpsc::UnboundedReceiver<(H::Digest, Bytes)> {
         let (sender, receiver) = mpsc::unbounded();
         if self
             .recipients
@@ -29,7 +29,7 @@ impl Relay {
         receiver
     }
 
-    pub async fn broadcast(&self, sender: &PublicKey, payload: (Digest, Bytes)) {
+    pub async fn broadcast(&self, sender: &PublicKey, payload: (H::Digest, Bytes)) {
         let channels = {
             let mut channels = Vec::new();
             let recipients = self.recipients.lock().unwrap();
@@ -50,7 +50,7 @@ impl Relay {
     }
 }
 
-impl Default for Relay {
+impl<H: Hasher> Default for Relay<H> {
     fn default() -> Self {
         Self::new()
     }
