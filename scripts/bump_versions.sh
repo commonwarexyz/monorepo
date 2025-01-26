@@ -50,9 +50,7 @@ find . -name "Cargo.toml" | while read -r cargo_file; do
 
   # If we changed anything, overwrite the file
   if ${changed}; then
-    for line in "${content[@]}"; do
-      printf "%s\n" "${line}"
-    done > "${cargo_file}"
+    printf "%s\n" "${content[@]}" > "${cargo_file}"
     echo "Updated ${cargo_file}"
   fi
 done
