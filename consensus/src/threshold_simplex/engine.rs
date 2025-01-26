@@ -122,7 +122,7 @@ impl<
     ) {
         // Start the voter
         let (voter_sender, voter_receiver) = voter_network;
-        let mut voter = self.runtime.spawn("voter", async move {
+        let mut voter_handle = self.runtime.spawn("voter", async move {
             self.voter
                 .run(self.resolver_mailbox, voter_sender, voter_receiver)
                 .await;
@@ -130,7 +130,7 @@ impl<
 
         // Start the resolver
         let (resolver_sender, resolver_receiver) = resolver_network;
-        let mut resolver = self.runtime.spawn("resolver", async move {
+        let mut resolver_handle = self.runtime.spawn("resolver", async move {
             self.resolver
                 .run(self.voter_mailbox, resolver_sender, resolver_receiver)
                 .await;
