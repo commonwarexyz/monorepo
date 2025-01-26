@@ -37,10 +37,10 @@ fn bench_prove_single_element(c: &mut Criterion) {
                         for (pos, element) in samples {
                             let proof = mmr.proof(pos).unwrap();
                             assert!(proof.verify_element_inclusion(
+                                &mut hasher,
                                 &element,
                                 pos,
                                 &root_hash,
-                                &mut hasher
                             ));
                         }
                     },
