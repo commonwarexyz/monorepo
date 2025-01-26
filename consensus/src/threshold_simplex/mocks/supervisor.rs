@@ -3,14 +3,14 @@ use crate::{
         Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Activity, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
+    Activity, DigestBytes, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         poly,
     },
-    Digest, Hasher, PublicKey,
+    Hasher, PublicKey,
 };
 use commonware_utils::modulo;
 use std::{
@@ -30,7 +30,7 @@ pub struct Config<H: Hasher> {
     pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<PublicKey>, group::Share)>,
 }
 
-type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
+type Participation = HashMap<View, HashMap<DigestBytes, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]

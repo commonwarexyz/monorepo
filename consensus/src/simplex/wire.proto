@@ -16,7 +16,7 @@ message Voter {
 message Proposal {
     uint64 view = 1;
     uint64 parent = 2;
-    bytes payload = 3; // Digest
+    bytes payload = 3; // DigestBytes
 }
 
 message Signature {

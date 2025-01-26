@@ -12,9 +12,9 @@ use crate::{
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Automaton, Committer, Relay, Supervisor,
+    Automaton, Committer, DigestBytes, Relay, Supervisor,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -54,13 +54,13 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view
-    proposal: Option<(Digest /* proposal */, wire::Proposal)>,
+    proposal: Option<(DigestBytes /* proposal */, wire::Proposal)>,
     requested_proposal: bool,
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notaries: HashMap<u32, Digest>,
-    notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
+    notaries: HashMap<u32, DigestBytes>,
+    notarizes: HashMap<DigestBytes, HashMap<u32, wire::Notarize>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
@@ -70,8 +70,8 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalizers: HashMap<u32, Digest>,
-    finalizes: HashMap<Digest, HashMap<u32, wire::Finalize>>,
+    finalizers: HashMap<u32, DigestBytes>,
+    finalizes: HashMap<DigestBytes, HashMap<u32, wire::Finalize>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
@@ -121,7 +121,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest = self.hasher.finalize();
+        let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
 
         // Check if already notarized
         let public_key_index = notarize.signature.as_ref().unwrap().public_key;
@@ -296,7 +296,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest = self.hasher.finalize();
+        let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
@@ -431,7 +431,7 @@ pub struct Actor<
     replay_concurrency: usize,
     journal: Option<Journal<B, E>>,
 
-    genesis: Option<Digest>,
+    genesis: Option<DigestBytes>,
 
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
@@ -579,7 +579,7 @@ impl<
         Some(proposal)
     }
 
-    fn find_parent(&self) -> Result<(View, Digest), View> {
+    fn find_parent(&self) -> Result<(View, DigestBytes), View> {
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
@@ -624,7 +624,7 @@ impl<
     async fn propose(
         &mut self,
         backfiller: &mut resolver::Mailbox,
-    ) -> Option<(Context, oneshot::Receiver<Digest>)> {
+    ) -> Option<(Context, oneshot::Receiver<DigestBytes>)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -839,7 +839,7 @@ impl<
         }
     }
 
-    async fn our_proposal(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {
+    async fn our_proposal(&mut self, digest: DigestBytes, proposal: wire::Proposal) -> bool {
         // Store the proposal
         let round = self.views.get_mut(&proposal.view).expect("view missing");
 
@@ -1231,7 +1231,7 @@ impl<
             let proposal = notarization.proposal.unwrap();
             let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
             self.hasher.update(&message);
-            let digest = self.hasher.finalize();
+            let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
             debug!(
                 view = proposal.view,
                 digest = hex(&digest),
@@ -1435,7 +1435,7 @@ impl<
             let proposal = finalization.proposal.unwrap();
             let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
             self.hasher.update(&message);
-            let digest = self.hasher.finalize();
+            let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
             debug!(
                 view = proposal.view,
                 digest = hex(&digest),
@@ -1909,7 +1909,8 @@ impl<
                             let proposal_message =
                                 proposal_message(proposal.view, proposal.parent, &proposal.payload);
                             self.hasher.update(&proposal_message);
-                            let proposal_digest = self.hasher.finalize();
+                            let proposal_digest =
+                                DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
                             round.proposal = Some((proposal_digest, proposal));
                             round.verified_proposal = true;
                             round.broadcast_notarize = true;
@@ -2047,7 +2048,7 @@ impl<
                     // Construct proposal
                     let message = proposal_message(context.view, context.parent.0, &proposed);
                     self.hasher.update(&message);
-                    let proposal_digest = self.hasher.finalize();
+                    let proposal_digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
                     let proposal = wire::Proposal {
                         view: context.view,
                         parent: context.parent.0,

@@ -12,7 +12,7 @@ use crate::{
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Automaton, Committer, Relay, ThresholdSupervisor,
+    Automaton, Committer, DigestBytes, Relay, ThresholdSupervisor,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -20,7 +20,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
-    Digest, Hasher, PublicKey, Scheme,
+    Hasher, PublicKey, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -61,13 +61,13 @@ struct Round<
     nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view (only matters prior to notarization)
-    proposal: Option<(Digest /* proposal */, wire::Proposal)>,
+    proposal: Option<(DigestBytes /* proposal */, wire::Proposal)>,
     requested_proposal: bool,
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notaries: HashMap<u32, Digest>,
-    notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
+    notaries: HashMap<u32, DigestBytes>,
+    notarizes: HashMap<DigestBytes, HashMap<u32, wire::Notarize>>,
     notarization: Option<wire::Notarization>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
@@ -79,8 +79,8 @@ struct Round<
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalizers: HashMap<u32, Digest>,
-    finalizes: HashMap<Digest, HashMap<u32, wire::Finalize>>,
+    finalizers: HashMap<u32, DigestBytes>,
+    finalizes: HashMap<DigestBytes, HashMap<u32, wire::Finalize>>,
     finalization: Option<wire::Finalization>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -135,7 +135,7 @@ impl<
     fn add_verified_proposal(&mut self, proposal: wire::Proposal) {
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest = self.hasher.finalize();
+        let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
         if self.proposal.is_none() {
             debug!(
                 view = proposal.view,
@@ -166,7 +166,7 @@ impl<
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest = self.hasher.finalize();
+        let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
 
         // Check if already notarized
         if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
@@ -289,7 +289,7 @@ impl<
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest = self.hasher.finalize();
+        let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
@@ -546,7 +546,7 @@ impl<
                 &notarization_proposal.payload,
             );
             self.hasher.update(&message);
-            let digest = self.hasher.finalize();
+            let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
             if digest != *proposal {
                 warn!(
                     view = self.view,
@@ -648,7 +648,7 @@ pub struct Actor<
     replay_concurrency: usize,
     journal: Option<Journal<B, E>>,
 
-    genesis: Option<Digest>,
+    genesis: Option<DigestBytes>,
 
     seed_namespace: Vec<u8>,
     notarize_namespace: Vec<u8>,
@@ -806,7 +806,7 @@ impl<
         None
     }
 
-    fn find_parent(&self) -> Result<(View, Digest), View> {
+    fn find_parent(&self) -> Result<(View, DigestBytes), View> {
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
@@ -852,7 +852,7 @@ impl<
     async fn propose(
         &mut self,
         backfiller: &mut resolver::Mailbox,
-    ) -> Option<(Context, oneshot::Receiver<Digest>)> {
+    ) -> Option<(Context, oneshot::Receiver<DigestBytes>)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -1095,7 +1095,7 @@ impl<
         }
     }
 
-    async fn our_proposal(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {
+    async fn our_proposal(&mut self, digest: DigestBytes, proposal: wire::Proposal) -> bool {
         // Store the proposal
         let round = self.views.get_mut(&proposal.view).expect("view missing");
 
@@ -2120,7 +2120,8 @@ impl<
                             let proposal_message =
                                 proposal_message(proposal.view, proposal.parent, &proposal.payload);
                             self.hasher.update(&proposal_message);
-                            let proposal_digest = self.hasher.finalize();
+                            let proposal_digest =
+                                DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
                             round.proposal = Some((proposal_digest, proposal));
                             round.verified_proposal = true;
                             round.broadcast_notarize = true;
@@ -2285,7 +2286,7 @@ impl<
                     // Construct proposal
                     let message = proposal_message(context.view, context.parent.0, &proposed);
                     self.hasher.update(&message);
-                    let proposal_digest = self.hasher.finalize();
+                    let proposal_digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
                     let proposal = wire::Proposal {
                         view: context.view,
                         parent: context.parent.0,

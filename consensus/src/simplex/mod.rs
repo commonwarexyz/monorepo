@@ -115,8 +115,6 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use commonware_cryptography::Digest;
-
 mod encoder;
 mod prover;
 pub use prover::Prover;
@@ -142,6 +140,8 @@ pub mod mocks;
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
 
+use crate::{Activity, DigestBytes};
+
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
 pub struct Context {
@@ -152,10 +152,8 @@ pub struct Context {
     ///
     /// Payloads from views between the current view and the parent view can never be
     /// directly finalized (must exist some nullification).
-    pub parent: (View, Digest),
+    pub parent: (View, DigestBytes),
 }
-
-use crate::Activity;
 
 /// Notarize a payload at a given view.
 ///

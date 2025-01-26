@@ -6,7 +6,7 @@ use super::{
     Config,
 };
 use bytes::BufMut;
-use commonware_consensus::threshold_simplex::Prover;
+use commonware_consensus::{threshold_simplex::Prover, DigestBytes};
 use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},
     Hasher,
@@ -63,7 +63,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                     // Use the digest of the genesis message as the initial
                     // payload.
                     self.hasher.update(GENESIS);
-                    let digest = self.hasher.finalize();
+                    let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
                     let _ = response.send(digest);
                 }
                 Message::Propose { index, response } => {
@@ -119,7 +119,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
 
                     // Hash the message
                     self.hasher.update(&msg);
-                    let digest = self.hasher.finalize();
+                    let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
                     info!(msg = hex(&msg), payload = hex(&digest), "proposed");
 
                     // Publish to indexer
@@ -155,7 +155,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                 }
                 Message::Verify { payload, response } => {
                     // Ensure payload is a valid digest
-                    if !H::validate(&payload) {
+                    if !H::validate(&H::from(&payload)) {
                         let _ = response.send(false);
                         continue;
                     }

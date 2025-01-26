@@ -159,7 +159,7 @@ fn main() {
                             let _ = response.send(None);
                             continue;
                         };
-                        let data = network.get(&incoming.digest);
+                        let data = network.get(incoming.digest.as_ref());
                         let _ = response.send(data.cloned());
                     }
                     Message::PutFinalization { incoming, response } => {

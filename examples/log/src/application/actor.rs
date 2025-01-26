@@ -3,7 +3,7 @@ use super::{
     supervisor::Supervisor,
     Config,
 };
-use commonware_consensus::simplex::Prover;
+use commonware_consensus::{simplex::Prover, DigestBytes};
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_utils::hex;
 use futures::{channel::mpsc, StreamExt};
@@ -49,7 +49,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                     // to some parent, this doesn't really do anything
                     // in this example.
                     self.hasher.update(GENESIS);
-                    let digest = self.hasher.finalize();
+                    let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
                     let _ = response.send(digest);
                 }
                 Message::Propose { response } => {
@@ -59,8 +59,8 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
 
                     // Hash the message
                     self.hasher.update(&msg);
-                    let digest = self.hasher.finalize();
-                    info!(msg = hex(&msg), payload = hex(&digest), "proposed");
+                    let digest = DigestBytes::copy_from_slice(self.hasher.finalize().as_ref());
+                    info!(msg = hex(&msg), payload = hex(digest.as_ref()), "proposed");
 
                     // Send digest to consensus
                     let _ = response.send(digest);
@@ -68,7 +68,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                 Message::Verify { payload, response } => {
                     // If we linked payloads to their parent, we would verify
                     // the parent included in the payload matches the provided context.
-                    let valid = H::validate(&payload);
+                    let valid = H::validate(&H::from(&payload));
                     let _ = response.send(valid);
                 }
                 Message::Prepared { proof, payload } => {

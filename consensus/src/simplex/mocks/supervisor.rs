@@ -3,9 +3,9 @@ use crate::{
         prover::Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Activity, Proof, Supervisor as Su,
+    Activity, DigestBytes, Proof, Supervisor as Su,
 };
-use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Hasher, PublicKey, Scheme};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -16,7 +16,7 @@ pub struct Config<C: Scheme, H: Hasher> {
     pub participants: BTreeMap<View, Vec<PublicKey>>,
 }
 
-type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
+type Participation = HashMap<View, HashMap<DigestBytes, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
