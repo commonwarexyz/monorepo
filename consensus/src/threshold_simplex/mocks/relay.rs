@@ -1,14 +1,14 @@
 use bytes::Bytes;
-use commonware_cryptography::{Hasher, PublicKey};
+use commonware_cryptography::{Digest, PublicKey};
 use futures::{channel::mpsc, SinkExt};
 use std::{collections::BTreeMap, sync::Mutex};
 
 /// Relay is a mock for distributing artifacts between applications.
-pub struct Relay<H: Hasher> {
-    recipients: Mutex<BTreeMap<PublicKey, mpsc::UnboundedSender<(H::Digest, Bytes)>>>,
+pub struct Relay {
+    recipients: Mutex<BTreeMap<PublicKey, mpsc::UnboundedSender<(Digest, Bytes)>>>,
 }
 
-impl<H: Hasher> Relay<H> {
+impl Relay {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -16,7 +16,7 @@ impl<H: Hasher> Relay<H> {
         }
     }
 
-    pub fn register(&self, public_key: PublicKey) -> mpsc::UnboundedReceiver<(H::Digest, Bytes)> {
+    pub fn register(&self, public_key: PublicKey) -> mpsc::UnboundedReceiver<(Digest, Bytes)> {
         let (sender, receiver) = mpsc::unbounded();
         if self
             .recipients
@@ -30,7 +30,7 @@ impl<H: Hasher> Relay<H> {
         receiver
     }
 
-    pub async fn broadcast(&self, sender: &PublicKey, payload: (H::Digest, Bytes)) {
+    pub async fn broadcast(&self, sender: &PublicKey, payload: (Digest, Bytes)) {
         let channels = {
             let mut channels = Vec::new();
             let recipients = self.recipients.lock().unwrap();
@@ -51,7 +51,7 @@ impl<H: Hasher> Relay<H> {
     }
 }
 
-impl<H: Hasher> Default for Relay<H> {
+impl Default for Relay {
     fn default() -> Self {
         Self::new()
     }

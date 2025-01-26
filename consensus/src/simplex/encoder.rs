@@ -1,17 +1,17 @@
 use super::View;
 use bytes::{BufMut, Bytes};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::Digest;
 use commonware_utils::union;
 
 pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
-pub fn proposal_message<H: Hasher>(view: View, parent: View, payload: &H::Digest) -> Bytes {
-    let mut msg = Vec::with_capacity(8 + 8 + H::DIGEST_LENGTH);
+pub fn proposal_message(view: View, parent: View, payload: &Digest) -> Bytes {
+    let mut msg = Vec::with_capacity(8 + 8 + payload.len());
     msg.put_u64(view);
     msg.put_u64(parent);
-    msg.extend_from_slice(payload.as_ref());
+    msg.extend_from_slice(payload);
     msg.into()
 }
 

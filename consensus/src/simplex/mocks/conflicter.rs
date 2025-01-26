@@ -7,7 +7,6 @@ use crate::{
     },
     Supervisor,
 };
-use bytes::Bytes;
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Spawner};
@@ -95,11 +94,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
 
                     // Notarize received digest
                     let parent = proposal.parent;
-                    let msg = proposal_message::<H>(
-                        proposal.view,
-                        proposal.parent,
-                        &H::from(&proposal.payload),
-                    );
+                    let msg = proposal_message(proposal.view, proposal.parent, &proposal.payload);
                     let n = wire::Notarize {
                         proposal: Some(proposal),
                         signature: Some(wire::Signature {
@@ -118,12 +113,12 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
 
                     // Notarize random digest
                     let digest = H::random(&mut self.runtime);
-                    let msg = proposal_message::<H>(view, parent, &digest);
+                    let msg = proposal_message(view, parent, &digest);
                     let n = wire::Notarize {
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
-                            payload: Bytes::copy_from_slice(digest.as_ref()),
+                            payload: digest,
                         }),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
@@ -156,11 +151,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
 
                     // Finalize provided digest
                     let parent = proposal.parent;
-                    let msg = proposal_message::<H>(
-                        proposal.view,
-                        proposal.parent,
-                        &H::from(&proposal.payload),
-                    );
+                    let msg = proposal_message(proposal.view, proposal.parent, &proposal.payload);
                     let f = wire::Finalize {
                         proposal: Some(proposal),
                         signature: Some(wire::Signature {
@@ -179,12 +170,12 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
 
                     // Finalize random digest
                     let digest = H::random(&mut self.runtime);
-                    let msg = proposal_message::<H>(view, parent, &digest);
+                    let msg = proposal_message(view, parent, &digest);
                     let f = wire::Finalize {
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
-                            payload: Bytes::copy_from_slice(digest.as_ref()),
+                            payload: digest,
                         }),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,

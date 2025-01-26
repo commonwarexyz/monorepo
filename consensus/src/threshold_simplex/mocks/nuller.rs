@@ -116,8 +116,7 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize digest
-                    let message =
-                        proposal_message::<H>(view, proposal.parent, &H::from(&proposal.payload));
+                    let message = proposal_message(view, proposal.parent, &proposal.payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
                             .serialize()

@@ -534,7 +534,7 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
                                     debug!(view, sender = hex(&s), "unnecessary notarization");
                                     continue;
                                 }
-                                if !verify_notarization::<S,C,H>(&self.supervisor, &self.notarize_namespace, &notarization) {
+                                if !verify_notarization::<S,C>(&self.supervisor, &self.notarize_namespace, &notarization) {
                                     warn!(view, sender = hex(&s), "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;

@@ -100,8 +100,7 @@ impl<
                     // Notarize received digest
                     let share = self.supervisor.share(view).unwrap();
                     let parent = proposal.parent;
-                    let message =
-                        proposal_message::<H>(proposal.view, parent, &H::from(&proposal.payload));
+                    let message = proposal_message(proposal.view, parent, &proposal.payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
                             .serialize()
@@ -125,7 +124,7 @@ impl<
 
                     // Notarize random digest
                     let digest = H::random(&mut self.runtime);
-                    let message = proposal_message::<H>(view, parent, &digest);
+                    let message = proposal_message(view, parent, &digest);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
                             .serialize()
@@ -134,7 +133,7 @@ impl<
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
-                            payload: Bytes::copy_from_slice(digest.as_ref()),
+                            payload: digest,
                         }),
                         proposal_signature,
                         seed_signature,
@@ -160,8 +159,7 @@ impl<
                     // Finalize provided digest
                     let share = self.supervisor.share(view).unwrap();
                     let parent = proposal.parent;
-                    let message =
-                        proposal_message::<H>(proposal.view, parent, &H::from(&proposal.payload));
+                    let message = proposal_message(proposal.view, parent, &proposal.payload);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message)
                             .serialize()
@@ -179,7 +177,7 @@ impl<
 
                     // Finalize random digest
                     let digest = H::random(&mut self.runtime);
-                    let message = proposal_message::<H>(view, parent, &digest);
+                    let message = proposal_message(view, parent, &digest);
                     let signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);
                     let proposal_signature = signature.serialize().into();
@@ -187,7 +185,7 @@ impl<
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
-                            payload: Bytes::copy_from_slice(digest.as_ref()),
+                            payload: digest,
                         }),
                         proposal_signature,
                     };

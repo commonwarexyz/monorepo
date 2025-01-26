@@ -100,8 +100,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Nuller<C, H, S> {
                         .unwrap();
 
                     // Finalize digest
-                    let msg =
-                        proposal_message::<H>(view, proposal.parent, &H::from(&proposal.payload));
+                    let msg = proposal_message(view, proposal.parent, &proposal.payload);
                     let f = wire::Finalize {
                         proposal: Some(proposal.clone()),
                         signature: Some(wire::Signature {

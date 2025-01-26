@@ -13,7 +13,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
-    Hasher, Signature,
+    Digest, Hasher, Signature,
 };
 use std::marker::PhantomData;
 
@@ -91,9 +91,9 @@ impl<H: Hasher> Prover<H> {
     fn deserialize_proposal(
         mut proof: Proof,
         namespace: &[u8],
-    ) -> Option<(View, View, H::Digest, Verifier)> {
+    ) -> Option<(View, View, Digest, Verifier)> {
         // Ensure proof is big enough
-        let digest_len = H::DIGEST_LENGTH;
+        let digest_len = H::len();
         if proof.len() != 8 + 8 + digest_len + poly::PARTIAL_SIGNATURE_LENGTH {
             return None;
         }
@@ -101,12 +101,12 @@ impl<H: Hasher> Prover<H> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = H::from(&proof.copy_to_bytes(digest_len));
+        let payload = proof.copy_to_bytes(digest_len);
         let signature = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature = poly::Eval::deserialize(&signature)?;
 
         // Create callback
-        let proposal_message = proposal_message::<H>(view, parent, &payload);
+        let proposal_message = proposal_message(view, parent, &payload);
         let namespace = namespace.to_vec();
         let callback = move |identity: &poly::Poly<group::Public>| -> Option<u32> {
             if ops::partial_verify_message(
@@ -149,9 +149,9 @@ impl<H: Hasher> Prover<H> {
         &self,
         mut proof: Proof,
         namespace: &[u8],
-    ) -> Option<(View, View, H::Digest, group::Signature, group::Signature)> {
+    ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
         // Ensure proof prefix is big enough
-        let digest_len = H::DIGEST_LENGTH;
+        let digest_len = H::len();
         let len = 8 + 8 + digest_len + group::SIGNATURE_LENGTH + group::SIGNATURE_LENGTH;
         if proof.len() < len {
             return None;
@@ -160,8 +160,8 @@ impl<H: Hasher> Prover<H> {
         // Verify signature
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = H::from(&proof.copy_to_bytes(digest_len));
-        let message = proposal_message::<H>(view, parent, &payload);
+        let payload = proof.copy_to_bytes(digest_len);
+        let message = proposal_message(view, parent, &payload);
         let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
         let signature = group::Signature::deserialize(&signature)?;
         if ops::verify_message(&self.public, Some(namespace), &message, &signature).is_err() {
@@ -179,7 +179,7 @@ impl<H: Hasher> Prover<H> {
     }
 
     /// Deserialize a notarize proof.
-    pub fn deserialize_notarize(&self, proof: Proof) -> Option<(View, View, H::Digest, Verifier)> {
+    pub fn deserialize_notarize(&self, proof: Proof) -> Option<(View, View, Digest, Verifier)> {
         Self::deserialize_proposal(proof, &self.notarize_namespace)
     }
 
@@ -187,12 +187,12 @@ impl<H: Hasher> Prover<H> {
     pub fn deserialize_notarization(
         &self,
         proof: Proof,
-    ) -> Option<(View, View, H::Digest, group::Signature, group::Signature)> {
+    ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
         self.deserialize_threshold(proof, &self.notarize_namespace)
     }
 
     /// Deserialize a finalize proof.
-    pub fn deserialize_finalize(&self, proof: Proof) -> Option<(View, View, H::Digest, Verifier)> {
+    pub fn deserialize_finalize(&self, proof: Proof) -> Option<(View, View, Digest, Verifier)> {
         Self::deserialize_proposal(proof, &self.finalize_namespace)
     }
 
@@ -200,7 +200,7 @@ impl<H: Hasher> Prover<H> {
     pub fn deserialize_finalization(
         &self,
         proof: Proof,
-    ) -> Option<(View, View, H::Digest, group::Signature, group::Signature)> {
+    ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
         self.deserialize_threshold(proof, &self.finalize_namespace)
     }
 
@@ -208,14 +208,14 @@ impl<H: Hasher> Prover<H> {
     pub fn serialize_conflicting_proposal(
         view: View,
         parent_1: View,
-        payload_1: &H::Digest,
+        payload_1: &Digest,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &H::Digest,
+        payload_2: &Digest,
         signature_2: &Signature,
     ) -> Proof {
         // Setup proof
-        let digest_len = H::DIGEST_LENGTH;
+        let digest_len = H::len();
         let len = 8
             + 8
             + digest_len
@@ -228,10 +228,10 @@ impl<H: Hasher> Prover<H> {
         let mut proof = Vec::with_capacity(len);
         proof.put_u64(view);
         proof.put_u64(parent_1);
-        proof.extend_from_slice(payload_1.as_ref());
+        proof.extend_from_slice(payload_1);
         proof.extend_from_slice(signature_1);
         proof.put_u64(parent_2);
-        proof.extend_from_slice(payload_2.as_ref());
+        proof.extend_from_slice(payload_2);
         proof.extend_from_slice(signature_2);
         proof.into()
     }
@@ -241,7 +241,7 @@ impl<H: Hasher> Prover<H> {
         namespace: &[u8],
     ) -> Option<(View, Verifier)> {
         // Ensure proof is big enough
-        let digest_len = H::DIGEST_LENGTH;
+        let digest_len = H::len();
         let len = 8
             + 8
             + digest_len
@@ -273,7 +273,7 @@ impl<H: Hasher> Prover<H> {
             if ops::partial_verify_message(
                 identity,
                 Some(&namespace),
-                &proposal_message::<H>(view, parent_1, &H::from(&payload_1)),
+                &proposal_message(view, parent_1, &payload_1),
                 &signature_1,
             )
             .is_err()
@@ -283,7 +283,7 @@ impl<H: Hasher> Prover<H> {
             if ops::partial_verify_message(
                 identity,
                 Some(&namespace),
-                &proposal_message::<H>(view, parent_2, &H::from(&payload_2)),
+                &proposal_message(view, parent_2, &payload_2),
                 &signature_2,
             )
             .is_err()
@@ -300,10 +300,10 @@ impl<H: Hasher> Prover<H> {
     pub fn serialize_conflicting_notarize(
         view: View,
         parent_1: View,
-        payload_1: &H::Digest,
+        payload_1: &Digest,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &H::Digest,
+        payload_2: &Digest,
         signature_2: &Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
@@ -327,10 +327,10 @@ impl<H: Hasher> Prover<H> {
     pub fn serialize_conflicting_finalize(
         view: View,
         parent_1: View,
-        payload_1: &H::Digest,
+        payload_1: &Digest,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &H::Digest,
+        payload_2: &Digest,
         signature_2: &Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
@@ -353,12 +353,12 @@ impl<H: Hasher> Prover<H> {
     pub fn serialize_nullify_finalize(
         view: View,
         parent: View,
-        payload: &H::Digest,
+        payload: &Digest,
         signature_finalize: &Signature,
         signature_null: &Signature,
     ) -> Proof {
         // Setup proof
-        let digest_len = H::DIGEST_LENGTH;
+        let digest_len = H::len();
         let len =
             8 + 8 + digest_len + poly::PARTIAL_SIGNATURE_LENGTH + poly::PARTIAL_SIGNATURE_LENGTH;
 
@@ -366,7 +366,7 @@ impl<H: Hasher> Prover<H> {
         let mut proof = Vec::with_capacity(len);
         proof.put_u64(view);
         proof.put_u64(parent);
-        proof.extend_from_slice(payload.as_ref());
+        proof.extend_from_slice(payload);
         proof.extend_from_slice(signature_finalize);
         proof.extend_from_slice(signature_null);
         proof.into()
@@ -375,7 +375,7 @@ impl<H: Hasher> Prover<H> {
     /// Deserialize a conflicting nullify and finalize proof.
     pub fn deserialize_nullify_finalize(&self, mut proof: Proof) -> Option<(View, Verifier)> {
         // Ensure proof is big enough
-        let digest_len = H::DIGEST_LENGTH;
+        let digest_len = H::len();
         let len =
             8 + 8 + digest_len + poly::PARTIAL_SIGNATURE_LENGTH + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != len {
@@ -401,7 +401,7 @@ impl<H: Hasher> Prover<H> {
             if ops::partial_verify_message(
                 identity,
                 Some(&finalize_namespace),
-                &proposal_message::<H>(view, parent, &H::from(&payload)),
+                &proposal_message(view, parent, &payload),
                 &signature_finalize,
             )
             .is_err()

@@ -14,9 +14,9 @@ use std::time::Duration;
 pub struct Config<
     C: Scheme,
     H: Hasher,
-    A: Automaton<H, Context = Context>,
-    R: Relay<H>,
-    F: Committer<H>,
+    A: Automaton<Context = Context>,
+    R: Relay,
+    F: Committer,
     S: Supervisor<Index = View>,
 > {
     pub crypto: C,

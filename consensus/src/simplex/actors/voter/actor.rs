@@ -14,8 +14,7 @@ use crate::{
     },
     Automaton, Committer, Relay, Supervisor,
 };
-use bytes::Bytes;
-use commonware_cryptography::{Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Digest, Hasher, PublicKey, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -55,13 +54,13 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view
-    proposal: Option<(H::Digest /* proposal */, wire::Proposal)>,
+    proposal: Option<(Digest /* proposal */, wire::Proposal)>,
     requested_proposal: bool,
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notaries: HashMap<u32, H::Digest>,
-    notarizes: HashMap<H::Digest, HashMap<u32, wire::Notarize>>,
+    notaries: HashMap<u32, Digest>,
+    notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
@@ -71,8 +70,8 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalizers: HashMap<u32, H::Digest>,
-    finalizes: HashMap<H::Digest, HashMap<u32, wire::Finalize>>,
+    finalizers: HashMap<u32, Digest>,
+    finalizes: HashMap<Digest, HashMap<u32, wire::Finalize>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
@@ -120,8 +119,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         let proposal = notarize.proposal.as_ref().unwrap();
 
         // Compute proposal digest
-        let message =
-            proposal_message::<H>(proposal.view, proposal.parent, &H::from(&proposal.payload));
+        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
         let digest = self.hasher.finalize();
 
@@ -132,7 +130,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 trace!(
                     view = self.view,
                     signer = hex(public_key),
-                    previous_notarize = hex(previous_notarize.as_ref()),
+                    previous_notarize = hex(previous_notarize),
                     "already notarized"
                 );
                 return false;
@@ -150,10 +148,10 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 self.view,
                 public_key,
                 previous_proposal.parent,
-                &H::from(&previous_proposal.payload),
+                &previous_proposal.payload,
                 &previous_notarize.signature.as_ref().unwrap().signature,
                 proposal.parent,
-                &H::from(&proposal.payload),
+                &proposal.payload,
                 &notarize.signature.as_ref().unwrap().signature,
             );
             self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
@@ -208,7 +206,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
             self.view,
             public_key,
             finalize_proposal.parent,
-            &H::from(&finalize_proposal.payload),
+            &finalize_proposal.payload,
             &finalize.signature.as_ref().unwrap().signature,
             &nullify.signature.as_ref().unwrap().signature,
         );
@@ -236,7 +234,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
             // matter which one we choose.
             debug!(
                 view = self.view,
-                proposal = hex(proposal.as_ref()),
+                proposal = hex(proposal),
                 verified = self.verified_proposal,
                 "broadcasting notarization"
             );
@@ -282,7 +280,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 self.view,
                 public_key,
                 proposal.parent,
-                &H::from(&proposal.payload),
+                &proposal.payload,
                 &finalize.signature.as_ref().unwrap().signature,
                 &null.signature.as_ref().unwrap().signature,
             );
@@ -296,8 +294,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
             return false;
         }
         // Compute proposal digest
-        let message =
-            proposal_message::<H>(proposal.view, proposal.parent, &H::from(&proposal.payload));
+        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
         let digest = self.hasher.finalize();
 
@@ -307,7 +304,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 trace!(
                     view = self.view,
                     signer = hex(public_key),
-                    previous_finalize = hex(previous_finalize.as_ref()),
+                    previous_finalize = hex(previous_finalize),
                     "already finalize"
                 );
                 return false;
@@ -325,10 +322,10 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 self.view,
                 public_key,
                 previous_proposal.parent,
-                &H::from(&previous_proposal.payload),
+                &previous_proposal.payload,
                 &previous_finalize.signature.as_ref().unwrap().signature,
                 proposal.parent,
-                &H::from(&proposal.payload),
+                &proposal.payload,
                 &finalize.signature.as_ref().unwrap().signature,
             );
             self.supervisor.report(CONFLICTING_FINALIZE, proof).await;
@@ -371,7 +368,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
             // matter which one we choose.
             debug!(
                 view = self.view,
-                proposal = hex(proposal.as_ref()),
+                proposal = hex(proposal),
                 verified = self.verified_proposal,
                 "broadcasting finalization"
             );
@@ -418,9 +415,9 @@ pub struct Actor<
     E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
     H: Hasher,
-    A: Automaton<H, Context = Context>,
-    R: Relay<H>,
-    F: Committer<H>,
+    A: Automaton<Context = Context>,
+    R: Relay,
+    F: Committer,
     S: Supervisor<Index = View>,
 > {
     runtime: E,
@@ -434,7 +431,7 @@ pub struct Actor<
     replay_concurrency: usize,
     journal: Option<Journal<B, E>>,
 
-    genesis: Option<H::Digest>,
+    genesis: Option<Digest>,
 
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
@@ -462,9 +459,9 @@ impl<
         E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
         H: Hasher,
-        A: Automaton<H, Context = Context>,
-        R: Relay<H>,
-        F: Committer<H>,
+        A: Automaton<Context = Context>,
+        R: Relay,
+        F: Committer,
         S: Supervisor<Index = View>,
     > Actor<B, E, C, H, A, R, F, S>
 {
@@ -582,7 +579,7 @@ impl<
         Some(proposal)
     }
 
-    fn find_parent(&self) -> Result<(View, H::Digest), View> {
+    fn find_parent(&self) -> Result<(View, Digest), View> {
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
@@ -592,7 +589,7 @@ impl<
             // If have notarization, return
             let parent = self.is_notarized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, H::from(&parent.payload)));
+                return Ok((cursor, parent.payload.clone()));
             }
 
             // If have finalization, return
@@ -600,7 +597,7 @@ impl<
             // We never want to build on some view less than finalized and this prevents that
             let parent = self.is_finalized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, H::from(&parent.payload)));
+                return Ok((cursor, parent.payload.clone()));
             }
 
             // If have nullification, continue
@@ -627,7 +624,7 @@ impl<
     async fn propose(
         &mut self,
         backfiller: &mut resolver::Mailbox,
-    ) -> Option<(Context, oneshot::Receiver<H::Digest>)> {
+    ) -> Option<(Context, oneshot::Receiver<Digest>)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -668,7 +665,7 @@ impl<
         debug!(view = self.view, "requested proposal from automaton");
         let context = Context {
             view: self.view,
-            parent: (parent_view, Bytes::copy_from_slice(parent_payload.as_ref())),
+            parent: (parent_view, parent_payload),
         };
         Some((context.clone(), self.automaton.propose(context).await))
     }
@@ -842,7 +839,7 @@ impl<
         }
     }
 
-    async fn our_proposal(&mut self, digest: H::Digest, proposal: wire::Proposal) -> bool {
+    async fn our_proposal(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {
         // Store the proposal
         let round = self.views.get_mut(&proposal.view).expect("view missing");
 
@@ -860,7 +857,7 @@ impl<
         debug!(
             view = proposal.view,
             parent = proposal.parent,
-            digest = hex(&digest.as_ref()),
+            digest = hex(&digest),
             "generated proposal"
         );
         round.proposal = Some((digest, proposal));
@@ -933,7 +930,7 @@ impl<
                 };
 
                 // Peer proposal references a valid parent
-                break H::from(&parent_proposal.payload);
+                break parent_proposal.payload.clone();
             }
 
             // Check nullification exists in gap
@@ -951,25 +948,20 @@ impl<
         let payload = proposal.payload.clone();
         debug!(
             view = proposal.view,
-            digest = hex(proposal_digest.as_ref()),
+            digest = hex(proposal_digest),
             payload = hex(&payload),
             "requested proposal verification",
         );
         let context = Context {
             view: proposal.view,
-            parent: (
-                proposal.parent,
-                Bytes::copy_from_slice(parent_payload.as_ref()),
-            ),
+            parent: (proposal.parent, parent_payload),
         };
         let proposal = Some((proposal_digest.clone(), proposal.clone()));
         let round = self.views.get_mut(&context.view).unwrap();
         round.proposal = proposal;
         Some((
             context.clone(),
-            self.automaton
-                .verify(context, H::from(&payload.clone()))
-                .await,
+            self.automaton.verify(context, payload.clone()).await,
         ))
     }
 
@@ -1135,8 +1127,7 @@ impl<
         };
 
         // Verify the signature
-        let notarize_message =
-            proposal_message::<H>(proposal.view, proposal.parent, &H::from(&proposal.payload));
+        let notarize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         if !C::verify(
             Some(&self.notarize_namespace),
             &notarize_message,
@@ -1194,11 +1185,7 @@ impl<
         }
 
         // Verify notarization
-        if !verify_notarization::<S, C, H>(
-            &self.supervisor,
-            &self.notarize_namespace,
-            &notarization,
-        ) {
+        if !verify_notarization::<S, C>(&self.supervisor, &self.notarize_namespace, &notarization) {
             return;
         }
 
@@ -1242,13 +1229,12 @@ impl<
         // If proposal is missing, set it
         if round.proposal.is_none() {
             let proposal = notarization.proposal.unwrap();
-            let message =
-                proposal_message::<H>(proposal.view, proposal.parent, &H::from(&proposal.payload));
+            let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
             self.hasher.update(&message);
             let digest = self.hasher.finalize();
             debug!(
                 view = proposal.view,
-                digest = hex(&digest.as_ref()),
+                digest = hex(&digest),
                 "setting unverified proposal in notarization"
             );
             round.proposal = Some((digest, proposal));
@@ -1349,8 +1335,7 @@ impl<
         };
 
         // Verify the signature
-        let finalize_message =
-            proposal_message::<H>(proposal.view, proposal.parent, &H::from(&proposal.payload));
+        let finalize_message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         if !C::verify(
             Some(&self.finalize_namespace),
             &finalize_message,
@@ -1408,11 +1393,7 @@ impl<
         }
 
         // Verify finalization
-        if !verify_finalization::<S, C, H>(
-            &self.supervisor,
-            &self.finalize_namespace,
-            &finalization,
-        ) {
+        if !verify_finalization::<S, C>(&self.supervisor, &self.finalize_namespace, &finalization) {
             return;
         }
 
@@ -1452,13 +1433,12 @@ impl<
         // If proposal is missing, set it
         if round.proposal.is_none() {
             let proposal = finalization.proposal.unwrap();
-            let message =
-                proposal_message::<H>(proposal.view, proposal.parent, &H::from(&proposal.payload));
+            let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
             self.hasher.update(&message);
             let digest = self.hasher.finalize();
             debug!(
                 view = proposal.view,
-                digest = hex(&digest.as_ref()),
+                digest = hex(&digest),
                 "setting unverified proposal in finalization"
             );
             round.proposal = Some((digest, proposal));
@@ -1500,11 +1480,7 @@ impl<
                 public_key,
                 signature: self.crypto.sign(
                     Some(&self.notarize_namespace),
-                    &proposal_message::<H>(
-                        proposal.view,
-                        proposal.parent,
-                        &H::from(&proposal.payload),
-                    ),
+                    &proposal_message(proposal.view, proposal.parent, &proposal.payload),
                 ),
             }),
         })
@@ -1611,11 +1587,7 @@ impl<
                 public_key,
                 signature: self.crypto.sign(
                     Some(&self.finalize_namespace),
-                    &proposal_message::<H>(
-                        proposal.view,
-                        proposal.parent,
-                        &H::from(&proposal.payload),
-                    ),
+                    &proposal_message(proposal.view, proposal.parent, &proposal.payload),
                 ),
             }),
         })
@@ -1714,7 +1686,7 @@ impl<
             self.committer
                 .prepared(
                     proof,
-                    H::from(&notarization.proposal.as_ref().unwrap().payload.clone()),
+                    notarization.proposal.as_ref().unwrap().payload.clone(),
                 )
                 .await;
 
@@ -1869,7 +1841,7 @@ impl<
             self.committer
                 .finalized(
                     proof,
-                    H::from(&finalization.proposal.as_ref().unwrap().payload.clone()),
+                    finalization.proposal.as_ref().unwrap().payload.clone(),
                 )
                 .await;
 
@@ -1934,11 +1906,8 @@ impl<
                         if public_key == self.crypto.public_key() {
                             observed_view = max(observed_view, proposal.view);
                             let round = self.views.get_mut(&proposal.view).expect("missing round");
-                            let proposal_message = proposal_message::<H>(
-                                proposal.view,
-                                proposal.parent,
-                                &H::from(&proposal.payload),
-                            );
+                            let proposal_message =
+                                proposal_message(proposal.view, proposal.parent, &proposal.payload);
                             self.hasher.update(&proposal_message);
                             let proposal_digest = self.hasher.finalize();
                             round.proposal = Some((proposal_digest, proposal));
@@ -2076,13 +2045,13 @@ impl<
                     }
 
                     // Construct proposal
-                    let message = proposal_message::<H>(context.view, context.parent.0, &proposed);
+                    let message = proposal_message(context.view, context.parent.0, &proposed);
                     self.hasher.update(&message);
                     let proposal_digest = self.hasher.finalize();
                     let proposal = wire::Proposal {
                         view: context.view,
                         parent: context.parent.0,
-                        payload: Bytes::copy_from_slice(proposed.as_ref()),
+                        payload: proposed.clone(),
                     };
                     if !self.our_proposal(proposal_digest, proposal.clone()).await {
                         warn!(view = context.view, "failed to record our container");

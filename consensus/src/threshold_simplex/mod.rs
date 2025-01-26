@@ -146,9 +146,10 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
+use commonware_cryptography::Digest;
+
 mod encoder;
 mod prover;
-use bytes::Bytes;
 pub use prover::Prover;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/threshold_simplex.wire.rs"));
@@ -182,7 +183,7 @@ pub struct Context {
     ///
     /// Payloads from views between the current view and the parent view can never be
     /// directly finalized (must exist some nullification).
-    pub parent: (View, Bytes),
+    pub parent: (View, Digest),
 }
 
 use crate::Activity;

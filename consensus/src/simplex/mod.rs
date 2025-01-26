@@ -115,7 +115,8 @@
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 
-use bytes::Bytes;
+use commonware_cryptography::Digest;
+
 mod encoder;
 mod prover;
 pub use prover::Prover;
@@ -151,7 +152,7 @@ pub struct Context {
     ///
     /// Payloads from views between the current view and the parent view can never be
     /// directly finalized (must exist some nullification).
-    pub parent: (View, Bytes),
+    pub parent: (View, Digest),
 }
 
 use crate::Activity;

@@ -3,7 +3,7 @@ use crate::{
     simplex::encoder::{nullify_message, proposal_message},
     Supervisor,
 };
-use commonware_cryptography::{Hasher, PublicKey, Scheme};
+use commonware_cryptography::{PublicKey, Scheme};
 use commonware_utils::{hex, quorum};
 use std::collections::HashSet;
 use tracing::debug;
@@ -14,7 +14,7 @@ pub fn threshold(validators: &[PublicKey]) -> Option<(u32, u32)> {
     Some((threshold, len))
 }
 
-pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme, H: Hasher>(
+pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
     supervisor: &S,
     namespace: &[u8],
     notarization: &wire::Notarization,
@@ -71,8 +71,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme, H: Hasher>(
     }
 
     // Verify threshold notarization
-    let message =
-        proposal_message::<H>(proposal.view, proposal.parent, &H::from(&proposal.payload));
+    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
     let mut seen = HashSet::new();
     for signature in notarization.signatures.iter() {
         // Get public key
@@ -196,7 +195,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
     true
 }
 
-pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme, H: Hasher>(
+pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
     supervisor: &S,
     namespace: &[u8],
     finalization: &wire::Finalization,
@@ -253,8 +252,7 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme, H: Hasher>(
     }
 
     // Verify threshold finalization
-    let message =
-        proposal_message::<H>(proposal.view, proposal.parent, &H::from(&proposal.payload));
+    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
     let mut seen = HashSet::new();
     for signature in finalization.signatures.iter() {
         // Get public key

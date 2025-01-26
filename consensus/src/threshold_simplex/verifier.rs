@@ -3,20 +3,14 @@ use super::{
     wire, View,
 };
 use crate::ThresholdSupervisor;
-use commonware_cryptography::{
-    bls12381::primitives::{
-        self,
-        group::{self, Element},
-        poly,
-    },
-    Hasher,
+use commonware_cryptography::bls12381::primitives::{
+    self,
+    group::{self, Element},
+    poly,
 };
 use tracing::debug;
 
-pub fn verify_notarization<
-    S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
-    H: Hasher,
->(
+pub fn verify_notarization<S: ThresholdSupervisor<Index = View, Identity = poly::Public>>(
     supervisor: &S,
     notarization_namespace: &[u8],
     seed_namespace: &[u8],
@@ -49,8 +43,7 @@ pub fn verify_notarization<
     };
 
     // Verify threshold notarization
-    let message =
-        proposal_message::<H>(proposal.view, proposal.parent, &H::from(&proposal.payload));
+    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
     if primitives::ops::verify_message(
         &public_key,
         Some(notarization_namespace),
@@ -133,10 +126,7 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
     true
 }
 
-pub fn verify_finalization<
-    S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
-    H: Hasher,
->(
+pub fn verify_finalization<S: ThresholdSupervisor<Index = View, Identity = poly::Public>>(
     supervisor: &S,
     finalization_namespace: &[u8],
     seed_namespace: &[u8],
@@ -169,8 +159,7 @@ pub fn verify_finalization<
     };
 
     // Verify threshold finalization
-    let message =
-        proposal_message::<H>(proposal.view, proposal.parent, &H::from(&proposal.payload));
+    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
     if primitives::ops::verify_message(
         &public_key,
         Some(finalization_namespace),
