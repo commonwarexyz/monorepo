@@ -9,6 +9,7 @@ use std::fmt::Debug;
 
 use bytes::Bytes;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
+use std::hash::Hash;
 
 pub mod bls12381;
 pub use bls12381::Bls12381;
@@ -138,17 +139,19 @@ pub trait BatchScheme {
 /// after cloning.
 pub trait Hasher: Clone + Send + Sync + 'static {
     type Digest: AsRef<[u8]>
+        + AsMut<[u8]>
         + Clone
         + Send
         + Sync
         + 'static
+        + Hash
         + Eq
         + PartialEq
         + Ord
         + PartialOrd
         + Debug;
 
-    const DIGEST_LENGTH: usize;
+    const DIGEST_LENGTH: usize = 32;
 
     /// Create a new hasher.
     fn new() -> Self;
