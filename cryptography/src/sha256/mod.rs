@@ -8,6 +8,7 @@ use sha2::{Digest as _, Sha256 as ISha256};
 const DIGEST_LENGTH: usize = 32;
 
 /// SHA-256 hasher.
+#[derive(Debug)]
 pub struct Sha256 {
     hasher: ISha256,
 }

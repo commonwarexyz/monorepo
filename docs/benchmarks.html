@@ -79,7 +79,6 @@
         <div>
             <p>
                 <button id="toggle-expand" onclick="toggleExpand()">expand all</button>
-                <button id="toggle-units" onclick="toggleUnits()">show nanosecond units</button>
             </p>
         </div>
     </div>
@@ -89,15 +88,13 @@
     <script>
         'use strict';
 
-        // Global variable to track unit usage
-        window.USE_MS = true;
-
         // Toggle function to switch between expanding/collapsing all <details> elements
         function updateExpandButton() {
             const expandBtn = document.getElementById('toggle-expand');
-            // If *any* detail is open, switch to "collapse all"
-            const anyOpen = Array.from(document.querySelectorAll('details')).some(d => d.open);
-            expandBtn.textContent = anyOpen ? 'collapse all' : 'expand all';
+            const detailsList = document.querySelectorAll('details');
+            const anyOpen = Array.from(detailsList).some(d => d.open);
+            const benchmarkCount = document.querySelectorAll('details.benchmark-graph-details').length;
+            expandBtn.textContent = anyOpen ? `collapse all (${benchmarkCount})` : `expand all (${benchmarkCount})`;
         }
 
         // Toggle function to expand all <details> elements
@@ -106,18 +103,6 @@
             const anyOpen = Array.from(detailsList).some(d => d.open);
             detailsList.forEach(d => d.open = !anyOpen);
             updateExpandButton();
-        }
-
-        // Toggle function to switch between ns/iter and ms/iter
-        function toggleUnits() {
-            // Update button
-            window.USE_MS = !window.USE_MS;
-            const unitsBtn = document.getElementById('toggle-units');
-            unitsBtn.textContent = window.USE_MS ? 'show nanosecond units' : 'show millisecond units';
-
-            // Re-run setup to regenerate all charts with the updated unit
-            document.getElementById('main').innerHTML = '';
-            setupBenchmark();
         }
 
         // Compute all-time and 7-day performance changes for a single benchmark
@@ -221,8 +206,8 @@
                     const summary = document.createElement('summary');
                     summary.textContent = name;
                     const { pctAllTime, pct7Day, latest } = computeSingleBenchSummary(dataset);
-                    const value = window.USE_MS ? latest / 1e6 : latest;
-                    const units = window.USE_MS ? "ms" : "ns";
+                    const value = latest / 1e6;
+                    const units = "ms";
                     summary.innerHTML = `
                         <span class="benchmark-graph-title">${name}</span>
                         <br>
@@ -256,12 +241,12 @@
                             yAxes: [{
                                 scaleLabel: {
                                     display: true,
-                                    labelString: window.USE_MS ? 'ms/iter' : 'ns/iter',
+                                    labelString: 'ms/iter',
                                 },
                                 ticks: {
                                     beginAtZero: true,
                                     callback: function (value) {
-                                        return window.USE_MS ? (value / 1e6) : value;
+                                        return (value / 1e6);
                                     }
                                 }
                             }]
@@ -277,8 +262,8 @@
                                 },
                                 label: function (item) {
                                     let rawVal = Number(item.value);
-                                    // If toggling to ms, convert from ns -> ms (divide by 1e6)
-                                    let val = window.USE_MS ? rawVal / 1e6 : rawVal;
+                                    // Convert from ns -> ms (divide by 1e6)
+                                    let val = rawVal / 1e6;
 
                                     // Format numeric output
                                     let label = val.toLocaleString(undefined, {
@@ -287,22 +272,19 @@
                                     });
 
                                     const { range, unit } = dataset[item.index].bench;
-                                    // If in ms mode, show "ms/iter", else "ns/iter"
-                                    const labelUnit = window.USE_MS ? 'ms/iter' : 'ns/iter';
-                                    label += ' ' + labelUnit;
+                                    label += ' ms/iter';
 
                                     if (range) {
                                         // parse numeric range if it exists, also convert to ms if needed
                                         let rangeVal = range.replace(/[^\d.]/g, '');
                                         let rangeNum = Number(rangeVal);
-                                        if (!isNaN(rangeNum) && window.USE_MS) {
+                                        if (!isNaN(rangeNum)) {
                                             rangeNum = rangeNum / 1e6;
                                         }
-                                        const rangeUnit = window.USE_MS ? 'ms' : 'ns';
                                         label += ' (' + rangeNum.toLocaleString(undefined, {
                                             minimumFractionDigits: 3,
                                             maximumFractionDigits: 3
-                                        }) + ' ' + rangeUnit + ')';
+                                        }) + ' ms)';
                                     }
                                     return label;
                                 },
@@ -358,7 +340,11 @@
                 }
             }
 
+            // Render all charts
             renderAllCharts(init());
+
+            // Update buttons
+            updateExpandButton();
         };
     </script>
     <script src="https://commonwarexyz.github.io/benchmarks/data.js" onload="setupBenchmark()"></script>

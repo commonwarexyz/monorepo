@@ -11,8 +11,10 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/storage"
 documentation = "https://docs.rs/commonware-storage"
 
 [dependencies]
+bytes = { workspace = true }
 commonware-cryptography = {workspace = true}
 cfg-if = { workspace = true }
+thiserror = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bytes = { workspace = true }
