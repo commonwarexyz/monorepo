@@ -135,7 +135,7 @@ impl<
     fn add_verified_proposal(&mut self, proposal: wire::Proposal) {
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest = Digest::copy_from_slice(self.hasher.finalize().as_ref());
+        let digest: Digest = self.hasher.finalize().into();
         if self.proposal.is_none() {
             debug!(
                 view = proposal.view,
@@ -166,7 +166,7 @@ impl<
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest = Digest::copy_from_slice(self.hasher.finalize().as_ref());
+        let digest: Digest = self.hasher.finalize().into();
 
         // Check if already notarized
         if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
@@ -289,7 +289,7 @@ impl<
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest = Digest::copy_from_slice(self.hasher.finalize().as_ref());
+        let digest: Digest = self.hasher.finalize().into();
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
@@ -546,7 +546,7 @@ impl<
                 &notarization_proposal.payload,
             );
             self.hasher.update(&message);
-            let digest = Digest::copy_from_slice(self.hasher.finalize().as_ref());
+            let digest: Digest = self.hasher.finalize().into();
             if digest != *proposal {
                 warn!(
                     view = self.view,
@@ -2120,8 +2120,7 @@ impl<
                             let proposal_message =
                                 proposal_message(proposal.view, proposal.parent, &proposal.payload);
                             self.hasher.update(&proposal_message);
-                            let proposal_digest =
-                                Digest::copy_from_slice(self.hasher.finalize().as_ref());
+                            let proposal_digest: Digest = self.hasher.finalize().into();
                             round.proposal = Some((proposal_digest, proposal));
                             round.verified_proposal = true;
                             round.broadcast_notarize = true;
@@ -2286,7 +2285,7 @@ impl<
                     // Construct proposal
                     let message = proposal_message(context.view, context.parent.0, &proposed);
                     self.hasher.update(&message);
-                    let proposal_digest = Digest::copy_from_slice(self.hasher.finalize().as_ref());
+                    let proposal_digest:Digest = self.hasher.finalize().into();
                     let proposal = wire::Proposal {
                         view: context.view,
                         parent: context.parent.0,
