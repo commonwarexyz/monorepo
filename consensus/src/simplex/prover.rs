@@ -467,7 +467,7 @@ mod tests {
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
-        proof.extend_from_slice(&vec![0; Sha256::DIGEST_LENGTH]); // payload
+        proof.extend_from_slice(&[0; Sha256::DIGEST_LENGTH]); // payload
         proof.put_u32(0); // count of 0 signatures is valid
 
         // Verify that the proof is accepted
@@ -486,7 +486,7 @@ mod tests {
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
-        proof.extend_from_slice(&vec![0; Sha256::DIGEST_LENGTH]); // payload
+        proof.extend_from_slice(&[0; Sha256::DIGEST_LENGTH]); // payload
 
         // Verify that the proof is rejected
         let result = Prover::<Ed25519, Sha256>::deserialize_aggregation(
@@ -504,7 +504,7 @@ mod tests {
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
-        proof.extend_from_slice(&vec![0; Sha256::DIGEST_LENGTH]); // payload
+        proof.extend_from_slice(&[0; Sha256::DIGEST_LENGTH]); // payload
         proof.put_u32(100);
 
         // Verify that the proof is rejected

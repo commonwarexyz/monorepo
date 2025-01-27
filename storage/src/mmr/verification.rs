@@ -21,7 +21,7 @@ pub struct Proof<H: CHasher> {
 
 impl<H: CHasher> PartialEq for Proof<H> {
     fn eq(&self, other: &Self) -> bool {
-        self.size == other.size && self.hashes == self.hashes
+        self.size == other.size && self.hashes == other.hashes
     }
 }
 
