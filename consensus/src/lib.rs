@@ -21,6 +21,7 @@ pub type Activity = u8;
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
+/// Digest represents an arbitrary digest bytes.
 pub type Digest = Bytes;
 
 cfg_if::cfg_if! {

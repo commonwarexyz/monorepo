@@ -205,7 +205,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     fn genesis(&mut self) -> Digest {
         let payload = Bytes::from(GENESIS_BYTES);
         self.hasher.update(&payload);
-        let digest = Digest::copy_from_slice(self.hasher.finalize().as_ref());
+        let digest: Digest = self.hasher.finalize().into();
         self.verified.insert(digest.clone());
         self.finalized_views.insert(digest.clone());
         digest
@@ -232,7 +232,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         payload.extend_from_slice(&context.parent.1);
         payload.put_u64(self.runtime.gen::<u64>()); // Ensures we always have a unique payload
         self.hasher.update(&payload);
-        let digest = Digest::copy_from_slice(self.hasher.finalize().as_ref());
+        let digest: Digest = self.hasher.finalize().into();
 
         // Mark verified
         self.verified.insert(digest.clone());

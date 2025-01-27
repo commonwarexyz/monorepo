@@ -49,7 +49,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
                     // to some parent, this doesn't really do anything
                     // in this example.
                     self.hasher.update(GENESIS);
-                    let digest = Digest::copy_from_slice(self.hasher.finalize().as_ref());
+                    let digest: Digest = self.hasher.finalize().into();
                     let _ = response.send(digest);
                 }
                 Message::Propose { response } => {
@@ -59,7 +59,7 @@ impl<R: Rng, C: Scheme, H: Hasher> Application<R, C, H> {
 
                     // Hash the message
                     self.hasher.update(&msg);
-                    let digest = Digest::copy_from_slice(self.hasher.finalize().as_ref());
+                    let digest: Digest = self.hasher.finalize().into();
                     info!(msg = hex(&msg), payload = hex(digest.as_ref()), "proposed");
 
                     // Send digest to consensus
