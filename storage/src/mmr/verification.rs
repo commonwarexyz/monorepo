@@ -277,19 +277,19 @@ mod tests {
         assert!(
             !proof.verify_element_inclusion(
                 &mut hasher,
-                &Sha256Digest::try_from(&vec![0u8; Sha256::DIGEST_LENGTH]).unwrap(),
+                &Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]),
                 POS,
                 &root_hash,
             ),
             "proof verification should fail with mangled element"
         );
-        let root_hash2 = Sha256Digest::try_from(&vec![0u8; Sha256::DIGEST_LENGTH]).unwrap();
+        let root_hash2 = Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]);
         assert!(
             !proof.verify_element_inclusion(&mut hasher, &element, POS, &root_hash2),
             "proof verification should fail with mangled root_hash"
         );
         let mut proof2 = proof.clone();
-        proof2.hashes[0] = Sha256Digest::try_from(&vec![0u8; Sha256::DIGEST_LENGTH]).unwrap();
+        proof2.hashes[0] = Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]);
         assert!(
             !proof2.verify_element_inclusion(&mut hasher, &element, POS, &root_hash),
             "proof verification should fail with mangled proof hash"
@@ -303,7 +303,7 @@ mod tests {
         proof2 = proof.clone();
         proof2
             .hashes
-            .push(Sha256Digest::try_from(&vec![0u8; Sha256::DIGEST_LENGTH]).unwrap());
+            .push(Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]));
         assert!(
             !proof2.verify_element_inclusion(&mut hasher, &element, POS, &root_hash),
             "proof verification should fail with extra hash"
@@ -325,7 +325,7 @@ mod tests {
         // sneak in an extra hash that won't be used in the computation and make sure it's detected
         proof2
             .hashes
-            .push(Sha256Digest::try_from(&vec![0u8; Sha256::DIGEST_LENGTH]).unwrap());
+            .push(Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]));
         proof2
             .hashes
             .extend(proof.hashes[PEAK_COUNT - 1..].iter().cloned());
@@ -342,7 +342,7 @@ mod tests {
         let mut elements = Vec::<Sha256Digest>::new();
         let mut element_positions = Vec::<u64>::new();
         for i in 0..49 {
-            elements.push(Sha256Digest::try_from(&vec![i as u8; Sha256::DIGEST_LENGTH]).unwrap());
+            elements.push(Sha256Digest::from([i as u8; Sha256::DIGEST_LENGTH]));
             element_positions.push(mmr.add(elements.last().unwrap()));
         }
         // test range proofs over all possible ranges of at least 2 elements
@@ -432,8 +432,7 @@ mod tests {
         );
         // mangle the proof and confirm it fails
         let mut invalid_proof = range_proof.clone();
-        invalid_proof.hashes[1] =
-            Sha256Digest::try_from(&vec![0u8; Sha256::DIGEST_LENGTH]).unwrap();
+        invalid_proof.hashes[1] = Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]);
         assert!(
             !invalid_proof.verify_range_inclusion(
                 &mut hasher,
@@ -447,10 +446,9 @@ mod tests {
         // inserting elements into the proof should also cause it to fail (malleability check)
         for i in 0..range_proof.hashes.len() {
             let mut invalid_proof = range_proof.clone();
-            invalid_proof.hashes.insert(
-                i,
-                Sha256Digest::try_from(&vec![0u8; Sha256::DIGEST_LENGTH]).unwrap(),
-            );
+            invalid_proof
+                .hashes
+                .insert(i, Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]));
             assert!(
                 !invalid_proof.verify_range_inclusion(
                     &mut hasher,
