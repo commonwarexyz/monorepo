@@ -82,24 +82,14 @@ impl TryFrom<&[u8]> for Digest {
 impl TryFrom<&Bytes> for Digest {
     type Error = DigestError;
     fn try_from(value: &Bytes) -> Result<Self, Self::Error> {
-        if value.len() != DIGEST_LENGTH {
-            return Err(DigestError::InvalidDigestLength);
-        }
-        let mut v = [0u8; DIGEST_LENGTH];
-        v.copy_from_slice(value);
-        Ok(Self(v))
+        Self::try_from(value.as_ref())
     }
 }
 
 impl TryFrom<&Vec<u8>> for Digest {
     type Error = DigestError;
     fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
-        if value.len() != DIGEST_LENGTH {
-            return Err(DigestError::InvalidDigestLength);
-        }
-        let mut v = [0u8; DIGEST_LENGTH];
-        v.copy_from_slice(value);
-        Ok(Self(v))
+        Self::try_from(value.as_slice())
     }
 }
 
