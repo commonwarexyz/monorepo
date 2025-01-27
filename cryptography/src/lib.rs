@@ -9,7 +9,7 @@ use std::fmt::Debug;
 
 use bytes::Bytes;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
-use std::hash::Hash;
+use thiserror::Error;
 
 pub mod bls12381;
 pub use bls12381::Bls12381;
@@ -125,6 +125,13 @@ pub trait BatchScheme {
     fn verify<R: RngCore + CryptoRng>(self, rng: &mut R) -> bool;
 }
 
+/// Error Digest manipulations must rely on.
+#[derive(Error, Debug)]
+pub enum DigestError {
+    #[error("invalid digest length")]
+    InvalidDigestLength,
+}
+
 /// Interface that commonware crates rely on for hashing.
 ///
 /// Hash functions in commonware primitives are not typically hardcoded
@@ -139,12 +146,14 @@ pub trait BatchScheme {
 /// after cloning.
 pub trait Hasher: Clone + Send + Sync + 'static {
     type Digest: AsRef<[u8]>
-        + AsMut<[u8]>
+        + for<'a> TryFrom<&'a Bytes, Error = DigestError>
+        + for<'a> TryFrom<&'a [u8], Error = DigestError>
+        + for<'a> TryFrom<&'a Vec<u8>, Error = DigestError>
+        + Into<Bytes>
         + Clone
         + Send
         + Sync
         + 'static
-        + Hash
         + Eq
         + PartialEq
         + Ord
@@ -168,22 +177,13 @@ pub trait Hasher: Clone + Send + Sync + 'static {
     /// This function does not need to be called after `finalize`.
     fn reset(&mut self);
 
-    /// Validate the digest.
-    fn validate(digest: &Self::Digest) -> bool;
-
-    fn from(data: &[u8]) -> Self::Digest;
-
     /// Generate a random digest.
     ///
     /// # Warning
     ///
     /// This function is typically used for testing and is not recommended
     /// for production use.
-    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Self::Digest {
-        let mut digest = vec![0u8; Self::DIGEST_LENGTH];
-        rng.fill_bytes(&mut digest);
-        Self::from(&digest)
-    }
+    fn random<R: Rng + CryptoRng>(rng: &mut R) -> Self::Digest;
 }
 
 #[cfg(test)]
@@ -435,13 +435,13 @@ mod tests {
         let mut hasher = H::new();
         hasher.update(b"hello world");
         let digest = hasher.finalize();
-        assert!(H::validate(&digest));
+        assert!(H::Digest::try_from(digest.as_ref()).is_ok());
         assert_eq!(digest.as_ref().len(), H::DIGEST_LENGTH);
 
         // Reuse hasher without reset
         hasher.update(b"hello world");
         let digest_again = hasher.finalize();
-        assert!(H::validate(&digest_again));
+        assert!(H::Digest::try_from(digest_again.as_ref()).is_ok());
         assert_eq!(digest, digest_again);
 
         // Reuse hasher with reset
@@ -449,13 +449,13 @@ mod tests {
         hasher.reset();
         hasher.update(b"hello world");
         let digest_reset = hasher.finalize();
-        assert!(H::validate(&digest_reset));
+        assert!(H::Digest::try_from(digest_reset.as_ref()).is_ok());
         assert_eq!(digest, digest_reset);
 
         // Hash different data
         hasher.update(b"hello mars");
         let digest_mars = hasher.finalize();
-        assert!(H::validate(&digest_mars));
+        assert!(H::Digest::try_from(digest_mars.as_ref()).is_ok());
         assert_ne!(digest, digest_mars);
     }
 
@@ -465,20 +465,20 @@ mod tests {
         hasher.update(b"hello");
         hasher.update(b" world");
         let digest = hasher.finalize();
-        assert!(H::validate(&digest));
+        assert!(H::Digest::try_from(digest.as_ref()).is_ok());
 
         // Generate hash in oneshot
         let mut hasher = H::new();
         hasher.update(b"hello world");
         let digest_oneshot = hasher.finalize();
-        assert!(H::validate(&digest_oneshot));
+        assert!(H::Digest::try_from(digest_oneshot.as_ref()).is_ok());
         assert_eq!(digest, digest_oneshot);
     }
 
     fn test_hasher_empty_input<H: Hasher>() {
         let mut hasher = H::new();
         let digest = hasher.finalize();
-        assert!(H::validate(&digest));
+        assert!(H::Digest::try_from(digest.as_ref()).is_ok());
     }
 
     fn test_hasher_large_input<H: Hasher>() {
@@ -486,7 +486,7 @@ mod tests {
         let data = vec![1; 1024];
         hasher.update(&data);
         let digest = hasher.finalize();
-        assert!(H::validate(&digest));
+        assert!(H::Digest::try_from(digest.as_ref()).is_ok());
     }
 
     #[test]

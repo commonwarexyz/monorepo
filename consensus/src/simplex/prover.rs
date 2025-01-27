@@ -5,7 +5,7 @@ use super::{
     },
     wire, View,
 };
-use crate::{DigestBytes, Proof};
+use crate::{Digest, Proof};
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{Hasher, PublicKey, Scheme, Signature};
 use std::{collections::HashSet, marker::PhantomData};
@@ -61,7 +61,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         mut proof: Proof,
         check_sig: bool,
         namespace: &[u8],
-    ) -> Option<(View, View, DigestBytes, PublicKey)> {
+    ) -> Option<(View, View, Digest, PublicKey)> {
         // Ensure proof is big enough
         let digest_len = H::DIGEST_LENGTH;
         let (public_key_len, signature_len) = C::len();
@@ -122,7 +122,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         max: u32,
         check_sigs: bool,
         namespace: &[u8],
-    ) -> Option<(View, View, DigestBytes, Vec<PublicKey>)> {
+    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
         // Ensure proof prefix is big enough
         let digest_len = H::DIGEST_LENGTH;
         let len = 8 + 8 + digest_len + 4;
@@ -174,7 +174,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         &self,
         proof: Proof,
         check_sig: bool,
-    ) -> Option<(View, View, DigestBytes, PublicKey)> {
+    ) -> Option<(View, View, Digest, PublicKey)> {
         Self::deserialize_proposal(proof, check_sig, &self.notarize_namespace)
     }
 
@@ -184,7 +184,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         proof: Proof,
         max: u32,
         check_sigs: bool,
-    ) -> Option<(View, View, DigestBytes, Vec<PublicKey>)> {
+    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
         Self::deserialize_aggregation(proof, max, check_sigs, &self.notarize_namespace)
     }
 
@@ -193,7 +193,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         &self,
         proof: Proof,
         check_sig: bool,
-    ) -> Option<(View, View, DigestBytes, PublicKey)> {
+    ) -> Option<(View, View, Digest, PublicKey)> {
         Self::deserialize_proposal(proof, check_sig, &self.finalize_namespace)
     }
 
@@ -203,7 +203,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         proof: Proof,
         max: u32,
         check_sigs: bool,
-    ) -> Option<(View, View, DigestBytes, Vec<PublicKey>)> {
+    ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
         Self::deserialize_aggregation(proof, max, check_sigs, &self.finalize_namespace)
     }
 
@@ -212,10 +212,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         view: View,
         public_key: &PublicKey,
         parent_1: View,
-        payload_1: &DigestBytes,
+        payload_1: &Digest,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &DigestBytes,
+        payload_2: &Digest,
         signature_2: &Signature,
     ) -> Proof {
         // Setup proof
@@ -291,10 +291,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         view: View,
         public_key: &PublicKey,
         parent_1: View,
-        payload_1: &DigestBytes,
+        payload_1: &Digest,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &DigestBytes,
+        payload_2: &Digest,
         signature_2: &Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
@@ -324,10 +324,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         view: View,
         public_key: &PublicKey,
         parent_1: View,
-        payload_1: &DigestBytes,
+        payload_1: &Digest,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &DigestBytes,
+        payload_2: &Digest,
         signature_2: &Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
@@ -356,7 +356,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         view: View,
         public_key: &PublicKey,
         parent: View,
-        payload: &DigestBytes,
+        payload: &Digest,
         signature_finalize: &Signature,
         signature_null: &Signature,
     ) -> Proof {

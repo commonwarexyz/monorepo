@@ -18,7 +18,7 @@ message Voter {
 message Proposal {
     uint64 view = 1;
     uint64 parent = 2;
-    bytes payload = 3; // DigestBytes
+    bytes payload = 3; // Digest
 }
 
 // A Notarize from the leader for a view is also treated as a proposal

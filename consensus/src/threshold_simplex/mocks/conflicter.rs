@@ -7,7 +7,7 @@ use crate::{
         },
         wire, View,
     },
-    DigestBytes, ThresholdSupervisor,
+    Digest, ThresholdSupervisor,
 };
 use bytes::Bytes;
 use commonware_cryptography::{
@@ -123,8 +123,7 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Notarize random digest
-                    let digest =
-                        DigestBytes::copy_from_slice(H::random(&mut self.runtime).as_ref());
+                    let digest: Digest = H::random(&mut self.runtime).into();
                     let message = proposal_message(view, parent, &digest);
                     let proposal_signature =
                         ops::partial_sign_message(share, Some(&self.notarize_namespace), &message)
@@ -177,8 +176,7 @@ impl<
                     sender.send(Recipients::All, msg, true).await.unwrap();
 
                     // Finalize random digest
-                    let digest =
-                        DigestBytes::copy_from_slice(H::random(&mut self.runtime).as_ref());
+                    let digest: Digest = H::random(&mut self.runtime).into();
                     let message = proposal_message(view, parent, &digest);
                     let signature =
                         ops::partial_sign_message(share, Some(&self.finalize_namespace), &message);

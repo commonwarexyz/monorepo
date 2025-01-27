@@ -5,7 +5,7 @@ use super::{
     },
     wire, View,
 };
-use crate::{DigestBytes, Proof};
+use crate::{Digest, Proof};
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -91,7 +91,7 @@ impl<H: Hasher> Prover<H> {
     fn deserialize_proposal(
         mut proof: Proof,
         namespace: &[u8],
-    ) -> Option<(View, View, DigestBytes, Verifier)> {
+    ) -> Option<(View, View, Digest, Verifier)> {
         // Ensure proof is big enough
         let digest_len = H::DIGEST_LENGTH;
         if proof.len() != 8 + 8 + digest_len + poly::PARTIAL_SIGNATURE_LENGTH {
@@ -149,7 +149,7 @@ impl<H: Hasher> Prover<H> {
         &self,
         mut proof: Proof,
         namespace: &[u8],
-    ) -> Option<(View, View, DigestBytes, group::Signature, group::Signature)> {
+    ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
         // Ensure proof prefix is big enough
         let digest_len = H::DIGEST_LENGTH;
         let len = 8 + 8 + digest_len + group::SIGNATURE_LENGTH + group::SIGNATURE_LENGTH;
@@ -179,10 +179,7 @@ impl<H: Hasher> Prover<H> {
     }
 
     /// Deserialize a notarize proof.
-    pub fn deserialize_notarize(
-        &self,
-        proof: Proof,
-    ) -> Option<(View, View, DigestBytes, Verifier)> {
+    pub fn deserialize_notarize(&self, proof: Proof) -> Option<(View, View, Digest, Verifier)> {
         Self::deserialize_proposal(proof, &self.notarize_namespace)
     }
 
@@ -190,15 +187,12 @@ impl<H: Hasher> Prover<H> {
     pub fn deserialize_notarization(
         &self,
         proof: Proof,
-    ) -> Option<(View, View, DigestBytes, group::Signature, group::Signature)> {
+    ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
         self.deserialize_threshold(proof, &self.notarize_namespace)
     }
 
     /// Deserialize a finalize proof.
-    pub fn deserialize_finalize(
-        &self,
-        proof: Proof,
-    ) -> Option<(View, View, DigestBytes, Verifier)> {
+    pub fn deserialize_finalize(&self, proof: Proof) -> Option<(View, View, Digest, Verifier)> {
         Self::deserialize_proposal(proof, &self.finalize_namespace)
     }
 
@@ -206,7 +200,7 @@ impl<H: Hasher> Prover<H> {
     pub fn deserialize_finalization(
         &self,
         proof: Proof,
-    ) -> Option<(View, View, DigestBytes, group::Signature, group::Signature)> {
+    ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
         self.deserialize_threshold(proof, &self.finalize_namespace)
     }
 
@@ -214,10 +208,10 @@ impl<H: Hasher> Prover<H> {
     pub fn serialize_conflicting_proposal(
         view: View,
         parent_1: View,
-        payload_1: &DigestBytes,
+        payload_1: &Digest,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &DigestBytes,
+        payload_2: &Digest,
         signature_2: &Signature,
     ) -> Proof {
         // Setup proof
@@ -306,10 +300,10 @@ impl<H: Hasher> Prover<H> {
     pub fn serialize_conflicting_notarize(
         view: View,
         parent_1: View,
-        payload_1: &DigestBytes,
+        payload_1: &Digest,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &DigestBytes,
+        payload_2: &Digest,
         signature_2: &Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
@@ -333,10 +327,10 @@ impl<H: Hasher> Prover<H> {
     pub fn serialize_conflicting_finalize(
         view: View,
         parent_1: View,
-        payload_1: &DigestBytes,
+        payload_1: &Digest,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &DigestBytes,
+        payload_2: &Digest,
         signature_2: &Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
@@ -359,7 +353,7 @@ impl<H: Hasher> Prover<H> {
     pub fn serialize_nullify_finalize(
         view: View,
         parent: View,
-        payload: &DigestBytes,
+        payload: &Digest,
         signature_finalize: &Signature,
         signature_null: &Signature,
     ) -> Proof {

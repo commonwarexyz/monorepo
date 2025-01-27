@@ -21,7 +21,7 @@ pub type Activity = u8;
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
-pub type DigestBytes = Bytes;
+pub type Digest = Bytes;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
@@ -38,7 +38,7 @@ cfg_if::cfg_if! {
             type Context;
 
             /// Payload used to initialize the consensus engine.
-            fn genesis(&mut self) -> impl Future<Output = DigestBytes> + Send;
+            fn genesis(&mut self) -> impl Future<Output = Digest> + Send;
 
             /// Generate a new payload for the given context.
             ///
@@ -48,7 +48,7 @@ cfg_if::cfg_if! {
             fn propose(
                 &mut self,
                 context: Self::Context,
-            ) -> impl Future<Output = oneshot::Receiver<DigestBytes>> + Send;
+            ) -> impl Future<Output = oneshot::Receiver<Digest>> + Send;
 
             /// Verify the payload is valid.
             ///
@@ -57,7 +57,7 @@ cfg_if::cfg_if! {
             fn verify(
                 &mut self,
                 context: Self::Context,
-                payload: DigestBytes,
+                payload: Digest,
             ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
         }
 
@@ -71,7 +71,7 @@ cfg_if::cfg_if! {
             ///
             /// Other participants may not begin voting on a proposal until they have the full contents,
             /// so timely delivery often yields better performance.
-            fn broadcast(&mut self, payload: DigestBytes) -> impl Future<Output = ()> + Send;
+            fn broadcast(&mut self, payload: Digest) -> impl Future<Output = ()> + Send;
         }
 
         /// Committer is the interface responsible for handling notifications of payload status.
@@ -79,10 +79,10 @@ cfg_if::cfg_if! {
             /// Event that a payload has made some progress towards finalization but is not yet finalized.
             ///
             /// This is often used to provide an early ("best guess") confirmation to users.
-            fn prepared(&mut self, proof: Proof, payload: DigestBytes) -> impl Future<Output = ()> + Send;
+            fn prepared(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
 
             /// Event indicating the container has been finalized.
-            fn finalized(&mut self, proof: Proof, payload: DigestBytes) -> impl Future<Output = ()> + Send;
+            fn finalized(&mut self, proof: Proof, payload: Digest) -> impl Future<Output = ()> + Send;
         }
 
         /// Supervisor is the interface responsible for managing which participants are active at a given time.

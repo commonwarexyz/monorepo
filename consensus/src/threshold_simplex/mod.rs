@@ -171,7 +171,7 @@ pub mod mocks;
 /// View is a monotonically increasing counter that represents the current focus of consensus.
 pub type View = u64;
 
-use crate::{Activity, DigestBytes};
+use crate::{Activity, Digest};
 
 /// Context is a collection of metadata from consensus about a given payload.
 #[derive(Clone)]
@@ -183,7 +183,7 @@ pub struct Context {
     ///
     /// Payloads from views between the current view and the parent view can never be
     /// directly finalized (must exist some nullification).
-    pub parent: (View, DigestBytes),
+    pub parent: (View, Digest),
 }
 
 /// Notarize a payload at a given view.

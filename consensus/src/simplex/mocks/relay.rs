@@ -1,4 +1,4 @@
-use crate::DigestBytes;
+use crate::Digest;
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, SinkExt};
@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, sync::Mutex};
 
 /// Relay is a mock for distributing artifacts between applications.
 pub struct Relay {
-    recipients: Mutex<BTreeMap<PublicKey, mpsc::UnboundedSender<(DigestBytes, Bytes)>>>,
+    recipients: Mutex<BTreeMap<PublicKey, mpsc::UnboundedSender<(Digest, Bytes)>>>,
 }
 
 impl Relay {
@@ -16,7 +16,7 @@ impl Relay {
         }
     }
 
-    pub fn register(&self, public_key: PublicKey) -> mpsc::UnboundedReceiver<(DigestBytes, Bytes)> {
+    pub fn register(&self, public_key: PublicKey) -> mpsc::UnboundedReceiver<(Digest, Bytes)> {
         let (sender, receiver) = mpsc::unbounded();
         if self
             .recipients
@@ -30,7 +30,7 @@ impl Relay {
         receiver
     }
 
-    pub async fn broadcast(&self, sender: &PublicKey, payload: (DigestBytes, Bytes)) {
+    pub async fn broadcast(&self, sender: &PublicKey, payload: (Digest, Bytes)) {
         let channels = {
             let mut channels = Vec::new();
             let recipients = self.recipients.lock().unwrap();

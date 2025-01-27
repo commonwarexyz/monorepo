@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
 use commonware_bridge::{wire, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE};
-use commonware_consensus::threshold_simplex::Prover;
+use commonware_consensus::{threshold_simplex::Prover, Digest};
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
     Ed25519, Hasher, Scheme, Sha256,
@@ -143,14 +143,14 @@ fn main() {
 
                         // Compute digest
                         hasher.update(&incoming.data);
-                        let digest = hasher.finalize();
+                        let digest: Digest = hasher.finalize().into();
 
                         // Store block
                         network.insert(digest.clone(), incoming.data);
                         let _ = response.send(true);
                         info!(
                             network = hex(&incoming.network),
-                            block = hex(&digest),
+                            block = hex(digest.as_ref()),
                             "stored block"
                         );
                     }
@@ -159,7 +159,7 @@ fn main() {
                             let _ = response.send(None);
                             continue;
                         };
-                        let data = network.get(incoming.digest.as_ref());
+                        let data = network.get(&incoming.digest);
                         let _ = response.send(data.cloned());
                     }
                     Message::PutFinalization { incoming, response } => {

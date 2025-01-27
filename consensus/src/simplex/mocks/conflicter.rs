@@ -5,7 +5,7 @@ use crate::{
         encoder::{finalize_namespace, notarize_namespace, proposal_message},
         wire, View,
     },
-    DigestBytes, Supervisor,
+    Digest, Supervisor,
 };
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -112,8 +112,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         .unwrap();
 
                     // Notarize random digest
-                    let digest =
-                        DigestBytes::copy_from_slice(H::random(&mut self.runtime).as_ref());
+                    let digest: Digest = H::random(&mut self.runtime).into();
                     let msg = proposal_message(view, parent, &digest);
                     let n = wire::Notarize {
                         proposal: Some(wire::Proposal {
@@ -170,8 +169,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         .unwrap();
 
                     // Finalize random digest
-                    let digest =
-                        DigestBytes::copy_from_slice(H::random(&mut self.runtime).as_ref());
+                    let digest: Digest = H::random(&mut self.runtime).into();
                     let msg = proposal_message(view, parent, &digest);
                     let f = wire::Finalize {
                         proposal: Some(wire::Proposal {

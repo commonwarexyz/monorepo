@@ -1,5 +1,5 @@
 use super::View;
-use crate::DigestBytes;
+use crate::Digest;
 use bytes::{BufMut, Bytes};
 use commonware_utils::union;
 
@@ -7,7 +7,7 @@ pub const NOTARIZE_SUFFIX: &[u8] = b"_NOTARIZE";
 pub const NULLIFY_SUFFIX: &[u8] = b"_NULLIFY";
 pub const FINALIZE_SUFFIX: &[u8] = b"_FINALIZE";
 
-pub fn proposal_message(view: View, parent: View, payload: &DigestBytes) -> Bytes {
+pub fn proposal_message(view: View, parent: View, payload: &Digest) -> Bytes {
     let mut msg = Vec::with_capacity(8 + 8 + payload.len());
     msg.put_u64(view);
     msg.put_u64(parent);
