@@ -231,7 +231,6 @@ fn peak_hash_from_range<'a, H: CHasher>(
 mod tests {
     use super::Proof;
     use crate::mmr::mem::Mmr;
-    use bytes::Bytes;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
     type Sha256Digest = <Sha256 as CHasher>::Digest;
@@ -240,8 +239,7 @@ mod tests {
     fn test_verify_element() {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
         let mut mmr = Mmr::<Sha256>::new();
-        let element = Bytes::from_static(b"01234567012345670123456701234567");
-        let element = Sha256Digest::try_from(&element).unwrap();
+        let element = Sha256Digest::from(*b"01234567012345670123456701234567");
         let mut leaves: Vec<u64> = Vec::new();
         for _ in 0..11 {
             leaves.push(mmr.add(&element));

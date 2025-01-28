@@ -237,7 +237,6 @@ mod tests {
     use crate::mmr::hasher::Hasher;
     use crate::mmr::iterator::nodes_needing_parents;
     use crate::mmr::mem::Mmr;
-    use bytes::Bytes;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
@@ -261,8 +260,7 @@ mod tests {
             0,
             "oldest_required_element should return 0 on empty MMR"
         );
-        let element = Bytes::from_static(b"01234567012345670123456701234567");
-        let element = <Sha256 as CHasher>::Digest::try_from(&element).unwrap();
+        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let mut leaves: Vec<u64> = Vec::new();
         for _ in 0..11 {
             leaves.push(mmr.add(&element));
