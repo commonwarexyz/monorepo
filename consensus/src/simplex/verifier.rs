@@ -168,7 +168,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
                     view = nullification.view,
                     signer = signature.public_key,
                     reason = "invalid validator",
-                    "dropping finalization"
+                    "dropping notarization"
                 );
                 return false;
             }
