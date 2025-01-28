@@ -1,14 +1,12 @@
 use bytes::Bytes;
-use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,
 };
-use tracing::debug;
 
 use crate::{
     linked::{actors::signer, Context},
-    Application as A, Broadcaster, Collector as Z,
+    Application as A, Broadcaster,
 };
 
 #[derive(Clone)]
@@ -34,19 +32,6 @@ impl A for Mailbox {
             .send(true)
             .expect("Failed to send verification result");
         receiver
-    }
-}
-
-impl Z for Mailbox {
-    type Context = Context;
-    type Proof = Bytes;
-    async fn acknowledged(
-        &mut self,
-        _context: Self::Context,
-        _payload: Digest,
-        _proof: Self::Proof,
-    ) {
-        debug!("acknowledged");
     }
 }
 

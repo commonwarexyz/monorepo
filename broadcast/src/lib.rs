@@ -9,6 +9,8 @@ use thiserror::Error;
 
 pub mod linked;
 
+pub type Proof = Bytes;
+
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -53,22 +55,19 @@ pub trait Application: Send + 'static {
 pub trait Collector: Send + 'static {
     type Context;
 
-    // Proof is the proof of acknowledgement.
-    // This may be something like a threshold signature.
-    type Proof;
-
     /// Event that a payload has been successfully broadcasted to a threshold of signers in the network.
     fn acknowledged(
         &mut self,
         context: Self::Context,
         payload: Digest,
-        proof: Self::Proof,
+        proof: Proof,
     ) -> impl Future<Output = ()> + Send;
 }
 
 pub trait Coordinator: Clone + Send + Sync + 'static {
     type Index;
 
+    /// Return the current index of the coordinator.
     fn index(&self) -> Self::Index;
 
     fn sequencers(&self, index: Self::Index) -> Option<&Vec<PublicKey>>;
@@ -82,6 +81,9 @@ pub trait ThresholdCoordinator: Coordinator {
     type Identity;
     type Share;
 
+    /// Return the polynomial of the given index.
     fn identity(&self, index: Self::Index) -> Option<&Self::Identity>;
+
+    /// Return my share of the polynomial of the given index.
     fn share(&self, index: Self::Index) -> Option<&Self::Share>;
 }

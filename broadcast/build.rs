@@ -4,11 +4,12 @@ fn main() -> Result<()> {
     let mut config = prost_build::Config::new();
     config.bytes([
         "Chunk.sequencer",
-        "Chunk.payload",
+        "Chunk.payload_digest",
         "Chunk.signature",
-        "Parent.digest",
-        "Parent.threshold",
-        "Ack.digest",
+        "Chunk.Parent.chunk_digest",
+        "Chunk.Parent.threshold",
+        "Ack.sequencer",
+        "Ack.chunk_digest",
         "Ack.partial",
     ]);
     config.compile_protos(&["src/linked/wire.proto"], &["src/linked/"])?;

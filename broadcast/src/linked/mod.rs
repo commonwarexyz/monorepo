@@ -3,14 +3,15 @@ use commonware_cryptography::PublicKey;
 mod actors;
 mod encoder;
 mod mocks;
+mod prover;
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
-pub type View = u64;
+pub type Epoch = u64;
 
 /// Context is a collection of metadata from consensus about a given payload.
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Context {
     pub sequencer: PublicKey,
     pub height: u64,
@@ -23,6 +24,8 @@ mod tests {
         sync::{Arc, Mutex},
         time::Duration,
     };
+
+    use crate::linked::Context;
 
     use super::{actors::signer, mocks};
     use bytes::Bytes;
@@ -143,6 +146,10 @@ mod tests {
                 };
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
+                // Create collections
+                let collector = mocks::collector::Collector::new();
+                let mailboxes = HashMap::new();
+
                 // Create engines
                 for validator in validators.iter() {
                     // Coordinator
@@ -156,9 +163,7 @@ mod tests {
 
                     // Application
                     let (mut app, mut app_mailbox) = mocks::application::Application::new();
-                    // TODO: remove
-                    let hw = Bytes::from("Hello world");
-                    app_mailbox.broadcast(hw).await;
+                    mailboxes.insert(validator.clone(), app_mailbox);
 
                     // Signer
                     let cfg = journal::Config {
@@ -175,7 +180,7 @@ mod tests {
                         signer::Config {
                             crypto: scheme.clone(),
                             application: app_mailbox.clone(),
-                            collector: app_mailbox.clone(),
+                            collector,
                             coordinator,
                             mailbox_size: 1,
                             hasher: Sha256::default(),
@@ -191,6 +196,24 @@ mod tests {
                         async move { signer.run((a1, a2), (b1, b2)).await },
                     );
                 }
+
+                runtime.spawn("collector", async move {
+                    let hw = Bytes::from("Hello, World!");
+                    loop {
+                        let mut context = Context {
+                            sequencer: validators[0].clone(),
+                            height: 0,
+                        };
+                        if let Some((digest, bytes)) = collector.get(&context) {
+                            println!("Got payload: {:?}", digest);
+                            println!("Got proof: {:?}", bytes);
+                            context.height += 1;
+                            mailboxes.get(&validators[0]).unwrap().broadcast(hw);
+                        } else {
+                            continue;
+                        }
+                    }
+                });
 
                 // TODO: remove
                 runtime.sleep(Duration::from_secs(10)).await;

@@ -1,4 +1,4 @@
-use crate::{linked::View, Coordinator as S, ThresholdCoordinator as T};
+use crate::{linked::Epoch, Coordinator as S, ThresholdCoordinator as T};
 use std::collections::HashMap;
 
 use commonware_cryptography::{
@@ -44,7 +44,7 @@ impl Coordinator {
 }
 
 impl S for Coordinator {
-    type Index = View;
+    type Index = Epoch;
 
     fn index(&self) -> Self::Index {
         self.view
