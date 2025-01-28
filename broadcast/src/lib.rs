@@ -24,6 +24,64 @@ pub enum Error {
     ThresholdSignature,
     #[error("Unknown signer")]
     UnknownSigner,
+    #[error("Chunk height {0} lower than tip height {1}")]
+    HeightTooLow(u64, u64),
+
+    // Broadcast errors
+    #[error("I am not a sequencer in epoch {0}")]
+    IAmNotASequencer(u64),
+    #[error("Nothing to rebroadcast")]
+    NothingToRebroadcast,
+    #[error("Broadcast failed")]
+    BroadcastFailed,
+
+    // Proto Malformed Errors
+    #[error("Missing chunk")]
+    MissingChunk,
+    #[error("Genesis chunk must not have a parent")]
+    GenesisChunkMustNotHaveParent,
+    #[error("Link missing parent")]
+    LinkMissingParent,
+    #[error("Invalid digest")]
+    InvalidDigest,
+
+    // Epoch Errors
+    #[error("Unknown identity at epoch {0}")]
+    UnknownIdentity(u64),
+    #[error("Unknown signers at epoch {0}")]
+    UnknownSigners(u64),
+    #[error("Unknown signer index {0} at epoch {1}")]
+    UnknownSignerIndex(u32, u64),
+    #[error("Epoch {0} has no sequencer {1:?}")]
+    UnknownSequencer(u64, Bytes),
+
+    // Peer Errors
+    #[error("Peer mismatch")]
+    PeerMismatch,
+
+    // Signature Errors
+    #[error("Unable to deserialize threshold signature")]
+    UnableToDeserializeThresholdSignature,
+    #[error("Unable to deserialize partial signature")]
+    UnableToDeserializePartialSignature,
+    #[error("Invalid threshold signature")]
+    InvalidThresholdSignature,
+    #[error("Invalid partial signature")]
+    InvalidPartialSignature,
+    #[error("Invalid link signature")]
+    InvalidLinkSignature,
+
+    // Ignorable Message Errors
+    #[error("Invalid ack epoch {0} outside bounds {1} - {2}")]
+    AckEpochOutsideBounds(u64, u64, u64),
+    #[error("Threshold already exists")]
+    ThresholdAlreadyExists,
+    #[error("Partial already exists")]
+    PartialAlreadyExists,
+
+    // Slashable Errors
+    #[error("Chunk mismatch from sender {0:?} with height {1}")]
+    ChunkMismatch(Bytes, u64),
 }
 
 /// A trait for reliable replication of messages across a network.

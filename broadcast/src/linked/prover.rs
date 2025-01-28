@@ -1,7 +1,13 @@
-use super::{encoder, wire};
+use super::{encoder, Context};
 use crate::Proof;
-use bytes::Buf;
-use commonware_cryptography::{Hasher, PublicKey, Scheme, Signature};
+use bytes::{Buf, BufMut};
+use commonware_cryptography::{
+    bls12381::primitives::{
+        group::{self, Element},
+        ops,
+    },
+    Digest, Hasher, Scheme,
+};
 use std::marker::PhantomData;
 
 #[derive(Clone)]
@@ -9,80 +15,78 @@ pub struct Prover<C: Scheme, H: Hasher> {
     _crypto: PhantomData<C>,
     _hasher: PhantomData<H>,
 
-    ack_namespace: Vec<u8>,
+    public: group::Public,
+    namespace: Vec<u8>,
 }
 
 impl<C: Scheme, H: Hasher> Prover<C, H> {
     /// Create a new prover with the given signing `namespace`.
-    pub fn new(namespace: &[u8]) -> Self {
+    pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {
             _crypto: PhantomData,
             _hasher: PhantomData,
-            ack_namespace: encoder::ack_namespace(namespace),
+            public,
+            namespace: encoder::chunk_namespace(namespace),
         }
     }
 
-    pub fn serialize_acknowlegement(
-        &self,
-        chunk: &wire::Chunk,
-        identity: &PublicKey,
-        threshold: &Signature,
-    ) -> Proof {
-        let serialized_chunk = encoder::serialize_chunk(chunk, true);
+    /// Returns 1) the length of a proof and 2) a tuple with the lengths of:
+    /// - the digest
+    /// - the public key
+    /// - the signature
+    fn get_len() -> (usize, (usize, usize, usize)) {
+        let len_digest = H::len();
+        let (len_public_key, len_signature) = C::len();
 
-        // Initial capacity
-        let len = serialized_chunk.len() + identity.len() + threshold.len();
+        let mut len = 0;
+        len += len_public_key; // context.sequencer
+        len += 8; // context.height
+        len += len_digest; // payload_digest
+        len += len_signature; // threshold
+
+        (len, (len_digest, len_public_key, len_signature))
+    }
+
+    pub fn serialize_threshold(
+        context: &Context,
+        payload_digest: &Digest,
+        threshold: &group::Signature,
+    ) -> Proof {
+        let (len, _) = Prover::<C, H>::get_len();
         let mut proof = Vec::with_capacity(len);
 
         // Encode proof
-        proof.extend_from_slice(&serialized_chunk);
-        proof.extend_from_slice(identity);
-        proof.extend_from_slice(threshold);
+        proof.extend_from_slice(&context.sequencer);
+        proof.put_u64(context.height);
+        proof.extend_from_slice(payload_digest);
+        proof.extend_from_slice(&threshold.serialize());
         proof.into()
     }
 
-    pub fn deserialize_acknowledgement(
+    pub fn deserialize_threshold(
         &self,
         mut proof: Proof,
-    ) -> Option<(wire::Chunk, PublicKey, Signature)> {
-        let digest_len = H::len();
-        let (public_key_len, signature_len) = C::len();
-
-        let short_len = 8 + 8 + digest_len + public_key_len + signature_len;
-        let long_len = short_len + digest_len + digest_len;
+    ) -> Option<(Context, Digest, group::Signature)> {
+        let (len, (digest_len, public_key_len, signature_len)) = Prover::<C, H>::get_len();
 
         // Ensure proof is the right size
-        if proof.len() != short_len && proof.len() != long_len {
+        if proof.len() != len {
             return None;
         }
-        let has_parent = proof.len() == long_len;
 
         // Decode proof
         let sequencer = proof.copy_to_bytes(public_key_len);
         let height = proof.get_u64();
         let payload_digest = proof.copy_to_bytes(digest_len);
-        let mut parent = None;
-        if has_parent {
-            let chunk_digest = proof.copy_to_bytes(digest_len);
-            let threshold = proof.copy_to_bytes(digest_len);
-            parent = Some(wire::chunk::Parent {
-                chunk_digest,
-                threshold,
-            });
-        }
-        let signature = proof.copy_to_bytes(signature_len);
-        let identity = proof.copy_to_bytes(public_key_len);
         let threshold = proof.copy_to_bytes(signature_len);
+        let threshold = group::Signature::deserialize(&threshold)?;
 
-        // Create chunk
-        let chunk = wire::Chunk {
-            sequencer,
-            height,
-            payload_digest,
-            parent,
-            signature,
-        };
+        // Verify signature
+        let msg = proof.as_ref(); // TODO: bug
+        if ops::verify_message(&self.public, Some(&self.namespace), &msg, &threshold).is_err() {
+            return None;
+        }
 
-        Some((chunk, identity, threshold))
+        Some((Context { sequencer, height }, payload_digest, threshold))
     }
 }

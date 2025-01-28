@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::{
     linked::{Context, Epoch},
     Application, Collector, ThresholdCoordinator,
@@ -18,4 +20,6 @@ pub struct Config<
     pub collector: Z,
     pub mailbox_size: usize,
     pub namespace: Vec<u8>,
+    pub rebroadcast_timeout: Option<Duration>,
+    pub epoch_bounds: (u64, u64),
 }

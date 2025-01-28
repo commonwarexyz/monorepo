@@ -5,11 +5,9 @@ fn main() -> Result<()> {
     config.bytes([
         "Chunk.sequencer",
         "Chunk.payload_digest",
-        "Chunk.signature",
-        "Chunk.Parent.chunk_digest",
-        "Chunk.Parent.threshold",
-        "Ack.sequencer",
-        "Ack.chunk_digest",
+        "Parent.payload_digest",
+        "Parent.threshold",
+        "Link.signature",
         "Ack.partial",
     ]);
     config.compile_protos(&["src/linked/wire.proto"], &["src/linked/"])?;
