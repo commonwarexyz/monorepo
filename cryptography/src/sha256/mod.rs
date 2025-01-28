@@ -1,9 +1,10 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
-use crate::{DigestError, Hasher};
+use crate::{Error, Hasher};
 use bytes::Bytes;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
+use std::ops::Deref;
 
 const DIGEST_LENGTH: usize = 32;
 
@@ -68,10 +69,10 @@ impl From<[u8; DIGEST_LENGTH]> for Digest {
 }
 
 impl TryFrom<&[u8]> for Digest {
-    type Error = DigestError;
+    type Error = Error;
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         if value.len() != DIGEST_LENGTH {
-            return Err(DigestError::InvalidDigestLength);
+            return Err(Error::InvalidDigestLength);
         }
         let mut v = [0u8; DIGEST_LENGTH];
         v.copy_from_slice(value);
@@ -80,14 +81,14 @@ impl TryFrom<&[u8]> for Digest {
 }
 
 impl TryFrom<&Bytes> for Digest {
-    type Error = DigestError;
+    type Error = Error;
     fn try_from(value: &Bytes) -> Result<Self, Self::Error> {
         Self::try_from(value.as_ref())
     }
 }
 
 impl TryFrom<&Vec<u8>> for Digest {
-    type Error = DigestError;
+    type Error = Error;
     fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
         Self::try_from(value.as_slice())
     }
@@ -102,6 +103,13 @@ impl Into<Bytes> for Digest {
 
 impl AsRef<[u8]> for Digest {
     fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Deref for Digest {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
         &self.0
     }
 }

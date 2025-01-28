@@ -6,6 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use std::fmt::Debug;
+use std::ops::Deref;
 
 use bytes::Bytes;
 use rand::{CryptoRng, Rng, RngCore, SeedableRng};
@@ -127,7 +128,7 @@ pub trait BatchScheme {
 
 /// Error Digest manipulations must rely on.
 #[derive(Error, Debug)]
-pub enum DigestError {
+pub enum Error {
     #[error("invalid digest length")]
     InvalidDigestLength,
 }
@@ -146,9 +147,10 @@ pub enum DigestError {
 /// after cloning.
 pub trait Hasher: Clone + Send + Sync + 'static {
     type Digest: AsRef<[u8]>
-        + for<'a> TryFrom<&'a Bytes, Error = DigestError>
-        + for<'a> TryFrom<&'a [u8], Error = DigestError>
-        + for<'a> TryFrom<&'a Vec<u8>, Error = DigestError>
+        + for<'a> TryFrom<&'a Bytes, Error = Error>
+        + for<'a> TryFrom<&'a [u8], Error = Error>
+        + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
+        + Deref<Target = [u8]>
         + Into<Bytes>
         + Clone
         + Send

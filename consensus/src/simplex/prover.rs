@@ -67,10 +67,13 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         namespace: &[u8],
     ) -> Option<(View, View, Digest, PublicKey)> {
         // Ensure proof is big enough
-        let digest_len = H::DIGEST_LENGTH;
         let (public_key_len, signature_len) = C::len();
         if proof.len()
-            != size_of::<u64>() + size_of::<u64>() + digest_len + public_key_len + signature_len
+            != size_of::<u64>()
+                + size_of::<u64>()
+                + H::DIGEST_LENGTH
+                + public_key_len
+                + signature_len
         {
             return None;
         }
@@ -78,7 +81,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(digest_len);
+        let payload = proof.copy_to_bytes(H::DIGEST_LENGTH);
         let public_key = proof.copy_to_bytes(public_key_len);
         let signature = proof.copy_to_bytes(signature_len);
 
@@ -130,8 +133,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         namespace: &[u8],
     ) -> Option<(View, View, Digest, Vec<PublicKey>)> {
         // Ensure proof prefix is big enough
-        let digest_len = H::DIGEST_LENGTH;
-        let len = size_of::<u64>() + size_of::<u64>() + digest_len + size_of::<u32>();
+        let len = size_of::<u64>() + size_of::<u64>() + H::DIGEST_LENGTH + size_of::<u32>();
         if proof.len() < len {
             return None;
         }
@@ -139,7 +141,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         // Decode proof prefix
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(digest_len);
+        let payload = proof.copy_to_bytes(H::DIGEST_LENGTH);
         let count = proof.get_u32();
         if count > max {
             return None;
@@ -229,15 +231,14 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         signature_2: &Signature,
     ) -> Proof {
         // Setup proof
-        let digest_len = H::DIGEST_LENGTH;
         let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
             + public_key_len
             + size_of::<u64>()
-            + digest_len
+            + H::DIGEST_LENGTH
             + signature_len
             + size_of::<u64>()
-            + digest_len
+            + H::DIGEST_LENGTH
             + signature_len;
 
         // Encode proof
@@ -259,15 +260,14 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         namespace: &[u8],
     ) -> Option<(PublicKey, View)> {
         // Ensure proof is big enough
-        let digest_len = H::DIGEST_LENGTH;
         let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
             + public_key_len
             + size_of::<u64>()
-            + digest_len
+            + H::DIGEST_LENGTH
             + signature_len
             + size_of::<u64>()
-            + digest_len
+            + H::DIGEST_LENGTH
             + signature_len;
         if proof.len() != len {
             return None;
@@ -277,10 +277,10 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_len);
         let parent_1 = proof.get_u64();
-        let payload_1 = proof.copy_to_bytes(digest_len);
+        let payload_1 = proof.copy_to_bytes(H::DIGEST_LENGTH);
         let signature_1 = proof.copy_to_bytes(signature_len);
         let parent_2 = proof.get_u64();
-        let payload_2 = proof.copy_to_bytes(digest_len);
+        let payload_2 = proof.copy_to_bytes(H::DIGEST_LENGTH);
         let signature_2 = proof.copy_to_bytes(signature_len);
 
         // Verify signatures
@@ -383,12 +383,11 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         signature_null: &Signature,
     ) -> Proof {
         // Setup proof
-        let digest_len = H::DIGEST_LENGTH;
         let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
             + public_key_len
             + size_of::<u64>()
-            + digest_len
+            + H::DIGEST_LENGTH
             + signature_len
             + signature_len;
 
@@ -410,12 +409,11 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         check_sig: bool,
     ) -> Option<(PublicKey, View)> {
         // Ensure proof is big enough
-        let digest_len = H::DIGEST_LENGTH;
         let (public_key_len, signature_len) = C::len();
         let len = size_of::<u64>()
             + public_key_len
             + size_of::<u64>()
-            + digest_len
+            + H::DIGEST_LENGTH
             + signature_len
             + signature_len;
         if proof.len() != len {
@@ -426,7 +424,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let view = proof.get_u64();
         let public_key = proof.copy_to_bytes(public_key_len);
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(digest_len);
+        let payload = proof.copy_to_bytes(H::DIGEST_LENGTH);
         let signature_finalize = proof.copy_to_bytes(signature_len);
         let signature_null = proof.copy_to_bytes(signature_len);
 

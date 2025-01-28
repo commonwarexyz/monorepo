@@ -14,7 +14,7 @@ use commonware_cryptography::Hasher as CHasher;
 /// range of elements, in the MMR.
 pub struct Proof<H: CHasher> {
     /// The total number of nodes in the MMR.
-    pub size: u64, // total # of nodes in the MMR
+    pub size: u64,
     /// The hashes necessary for proving the inclusion of an element, or range of elements, in the MMR.
     pub hashes: Vec<H::Digest>,
 }
