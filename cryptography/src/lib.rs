@@ -146,6 +146,7 @@ pub enum Error {
 /// clone the hasher state but users should not rely on this behavior and call `reset`
 /// after cloning.
 pub trait Hasher: Clone + Send + Sync + 'static {
+    /// Byte array representing a hash digest.
     type Digest: AsRef<[u8]>
         + for<'a> TryFrom<&'a Bytes, Error = Error>
         + for<'a> TryFrom<&'a [u8], Error = Error>
@@ -162,7 +163,8 @@ pub trait Hasher: Clone + Send + Sync + 'static {
         + PartialOrd
         + Debug;
 
-    const DIGEST_LENGTH: usize = 32;
+    /// The length of the digest in bytes.
+    const DIGEST_LENGTH: usize;
 
     /// Create a new hasher.
     fn new() -> Self;
