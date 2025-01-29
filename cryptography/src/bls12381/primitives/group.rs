@@ -489,6 +489,8 @@ impl Point for G2 {
 /// Verifies that the pairing of `pk` and `hm` is equal to the pairing of `G1::one()` and `sig`.
 pub(super) fn equal(pk: &G1, sig: &G2, mut hm: G2) -> bool {
     // Create a pairing context
+    //
+    // We only handle pre-hashed messages, so we don't need to provide a `DST`.
     let mut pairing = Pairing::new(false, &[]);
 
     // Convert G1::one() and 'sig' into affine
