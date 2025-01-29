@@ -80,6 +80,7 @@
     </div>
 
     <div id="footer-placeholder"></div>
+    <script src="https://cdn.jsdelivr.net/npm/moment@2.29.2/moment.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.2/dist/Chart.min.js"></script>
     <script>
         'use strict';
@@ -218,10 +219,11 @@
 
                     // Create chart
                     const data = {
-                        labels: dataset.map(d => d.commit.id.slice(0, 7)),
                         datasets: [{
                             label: name,
-                            data: dataset.map(d => d.bench.value),
+                            data: dataset.map(d => {
+                                return { x: new Date(d.commit.timestamp), y: d.bench.value };
+                            }),
                             borderColor: '#000000',
                             backgroundColor: '#000000' + '60'
                         }]
@@ -229,14 +231,20 @@
                     const options = {
                         scales: {
                             xAxes: [{
+                                type: 'time',
+                                time: {
+                                    unit: 'day',
+                                    displayFormats: {
+                                        day: 'M/D'
+                                    },
+                                },
                                 ticks: {
                                     autoSkip: true,
-                                    maxTicksLimit: 10,
+                                    maxTicksLimit: 5,
                                 },
                                 scaleLabel: {
-                                    display: true,
-                                    labelString: 'commit',
-                                },
+                                    display: false,
+                                }
                             }],
                             yAxes: [{
                                 scaleLabel: {
@@ -246,10 +254,13 @@
                                 ticks: {
                                     beginAtZero: true,
                                     autoSkip: true,
-                                    maxTicksLimit: 5,
+                                    maxTicksLimit: 7,
                                     callback: function (value) {
                                         return (value / 1e6);
                                     }
+                                },
+                                gridLines: {
+                                    display: true,
                                 }
                             }]
                         },
