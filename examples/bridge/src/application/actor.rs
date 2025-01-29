@@ -26,8 +26,8 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: Rng, H: Hasher, Si: Sink, St: Stream> {
     runtime: R,
     indexer: Connection<Si, St>,
-    prover: Prover<H>,
-    other_prover: Prover<H>,
+    prover: Prover,
+    other_prover: Prover,
     public: Vec<u8>,
     other_public: Vec<u8>,
     hasher: H,

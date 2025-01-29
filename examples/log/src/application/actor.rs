@@ -16,7 +16,7 @@ const GENESIS: &[u8] = b"commonware is neat";
 /// Application actor.
 pub struct Application<R: Rng, C: Scheme, H: Hasher> {
     runtime: R,
-    prover: Prover<C, H>,
+    prover: Prover<C>,
     hasher: H,
     mailbox: mpsc::Receiver<Message>,
 }

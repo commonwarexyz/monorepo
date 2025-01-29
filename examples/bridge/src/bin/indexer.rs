@@ -117,7 +117,7 @@ fn main() {
         let network = from_hex(network).expect("Network not well-formed");
         let public = group::Public::deserialize(&network).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let prover = Prover::<Sha256>::new(public, &namespace);
+        let prover = Prover::new(public, &namespace, Sha256::DIGEST_LENGTH);
         provers.insert(network.clone(), prover);
         blocks.insert(network.clone(), HashMap::new());
         finalizations.insert(network, BTreeMap::new());
