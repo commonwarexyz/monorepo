@@ -486,23 +486,22 @@ impl Point for G2 {
     }
 }
 
-/// Verifies that `e(pk, hm)` is equal to `e(G1::one(), sig)` using a single pairing.
+/// Verifies that `e(pk,hm)` is equal to `e(G1::one(),sig)` using a single product check with
+/// a negated G1 generator (`e(pk,hm) * e(-G1::one(),sig) == 1`).
 pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {
     // Create a pairing context
     //
-    // We only handle pre-hashed messages, so we don't need to provide a `DST`.
+    // We only handle pre-hashed messages, so we leave the domain separator tag (`DST`) empty.
     let mut pairing = Pairing::new(false, &[]);
 
-    // Convert 'sig' into affine
+    // Convert `sig` into affine and aggregate `e(-G1::one(), sig)`
     let mut q = blst_p2_affine::default();
     unsafe {
         blst_p2_to_affine(&mut q, &sig.0);
-
-        // Aggregate e(-G1::one(), sig)
         pairing.raw_aggregate(&q, &BLS12_381_NEG_G1);
     }
 
-    // Convert 'pk' and 'hm' into affine
+    // Convert `pk` and `hm` into affine
     let mut p = blst_p1_affine::default();
     let mut q = blst_p2_affine::default();
     unsafe {
@@ -510,10 +509,13 @@ pub(super) fn equal(pk: &G1, sig: &G2, hm: &G2) -> bool {
         blst_p2_to_affine(&mut q, &hm.0);
     }
 
-    // Aggregate e(pk, hm)
+    // Aggregate `e(pk, hm)`
     pairing.raw_aggregate(&q, &p);
 
-    // Return GT==1
+    // Finalize the pairing accumulation and verify the result
+    //
+    // If `finalverify()` returns `true`, it means `e(pk,hm) * e(-G1::one(),sig) == 1`. This
+    // is equivalent to `e(pk,hm) == e(G1::one(),sig)`.
     pairing.commit();
     pairing.finalverify(None)
 }
