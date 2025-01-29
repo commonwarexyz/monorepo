@@ -14,7 +14,7 @@ use crate::{
     },
     Automaton, Committer, Digest, Relay, Supervisor,
 };
-use commonware_cryptography::{Hasher, PublicKey, Scheme};
+use commonware_cryptography::{Hasher, PublicKey, Scheme, Sha256};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -42,8 +42,8 @@ type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<u32, wire::Finalize>)
 
 const GENESIS_VIEW: View = 0;
 
-struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
-    hasher: H,
+struct Round<C: Scheme, S: Supervisor<Index = View>> {
+    hasher: Sha256,
     supervisor: S,
     _crypto: PhantomData<C>,
 
@@ -76,11 +76,11 @@ struct Round<C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
-    pub fn new(hasher: H, supervisor: S, view: View) -> Self {
+impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
+    pub fn new(supervisor: S, view: View) -> Self {
         let leader = supervisor.leader(view).expect("unable to compute leader");
         Self {
-            hasher,
+            hasher: Sha256::new(),
             supervisor,
             _crypto: PhantomData,
 
@@ -144,7 +144,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_notarize.proposal.as_ref().unwrap();
-            let proof = Prover::<C, H>::serialize_conflicting_notarize(
+            let proof = Prover::<C>::serialize_conflicting_notarize(
                 self.view,
                 public_key,
                 previous_proposal.parent,
@@ -174,7 +174,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         }
         let entry = self.notarizes.entry(digest).or_default();
         let signature = &notarize.signature.as_ref().unwrap().signature;
-        let proof = Prover::<C, H>::serialize_proposal(proposal, public_key, signature);
+        let proof = Prover::<C>::serialize_proposal(proposal, public_key, signature);
         entry.insert(public_key_index, notarize);
         self.supervisor.report(NOTARIZE, proof).await;
         true
@@ -202,7 +202,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
             .get(&public_key_index)
             .unwrap();
         let finalize_proposal = finalize.proposal.as_ref().unwrap();
-        let proof = Prover::<C, H>::serialize_nullify_finalize(
+        let proof = Prover::<C>::serialize_nullify_finalize(
             self.view,
             public_key,
             finalize_proposal.parent,
@@ -276,7 +276,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
-            let proof = Prover::<C, H>::serialize_nullify_finalize(
+            let proof = Prover::<C>::serialize_nullify_finalize(
                 self.view,
                 public_key,
                 proposal.parent,
@@ -318,7 +318,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_finalize.proposal.as_ref().unwrap();
-            let proof = Prover::<C, H>::serialize_conflicting_finalize(
+            let proof = Prover::<C>::serialize_conflicting_finalize(
                 self.view,
                 public_key,
                 previous_proposal.parent,
@@ -348,7 +348,7 @@ impl<C: Scheme, H: Hasher, S: Supervisor<Index = View>> Round<C, H, S> {
         }
         let entry = self.finalizes.entry(digest).or_default();
         let signature = &finalize.signature.as_ref().unwrap().signature;
-        let proof = Prover::<C, H>::serialize_proposal(proposal, public_key, signature);
+        let proof = Prover::<C>::serialize_proposal(proposal, public_key, signature);
         entry.insert(public_key_index, finalize);
         self.supervisor.report(FINALIZE, proof).await;
         true
@@ -414,7 +414,6 @@ pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
-    H: Hasher,
     A: Automaton<Context = Context>,
     R: Relay,
     F: Committer,
@@ -422,11 +421,12 @@ pub struct Actor<
 > {
     runtime: E,
     crypto: C,
-    hasher: H,
     automaton: A,
     relay: R,
     committer: F,
     supervisor: S,
+
+    hasher: Sha256,
 
     replay_concurrency: usize,
     journal: Option<Journal<B, E>>,
@@ -446,7 +446,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, H, S>>,
+    views: BTreeMap<View, Round<C, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -458,18 +458,13 @@ impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
-        H: Hasher,
         A: Automaton<Context = Context>,
         R: Relay,
         F: Committer,
         S: Supervisor<Index = View>,
-    > Actor<B, E, C, H, A, R, F, S>
+    > Actor<B, E, C, A, R, F, S>
 {
-    pub fn new(
-        runtime: E,
-        journal: Journal<B, E>,
-        cfg: Config<C, H, A, R, F, S>,
-    ) -> (Self, Mailbox) {
+    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, A, R, F, S>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -503,11 +498,12 @@ impl<
             Self {
                 runtime,
                 crypto: cfg.crypto,
-                hasher: cfg.hasher,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 committer: cfg.committer,
                 supervisor: cfg.supervisor,
+
+                hasher: Sha256::new(),
 
                 replay_concurrency: cfg.replay_concurrency,
                 journal: Some(journal),
@@ -821,7 +817,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
 
         // Handle nullify
         let nullify_bytes = wire::Voter {
@@ -1009,7 +1005,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
         round.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
         round.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         self.view = view;
@@ -1147,7 +1143,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
 
         // Handle notarize
         let notarize_bytes = wire::Voter {
@@ -1199,7 +1195,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
         let validators = self.supervisor.participants(view).unwrap();
         for signature in &notarization.signatures {
             let notarize = wire::Notarize {
@@ -1270,13 +1266,10 @@ impl<
 
     async fn handle_nullification(&mut self, nullification: wire::Nullification) {
         // Add signatures to view (needed to broadcast notarization if we get proposal)
-        let round = self.views.entry(nullification.view).or_insert_with(|| {
-            Round::new(
-                self.hasher.clone(),
-                self.supervisor.clone(),
-                nullification.view,
-            )
-        });
+        let round = self
+            .views
+            .entry(nullification.view)
+            .or_insert_with(|| Round::new(self.supervisor.clone(), nullification.view));
         let validators = self.supervisor.participants(nullification.view).unwrap();
         for signature in &nullification.signatures {
             let nullify = wire::Nullify {
@@ -1355,7 +1348,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
 
         // Handle finalize
         let finalize_bytes = wire::Voter {
@@ -1407,7 +1400,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
         let validators = self.supervisor.participants(view).unwrap();
         for signature in finalization.signatures.iter() {
             let finalize = wire::Finalize {
@@ -1682,7 +1675,7 @@ impl<
                 let public_key = validators.get(signature.public_key as usize).unwrap();
                 signatures.push((public_key, &signature.signature));
             }
-            let proof = Prover::<C, H>::serialize_aggregation(proposal, signatures);
+            let proof = Prover::<C>::serialize_aggregation(proposal, signatures);
             self.committer
                 .prepared(
                     proof,
@@ -1837,7 +1830,7 @@ impl<
                 let public_key = validators.get(signature.public_key as usize).unwrap();
                 signatures.push((public_key, &signature.signature));
             }
-            let proof = Prover::<C, H>::serialize_aggregation(proposal, signatures);
+            let proof = Prover::<C>::serialize_aggregation(proposal, signatures);
             self.committer
                 .finalized(
                     proof,

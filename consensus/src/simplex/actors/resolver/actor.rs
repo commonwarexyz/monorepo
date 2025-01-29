@@ -11,7 +11,7 @@ use crate::{
     },
     Supervisor,
 };
-use commonware_cryptography::{Hasher, Scheme};
+use commonware_cryptography::Scheme;
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
@@ -24,7 +24,6 @@ use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -96,10 +95,9 @@ impl Inflight {
 }
 
 /// Requests are made concurrently to multiple peers.
-pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> {
+pub struct Actor<E: Clock + GClock + Rng, C: Scheme, S: Supervisor<Index = View>> {
     runtime: E,
     supervisor: S,
-    _hasher: PhantomData<H>,
 
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
@@ -125,7 +123,7 @@ pub struct Actor<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<In
     served: Counter,
 }
 
-impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>> Actor<E, C, H, S> {
+impl<E: Clock + GClock + Rng, C: Scheme, S: Supervisor<Index = View>> Actor<E, C, S> {
     pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize requester
         let config = requester::Config {
@@ -161,7 +159,6 @@ impl<E: Clock + GClock + Rng, C: Scheme, H: Hasher, S: Supervisor<Index = View>>
             Self {
                 runtime,
                 supervisor: cfg.supervisor,
-                _hasher: PhantomData,
 
                 notarize_namespace: notarize_namespace(&cfg.namespace),
                 nullify_namespace: nullify_namespace(&cfg.namespace),
