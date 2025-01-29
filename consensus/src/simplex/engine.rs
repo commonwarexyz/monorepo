@@ -8,7 +8,7 @@ use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
-use commonware_storage::journal::Journal;
+use commonware_storage::journal::variable::Journal;
 use governor::clock::Clock as GClock;
 use rand::{CryptoRng, Rng};
 use tracing::debug;

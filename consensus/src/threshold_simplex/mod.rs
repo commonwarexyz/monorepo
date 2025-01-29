@@ -220,7 +220,7 @@ mod tests {
         deterministic::{self, Executor},
         Clock, Runner, Spawner,
     };
-    use commonware_storage::journal::{self, Journal};
+    use commonware_storage::journal::variable::{Config as JConfig, Journal};
     use commonware_utils::{hex, quorum};
     use engine::Engine;
     use futures::{channel::mpsc, StreamExt};
@@ -389,7 +389,7 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: hex(&validator),
                 };
@@ -625,7 +625,7 @@ mod tests {
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
-                    let cfg = journal::Config {
+                    let cfg = JConfig {
                         registry: Arc::new(Mutex::new(Registry::default())),
                         partition: hex(&validator),
                     };
@@ -850,7 +850,7 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: hex(&validator),
                 };
@@ -987,7 +987,7 @@ mod tests {
             runtime.spawn("application", async move {
                 actor.run().await;
             });
-            let cfg = journal::Config {
+            let cfg = JConfig {
                 registry: Arc::new(Mutex::new(Registry::default())),
                 partition: hex(&validator),
             };
@@ -1144,7 +1144,7 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: hex(&validator),
                 };
@@ -1335,7 +1335,7 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: hex(&validator),
                 };
@@ -1515,7 +1515,7 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: hex(&validator),
                 };
@@ -1688,7 +1688,7 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: hex(&validator),
                 };
@@ -1917,7 +1917,7 @@ mod tests {
                 runtime.spawn("application", async move {
                     actor.run().await;
                 });
-                let cfg = journal::Config {
+                let cfg = JConfig {
                     registry: Arc::new(Mutex::new(Registry::default())),
                     partition: hex(&validator),
                 };
@@ -2109,7 +2109,7 @@ mod tests {
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
-                    let cfg = journal::Config {
+                    let cfg = JConfig {
                         registry: Arc::new(Mutex::new(Registry::default())),
                         partition: hex(&validator),
                     };
@@ -2293,7 +2293,7 @@ mod tests {
                     runtime.spawn("application", async move {
                         actor.run().await;
                     });
-                    let cfg = journal::Config {
+                    let cfg = JConfig {
                         registry: Arc::new(Mutex::new(Registry::default())),
                         partition: hex(&validator),
                     };

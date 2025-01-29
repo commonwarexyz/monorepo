@@ -55,7 +55,7 @@ use commonware_runtime::{
     tokio::{self, Executor},
     Runner, Spawner,
 };
-use commonware_storage::journal::{self, Journal};
+use commonware_storage::journal::variable::{Config, Journal};
 use commonware_utils::{hex, union};
 use governor::Quota;
 use prometheus_client::registry::Registry;
@@ -194,7 +194,7 @@ fn main() {
         // Initialize storage
         let journal = Journal::init(
             runtime.clone(),
-            journal::Config {
+            Config {
                 registry: Arc::new(Mutex::new(Registry::default())),
                 partition: String::from("log"),
             },
