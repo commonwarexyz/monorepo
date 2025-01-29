@@ -23,8 +23,8 @@ pub type Proof = Bytes;
 
 /// Digest is an arbitrary hash digest.
 ///
-/// Because consensus is only ever aware of the digest of application payloads, it does not need to be
-/// instantiated with a specific [commonware_cryptography::Hasher]. It is up to the application to syntactically
+/// Because consensus is only ever aware of the digest of application payloads, it is not instantiated with
+/// a specific [commonware_cryptography::Hasher]. It is up to the application to syntactically
 /// verify any `Digest` provided by consensus (may have come from an untrusted peer).
 pub type Digest = Bytes;
 
