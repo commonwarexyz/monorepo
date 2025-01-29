@@ -229,6 +229,10 @@
                     const options = {
                         scales: {
                             xAxes: [{
+                                ticks: {
+                                    autoSkip: true,
+                                    maxTicksLimit: 10,
+                                },
                                 scaleLabel: {
                                     display: true,
                                     labelString: 'commit',
@@ -241,6 +245,8 @@
                                 },
                                 ticks: {
                                     beginAtZero: true,
+                                    autoSkip: true,
+                                    maxTicksLimit: 5,
                                     callback: function (value) {
                                         return (value / 1e6);
                                     }
