@@ -1,17 +1,21 @@
 use commonware_cryptography::PublicKey;
 
-mod actors;
 mod encoder;
-mod mocks;
-mod prover;
+
+#[cfg(test)]
+pub mod mocks;
+
 mod wire {
     include!(concat!(env!("OUT_DIR"), "/wire.rs"));
 }
 
+pub mod prover;
+pub mod signer;
+
 pub type Epoch = u64;
 
 /// Context is a collection of metadata from consensus about a given payload.
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Context {
     pub sequencer: PublicKey,
     pub height: u64,
@@ -25,17 +29,17 @@ mod tests {
         time::Duration,
     };
 
-    use crate::linked::Context;
-
-    use super::{actors::signer, mocks};
+    use super::{mocks, signer};
     use bytes::Bytes;
-    use commonware_cryptography::{bls12381::dkg::ops, Ed25519, PublicKey, Scheme, Sha256};
+    use commonware_cryptography::{bls12381::dkg::ops, Ed25519, Hasher, PublicKey, Scheme, Sha256};
     use commonware_macros::test_traced;
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{deterministic::Executor, Clock, Runner, Spawner};
     use commonware_storage::journal::{self, Journal};
     use commonware_utils::hex;
+    use futures::channel::oneshot;
     use prometheus_client::registry::Registry;
+    use tracing::debug;
 
     /// Registers all validators using the oracle.
     async fn register_validators(
@@ -52,12 +56,12 @@ mod tests {
     }
 
     /// Enum to describe the action to take when linking validators.
+    #[allow(dead_code)] // TODO: remove when used
     enum Action {
         Link(Link),
         Update(Link), // Unlink and then link
         Unlink,
     }
-
     /// Links (or unlinks) validators using the oracle.
     ///
     /// The `action` parameter determines the action (e.g. link, unlink) to take.
@@ -110,8 +114,9 @@ mod tests {
         let num_validators = 4;
         let quorum = 3;
         let (executor, mut runtime, _) = Executor::timed(Duration::from_secs(30));
-        let (identity, shares_vec) =
+        let (identity, mut shares_vec) =
             ops::generate_shares(&mut runtime, None, num_validators, quorum);
+        shares_vec.sort_by(|a, b| a.index.cmp(&b.index));
 
         executor.start({
             let runtime = runtime.clone();
@@ -127,43 +132,47 @@ mod tests {
                 runtime.spawn("network", network.run());
 
                 // Create validators
-                let mut validators = Vec::new();
-                let mut shares = HashMap::new();
-                let mut schemes = HashMap::new();
-                for i in 0..num_validators {
-                    let scheme = Ed25519::from_seed(i as u64);
-                    let pk = scheme.public_key();
-                    validators.push(pk.clone());
-                    schemes.insert(pk.clone(), scheme);
-                    shares.insert(pk, shares_vec[i as usize]);
-                }
-                validators.sort();
-                let mut registrations = register_validators(&mut oracle, &validators).await;
+                let mut validators = (0..num_validators)
+                    .map(|i| Ed25519::from_seed(i as u64))
+                    .collect::<Vec<_>>();
+                validators.sort_by_key(|s| s.public_key());
+                let validators = validators
+                    .iter()
+                    .enumerate()
+                    .map(|(i, scheme)| {
+                        let pk = scheme.public_key();
+                        let share = shares_vec[i];
+                        (pk, scheme.clone(), share)
+                    })
+                    .collect::<Vec<_>>();
+                let pks = validators
+                    .iter()
+                    .map(|(pk, _, _)| pk.clone())
+                    .collect::<Vec<_>>();
+                let mut registrations = register_validators(&mut oracle, &pks).await;
                 let link = Link {
                     latency: 10.0,
                     jitter: 1.0,
                     success_rate: 1.0,
                 };
-                link_validators(&mut oracle, &validators, Action::Link(link), None).await;
+                link_validators(&mut oracle, &pks, Action::Link(link), None).await;
 
                 // Create collections
-                let collector = mocks::collector::Collector::new();
-                let mailboxes = HashMap::new();
+                let (collector, collector_mailbox) = mocks::collector::Collector::new();
+                runtime.spawn("collector", collector.run());
 
                 // Create engines
-                for validator in validators.iter() {
+                let mut mailboxes = HashMap::new();
+                for (validator, scheme, share) in validators.iter() {
                     // Coordinator
-                    let share = shares.remove(validator).unwrap();
-                    let mut coordinator = mocks::coordinator::Coordinator::new(
-                        identity.clone(),
-                        validators.clone(),
-                        share,
-                    );
+                    let mut coordinator =
+                        mocks::coordinator::Coordinator::new(identity.clone(), pks.clone(), *share);
+                    debug!("Share index: {}", share.index);
                     coordinator.set_view(111);
 
                     // Application
-                    let (mut app, mut app_mailbox) = mocks::application::Application::new();
-                    mailboxes.insert(validator.clone(), app_mailbox);
+                    let (mut app, app_mailbox) = mocks::application::Application::new();
+                    mailboxes.insert(validator.clone(), app_mailbox.clone());
 
                     // Signer
                     let cfg = journal::Config {
@@ -173,18 +182,20 @@ mod tests {
                     let journal = Journal::init(runtime.clone(), cfg)
                         .await
                         .expect("Failed to initialize journal");
-                    let scheme = schemes.get(validator).unwrap().clone();
                     let (signer, signer_mailbox) = signer::Actor::new(
                         runtime.clone(),
                         journal,
                         signer::Config {
                             crypto: scheme.clone(),
                             application: app_mailbox.clone(),
-                            collector,
+                            collector: collector_mailbox.clone(),
                             coordinator,
                             mailbox_size: 1,
                             hasher: Sha256::default(),
                             namespace: b"test".to_vec(),
+                            epoch_bounds: (1, 1),
+                            prune_timeout: None,
+                            rebroadcast_timeout: Some(Duration::from_secs(5)),
                         },
                     );
 
@@ -197,27 +208,53 @@ mod tests {
                     );
                 }
 
-                runtime.spawn("collector", async move {
-                    let hw = Bytes::from("Hello, World!");
-                    loop {
-                        let mut context = Context {
-                            sequencer: validators[0].clone(),
-                            height: 0,
-                        };
-                        if let Some((digest, bytes)) = collector.get(&context) {
-                            println!("Got payload: {:?}", digest);
-                            println!("Got proof: {:?}", bytes);
-                            context.height += 1;
-                            mailboxes.get(&validators[0]).unwrap().broadcast(hw);
-                        } else {
-                            continue;
+                // For each validator, attempt to propose a payload every 250ms
+                runtime.spawn("proposer", {
+                    let runtime = runtime.clone();
+                    async move {
+                        let mut iter = 0;
+                        let mut hasher = Sha256::default();
+                        loop {
+                            iter += 1;
+                            for (validator, mailbox) in mailboxes.iter_mut() {
+                                let payload = Bytes::from(format!(
+                                    "hello world from validator {}, iter {}",
+                                    hex(validator),
+                                    iter
+                                ));
+                                hasher.update(&payload);
+                                let digest = hasher.finalize();
+                                mailbox.broadcast(digest).await;
+                            }
+                            runtime.sleep(Duration::from_millis(250)).await;
                         }
                     }
                 });
 
-                // TODO: remove
-                runtime.sleep(Duration::from_secs(10)).await;
-                panic!("Done");
+                // Wait for the acknowledged height of each sequencer to reach 100
+                let (collector_sender, collector_receiver) = oneshot::channel();
+                runtime.spawn("collector", {
+                    let mut collector = collector_mailbox.clone();
+                    let runtime = runtime.clone();
+                    async move {
+                        loop {
+                            let mut min_tip = u64::MAX;
+                            for (v, _, _) in validators.iter() {
+                                let tip = collector.get_tip(v.clone()).await.unwrap_or(0);
+                                debug!("Collector: tip {}", tip);
+                                min_tip = min_tip.min(tip);
+                            }
+                            if min_tip >= 100 {
+                                collector_sender.send(()).unwrap();
+                                break;
+                            }
+                            debug!("Collector: min tip {}", min_tip);
+                            runtime.sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                });
+
+                collector_receiver.await.unwrap();
             }
         });
     }

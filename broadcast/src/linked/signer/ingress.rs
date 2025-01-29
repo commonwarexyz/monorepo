@@ -1,5 +1,6 @@
 use crate::{linked::Context, Broadcaster};
 use bytes::Bytes;
+use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
@@ -10,6 +11,10 @@ pub enum Message {
     Broadcast {
         payload: Bytes,
         result: oneshot::Sender<bool>,
+    },
+    Verified {
+        context: Context,
+        payload_digest: Digest,
     },
 }
 
@@ -29,14 +34,23 @@ impl Broadcaster for Mailbox {
 
     async fn broadcast(&mut self, payload: Bytes) -> oneshot::Receiver<bool> {
         let (sender, receiver) = oneshot::channel();
-        let msg = Message::Broadcast {
-            payload,
-            result: sender,
-        };
         self.sender
-            .send(msg)
+            .send(Message::Broadcast {
+                payload,
+                result: sender,
+            })
             .await
             .expect("Failed to send broadcast");
         receiver
+    }
+
+    async fn verified(&mut self, context: Self::Context, payload_digest: Digest) {
+        self.sender
+            .send(Message::Verified {
+                context,
+                payload_digest,
+            })
+            .await
+            .expect("Failed to send verified");
     }
 }

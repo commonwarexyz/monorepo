@@ -21,5 +21,6 @@ pub struct Config<
     pub mailbox_size: usize,
     pub namespace: Vec<u8>,
     pub rebroadcast_timeout: Option<Duration>,
+    pub prune_timeout: Option<Duration>,
     pub epoch_bounds: (u64, u64),
 }

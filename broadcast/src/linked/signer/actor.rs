@@ -1,4 +1,4 @@
-use super::{Config, Mailbox, Message};
+use super::{AckManager, Config, Evidence, Mailbox, Message, TipManager};
 use crate::{
     linked::{encoder, prover::Prover, wire, Context, Epoch},
     Application, Collector, Error, ThresholdCoordinator,
@@ -16,13 +16,13 @@ use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
 use commonware_storage::journal::Journal;
-use futures::channel::{mpsc, oneshot};
-use futures::StreamExt;
-use prost::Message as _;
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    time::{Duration, SystemTime},
+use futures::{
+    channel::{mpsc, oneshot},
+    future::Either,
+    StreamExt,
 };
+use prost::Message as _;
+use std::time::{Duration, SystemTime};
 use tracing::{debug, error};
 
 pub struct Actor<
@@ -73,6 +73,12 @@ pub struct Actor<
     // The system time at which the rebroadcast deadline is reached
     rebroadcast_deadline: Option<SystemTime>,
 
+    // The configured timeout for pruning old evidence
+    prune_timeout: Option<Duration>,
+
+    // The system time at which the prune deadline is reached
+    prune_deadline: Option<SystemTime>,
+
     ////////////////////////////////////////
     // Pruning
     ////////////////////////////////////////
@@ -93,14 +99,9 @@ pub struct Actor<
     ////////////////////////////////////////
     // State
     ////////////////////////////////////////
+    tipman: TipManager,
 
-    // The highest-height chunk for each sequencer.
-    // The chunk must have the threshold signature of its parent.
-    // Existence of the chunk implies:
-    // - The existence of the sequencer's entire chunk chain (from height zero)
-    // - That the chunk has been acked by this signer.
-    tips: HashMap<PublicKey, wire::Chunk>,
-
+    // Handles acknowledgements for chunks.
     ackman: AckManager,
 }
 
@@ -129,10 +130,12 @@ impl<
             ack_namespace: encoder::ack_namespace(&cfg.namespace),
             rebroadcast_timeout: cfg.rebroadcast_timeout,
             rebroadcast_deadline: None,
+            prune_timeout: cfg.prune_timeout,
+            prune_deadline: None,
             epoch_bounds: cfg.epoch_bounds,
             mailbox_receiver,
-            tips: HashMap::new(),
-            ackman: AckManager::new(),
+            tipman: TipManager::default(),
+            ackman: AckManager::default(),
         };
 
         (result, mailbox)
@@ -147,9 +150,22 @@ impl<
         let (mut ack_sender, mut ack_receiver) = ack_network;
         let mut shutdown = self.runtime.stopped();
         let runtime = self.runtime.clone();
+        if let Some(timeout) = self.prune_timeout {
+            self.prune_deadline = Some(runtime.current() + timeout);
+        }
 
         loop {
-            let rebroadcast_deadline = self.rebroadcast_deadline.clone();
+            // Create deadline futures.
+            // If the deadline is None, the future will never resolve.
+            let rebroadcast = match self.rebroadcast_deadline {
+                Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
+                None => Either::Right(futures::future::pending()),
+            };
+            let prune = match self.prune_deadline {
+                Some(deadline) => Either::Left(self.runtime.sleep_until(deadline)),
+                None => Either::Right(futures::future::pending()),
+            };
+
             select! {
                 // Handle shutdown signal
                 _ = &mut shutdown => {
@@ -163,16 +179,20 @@ impl<
                     return;
                 },
 
-                // Handle rebroadcast deadline (if it exists)
-                _ = async {
-                    if let Some(deadline) = rebroadcast_deadline {
-                        runtime.sleep_until(deadline).await;
-                    } else {
-                        futures::future::pending::<()>().await;
-                    }
-                } => {
+                // Handle rebroadcast deadline
+                _ = rebroadcast => {
                     debug!("Rebroadcasting");
-                    self.rebroadcast(&mut link_sender).await;
+                    if let Err(e) = self.rebroadcast(&mut link_sender).await {
+                        error!("Failed to rebroadcast: {:?}", e);
+                        continue;
+                    }
+                },
+
+                // Handle prune deadline
+                _ = prune => {
+                    debug!("Pruning");
+                    let epoch = self.coordinator.index();
+                    self.ackman.prune_epoch(epoch);
                 },
 
                 // Handle incoming links
@@ -187,22 +207,25 @@ impl<
                         error!("Failed to decode link");
                         continue;
                     };
-                    let Ok((chunk, parent)) = self.validate_link(link, &sender) else {
-                        error!("Failed to validate link");
+                    if let Err(e) = self.validate_link(&link, &sender) {
+                        error!("Failed to validate link: {:?}", e);
                         continue;
                     };
 
-                    if let Some(parent) = parent {
+                    if let Some(parent) = link.parent.as_ref() {
                         debug!("Received parent");
                         let parent_chunk = wire::Chunk {
                             sequencer: sender.clone(),
-                            height: chunk.height.checked_sub(1).unwrap(),
+                            height: link.chunk.as_ref().unwrap().height.checked_sub(1).unwrap(),
                             payload_digest: parent.payload_digest.clone(),
                         };
                         let threshold = group::Signature::deserialize(&parent.threshold).unwrap();
                         self.handle_threshold(&parent_chunk, parent.epoch, threshold).await;
                     }
-                    self.handle_chunk(&chunk, &mut ack_sender).await;
+                    if let Err(e) = self.handle_link(&link).await {
+                        error!("Failed to handle link: {:?}", e);
+                        continue;
+                    }
                 },
 
                 // Handle incoming acks
@@ -217,28 +240,103 @@ impl<
                         error!("Failed to decode ack");
                         continue;
                     };
-                    let Ok((chunk, epoch, partial)) = self.validate_ack(ack, &sender) else {
-                        error!("Failed to verify ack");
-                        continue;
+                    let (chunk, epoch, partial) = match self.validate_ack(ack, &sender) {
+                        Ok(result) => result,
+                        Err(e) => {
+                            error!("Failed to validate ack: {:?}", e);
+                            continue;
+                        }
                     };
-                    self.handle_ack(&chunk, epoch, partial).await;
+                    if let Err(e) = self.handle_ack(&chunk, epoch, partial).await {
+                        error!("Failed to handle ack: {:?}", e);
+                        continue;
+                    }
                 },
 
                 // Handle mailbox messages
                 mail = self.mailbox_receiver.next() => {
-                    debug!("Received mailbox message");
+                    debug!("Mailbox: ...parsing");
                     let msg = match mail {
                         Some(msg) => msg,
-                        None => break,
+                        None => {
+                            error!("Mailbox receiver failed");
+                            break;
+                        }
                     };
                     match msg {
                         Message::Broadcast{ payload, result } => {
-                            self.broadcast_new(payload, result, &mut link_sender, &mut ack_sender).await;
+                            debug!("Mailbox: Broadcast");
+                            if let Err(e) = self.broadcast_new(payload, result, &mut link_sender).await {
+                                error!("Failed to broadcast new: {:?}", e);
+                                continue;
+                            }
+                        }
+                        Message::Verified{ context, payload_digest } => {
+                            debug!("Mailbox: Verified");
+                            if let Err(e) = self.handle_app_verified(&context, &payload_digest, &mut ack_sender).await {
+                                error!("Failed to handle app-verified: {:?}", e);
+                                continue;
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Handles a verified message from the application.
+    ///
+    /// This is called when the application has verified a payload.
+    /// The chunk will be signed if it matches the current tip.
+    async fn handle_app_verified(
+        &mut self,
+        context: &Context,
+        payload_digest: &Digest,
+        ack_sender: &mut impl Sender,
+    ) -> Result<(), Error> {
+        // Get the tip
+        let Some(chunk) = self.tipman.get_chunk(&context.sequencer) else {
+            return Err(Error::AppVerifiedNoTip);
+        };
+
+        // Return early if the height does not match
+        if chunk.height != context.height {
+            error!("App-verified payload height does not match tip");
+            return Err(Error::AppVerifiedHeightMismatch);
+        }
+
+        // Return early if the payload digest does not match
+        if chunk.payload_digest != payload_digest {
+            error!("App-verified payload does not match tip");
+            return Err(Error::AppVerifiedPayloadMismatch);
+        }
+
+        // Construct partial signature
+        let epoch = self.coordinator.index();
+        let ack_digest = self.hash_ack(&chunk, epoch);
+        let Some(share) = self.coordinator.share(epoch) else {
+            return Err(Error::UnknownShare(epoch));
+        };
+        let partial: Bytes =
+            ops::partial_sign_message(share, Some(&self.ack_namespace), &ack_digest)
+                .serialize()
+                .into();
+
+        // Send the ack to the network
+        let ack = wire::Ack {
+            chunk: Some(chunk.clone()),
+            epoch,
+            partial: partial.clone(),
+        };
+        ack_sender
+            .send(Recipients::All, ack.encode_to_vec().into(), false)
+            .await
+            .map_err(|_| Error::UnableToSendMessage)?;
+
+        // Deal with the ack as if it were received over the network
+        self.handle_ack(&chunk, epoch, partial).await?;
+
+        Ok(())
     }
 
     /// Handles a threshold, either received from a link from the network or generated locally.
@@ -249,15 +347,15 @@ impl<
         chunk: &wire::Chunk,
         epoch: Epoch,
         threshold: group::Signature,
-    ) -> Result<(), Error> {
+    ) {
         // Check if the threshold signature is already known
-        let evidence = self.ackman.get_or_init(epoch, &chunk);
+        let evidence = self.ackman.get_or_init(epoch, chunk);
         if let Evidence::Threshold(_) = evidence {
-            return Err(Error::ThresholdAlreadyExists);
+            return;
         }
 
         // The threshold signature is new, so store it
-        *evidence = Evidence::Threshold(threshold);
+        *evidence = Evidence::Threshold(Box::new(threshold));
 
         // Emit the proof
         let context = Context {
@@ -265,12 +363,10 @@ impl<
             height: chunk.height,
         };
         let proof =
-            Prover::<C, H>::serialize_threshold(&context, &chunk.payload_digest, &threshold);
+            Prover::<C, H>::serialize_threshold(&context, &chunk.payload_digest, epoch, &threshold);
         self.collector
             .acknowledged(context, chunk.payload_digest.clone(), proof)
             .await;
-
-        Ok(())
     }
 
     /// Handles an ack
@@ -300,15 +396,15 @@ impl<
         let quorum = identity.required();
 
         // Get the partial signatures, returning early if we already have a threshold
-        let evidence = self.ackman.get_or_init(ack_epoch, &chunk);
+        let evidence = self.ackman.get_or_init(ack_epoch, chunk);
         let Evidence::Partials(partials) = evidence else {
-            return Err(Error::ThresholdAlreadyExists);
+            return Ok(());
         };
 
         // Return early if we already have this partial
         if partials.contains(&partial) {
             debug!("Ignoring ack. Already have this partial.");
-            return Err(Error::PartialAlreadyExists);
+            return Ok(());
         }
 
         // Store the ack
@@ -327,54 +423,36 @@ impl<
         let threshold = ops::threshold_signature_recover(quorum, partials).unwrap();
 
         // Handle the threshold
-        self.handle_threshold(chunk, ack_epoch, threshold).await?;
+        self.handle_threshold(chunk, ack_epoch, threshold).await;
 
         Ok(())
     }
 
-    /// Handles a chunk
+    /// Handles a link
     ///
     /// Returns an error if the chunk is invalid, or can be ignored
     /// (e.g. height is below the tip, etc.).
-    async fn handle_chunk(&mut self, chunk: &wire::Chunk, ack_sender: &mut impl Sender) {
+    async fn handle_link(&mut self, link: &wire::Link) -> Result<(), Error> {
         let epoch = self.coordinator.index();
 
-        // Validate the chunk with the application
-        // TODO
-
         // Store the tip
-        self.tips.insert(chunk.sequencer.clone(), chunk.clone());
+        self.tipman.put(link.clone());
 
         // Prune old evidence
+        let chunk = link.chunk.as_ref().unwrap();
         self.ackman
             .prune_height(epoch, &chunk.sequencer, chunk.height);
 
-        // Construct partial signature
-        let ack_digest = self.hash_ack(&chunk, epoch);
-        let Some(share) = self.coordinator.share(epoch) else {
-            error!("Failed to get share for epoch {:?}", epoch);
-            return;
+        // Verify the chunk with the application
+        let context = Context {
+            sequencer: chunk.sequencer.clone(),
+            height: chunk.height,
         };
-        let partial: Bytes =
-            ops::partial_sign_message(share, Some(&self.ack_namespace), &ack_digest)
-                .serialize()
-                .into();
+        self.application
+            .verify(context, chunk.payload_digest.clone())
+            .await;
 
-        // Deal with the ack as if it were received over the network
-        self.handle_ack(chunk, epoch, partial.clone()).await;
-
-        // Send the ack to the network
-        let ack = wire::Ack {
-            chunk: Some(chunk.clone()),
-            epoch,
-            partial,
-        };
-        if let Err(e) = ack_sender
-            .send(Recipients::All, ack.encode_to_vec().into(), false)
-            .await
-        {
-            error!("Failed to send ack: {:?}", e);
-        }
+        Ok(())
     }
 
     /// Broadcast a message to the network.
@@ -386,42 +464,35 @@ impl<
         payload_digest: Bytes,
         result: oneshot::Sender<bool>,
         link_sender: &mut impl Sender,
-        ack_sender: &mut impl Sender,
-    ) {
+    ) -> Result<(), Error> {
         let epoch = self.coordinator.index();
         let me = self.crypto.public_key();
 
         // Get parent Chunk and threshold signature
         let mut height = 0;
         let mut parent = None;
-        if let Some(tip) = self.tips.get(&me) {
+        if let Some(chunk_tip) = self.tipman.get_chunk(&me) {
             // Get threshold or return early
-            let Evidence::Threshold(threshold) = self.ackman.get_or_init(epoch, tip) else {
-                error!("Failed to get threshold for tip");
+            let Evidence::Threshold(threshold) = self.ackman.get_or_init(epoch, &chunk_tip) else {
                 let _ = result.send(false);
-                return;
+                return Err(Error::NoThresholdForTip(chunk_tip.height));
             };
 
             // Update height and parent
-            height = tip.height + 1;
+            height = chunk_tip.height + 1;
             parent = Some(wire::Parent {
-                payload_digest: tip.payload_digest.clone(),
+                payload_digest: chunk_tip.payload_digest,
                 threshold: threshold.serialize().into(),
                 epoch: self.coordinator.index(),
             });
         }
 
-        // Construct new chunk
+        // Construct new link
         let chunk = wire::Chunk {
             sequencer: me.clone(),
             height,
             payload_digest: payload_digest.clone(),
         };
-
-        // Deal with the chunk as if it were received over the network
-        self.handle_chunk(&chunk, ack_sender).await;
-
-        // Construct new link
         let signature = {
             let chunk_digest = self.hash_chunk(&chunk);
             self.crypto.sign(Some(&self.chunk_namespace), &chunk_digest)
@@ -432,15 +503,26 @@ impl<
             parent,
         };
 
-        // Broadcast to network
-        if let Err(_) = self.broadcast(&link, link_sender, epoch).await {
-            error!("Failed to broadcast link");
+        // Deal with the chunk as if it were received over the network
+        if let Err(e) = self.handle_link(&link).await {
+            error!("Failed to handle link: {:?}", e);
             let _ = result.send(false);
-            return;
+            return Err(e);
+        }
+
+        debug!("Broadcasting link");
+
+        // Broadcast to network
+        if let Err(e) = self.broadcast(&link, link_sender, epoch).await {
+            error!("Failed to broadcast link: {:?}", e);
+            let _ = result.send(false);
+            return Err(e);
         };
 
         // Return success
+        debug!("Broadcast successful");
         let _ = result.send(true);
+        Ok(())
     }
 
     /// Attempt to rebroadcast the highest-height chunk of this sequencer to all signers.
@@ -450,6 +532,9 @@ impl<
     /// - this instance has a chunk to rebroadcast.
     /// - this instance has not yet collected the threshold signature for the chunk.
     async fn rebroadcast(&mut self, link_sender: &mut impl Sender) -> Result<(), Error> {
+        // Unset the rebroadcast deadline
+        self.rebroadcast_deadline = None;
+
         // Return if not a sequencer in the current epoch
         let epoch = self.coordinator.index();
         let me = self.crypto.public_key();
@@ -458,24 +543,20 @@ impl<
         }
 
         // Return if no chunk to rebroadcast
-        let Some(tip) = self.tips.get(&me) else {
+        let Some(link_tip) = self.tipman.get(&me) else {
             return Err(Error::NothingToRebroadcast);
         };
-        let tip = tip.clone();
 
         // Return if threshold already collected
-        if let Evidence::Threshold(_) = self.ackman.get_or_init(epoch, &tip) {
+        if let Evidence::Threshold(_) = self
+            .ackman
+            .get_or_init(epoch, link_tip.chunk.as_ref().unwrap())
+        {
             return Err(Error::ThresholdAlreadyExists);
         }
 
         // Broadcast the message
-        let chunk_digest = self.hash_chunk(&tip);
-        let link = wire::Link {
-            chunk: Some(tip),
-            signature: self.crypto.sign(Some(&self.chunk_namespace), &chunk_digest),
-            parent: None, // TODO: bug
-        };
-        self.broadcast(&link, link_sender, epoch).await?;
+        self.broadcast(&link_tip, link_sender, epoch).await?;
 
         Ok(())
     }
@@ -484,14 +565,14 @@ impl<
     async fn broadcast(
         &mut self,
         link: &wire::Link,
-        sender: &mut impl Sender,
+        link_sender: &mut impl Sender,
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Send the link to all signers
         let Some(signers) = self.coordinator.signers(epoch) else {
             return Err(Error::UnknownSigners(epoch));
         };
-        sender
+        link_sender
             .send(
                 Recipients::Some(signers.clone()),
                 link.encode_to_vec().into(),
@@ -501,7 +582,9 @@ impl<
             .map_err(|_| Error::BroadcastFailed)?;
 
         // Set the rebroadcast deadline
-        // TODO
+        if let Some(timeout) = self.rebroadcast_timeout {
+            self.rebroadcast_deadline = Some(self.runtime.current() + timeout);
+        }
 
         Ok(())
     }
@@ -510,14 +593,10 @@ impl<
     ///
     /// Returns the chunk if the link is valid.
     /// Returns an error if the link is invalid.
-    fn validate_link(
-        &mut self,
-        link: wire::Link,
-        sender: &PublicKey,
-    ) -> Result<(wire::Chunk, Option<wire::Parent>), Error> {
+    fn validate_link(&mut self, link: &wire::Link, sender: &PublicKey) -> Result<(), Error> {
         // Validate chunk
         let epoch = self.coordinator.index();
-        let chunk = self.validate_chunk(link.chunk, epoch)?;
+        let chunk = self.validate_chunk(link.chunk.clone(), epoch)?;
 
         // Verify the sender
         if chunk.sequencer != sender {
@@ -530,7 +609,7 @@ impl<
             Some(&self.chunk_namespace),
             &chunk_digest,
             sender,
-            &link.signature.into(),
+            &link.signature.clone(),
         ) {
             return Err(Error::InvalidLinkSignature);
         }
@@ -540,7 +619,7 @@ impl<
             if link.parent.is_some() {
                 return Err(Error::GenesisChunkMustNotHaveParent);
             }
-            return Ok((chunk, None));
+            return Ok(());
         }
 
         // Verify parent
@@ -568,7 +647,7 @@ impl<
         )
         .map_err(|_| Error::InvalidThresholdSignature)?;
 
-        Ok((chunk, Some(parent.clone())))
+        Ok(())
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
@@ -629,15 +708,19 @@ impl<
         }
 
         // Verify height
-        if let Some(tip) = self.tips.get(&chunk.sequencer) {
+        if let Some(chunk_tip) = self.tipman.get_chunk(&chunk.sequencer) {
             // Height must be at least the tip height
-            if tip.height < chunk.height {
-                return Err(Error::HeightTooLow(chunk.height, tip.height));
-            } else if tip.height == chunk.height {
-                // Ensure this matches the tip if the height is the same
-                if tip.payload_digest != chunk.payload_digest {
-                    return Err(Error::ChunkMismatch(chunk.sequencer.clone(), chunk.height));
+            match chunk.height.cmp(&chunk_tip.height) {
+                std::cmp::Ordering::Less => {
+                    return Err(Error::HeightTooLow(chunk.height, chunk_tip.height));
                 }
+                std::cmp::Ordering::Equal => {
+                    // Ensure this matches the tip if the height is the same
+                    if chunk_tip.payload_digest != chunk.payload_digest {
+                        return Err(Error::ChunkMismatch(chunk.sequencer, chunk.height));
+                    }
+                }
+                std::cmp::Ordering::Greater => {}
             }
         }
 
@@ -666,60 +749,5 @@ impl<
         self.hasher.update(&chunk.payload_digest);
         self.hasher.update(&epoch.to_be_bytes());
         self.hasher.finalize()
-    }
-}
-
-enum Evidence {
-    Partials(HashSet<Bytes>),
-    Threshold(group::Signature),
-}
-
-/// Manages acknowledgements for chunks.
-struct AckManager {
-    // Acknowledgements for digests.
-    //
-    // Map from Epoch => Sequencer => Height => PayloadDigest => Evidence
-    //
-    // Evidence may be partial signatures or threshold signatures.
-    //
-    // The BTreeMaps are sorted by key, so we can prune old entries. In particular, we can prune
-    // entries where the height is less than the height of the highest chunk for the sequencer.
-    // We can often prune entries for old epochs as well.
-    acks: BTreeMap<Epoch, HashMap<PublicKey, BTreeMap<u64, HashMap<Digest, Evidence>>>>,
-}
-
-impl AckManager {
-    /// Returns a new AckManager.
-    pub fn new() -> Self {
-        AckManager {
-            acks: BTreeMap::new(),
-        }
-    }
-
-    /// Returns the evidence for the given epoch, sequencer, height, and chunk.
-    /// If the evidence did not exist, it is initialized as an empty set of partials.
-    fn get_or_init(&mut self, epoch: Epoch, chunk: &wire::Chunk) -> &mut Evidence {
-        self.acks
-            .entry(epoch)
-            .or_insert_with(HashMap::new)
-            .entry(chunk.sequencer.clone())
-            .or_insert_with(BTreeMap::new)
-            .entry(chunk.height)
-            .or_insert_with(HashMap::new)
-            .entry(chunk.payload_digest.clone())
-            .or_insert_with(|| Evidence::Partials(HashSet::new()))
-    }
-
-    /// Prunes all entries (at the given epoch and sequencer) below the height (exclusive).
-    fn prune_height(&mut self, epoch: Epoch, sequencer: &PublicKey, height: u64) {
-        self.acks
-            .get_mut(&epoch)
-            .and_then(|m| m.get_mut(sequencer))
-            .map(|m| m.retain(|h, _| *h >= height));
-    }
-
-    /// Prunes all entries below the given epoch (exclusive).
-    fn prune_epoch(&mut self, epoch: Epoch) {
-        self.acks.retain(|e, _| *e >= epoch);
     }
 }

@@ -1,4 +1,4 @@
-use super::{encoder, Context};
+use super::{encoder, wire, Context, Epoch};
 use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
@@ -26,7 +26,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
             _crypto: PhantomData,
             _hasher: PhantomData,
             public,
-            namespace: encoder::chunk_namespace(namespace),
+            namespace: encoder::ack_namespace(namespace),
         }
     }
 
@@ -42,6 +42,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         len += len_public_key; // context.sequencer
         len += 8; // context.height
         len += len_digest; // payload_digest
+        len += 8; // epoch
         len += len_signature; // threshold
 
         (len, (len_digest, len_public_key, len_signature))
@@ -50,6 +51,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     pub fn serialize_threshold(
         context: &Context,
         payload_digest: &Digest,
+        epoch: Epoch,
         threshold: &group::Signature,
     ) -> Proof {
         let (len, _) = Prover::<C, H>::get_len();
@@ -59,6 +61,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         proof.extend_from_slice(&context.sequencer);
         proof.put_u64(context.height);
         proof.extend_from_slice(payload_digest);
+        proof.put_u64(epoch);
         proof.extend_from_slice(&threshold.serialize());
         proof.into()
     }
@@ -78,11 +81,17 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
         let sequencer = proof.copy_to_bytes(public_key_len);
         let height = proof.get_u64();
         let payload_digest = proof.copy_to_bytes(digest_len);
+        let epoch = proof.get_u64();
         let threshold = proof.copy_to_bytes(signature_len);
         let threshold = group::Signature::deserialize(&threshold)?;
 
         // Verify signature
-        let msg = proof.as_ref(); // TODO: bug
+        let chunk = wire::Chunk {
+            sequencer: sequencer.clone(),
+            height,
+            payload_digest: payload_digest.clone(),
+        };
+        let msg = encoder::serialize(&chunk, Some(epoch));
         if ops::verify_message(&self.public, Some(&self.namespace), &msg, &threshold).is_err() {
             return None;
         }

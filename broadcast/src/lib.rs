@@ -14,18 +14,32 @@ pub type Proof = Bytes;
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Protobuf decode error")]
-    UnableToDecode,
     #[error("Duplicate ack")]
     DuplicateAck,
-    #[error("Conflicting ack")]
-    ConflictingAck,
     #[error("Unable to create threshold signature")]
     ThresholdSignature,
     #[error("Unknown signer")]
     UnknownSigner,
     #[error("Chunk height {0} lower than tip height {1}")]
     HeightTooLow(u64, u64),
+
+    // Application Verify Errors
+    #[error("Application verify dropped")]
+    ApplicationVerifyDropped,
+    #[error("Application verify failed")]
+    ApplicationVerifyFailed,
+
+    // Application Verified Errors
+    #[error("Application verified no tip")]
+    AppVerifiedNoTip,
+    #[error("Application verified height mismatch")]
+    AppVerifiedHeightMismatch,
+    #[error("Application verified payload mismatch")]
+    AppVerifiedPayloadMismatch,
+
+    // P2P Errors
+    #[error("Unable to send message")]
+    UnableToSendMessage,
 
     // Broadcast errors
     #[error("I am not a sequencer in epoch {0}")]
@@ -34,8 +48,12 @@ pub enum Error {
     NothingToRebroadcast,
     #[error("Broadcast failed")]
     BroadcastFailed,
+    #[error("No threshold for tip")]
+    NoThresholdForTip(u64),
 
     // Proto Malformed Errors
+    #[error("Protobuf decode error")]
+    UnableToDecode,
     #[error("Missing chunk")]
     MissingChunk,
     #[error("Genesis chunk must not have a parent")]
@@ -54,6 +72,8 @@ pub enum Error {
     UnknownSignerIndex(u32, u64),
     #[error("Epoch {0} has no sequencer {1:?}")]
     UnknownSequencer(u64, Bytes),
+    #[error("Unknown share at epoch {0}")]
+    UnknownShare(u64),
 
     // Peer Errors
     #[error("Peer mismatch")]
@@ -91,6 +111,13 @@ pub trait Broadcaster {
     /// Broadcast a message to the network.
     fn broadcast(&mut self, payload: Bytes)
         -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+
+    /// Receive notice that a payload is valid.
+    fn verified(
+        &mut self,
+        context: Self::Context,
+        payload_digest: Digest,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 /// Application is the interface responsible for processing messages received from the network.
@@ -107,7 +134,7 @@ pub trait Application: Send + 'static {
         &mut self,
         context: Self::Context,
         payload: Digest,
-    ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
+    ) -> impl Future<Output = ()> + Send;
 }
 
 pub trait Collector: Send + 'static {

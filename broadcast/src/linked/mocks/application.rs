@@ -1,42 +1,38 @@
 use bytes::Bytes;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt, StreamExt,
-};
+use commonware_cryptography::Digest;
+use futures::{channel::mpsc, SinkExt, StreamExt};
 
 use crate::{
-    linked::{actors::signer, Context},
+    linked::{signer, Context},
     Application as A, Broadcaster,
 };
 
+enum Message {
+    Broadcast(Bytes),
+    Verify(Context, Digest),
+}
+
 #[derive(Clone)]
 pub struct Mailbox {
-    sender: mpsc::Sender<Bytes>,
+    sender: mpsc::Sender<Message>,
 }
 
 impl Mailbox {
     pub async fn broadcast(&mut self, payload: Bytes) {
-        let _ = self.sender.send(payload).await;
+        let _ = self.sender.send(Message::Broadcast(payload)).await;
     }
 }
 
 impl A for Mailbox {
     type Context = Context;
-    async fn verify(
-        &mut self,
-        _context: Self::Context,
-        _payload: commonware_cryptography::Digest,
-    ) -> oneshot::Receiver<bool> {
-        let (sender, receiver) = oneshot::channel();
-        sender
-            .send(true)
-            .expect("Failed to send verification result");
-        receiver
+
+    async fn verify(&mut self, context: Self::Context, payload: Digest) {
+        let _ = self.sender.send(Message::Verify(context, payload)).await;
     }
 }
 
 pub struct Application {
-    mailbox: mpsc::Receiver<Bytes>,
+    mailbox: mpsc::Receiver<Message>,
 }
 
 impl Application {
@@ -46,8 +42,17 @@ impl Application {
     }
 
     pub async fn run(&mut self, mut signer: signer::Mailbox) {
-        while let Some(payload) = self.mailbox.next().await {
-            let _ = signer.broadcast(payload).await;
+        while let Some(msg) = self.mailbox.next().await {
+            match msg {
+                Message::Broadcast(payload) => {
+                    let receiver = signer.broadcast(payload).await;
+                    receiver.await.expect("Failed to broadcast");
+                }
+                Message::Verify(context, payload) => {
+                    // Act as-if the application is verifying the payload.
+                    signer.verified(context, payload).await;
+                }
+            }
         }
     }
 }
