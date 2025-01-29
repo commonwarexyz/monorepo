@@ -35,7 +35,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
             debug!(
                 view = proposal.view,
                 reason = "unable to compute participants for view",
-                "dropping finalization"
+                "dropping notarization"
             );
             return false;
         }
@@ -46,7 +46,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
             debug!(
                 view = proposal.view,
                 reason = "unable to compute participants for view",
-                "dropping finalization"
+                "dropping notarization"
             );
             return false;
         }
@@ -82,7 +82,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
                     view = proposal.view,
                     signer = signature.public_key,
                     reason = "invalid validator",
-                    "dropping finalization"
+                    "dropping notarization"
                 );
                 return false;
             }
@@ -121,7 +121,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
             debug!(
                 view = nullification.view,
                 reason = "unable to compute participants for view",
-                "dropping finalization"
+                "dropping nullification"
             );
             return false;
         }
@@ -132,7 +132,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
             debug!(
                 view = nullification.view,
                 reason = "unable to compute participants for view",
-                "dropping finalization"
+                "dropping nullification"
             );
             return false;
         }
@@ -168,7 +168,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
                     view = nullification.view,
                     signer = signature.public_key,
                     reason = "invalid validator",
-                    "dropping finalization"
+                    "dropping nullification"
                 );
                 return false;
             }
@@ -179,7 +179,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
             debug!(
                 signer = hex(public_key),
                 reason = "duplicate signature",
-                "dropping notarization"
+                "dropping nullification"
             );
             return false;
         }
@@ -187,7 +187,7 @@ pub fn verify_nullification<S: Supervisor<Index = View>, C: Scheme>(
 
         // Verify signature
         if !C::verify(Some(namespace), &message, public_key, &signature.signature) {
-            debug!(reason = "invalid signature", "dropping notarization");
+            debug!(reason = "invalid signature", "dropping nullification");
             return false;
         }
     }
@@ -204,7 +204,7 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
     let proposal = match &finalization.proposal {
         Some(proposal) => proposal,
         None => {
-            debug!(reason = "missing proposal", "dropping notarization");
+            debug!(reason = "missing proposal", "dropping finalization");
             return false;
         }
     };
