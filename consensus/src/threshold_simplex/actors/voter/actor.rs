@@ -20,7 +20,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
-    Hasher, PublicKey, Scheme,
+    Hasher, PublicKey, Scheme, Sha256,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -46,10 +46,9 @@ const GENESIS_VIEW: View = 0;
 
 struct Round<
     C: Scheme,
-    H: Hasher,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
-    hasher: H,
+    hasher: Sha256,
     supervisor: S,
     _crypto: PhantomData<C>,
 
@@ -88,13 +87,12 @@ struct Round<
 
 impl<
         C: Scheme,
-        H: Hasher,
         S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
-    > Round<C, H, S>
+    > Round<C, S>
 {
-    pub fn new(hasher: H, supervisor: S, view: View) -> Self {
+    pub fn new(supervisor: S, view: View) -> Self {
         Self {
-            hasher,
+            hasher: Sha256::new(),
             supervisor,
             _crypto: PhantomData,
 
@@ -188,7 +186,7 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_notarize.proposal.as_ref().unwrap();
-            let proof = Prover::<H>::serialize_conflicting_notarize(
+            let proof = Prover::serialize_conflicting_notarize(
                 self.view,
                 previous_proposal.parent,
                 &previous_proposal.payload,
@@ -216,7 +214,7 @@ impl<
             return false;
         }
         let entry = self.notarizes.entry(digest).or_default();
-        let proof = Prover::<H>::serialize_proposal(proposal, &notarize.proposal_signature);
+        let proof = Prover::serialize_proposal(proposal, &notarize.proposal_signature);
         entry.insert(public_key_index, notarize);
         self.supervisor.report(NOTARIZE, proof).await;
         true
@@ -243,7 +241,7 @@ impl<
             .get(&public_key_index)
             .unwrap();
         let finalize_proposal = finalize.proposal.as_ref().unwrap();
-        let proof = Prover::<H>::serialize_nullify_finalize(
+        let proof = Prover::serialize_nullify_finalize(
             self.view,
             finalize_proposal.parent,
             &finalize_proposal.payload,
@@ -270,7 +268,7 @@ impl<
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
-            let proof = Prover::<H>::serialize_nullify_finalize(
+            let proof = Prover::serialize_nullify_finalize(
                 self.view,
                 proposal.parent,
                 &proposal.payload,
@@ -311,7 +309,7 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_finalize.proposal.as_ref().unwrap();
-            let proof = Prover::<H>::serialize_conflicting_finalize(
+            let proof = Prover::serialize_conflicting_finalize(
                 self.view,
                 previous_proposal.parent,
                 &previous_proposal.payload,
@@ -340,7 +338,7 @@ impl<
         }
         let entry = self.finalizes.entry(digest).or_default();
         let signature = &finalize.proposal_signature;
-        let proof = Prover::<H>::serialize_proposal(proposal, signature);
+        let proof = Prover::serialize_proposal(proposal, signature);
         entry.insert(public_key_index, finalize);
         self.supervisor.report(FINALIZE, proof).await;
         true
@@ -626,7 +624,6 @@ pub struct Actor<
     B: Blob,
     E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
-    H: Hasher,
     A: Automaton<Context = Context>,
     R: Relay,
     F: Committer,
@@ -639,11 +636,12 @@ pub struct Actor<
 > {
     runtime: E,
     crypto: C,
-    hasher: H,
     automaton: A,
     relay: R,
     committer: F,
     supervisor: S,
+
+    hasher: Sha256,
 
     replay_concurrency: usize,
     journal: Option<Journal<B, E>>,
@@ -664,7 +662,7 @@ pub struct Actor<
 
     last_finalized: View,
     view: View,
-    views: BTreeMap<View, Round<C, H, S>>,
+    views: BTreeMap<View, Round<C, S>>,
 
     current_view: Gauge,
     tracked_views: Gauge,
@@ -676,7 +674,6 @@ impl<
         B: Blob,
         E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
-        H: Hasher,
         A: Automaton<Context = Context>,
         R: Relay,
         F: Committer,
@@ -686,13 +683,9 @@ impl<
             Index = View,
             Share = group::Share,
         >,
-    > Actor<B, E, C, H, A, R, F, S>
+    > Actor<B, E, C, A, R, F, S>
 {
-    pub fn new(
-        runtime: E,
-        journal: Journal<B, E>,
-        cfg: Config<C, H, A, R, F, S>,
-    ) -> (Self, Mailbox) {
+    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, A, R, F, S>) -> (Self, Mailbox) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
             panic!("leader timeout must be less than or equal to notarization timeout");
@@ -726,11 +719,12 @@ impl<
             Self {
                 runtime,
                 crypto: cfg.crypto,
-                hasher: cfg.hasher,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 committer: cfg.committer,
                 supervisor: cfg.supervisor,
+
+                hasher: Sha256::new(),
 
                 replay_concurrency: cfg.replay_concurrency,
                 journal: Some(journal),
@@ -1077,7 +1071,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
 
         // Handle nullify
         let nullify_bytes = wire::Voter {
@@ -1284,7 +1278,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
         round.leader_deadline = Some(self.runtime.current() + self.leader_timeout);
         round.advance_deadline = Some(self.runtime.current() + self.notarization_timeout);
         round.set_leader(seed);
@@ -1441,7 +1435,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
 
         // Handle notarize
         let notarize_bytes = wire::Voter {
@@ -1502,7 +1496,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
 
         // Store notarization
         let notarization_bytes = wire::Voter {
@@ -1555,13 +1549,10 @@ impl<
     async fn handle_nullification(&mut self, nullification: wire::Nullification) {
         // Create round (if it doesn't exist)
         let view = nullification.view;
-        let round = self.views.entry(view).or_insert_with(|| {
-            Round::new(
-                self.hasher.clone(),
-                self.supervisor.clone(),
-                nullification.view,
-            )
-        });
+        let round = self
+            .views
+            .entry(view)
+            .or_insert_with(|| Round::new(self.supervisor.clone(), nullification.view));
 
         // Store nullification
         let nullification_bytes = wire::Voter {
@@ -1631,7 +1622,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
 
         // Handle finalize
         let finalize_bytes = wire::Voter {
@@ -1692,7 +1683,7 @@ impl<
         let round = self
             .views
             .entry(view)
-            .or_insert_with(|| Round::new(self.hasher.clone(), self.supervisor.clone(), view));
+            .or_insert_with(|| Round::new(self.supervisor.clone(), view));
 
         // Store finalization
         let finalization_bytes = wire::Voter {
@@ -1891,7 +1882,7 @@ impl<
 
             // Alert application
             let proposal = notarization.proposal.as_ref().unwrap();
-            let proof = Prover::<H>::serialize_threshold(
+            let proof = Prover::serialize_threshold(
                 proposal,
                 &notarization.proposal_signature,
                 &notarization.seed_signature,
@@ -2044,7 +2035,7 @@ impl<
 
             // Alert application
             let proposal = finalization.proposal.as_ref().unwrap();
-            let proof = Prover::<H>::serialize_threshold(
+            let proof = Prover::serialize_threshold(
                 proposal,
                 &finalization.proposal_signature,
                 &finalization.seed_signature,

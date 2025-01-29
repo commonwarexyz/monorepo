@@ -210,7 +210,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::poly},
-        Ed25519, PublicKey, Scheme, Sha256,
+        Ed25519, Hasher, PublicKey, Scheme, Sha256,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
@@ -356,10 +356,9 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -373,10 +372,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -397,7 +396,6 @@ mod tests {
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -595,8 +593,7 @@ mod tests {
                 link_validators(&mut oracle, &validators, Action::Link(link), None).await;
 
                 // Create engines
-                let prover = Prover::new(pk, &namespace);
-                let hasher = Sha256::default();
+                let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut supervisors = HashMap::new();
                 let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -611,10 +608,10 @@ mod tests {
                         participants,
                     };
                     let supervisor =
-                        mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                        mocks::supervisor::Supervisor::new(supervisor_config);
                     supervisors.insert(validator.clone(), supervisor.clone());
                     let application_cfg = mocks::application::Config {
-                        hasher: hasher.clone(),
+                        hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
                         tracker: done_sender.clone(),
@@ -635,7 +632,6 @@ mod tests {
                         .expect("unable to create journal");
                     let cfg = config::Config {
                         crypto: scheme,
-                        hasher: hasher.clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
                         committer: application,
@@ -816,10 +812,9 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -838,10 +833,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -862,7 +857,6 @@ mod tests {
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -976,10 +970,10 @@ mod tests {
                 prover: prover.clone(),
                 participants,
             };
-            let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+            let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
             supervisors.push(supervisor.clone());
             let application_cfg = mocks::application::Config {
-                hasher: hasher.clone(),
+                hasher: Sha256::default(),
                 relay: relay.clone(),
                 participant: validator.clone(),
                 tracker: done_sender.clone(),
@@ -1000,7 +994,6 @@ mod tests {
                 .expect("unable to create journal");
             let cfg = config::Config {
                 crypto: scheme,
-                hasher: hasher.clone(),
                 automaton: application.clone(),
                 relay: application.clone(),
                 committer: application,
@@ -1113,10 +1106,9 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1135,10 +1127,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -1159,7 +1151,6 @@ mod tests {
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -1300,10 +1291,9 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1317,11 +1307,11 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
-                        hasher: hasher.clone(),
+                        hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
                         tracker: done_sender.clone(),
@@ -1330,7 +1320,7 @@ mod tests {
                     }
                 } else {
                     mocks::application::Config {
-                        hasher: hasher.clone(),
+                        hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
                         tracker: done_sender.clone(),
@@ -1352,7 +1342,6 @@ mod tests {
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -1493,10 +1482,9 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1510,10 +1498,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -1534,7 +1522,6 @@ mod tests {
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -1668,10 +1655,9 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1685,10 +1671,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -1709,7 +1695,6 @@ mod tests {
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme.clone(),
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -1899,10 +1884,9 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -1916,10 +1900,10 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
-                    hasher: hasher.clone(),
+                    hasher: Sha256::default(),
                     relay: relay.clone(),
                     participant: validator.clone(),
                     tracker: done_sender.clone(),
@@ -1940,7 +1924,6 @@ mod tests {
                     .expect("unable to create journal");
                 let cfg = config::Config {
                     crypto: scheme,
-                    hasher: hasher.clone(),
                     automaton: application.clone(),
                     relay: application.clone(),
                     committer: application,
@@ -2080,10 +2063,9 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2096,7 +2078,7 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2113,7 +2095,7 @@ mod tests {
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
-                        hasher: hasher.clone(),
+                        hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
                         tracker: done_sender.clone(),
@@ -2134,7 +2116,6 @@ mod tests {
                         .expect("unable to create journal");
                     let cfg = config::Config {
                         crypto: scheme,
-                        hasher: hasher.clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
                         committer: application,
@@ -2267,10 +2248,9 @@ mod tests {
             // Derive threshold
             let (public, shares) = ops::generate_shares(&mut runtime, None, n, threshold);
             let pk = poly::public(&public);
-            let prover = Prover::new(pk, &namespace);
+            let prover = Prover::new(pk, &namespace, Sha256::DIGEST_LENGTH);
 
             // Create engines
-            let hasher = Sha256::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut supervisors = Vec::new();
             let (done_sender, mut done_receiver) = mpsc::unbounded();
@@ -2283,7 +2263,7 @@ mod tests {
                     prover: prover.clone(),
                     participants,
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Sha256>::new(supervisor_config);
+                let supervisor = mocks::supervisor::Supervisor::new(supervisor_config);
                 let (voter, resolver) = registrations
                     .remove(&validator)
                     .expect("validator should be registered");
@@ -2299,7 +2279,7 @@ mod tests {
                 } else {
                     supervisors.push(supervisor.clone());
                     let application_cfg = mocks::application::Config {
-                        hasher: hasher.clone(),
+                        hasher: Sha256::default(),
                         relay: relay.clone(),
                         participant: validator.clone(),
                         tracker: done_sender.clone(),
@@ -2320,7 +2300,6 @@ mod tests {
                         .expect("unable to create journal");
                     let cfg = config::Config {
                         crypto: scheme,
-                        hasher: hasher.clone(),
                         automaton: application.clone(),
                         relay: application.clone(),
                         committer: application,

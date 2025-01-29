@@ -6,7 +6,7 @@ use super::{
 use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
 use commonware_cryptography::{
     bls12381::primitives::{group, poly},
-    Hasher, Scheme,
+    Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
@@ -21,7 +21,6 @@ pub struct Engine<
     B: Blob,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
-    H: Hasher,
     A: Automaton<Context = Context>,
     R: Relay,
     F: Committer,
@@ -34,9 +33,9 @@ pub struct Engine<
 > {
     runtime: E,
 
-    voter: voter::Actor<B, E, C, H, A, R, F, S>,
+    voter: voter::Actor<B, E, C, A, R, F, S>,
     voter_mailbox: voter::Mailbox,
-    resolver: resolver::Actor<E, C, H, S>,
+    resolver: resolver::Actor<E, C, S>,
     resolver_mailbox: resolver::Mailbox,
 }
 
@@ -44,7 +43,6 @@ impl<
         B: Blob,
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
-        H: Hasher,
         A: Automaton<Context = Context>,
         R: Relay,
         F: Committer,
@@ -54,10 +52,10 @@ impl<
             Share = group::Share,
             Identity = poly::Public,
         >,
-    > Engine<B, E, C, H, A, R, F, S>
+    > Engine<B, E, C, A, R, F, S>
 {
     /// Create a new `threshold-simplex` consensus engine.
-    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, H, A, R, F, S>) -> Self {
+    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -67,7 +65,6 @@ impl<
             journal,
             voter::Config {
                 crypto: cfg.crypto.clone(),
-                hasher: cfg.hasher,
                 automaton: cfg.automaton,
                 relay: cfg.relay,
                 committer: cfg.committer,

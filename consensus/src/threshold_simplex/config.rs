@@ -1,6 +1,6 @@
 use super::{Context, View};
 use crate::{Automaton, Committer, Relay, ThresholdSupervisor};
-use commonware_cryptography::{bls12381::primitives::group, Hasher, Scheme};
+use commonware_cryptography::{bls12381::primitives::group, Scheme};
 use governor::Quota;
 use prometheus_client::registry::Registry;
 use std::{
@@ -11,7 +11,6 @@ use std::{
 /// Configuration for the consensus engine.
 pub struct Config<
     C: Scheme,
-    H: Hasher,
     A: Automaton<Context = Context>,
     R: Relay,
     F: Committer,
@@ -19,9 +18,6 @@ pub struct Config<
 > {
     /// Cryptographic primitives.
     pub crypto: C,
-
-    /// Hashing algorithm.
-    pub hasher: H,
 
     /// Automaton for the consensus engine.
     pub automaton: A,
@@ -84,12 +80,11 @@ pub struct Config<
 
 impl<
         C: Scheme,
-        H: Hasher,
         A: Automaton<Context = Context>,
         R: Relay,
         F: Committer,
         S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
-    > Config<C, H, A, R, F, S>
+    > Config<C, A, R, F, S>
 {
     /// Assert enforces that all configuration values are valid.
     pub fn assert(&self) {

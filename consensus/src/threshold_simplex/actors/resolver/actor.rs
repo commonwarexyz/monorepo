@@ -11,7 +11,7 @@ use crate::{
     },
     ThresholdSupervisor,
 };
-use commonware_cryptography::{bls12381::primitives::poly, Hasher, Scheme};
+use commonware_cryptography::{bls12381::primitives::poly, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{utils::requester, Receiver, Recipients, Sender};
 use commonware_runtime::Clock;
@@ -24,7 +24,6 @@ use rand::{seq::IteratorRandom, Rng};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    marker::PhantomData,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -99,12 +98,10 @@ impl Inflight {
 pub struct Actor<
     E: Clock + GClock + Rng,
     C: Scheme,
-    H: Hasher,
     S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
 > {
     runtime: E,
     supervisor: S,
-    _hasher: PhantomData<H>,
 
     seed_namespace: Vec<u8>,
     notarize_namespace: Vec<u8>,
@@ -134,9 +131,8 @@ pub struct Actor<
 impl<
         E: Clock + GClock + Rng,
         C: Scheme,
-        H: Hasher,
         S: ThresholdSupervisor<Index = View, Identity = poly::Public>,
-    > Actor<E, C, H, S>
+    > Actor<E, C, S>
 {
     pub fn new(runtime: E, cfg: Config<C, S>) -> (Self, Mailbox) {
         // Initialize requester
@@ -173,7 +169,6 @@ impl<
             Self {
                 runtime,
                 supervisor: cfg.supervisor,
-                _hasher: PhantomData,
 
                 seed_namespace: seed_namespace(&cfg.namespace),
                 notarize_namespace: notarize_namespace(&cfg.namespace),
