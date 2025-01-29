@@ -21,7 +21,11 @@ pub type Activity = u8;
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
-/// Digest represents an arbitrary digest bytes.
+/// Digest is an arbitrary hash digest.
+///
+/// Because consensus is only ever aware of the digest of application payloads, it does not need to be
+/// instantiated with a specific [commonware_cryptography::Hasher]. It is up to the application to syntactically
+/// verify any `Digest` provided by consensus (may have come from an untrusted peer).
 pub type Digest = Bytes;
 
 cfg_if::cfg_if! {
