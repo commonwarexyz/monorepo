@@ -18,8 +18,4 @@ fn benchmark_hash_message(c: &mut Criterion) {
     }
 }
 
-criterion_group! {
-    name = benches;
-    config = Criterion::default().sample_size(10);
-    targets = benchmark_hash_message
-}
+criterion_group!(benches, benchmark_hash_message);
