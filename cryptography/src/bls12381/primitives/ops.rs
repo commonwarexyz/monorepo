@@ -42,7 +42,7 @@ pub fn verify(
 ) -> Result<(), Error> {
     let mut hm = group::Signature::zero();
     hm.map(dst, payload);
-    if !equal(public, signature, hm) {
+    if !equal(public, signature, &hm) {
         return Err(Error::InvalidSignature);
     }
     Ok(())
@@ -291,7 +291,7 @@ pub fn aggregate_verify_multiple_messages(
     });
 
     // Verify the signature
-    if !equal(public, signature, hm_sum) {
+    if !equal(public, signature, &hm_sum) {
         return Err(Error::InvalidSignature);
     }
     Ok(())
