@@ -5,7 +5,7 @@ use crate::mmr::iterator::{nodes_needing_parents, PathIterator, PeakIterator};
 use crate::mmr::verification::Proof;
 use crate::mmr::Error;
 use crate::mmr::Error::{ElementPruned, InvalidElementPosition};
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Hasher as CHasher;
 
 /// Implementation of `Mmr`.
 ///
@@ -17,7 +17,7 @@ pub struct Mmr<H: CHasher> {
     hasher: H,
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
     // from the from tallest tree to shortest.
-    nodes: Vec<Digest>,
+    nodes: Vec<H::Digest>,
     // The position of the oldest element still maintained by the MMR. Will be 0 unless forgetting
     // has been invoked. If non-zero, then proofs can only be generated for elements with positions
     // strictly after this point.
@@ -62,7 +62,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Add an element to the MMR and return its position in the MMR.
-    pub fn add(&mut self, element: &Digest) -> u64 {
+    pub fn add(&mut self, element: &H::Digest) -> u64 {
         let peaks = nodes_needing_parents(self.peak_iterator());
         let element_pos = self.index_to_pos(self.nodes.len() as u64);
         let hasher = &mut Hasher::new(&mut self.hasher);
@@ -82,7 +82,7 @@ impl<H: CHasher> Mmr<H> {
     }
 
     /// Computes the root hash of the MMR.
-    pub fn root_hash(&mut self) -> Digest {
+    pub fn root_hash(&mut self) -> H::Digest {
         let peaks = self
             .peak_iterator()
             .map(|(peak_pos, _)| &self.nodes[(peak_pos - self.oldest_remembered_pos) as usize]);
@@ -92,7 +92,7 @@ impl<H: CHasher> Mmr<H> {
 
     /// Return an inclusion proof for the specified element. Returns `ElementPruned` error if the
     /// requested element is not currently stored by this MMR.
-    pub fn proof(&self, element_pos: u64) -> Result<Proof, Error> {
+    pub fn proof(&self, element_pos: u64) -> Result<Proof<H>, Error> {
         self.range_proof(element_pos, element_pos)
     }
 
@@ -103,11 +103,11 @@ impl<H: CHasher> Mmr<H> {
         &self,
         start_element_pos: u64,
         end_element_pos: u64,
-    ) -> Result<Proof, Error> {
+    ) -> Result<Proof<H>, Error> {
         if start_element_pos != 0 && start_element_pos <= self.oldest_remembered_pos {
             return Err(ElementPruned(self.oldest_remembered_pos));
         }
-        let mut hashes: Vec<Digest> = Vec::new();
+        let mut hashes: Vec<H::Digest> = Vec::new();
         let mut start_tree_with_element = (u64::MAX, 0);
         let mut end_tree_with_element = (u64::MAX, 0);
 
@@ -237,7 +237,7 @@ mod tests {
     use crate::mmr::hasher::Hasher;
     use crate::mmr::iterator::nodes_needing_parents;
     use crate::mmr::mem::Mmr;
-    use commonware_cryptography::{Digest, Sha256};
+    use commonware_cryptography::{Hasher as CHasher, Sha256};
 
     /// Test MMR building by consecutively adding 11 equal elements to a new MMR, producing the
     /// structure in the example documented at the top of the mmr crate's mod.rs file with 19 nodes
@@ -260,8 +260,7 @@ mod tests {
             0,
             "oldest_required_element should return 0 on empty MMR"
         );
-
-        let element = Digest::from_static(b"01234567012345670123456701234567");
+        let element = <Sha256 as CHasher>::Digest::from(*b"01234567012345670123456701234567");
         let mut leaves: Vec<u64> = Vec::new();
         for _ in 0..11 {
             leaves.push(mmr.add(&element));
@@ -328,7 +327,7 @@ mod tests {
 
         // verify root hash
         let root_hash = mmr.root_hash();
-        let peak_hashes = [hash14, hash17, mmr.nodes[18].clone()];
+        let peak_hashes = [hash14, hash17, mmr.nodes[18]];
         let expected_root_hash = mmr_hasher.root_hash(19, peak_hashes.iter());
         assert_eq!(root_hash, expected_root_hash, "incorrect root hash");
 

@@ -1,5 +1,6 @@
+use crate::Digest;
 use bytes::Bytes;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::PublicKey;
 use futures::{channel::mpsc, SinkExt};
 use std::{collections::BTreeMap, sync::Mutex};
 

@@ -1,7 +1,6 @@
 use commonware_consensus::{
-    simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re,
+    simplex::Context, Automaton as Au, Committer as Co, Digest, Proof, Relay as Re,
 };
-use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,

@@ -6,7 +6,7 @@ use super::{
     Config,
 };
 use bytes::BufMut;
-use commonware_consensus::threshold_simplex::Prover;
+use commonware_consensus::{threshold_simplex::Prover, Digest};
 use commonware_cryptography::{
     bls12381::primitives::{group::Element, poly},
     Hasher,
@@ -26,8 +26,8 @@ const GENESIS: &[u8] = b"commonware is neat";
 pub struct Application<R: Rng, H: Hasher, Si: Sink, St: Stream> {
     runtime: R,
     indexer: Connection<Si, St>,
-    prover: Prover<H>,
-    other_prover: Prover<H>,
+    prover: Prover,
+    other_prover: Prover,
     public: Vec<u8>,
     other_public: Vec<u8>,
     hasher: H,
@@ -63,7 +63,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                     // Use the digest of the genesis message as the initial
                     // payload.
                     self.hasher.update(GENESIS);
-                    let digest = self.hasher.finalize();
+                    let digest: Digest = self.hasher.finalize().into();
                     let _ = response.send(digest);
                 }
                 Message::Propose { index, response } => {
@@ -119,7 +119,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
 
                     // Hash the message
                     self.hasher.update(&msg);
-                    let digest = self.hasher.finalize();
+                    let digest: Digest = self.hasher.finalize().into();
                     info!(msg = hex(&msg), payload = hex(&digest), "proposed");
 
                     // Publish to indexer
@@ -155,7 +155,7 @@ impl<R: Rng, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
                 }
                 Message::Verify { payload, response } => {
                     // Ensure payload is a valid digest
-                    if !H::validate(&payload) {
+                    if H::Digest::try_from(&payload).is_err() {
                         let _ = response.send(false);
                         continue;
                     }

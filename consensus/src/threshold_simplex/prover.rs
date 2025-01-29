@@ -5,7 +5,7 @@ use super::{
     },
     wire, View,
 };
-use crate::Proof;
+use crate::{Digest, Proof};
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -13,9 +13,8 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
-    Digest, Hasher, Signature,
+    Signature,
 };
-use std::marker::PhantomData;
 
 type Callback = Box<dyn Fn(&poly::Poly<group::Public>) -> Option<u32>>;
 
@@ -43,33 +42,33 @@ impl Verifier {
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover<H: Hasher> {
-    _hasher: PhantomData<H>,
-
+pub struct Prover {
     public: group::Public,
 
     seed_namespace: Vec<u8>,
     notarize_namespace: Vec<u8>,
     nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
+
+    digest: usize,
 }
 
 /// If we expose partial signatures of proofs, can be used to construct a partial signature
 /// over pre-aggregated data (where the public key of each index can be derived from the group
 /// polynomial). This can be very useful for distributing rewards without including all partial signatures
 /// in a block.
-impl<H: Hasher> Prover<H> {
+impl Prover {
     /// Create a new prover with the given signing `namespace`.
-    pub fn new(public: group::Public, namespace: &[u8]) -> Self {
+    pub fn new(public: group::Public, namespace: &[u8], digest: usize) -> Self {
         Self {
-            _hasher: PhantomData,
-
             public,
 
             seed_namespace: seed_namespace(namespace),
             notarize_namespace: notarize_namespace(namespace),
             nullify_namespace: nullify_namespace(namespace),
             finalize_namespace: finalize_namespace(namespace),
+
+            digest,
         }
     }
 
@@ -90,13 +89,13 @@ impl<H: Hasher> Prover<H> {
 
     /// Deserialize a proposal proof.
     fn deserialize_proposal(
+        &self,
         mut proof: Proof,
         namespace: &[u8],
     ) -> Option<(View, View, Digest, Verifier)> {
         // Ensure proof is big enough
-        let digest_len = H::len();
         let expected_len =
-            size_of::<u64>() + size_of::<u64>() + digest_len + poly::PARTIAL_SIGNATURE_LENGTH;
+            size_of::<u64>() + size_of::<u64>() + self.digest + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
         }
@@ -104,7 +103,7 @@ impl<H: Hasher> Prover<H> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(digest_len);
+        let payload = proof.copy_to_bytes(self.digest);
         let signature = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature = poly::Eval::deserialize(&signature)?;
 
@@ -157,10 +156,9 @@ impl<H: Hasher> Prover<H> {
         namespace: &[u8],
     ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
         // Ensure proof prefix is big enough
-        let digest_len = H::len();
         let expected_len = size_of::<u64>()
             + size_of::<u64>()
-            + digest_len
+            + self.digest
             + group::SIGNATURE_LENGTH
             + group::SIGNATURE_LENGTH;
         if proof.len() != expected_len {
@@ -170,7 +168,7 @@ impl<H: Hasher> Prover<H> {
         // Verify signature
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(digest_len);
+        let payload = proof.copy_to_bytes(self.digest);
         let message = proposal_message(view, parent, &payload);
         let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
         let signature = group::Signature::deserialize(&signature)?;
@@ -190,7 +188,7 @@ impl<H: Hasher> Prover<H> {
 
     /// Deserialize a notarize proof.
     pub fn deserialize_notarize(&self, proof: Proof) -> Option<(View, View, Digest, Verifier)> {
-        Self::deserialize_proposal(proof, &self.notarize_namespace)
+        Self::deserialize_proposal(self, proof, &self.notarize_namespace)
     }
 
     /// Deserialize a notarization proof.
@@ -203,7 +201,7 @@ impl<H: Hasher> Prover<H> {
 
     /// Deserialize a finalize proof.
     pub fn deserialize_finalize(&self, proof: Proof) -> Option<(View, View, Digest, Verifier)> {
-        Self::deserialize_proposal(proof, &self.finalize_namespace)
+        self.deserialize_proposal(proof, &self.finalize_namespace)
     }
 
     /// Deserialize a finalization proof.
@@ -225,13 +223,12 @@ impl<H: Hasher> Prover<H> {
         signature_2: &Signature,
     ) -> Proof {
         // Setup proof
-        let digest_len = H::len();
         let len = size_of::<u64>()
             + size_of::<u64>()
-            + digest_len
+            + payload_1.len()
             + poly::PARTIAL_SIGNATURE_LENGTH
             + size_of::<u64>()
-            + digest_len
+            + payload_2.len()
             + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
@@ -247,17 +244,17 @@ impl<H: Hasher> Prover<H> {
     }
 
     fn deserialize_conflicting_proposal(
+        &self,
         mut proof: Proof,
         namespace: &[u8],
     ) -> Option<(View, Verifier)> {
         // Ensure proof is big enough
-        let digest_len = H::len();
         let expected_len = size_of::<u64>()
             + size_of::<u64>()
-            + digest_len
+            + self.digest
             + poly::PARTIAL_SIGNATURE_LENGTH
             + size_of::<u64>()
-            + digest_len
+            + self.digest
             + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
@@ -266,11 +263,11 @@ impl<H: Hasher> Prover<H> {
         // Decode proof
         let view = proof.get_u64();
         let parent_1 = proof.get_u64();
-        let payload_1 = proof.copy_to_bytes(digest_len);
+        let payload_1 = proof.copy_to_bytes(self.digest);
         let signature_1 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_1 = Eval::deserialize(&signature_1)?;
         let parent_2 = proof.get_u64();
-        let payload_2 = proof.copy_to_bytes(digest_len);
+        let payload_2 = proof.copy_to_bytes(self.digest);
         let signature_2 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_2 = Eval::deserialize(&signature_2)?;
         if signature_1.index != signature_2.index {
@@ -329,7 +326,7 @@ impl<H: Hasher> Prover<H> {
 
     /// Deserialize a conflicting notarization proof.
     pub fn deserialize_conflicting_notarize(&self, proof: Proof) -> Option<(View, Verifier)> {
-        Self::deserialize_conflicting_proposal(proof, &self.notarize_namespace)
+        self.deserialize_conflicting_proposal(proof, &self.notarize_namespace)
     }
 
     /// Serialize a conflicting finalize proof.
@@ -356,7 +353,7 @@ impl<H: Hasher> Prover<H> {
 
     /// Deserialize a conflicting finalization proof.
     pub fn deserialize_conflicting_finalize(&self, proof: Proof) -> Option<(View, Verifier)> {
-        Self::deserialize_conflicting_proposal(proof, &self.finalize_namespace)
+        self.deserialize_conflicting_proposal(proof, &self.finalize_namespace)
     }
 
     /// Serialize a conflicting nullify and finalize proof.
@@ -368,9 +365,8 @@ impl<H: Hasher> Prover<H> {
         signature_null: &Signature,
     ) -> Proof {
         // Setup proof
-        let digest_len = H::len();
         let len =
-            8 + 8 + digest_len + poly::PARTIAL_SIGNATURE_LENGTH + poly::PARTIAL_SIGNATURE_LENGTH;
+            8 + 8 + payload.len() + poly::PARTIAL_SIGNATURE_LENGTH + poly::PARTIAL_SIGNATURE_LENGTH;
 
         // Encode proof
         let mut proof = Vec::with_capacity(len);
@@ -385,10 +381,9 @@ impl<H: Hasher> Prover<H> {
     /// Deserialize a conflicting nullify and finalize proof.
     pub fn deserialize_nullify_finalize(&self, mut proof: Proof) -> Option<(View, Verifier)> {
         // Ensure proof is big enough
-        let digest_len = H::len();
         let expected_len = size_of::<u64>()
             + size_of::<u64>()
-            + digest_len
+            + self.digest
             + poly::PARTIAL_SIGNATURE_LENGTH
             + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
@@ -398,7 +393,7 @@ impl<H: Hasher> Prover<H> {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(digest_len);
+        let payload = proof.copy_to_bytes(self.digest);
         let signature_finalize = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_finalize = Eval::deserialize(&signature_finalize)?;
         let signature_null = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
@@ -445,7 +440,7 @@ mod tests {
             dkg::ops::generate_shares,
             primitives::group::{self, Share},
         },
-        Sha256,
+        Hasher, Sha256,
     };
     use ops::{keypair, partial_sign_message, sign_message};
     use rand::{rngs::StdRng, SeedableRng};
@@ -465,8 +460,8 @@ mod tests {
     fn test_deserialize_proposal() {
         // Create valid signature
         let (public, poly, shares) = generate_threshold();
-        let prover = Prover::<Sha256>::new(public, b"test");
-        let payload = Digest::from(vec![0; Sha256::len()]);
+        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
+        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -482,9 +477,9 @@ mod tests {
         proof.extend_from_slice(&signature); // signature
 
         // Verify correct proof
-        let (_, _, _, verifier) =
-            Prover::<Sha256>::deserialize_proposal(proof.into(), &prover.notarize_namespace)
-                .unwrap();
+        let (_, _, _, verifier) = prover
+            .deserialize_proposal(proof.into(), &prover.notarize_namespace)
+            .unwrap();
         assert!(verifier.verify(&poly).is_none());
     }
 
@@ -492,8 +487,8 @@ mod tests {
     fn test_deserialize_proposal_invalid() {
         // Create valid signature
         let (public, poly, shares) = generate_threshold();
-        let prover = Prover::<Sha256>::new(public, b"test");
-        let payload = Digest::from(vec![0; Sha256::len()]);
+        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
+        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -509,9 +504,9 @@ mod tests {
         proof.extend_from_slice(&signature); // invalid signature
 
         // Verify bad signature
-        let (_, _, _, verifier) =
-            Prover::<Sha256>::deserialize_proposal(proof.into(), &prover.notarize_namespace)
-                .unwrap();
+        let (_, _, _, verifier) = prover
+            .deserialize_proposal(proof.into(), &prover.notarize_namespace)
+            .unwrap();
         assert!(verifier.verify(&poly).is_none());
     }
 
@@ -519,8 +514,8 @@ mod tests {
     fn test_deserialize_proposal_underflow() {
         // Create valid signature
         let (public, _, shares) = generate_threshold();
-        let prover = Prover::<Sha256>::new(public, b"test");
-        let payload = Digest::from(vec![0; Sha256::len()]);
+        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
+        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -539,8 +534,7 @@ mod tests {
         proof.extend_from_slice(&signature); // undersized signature
 
         // Verify bad proof
-        let result =
-            Prover::<Sha256>::deserialize_proposal(proof.into(), &prover.notarize_namespace);
+        let result = prover.deserialize_proposal(proof.into(), &prover.notarize_namespace);
         assert!(result.is_none());
     }
 
@@ -548,8 +542,8 @@ mod tests {
     fn test_deserialize_proposal_overflow() {
         // Create valid signature
         let (public, _, shares) = generate_threshold();
-        let prover = Prover::<Sha256>::new(public, b"test");
-        let payload = Digest::from(vec![0; Sha256::len()]);
+        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
+        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -568,8 +562,7 @@ mod tests {
         proof.extend_from_slice(&signature); // oversized signature
 
         // Verify bad proof
-        let result =
-            Prover::<Sha256>::deserialize_proposal(proof.into(), &prover.notarize_namespace);
+        let result = prover.deserialize_proposal(proof.into(), &prover.notarize_namespace);
         assert!(result.is_none());
     }
 
@@ -577,10 +570,10 @@ mod tests {
     fn test_deserialize_threshold() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::<Sha256>::new(public, b"test");
+        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; Sha256::len()]);
+        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),
@@ -607,10 +600,10 @@ mod tests {
     fn test_deserialize_threshold_invalid() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::<Sha256>::new(public, b"test");
+        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; Sha256::len()]);
+        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),
@@ -637,10 +630,10 @@ mod tests {
     fn test_deserialize_threshold_underflow() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::<Sha256>::new(public, b"test");
+        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; Sha256::len()]);
+        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),
@@ -670,10 +663,10 @@ mod tests {
     fn test_deserialize_threshold_overflow() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::<Sha256>::new(public, b"test");
+        let prover = Prover::new(public, b"test", Sha256::DIGEST_LENGTH);
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; Sha256::len()]);
+        let payload = Digest::from(vec![0; Sha256::DIGEST_LENGTH]);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),

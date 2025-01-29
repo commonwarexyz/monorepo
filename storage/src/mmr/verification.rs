@@ -1,7 +1,7 @@
 use crate::mmr::hasher::Hasher;
 use crate::mmr::iterator::PeakIterator;
 use bytes::{Buf, BufMut};
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Hasher as CHasher;
 
 /// A `Proof` contains the information necessary for proving the inclusion of an element, or some
 /// range of elements, in the MMR from its root hash. The `hashes` vector contains: (1) the peak
@@ -9,23 +9,31 @@ use commonware_cryptography::{Digest, Hasher as CHasher};
 /// proven, followed by: (2) the nodes in the remaining perfect trees necessary for reconstructing
 /// their peak hashes from the elements within the range. Both segments are ordered by decreasing
 /// height.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Proof {
+#[derive(Clone, Debug, Eq)]
+/// A Proof contains the information necessary for proving the inclusion of an element, or some
+/// range of elements, in the MMR.
+pub struct Proof<H: CHasher> {
     /// The total number of nodes in the MMR.
     pub size: u64,
     /// The hashes necessary for proving the inclusion of an element, or range of elements, in the MMR.
-    pub hashes: Vec<Digest>,
+    pub hashes: Vec<H::Digest>,
 }
 
-impl Proof {
+impl<H: CHasher> PartialEq for Proof<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.size == other.size && self.hashes == other.hashes
+    }
+}
+
+impl<H: CHasher> Proof<H> {
     /// Return true if `proof` proves that `element` appears at position `element_pos` within the MMR
     /// with root hash `root_hash`.
-    pub fn verify_element_inclusion<H: CHasher>(
+    pub fn verify_element_inclusion(
         &self,
         hasher: &mut H,
-        element: &Digest,
+        element: &H::Digest,
         element_pos: u64,
-        root_hash: &Digest,
+        root_hash: &H::Digest,
     ) -> bool {
         self.verify_range_inclusion(
             hasher,
@@ -39,13 +47,13 @@ impl Proof {
     /// Return true if `proof` proves that the `elements` appear consecutively between positions
     /// `start_element_pos` through `end_element_pos` (inclusive) within the MMR with root hash
     /// `root_hash`.
-    pub fn verify_range_inclusion<H: CHasher>(
+    pub fn verify_range_inclusion(
         &self,
         hasher: &mut H,
-        elements: &[Digest],
+        elements: &[H::Digest],
         start_element_pos: u64,
         end_element_pos: u64,
-        root_hash: &Digest,
+        root_hash: &H::Digest,
     ) -> bool {
         let mut proof_hashes_iter = self.hashes.iter();
         let mut elements_iter = elements.iter();
@@ -54,7 +62,7 @@ impl Proof {
 
         // Include peak hashes only for trees that have no elements from the range, and keep track of
         // the starting and ending trees of those that do contain some.
-        let mut peak_hashes: Vec<Digest> = Vec::new();
+        let mut peak_hashes: Vec<H::Digest> = Vec::new();
         let mut proof_hashes_used = 0;
         for (peak_pos, height) in PeakIterator::new(self.size) {
             let leftmost_pos = peak_pos + 2 - (1 << (height + 1));
@@ -95,8 +103,8 @@ impl Proof {
     }
 
     /// Return the maximum size in bytes of any serialized `Proof`.
-    pub fn max_serialization_size<H: CHasher>() -> usize {
-        size_of::<u64>() + (u8::MAX as usize * H::len())
+    pub fn max_serialization_size() -> usize {
+        size_of::<u64>() + (u8::MAX as usize * H::DIGEST_LENGTH)
     }
 
     /// Canonically serializes the `Proof` as:
@@ -104,8 +112,8 @@ impl Proof {
     ///    [0-8): size (u64 big-endian)
     ///    [8-...): raw bytes of each hash, each of length `H::len()`
     /// ```
-    pub fn serialize<H: CHasher>(&self) -> Vec<u8> {
-        let bytes_len = size_of::<u64>() + (self.hashes.len() * H::len());
+    pub fn serialize(&self) -> Vec<u8> {
+        let bytes_len = size_of::<u64>() + (self.hashes.len() * H::DIGEST_LENGTH);
         let mut bytes = Vec::with_capacity(bytes_len);
         bytes.put_u64(self.size);
 
@@ -117,14 +125,14 @@ impl Proof {
             "too many hashes in proof"
         );
         for hash in self.hashes.iter() {
-            bytes.extend_from_slice(hash);
+            bytes.extend_from_slice(hash.as_ref());
         }
         assert_eq!(bytes.len(), bytes_len, "serialization length mismatch");
         bytes.to_vec()
     }
 
     /// Deserializes a canonically encoded `Proof`. See `serialize` for the serialization format.
-    pub fn deserialize<H: CHasher>(bytes: &[u8]) -> Option<Self> {
+    pub fn deserialize(bytes: &[u8]) -> Option<Self> {
         let mut buf = bytes;
         if buf.len() < size_of::<u64>() {
             return None;
@@ -133,14 +141,18 @@ impl Proof {
 
         // A proof should divide neatly into the hash length and not contain more than 255 hashes.
         let buf_remaining = buf.remaining();
-        let hashes_len = buf_remaining / H::len();
-        if buf_remaining % H::len() != 0 || hashes_len > u8::MAX as usize {
+        let hashes_len = buf_remaining / H::DIGEST_LENGTH;
+        if buf_remaining % H::DIGEST_LENGTH != 0 || hashes_len > u8::MAX as usize {
             return None;
         }
         let mut hashes = Vec::with_capacity(hashes_len);
         for _ in 0..hashes_len {
-            let hash = buf.copy_to_bytes(H::len());
-            hashes.push(Digest::from(hash));
+            let hash = buf.copy_to_bytes(H::DIGEST_LENGTH);
+            let hash = match H::Digest::try_from(&hash) {
+                Ok(hash) => hash,
+                Err(_) => return None,
+            };
+            hashes.push(hash);
         }
         Some(Self { size, hashes })
     }
@@ -152,9 +164,9 @@ fn peak_hash_from_range<'a, H: CHasher>(
     two_h: u64,         // 2^height of the current node
     leftmost_pos: u64,  // leftmost leaf in the tree to be traversed
     rightmost_pos: u64, // rightmost leaf in the tree to be traversed
-    elements: &mut impl Iterator<Item = &'a Digest>,
-    sibling_hashes: &mut impl Iterator<Item = &'a Digest>,
-) -> Result<Digest, ()> {
+    elements: &mut impl Iterator<Item = &'a H::Digest>,
+    sibling_hashes: &mut impl Iterator<Item = &'a H::Digest>,
+) -> Result<H::Digest, ()> {
     assert_ne!(two_h, 0);
     if two_h == 1 {
         // we are at a leaf
@@ -165,9 +177,9 @@ fn peak_hash_from_range<'a, H: CHasher>(
     }
 
     let left_pos = node_pos - two_h;
-    let mut left_hash: Option<Digest> = None;
+    let mut left_hash: Option<H::Digest> = None;
     let right_pos = left_pos + two_h - 1;
-    let mut right_hash: Option<Digest> = None;
+    let mut right_hash: Option<H::Digest> = None;
 
     if left_pos >= leftmost_pos {
         // Descend left
@@ -219,13 +231,15 @@ fn peak_hash_from_range<'a, H: CHasher>(
 mod tests {
     use super::Proof;
     use crate::mmr::mem::Mmr;
-    use commonware_cryptography::{Digest, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{Hasher as CHasher, Sha256};
+
+    type Sha256Digest = <Sha256 as CHasher>::Digest;
 
     #[test]
     fn test_verify_element() {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
-        let mut mmr: Mmr<Sha256> = Mmr::<Sha256>::new();
-        let element = Digest::from_static(b"01234567012345670123456701234567");
+        let mut mmr = Mmr::<Sha256>::new();
+        let element = Sha256Digest::from(*b"01234567012345670123456701234567");
         let mut leaves: Vec<u64> = Vec::new();
         for _ in 0..11 {
             leaves.push(mmr.add(&element));
@@ -261,19 +275,19 @@ mod tests {
         assert!(
             !proof.verify_element_inclusion(
                 &mut hasher,
-                &Digest::from(vec![0u8; Sha256::len()]),
+                &Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]),
                 POS,
                 &root_hash,
             ),
             "proof verification should fail with mangled element"
         );
-        let root_hash2 = Digest::from(vec![0u8; Sha256::len()]);
+        let root_hash2 = Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]);
         assert!(
             !proof.verify_element_inclusion(&mut hasher, &element, POS, &root_hash2),
             "proof verification should fail with mangled root_hash"
         );
         let mut proof2 = proof.clone();
-        proof2.hashes[0] = Digest::from(vec![0u8; Sha256::len()]);
+        proof2.hashes[0] = Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]);
         assert!(
             !proof2.verify_element_inclusion(&mut hasher, &element, POS, &root_hash),
             "proof verification should fail with mangled proof hash"
@@ -285,7 +299,9 @@ mod tests {
             "proof verification should fail with incorrect size"
         );
         proof2 = proof.clone();
-        proof2.hashes.push(Digest::from(vec![0u8; Sha256::len()]));
+        proof2
+            .hashes
+            .push(Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]));
         assert!(
             !proof2.verify_element_inclusion(&mut hasher, &element, POS, &root_hash),
             "proof verification should fail with extra hash"
@@ -305,7 +321,9 @@ mod tests {
             .hashes
             .extend(proof.hashes[0..PEAK_COUNT - 1].iter().cloned());
         // sneak in an extra hash that won't be used in the computation and make sure it's detected
-        proof2.hashes.push(Digest::from(vec![0u8; Sha256::len()]));
+        proof2
+            .hashes
+            .push(Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]));
         proof2
             .hashes
             .extend(proof.hashes[PEAK_COUNT - 1..].iter().cloned());
@@ -319,10 +337,10 @@ mod tests {
     fn test_verify_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut mmr: Mmr<Sha256> = Mmr::default();
-        let mut elements = Vec::<Digest>::new();
+        let mut elements = Vec::<Sha256Digest>::new();
         let mut element_positions = Vec::<u64>::new();
         for i in 0..49 {
-            elements.push(Digest::from(vec![i as u8; Sha256::len()]));
+            elements.push(Sha256Digest::from([i as u8; Sha256::DIGEST_LENGTH]));
             element_positions.push(mmr.add(elements.last().unwrap()));
         }
         // test range proofs over all possible ranges of at least 2 elements
@@ -384,13 +402,13 @@ mod tests {
             for j in i..elements.len() {
                 assert!(
                     (i == start_index && j == end_index) // exclude the valid element range
-                    || !range_proof.verify_range_inclusion(
-                        &mut hasher,
-                        &elements[i..j + 1],
-                        start_pos,
-                        end_pos,
-                        &root_hash,
-                    ),
+                                    || !range_proof.verify_range_inclusion(
+                                        &mut hasher,
+                                        &elements[i..j + 1],
+                                        start_pos,
+                                        end_pos,
+                                        &root_hash,
+                                    ),
                     "range proof with invalid elements should fail {}:{}",
                     i,
                     j
@@ -398,21 +416,21 @@ mod tests {
             }
         }
         // confirm proof fails with invalid root hash
-        let mut invalid_root_hash = vec![0; Sha256::len()];
-        invalid_root_hash[29] = root_hash[29] + 1;
+        let mut invalid_root_hash = vec![0; Sha256::DIGEST_LENGTH];
+        invalid_root_hash[29] = root_hash.as_ref()[29] + 1;
         assert!(
             !range_proof.verify_range_inclusion(
                 &mut hasher,
                 valid_elements,
                 start_pos,
                 end_pos,
-                &Digest::from(invalid_root_hash),
+                &Sha256Digest::try_from(&invalid_root_hash).unwrap(),
             ),
             "range proof with invalid root hash should fail"
         );
         // mangle the proof and confirm it fails
         let mut invalid_proof = range_proof.clone();
-        invalid_proof.hashes[1] = Digest::from(vec![0u8; Sha256::len()]);
+        invalid_proof.hashes[1] = Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]);
         assert!(
             !invalid_proof.verify_range_inclusion(
                 &mut hasher,
@@ -428,7 +446,7 @@ mod tests {
             let mut invalid_proof = range_proof.clone();
             invalid_proof
                 .hashes
-                .insert(i, Digest::from(vec![0u8; Sha256::len()]));
+                .insert(i, Sha256Digest::from([0u8; Sha256::DIGEST_LENGTH]));
             assert!(
                 !invalid_proof.verify_range_inclusion(
                     &mut hasher,
@@ -484,10 +502,10 @@ mod tests {
     fn test_range_proofs_after_forgetting() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut mmr: Mmr<Sha256> = Mmr::default();
-        let mut elements = Vec::<Digest>::new();
+        let mut elements = Vec::<Sha256Digest>::new();
         let mut element_positions = Vec::<u64>::new();
         for i in 0..49 {
-            elements.push(Digest::from(vec![i as u8; Sha256::len()]));
+            elements.push(Sha256Digest::from([i as u8; Sha256::DIGEST_LENGTH]));
             element_positions.push(mmr.add(elements.last().unwrap()));
         }
 
@@ -526,7 +544,7 @@ mod tests {
 
         // add a few more nodes, forget again, and test again to make sure repeated forgetting works
         for i in 0..37 {
-            elements.push(Digest::from(vec![i as u8; Sha256::len()]));
+            elements.push(Sha256Digest::from([i as u8; Sha256::DIGEST_LENGTH]));
             element_positions.push(mmr.add(elements.last().unwrap()));
         }
         let updated_root_hash = mmr.root_hash();
@@ -557,16 +575,16 @@ mod tests {
     #[test]
     fn test_proof_serialization() {
         assert_eq!(
-            Proof::max_serialization_size::<Sha256>(),
+            Proof::<Sha256>::max_serialization_size(),
             8168,
             "wrong max serialization size of a Sha256 proof"
         );
         // create a new MMR and add a non-trivial amount of elements
         let mut mmr: Mmr<Sha256> = Mmr::default();
-        let mut elements = Vec::<Digest>::new();
+        let mut elements = Vec::<Sha256Digest>::new();
         let mut element_positions = Vec::<u64>::new();
         for i in 0..25 {
-            elements.push(Digest::from(vec![i as u8; Sha256::len()]));
+            elements.push(Sha256Digest::from([i as u8; Sha256::DIGEST_LENGTH]));
             element_positions.push(mmr.add(elements.last().unwrap()));
         }
         // Generate proofs over all possible ranges of elements and confirm each
@@ -577,8 +595,8 @@ mod tests {
                 let end_pos = element_positions[j];
                 let proof = mmr.range_proof(start_pos, end_pos).unwrap();
 
-                let mut serialized_proof = proof.serialize::<Sha256>();
-                let deserialized_proof = Proof::deserialize::<Sha256>(&serialized_proof);
+                let mut serialized_proof = proof.serialize();
+                let deserialized_proof = Proof::<Sha256>::deserialize(&serialized_proof);
                 assert!(deserialized_proof.is_some(), "proof didn't deserialize");
                 assert_eq!(
                     proof,
@@ -587,7 +605,7 @@ mod tests {
                 );
 
                 let deserialized_truncated =
-                    Proof::deserialize::<Sha256>(&serialized_proof[0..serialized_proof.len() - 1]);
+                    Proof::<Sha256>::deserialize(&serialized_proof[0..serialized_proof.len() - 1]);
                 assert!(
                     deserialized_truncated.is_none(),
                     "proof should not deserialize with truncated data"
@@ -595,7 +613,7 @@ mod tests {
 
                 serialized_proof.push(i as u8);
                 assert!(
-                    Proof::deserialize::<Sha256>(&serialized_proof).is_none(),
+                    Proof::<Sha256>::deserialize(&serialized_proof).is_none(),
                     "proof should not deserialize with extra data"
                 );
             }

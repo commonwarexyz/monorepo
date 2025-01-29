@@ -1,7 +1,9 @@
 use super::relay::Relay;
-use crate::{threshold_simplex::Context, Automaton as Au, Committer as Co, Proof, Relay as Re};
+use crate::{
+    threshold_simplex::Context, Automaton as Au, Committer as Co, Digest, Proof, Relay as Re,
+};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_cryptography::{Digest, Hasher, PublicKey};
+use commonware_cryptography::{Hasher, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::Clock;
 use commonware_utils::hex;
@@ -205,7 +207,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     fn genesis(&mut self) -> Digest {
         let payload = Bytes::from(GENESIS_BYTES);
         self.hasher.update(&payload);
-        let digest = self.hasher.finalize();
+        let digest: Digest = self.hasher.finalize().into();
         self.verified.insert(digest.clone());
         self.finalized_views.insert(digest.clone());
         digest
@@ -221,8 +223,8 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
             .await;
 
         // Verify parent exists and we are at the correct height
-        if !H::validate(&context.parent.1) {
-            self.panic("invalid parent digest length");
+        if let Err(err) = H::Digest::try_from(&context.parent.1) {
+            self.panic(&format!("parent: {}", err));
         }
 
         // Generate the payload
@@ -232,7 +234,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
         payload.extend_from_slice(&context.parent.1);
         payload.put_u64(self.runtime.gen::<u64>()); // Ensures we always have a unique payload
         self.hasher.update(&payload);
-        let digest = self.hasher.finalize();
+        let digest: Digest = self.hasher.finalize().into();
 
         // Mark verified
         self.verified.insert(digest.clone());
@@ -250,11 +252,11 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
             .await;
 
         // Verify parent exists and we are at the correct height
-        if !H::validate(&context.parent.1) {
-            self.panic("invalid parent digest length");
+        if let Err(err) = H::Digest::try_from(&context.parent.1) {
+            self.panic(&format!("parent: {}", err));
         }
-        if !H::validate(&payload) {
-            self.panic("invalid digest length");
+        if let Err(err) = H::Digest::try_from(&payload) {
+            self.panic(&err.to_string());
         }
 
         // Verify contents
@@ -268,7 +270,7 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
                 parsed_view, context.view
             ));
         }
-        let parsed_parent: Digest = contents.copy_to_bytes(H::len());
+        let parsed_parent: Digest = contents.copy_to_bytes(H::DIGEST_LENGTH);
         if parsed_parent != context.parent.1 {
             self.panic(&format!(
                 "invalid parent (in payload): {} != {}",
@@ -289,8 +291,8 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     }
 
     async fn notarized(&mut self, proof: Proof, payload: Digest) {
-        if !H::validate(&payload) {
-            self.panic("invalid digest length");
+        if let Err(err) = H::Digest::try_from(&payload) {
+            self.panic(&err.to_string());
         }
         if !self.notarized_views.insert(payload.clone()) {
             self.panic("view already notarized");
@@ -305,8 +307,8 @@ impl<E: Clock + RngCore, H: Hasher> Application<E, H> {
     }
 
     async fn finalized(&mut self, proof: Proof, payload: Digest) {
-        if !H::validate(&payload) {
-            self.panic("invalid digest length");
+        if let Err(err) = H::Digest::try_from(&payload) {
+            self.panic(&err.to_string());
         }
         if !self.finalized_views.insert(payload.clone()) {
             self.panic("view already finalized");

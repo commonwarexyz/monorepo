@@ -1,6 +1,6 @@
 use super::View;
+use crate::Digest;
 use bytes::{BufMut, Bytes};
-use commonware_cryptography::Digest;
 use commonware_utils::union;
 
 pub const SEED_SUFFIX: &[u8] = b"_SEED";

@@ -8,7 +8,7 @@ use commonware_cryptography::{
         group::{self, Element},
         poly::{self, Poly},
     },
-    Ed25519, Scheme, Sha256,
+    Ed25519, Hasher, Scheme, Sha256,
 };
 use commonware_p2p::authenticated;
 use commonware_runtime::{
@@ -227,9 +227,9 @@ fn main() {
 
         // Initialize application
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let hasher = Sha256::default();
-        let prover: Prover<Sha256> = Prover::new(public, &consensus_namespace);
-        let other_prover: Prover<Sha256> = Prover::new(other_identity, &consensus_namespace);
+        let prover: Prover = Prover::new(public, &consensus_namespace, Sha256::DIGEST_LENGTH);
+        let other_prover: Prover =
+            Prover::new(other_identity, &consensus_namespace, Sha256::DIGEST_LENGTH);
         let (application, supervisor, mailbox) = application::Application::new(
             runtime.clone(),
             application::Config {
@@ -237,7 +237,7 @@ fn main() {
                 prover,
                 other_prover,
                 other_network: other_identity,
-                hasher: hasher.clone(),
+                hasher: Sha256::default(),
                 mailbox_size: 1024,
                 identity,
                 participants: validators.clone(),
@@ -251,7 +251,6 @@ fn main() {
             journal,
             threshold_simplex::Config {
                 crypto: signer.clone(),
-                hasher,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
                 committer: mailbox,

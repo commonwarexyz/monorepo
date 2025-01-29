@@ -1,4 +1,4 @@
-use commonware_cryptography::{Digest, Hasher as CHasher};
+use commonware_cryptography::Hasher as CHasher;
 
 /// Hasher decorator the MMR uses for computing leaf, node and root hashes.
 pub(crate) struct Hasher<'a, H: CHasher> {
@@ -11,7 +11,7 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     }
 
     /// Computes the hash for a leaf given its position and the element it represents.
-    pub(crate) fn leaf_hash(&mut self, pos: u64, element: &Digest) -> Digest {
+    pub(crate) fn leaf_hash(&mut self, pos: u64, element: &H::Digest) -> H::Digest {
         self.update_with_pos(pos);
         self.update_with_hash(element);
         self.finalize_reset()
@@ -21,9 +21,9 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     pub(crate) fn node_hash(
         &mut self,
         pos: u64,
-        left_hash: &Digest,
-        right_hash: &Digest,
-    ) -> Digest {
+        left_hash: &H::Digest,
+        right_hash: &H::Digest,
+    ) -> H::Digest {
         self.update_with_pos(pos);
         self.update_with_hash(left_hash);
         self.update_with_hash(right_hash);
@@ -35,8 +35,8 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     pub(crate) fn root_hash<'b>(
         &mut self,
         pos: u64,
-        peak_hashes: impl Iterator<Item = &'b Digest>,
-    ) -> Digest {
+        peak_hashes: impl Iterator<Item = &'b H::Digest>,
+    ) -> H::Digest {
         self.update_with_pos(pos);
         for hash in peak_hashes {
             self.update_with_hash(hash);
@@ -47,17 +47,17 @@ impl<'a, H: CHasher> Hasher<'a, H> {
     pub(crate) fn update_with_pos(&mut self, pos: u64) {
         self.hasher.update(&pos.to_be_bytes());
     }
-    pub(crate) fn update_with_hash(&mut self, hash: &Digest) {
-        self.hasher.update(hash);
+    pub(crate) fn update_with_hash(&mut self, hash: &H::Digest) {
+        self.hasher.update(hash.as_ref());
     }
-    pub(crate) fn finalize_reset(&mut self) -> Digest {
+    pub(crate) fn finalize_reset(&mut self) -> H::Digest {
         self.hasher.finalize()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use commonware_cryptography::{Digest, Hasher as CHasher, Sha256};
+    use commonware_cryptography::{Hasher as CHasher, Sha256};
 
     #[test]
     fn test_leaf_hash_sha256() {
@@ -78,13 +78,13 @@ mod tests {
         let mut hasher = H::new();
         let mut mmr_hasher = super::Hasher::new(&mut hasher);
         // input hashes to use
-        let hash1 = Digest::from(vec![1u8; H::len()]);
-        let hash2 = Digest::from(vec![2u8; H::len()]);
+        let hash1 = H::Digest::try_from(&vec![1u8; H::DIGEST_LENGTH]).unwrap();
+        let hash2 = H::Digest::try_from(&vec![2u8; H::DIGEST_LENGTH]).unwrap();
 
         let out = mmr_hasher.leaf_hash(0, &hash1);
         assert_ne!(
             out,
-            Digest::from(vec![0u8; H::len()]),
+            H::Digest::try_from(vec![0u8; H::DIGEST_LENGTH].as_ref() as &[u8]).unwrap(),
             "hash should be non-zero"
         );
 
@@ -103,14 +103,14 @@ mod tests {
         let mut mmr_hasher = super::Hasher::new(&mut hasher);
         // input hashes to use
 
-        let hash1 = Digest::from(vec![1u8; H::len()]);
-        let hash2 = Digest::from(vec![2u8; H::len()]);
-        let hash3 = Digest::from(vec![3u8; H::len()]);
+        let hash1 = H::Digest::try_from(&vec![1u8; H::DIGEST_LENGTH]).unwrap();
+        let hash2 = H::Digest::try_from(&vec![2u8; H::DIGEST_LENGTH]).unwrap();
+        let hash3 = H::Digest::try_from(&vec![3u8; H::DIGEST_LENGTH]).unwrap();
 
         let out = mmr_hasher.node_hash(0, &hash1, &hash2);
         assert_ne!(
             out,
-            Digest::from(vec![0u8; H::len()]),
+            H::Digest::try_from(&vec![0u8; H::DIGEST_LENGTH]).unwrap(),
             "hash should be non-zero"
         );
 
@@ -143,16 +143,16 @@ mod tests {
         let mut hasher = H::new();
         let mut mmr_hasher = super::Hasher::new(&mut hasher);
         // input hashes to use
-        let hash1 = Digest::from(vec![1u8; H::len()]);
-        let hash2 = Digest::from(vec![2u8; H::len()]);
-        let hash3 = Digest::from(vec![3u8; H::len()]);
-        let hash4 = Digest::from(vec![4u8; H::len()]);
+        let hash1 = H::Digest::try_from(&vec![1u8; H::DIGEST_LENGTH]).unwrap();
+        let hash2 = H::Digest::try_from(&vec![2u8; H::DIGEST_LENGTH]).unwrap();
+        let hash3 = H::Digest::try_from(&vec![3u8; H::DIGEST_LENGTH]).unwrap();
+        let hash4 = H::Digest::try_from(&vec![4u8; H::DIGEST_LENGTH]).unwrap();
 
-        let empty_vec: Vec<Digest> = Vec::new();
+        let empty_vec: Vec<H::Digest> = Vec::new();
         let empty_out = mmr_hasher.root_hash(0, empty_vec.iter());
         assert_ne!(
             empty_out,
-            Digest::from(vec![0u8; H::len()]),
+            H::Digest::try_from(&vec![0u8; H::DIGEST_LENGTH]).unwrap(),
             "root hash of empty MMR should be non-zero"
         );
 
@@ -160,7 +160,7 @@ mod tests {
         let out = mmr_hasher.root_hash(10, vec.iter());
         assert_ne!(
             out,
-            Digest::from(vec![0u8; H::len()]),
+            H::Digest::try_from(&vec![0u8; H::DIGEST_LENGTH]).unwrap(),
             "root hash should be non-zero"
         );
         assert_ne!(out, empty_out, "root hash should differ from empty MMR");

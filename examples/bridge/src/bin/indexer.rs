@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
 use commonware_bridge::{wire, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE};
-use commonware_consensus::threshold_simplex::Prover;
+use commonware_consensus::{threshold_simplex::Prover, Digest};
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
     Ed25519, Hasher, Scheme, Sha256,
@@ -117,7 +117,7 @@ fn main() {
         let network = from_hex(network).expect("Network not well-formed");
         let public = group::Public::deserialize(&network).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let prover = Prover::<Sha256>::new(public, &namespace);
+        let prover = Prover::new(public, &namespace, Sha256::DIGEST_LENGTH);
         provers.insert(network.clone(), prover);
         blocks.insert(network.clone(), HashMap::new());
         finalizations.insert(network, BTreeMap::new());
@@ -143,14 +143,14 @@ fn main() {
 
                         // Compute digest
                         hasher.update(&incoming.data);
-                        let digest = hasher.finalize();
+                        let digest: Digest = hasher.finalize().into();
 
                         // Store block
                         network.insert(digest.clone(), incoming.data);
                         let _ = response.send(true);
                         info!(
                             network = hex(&incoming.network),
-                            block = hex(&digest),
+                            block = hex(digest.as_ref()),
                             "stored block"
                         );
                     }

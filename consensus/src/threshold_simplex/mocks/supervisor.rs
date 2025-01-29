@@ -3,14 +3,14 @@ use crate::{
         Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Activity, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
+    Activity, Digest, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         poly,
     },
-    Digest, Hasher, PublicKey,
+    PublicKey,
 };
 use commonware_utils::modulo;
 use std::{
@@ -25,8 +25,8 @@ type ViewInfo = (
     group::Share,
 );
 
-pub struct Config<H: Hasher> {
-    pub prover: Prover<H>,
+pub struct Config {
+    pub prover: Prover,
     pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<PublicKey>, group::Share)>,
 }
 
@@ -34,8 +34,8 @@ type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
-pub struct Supervisor<H: Hasher> {
-    prover: Prover<H>,
+pub struct Supervisor {
+    prover: Prover,
     participants: BTreeMap<View, ViewInfo>,
 
     pub notarizes: Arc<Mutex<Participation>>,
@@ -43,8 +43,8 @@ pub struct Supervisor<H: Hasher> {
     pub faults: Arc<Mutex<Faults>>,
 }
 
-impl<H: Hasher> Supervisor<H> {
-    pub fn new(cfg: Config<H>) -> Self {
+impl Supervisor {
+    pub fn new(cfg: Config) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, (identity, mut validators, share)) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
@@ -64,7 +64,7 @@ impl<H: Hasher> Supervisor<H> {
     }
 }
 
-impl<H: Hasher> Su for Supervisor<H> {
+impl Su for Supervisor {
     type Index = View;
 
     fn leader(&self, _: Self::Index) -> Option<PublicKey> {
@@ -198,7 +198,7 @@ impl<H: Hasher> Su for Supervisor<H> {
     }
 }
 
-impl<H: Hasher> TSu for Supervisor<H> {
+impl TSu for Supervisor {
     type Seed = group::Signature;
     type Identity = poly::Public;
     type Share = group::Share;

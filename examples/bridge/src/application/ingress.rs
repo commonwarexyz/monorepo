@@ -1,8 +1,7 @@
 use commonware_consensus::{
     threshold_simplex::{Context, View},
-    Automaton as Au, Committer as Co, Proof, Relay as Re,
+    Automaton as Au, Committer as Co, Digest, Proof, Relay as Re,
 };
-use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,
