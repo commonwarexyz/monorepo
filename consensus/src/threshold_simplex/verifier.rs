@@ -123,6 +123,7 @@ pub fn verify_nullification<S: ThresholdSupervisor<Index = View, Identity = poly
         debug!(reason = "invalid seed signature", "dropping nullification");
         return false;
     }
+    debug!(view = nullification.view, "seed verified");
     true
 }
 
@@ -136,7 +137,7 @@ pub fn verify_finalization<S: ThresholdSupervisor<Index = View, Identity = poly:
     let proposal = match &finalization.proposal {
         Some(proposal) => proposal,
         None => {
-            debug!(reason = "missing proposal", "dropping notarization");
+            debug!(reason = "missing proposal", "dropping finalization");
             return false;
         }
     };
@@ -154,7 +155,7 @@ pub fn verify_finalization<S: ThresholdSupervisor<Index = View, Identity = poly:
 
     // Parse signature
     let Some(signature) = group::Signature::deserialize(&finalization.proposal_signature) else {
-        debug!(reason = "invalid signature", "dropping nullification");
+        debug!(reason = "invalid signature", "dropping finalization");
         return false;
     };
 
@@ -185,5 +186,6 @@ pub fn verify_finalization<S: ThresholdSupervisor<Index = View, Identity = poly:
         debug!(reason = "invalid seed signature", "dropping finalization");
         return false;
     }
+    debug!(view = proposal.view, "seed verified");
     true
 }
