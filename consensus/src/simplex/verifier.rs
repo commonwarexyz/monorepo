@@ -28,6 +28,12 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
         }
     };
 
+    // Ensure payload is well-formed
+    let Ok(payload) = D::try_from(&proposal.payload) else {
+        debug!(reason = "invalid payload", "dropping notarization");
+        return false;
+    };
+
     // Ensure finalization has valid number of signatures
     let validators = match supervisor.participants(proposal.view) {
         Some(validators) => validators,
@@ -71,7 +77,7 @@ pub fn verify_notarization<S: Supervisor<Index = View>, C: Scheme>(
     }
 
     // Verify threshold notarization
-    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+    let message = proposal_message(proposal.view, proposal.parent, &payload);
     let mut seen = HashSet::new();
     for signature in notarization.signatures.iter() {
         // Get public key
@@ -209,6 +215,12 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
         }
     };
 
+    // Ensure payload is well-formed
+    let Ok(payload) = D::try_from(&proposal.payload) else {
+        debug!(reason = "invalid payload", "dropping finalization");
+        return false;
+    };
+
     // Ensure finalization has valid number of signatures
     let validators = match supervisor.participants(proposal.view) {
         Some(validators) => validators,
@@ -252,7 +264,7 @@ pub fn verify_finalization<S: Supervisor<Index = View>, C: Scheme>(
     }
 
     // Verify threshold finalization
-    let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+    let message = proposal_message(proposal.view, proposal.parent, &payload);
     let mut seen = HashSet::new();
     for signature in finalization.signatures.iter() {
         // Get public key
