@@ -143,6 +143,7 @@ pub trait Digest:
     + TryFrom<Vec<u8>, Error = Error>
     + Deref<Target = [u8]>
     + DerefMut<Target = [u8]>
+    + Default
     + Sized
     + Clone
     + Send

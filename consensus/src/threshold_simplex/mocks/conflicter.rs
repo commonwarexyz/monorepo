@@ -137,7 +137,7 @@ impl<
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
-                            payload: payload.into(),
+                            payload: payload.to_vec(),
                         }),
                         proposal_signature,
                         seed_signature,
@@ -193,7 +193,7 @@ impl<
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
-                            payload: payload.into(),
+                            payload: payload.to_vec(),
                         }),
                         proposal_signature,
                     };

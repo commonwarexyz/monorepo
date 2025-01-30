@@ -2414,7 +2414,7 @@ impl<
                     let proposal = wire::Proposal {
                         view: context.view,
                         parent: context.parent.0,
-                        payload: proposed.into(),
+                        payload: proposed.to_vec(),
                     };
                     if !self.our_proposal(
                         proposal_digest,
