@@ -12,9 +12,11 @@ use crate::{
         wire, Context, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Automaton, Committer, Digest, Relay, Supervisor,
+    Automaton, Committer, Digest, Parsed, Relay, Supervisor,
 };
-use commonware_cryptography::{Hasher, PublicKey, Scheme, Sha256};
+use commonware_cryptography::{
+    sha256::hash, sha256::Digest as Sha256Digest, Hasher, PublicKey, Scheme,
+};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -36,16 +38,18 @@ use std::{
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
-type Notarizable<'a> = Option<(wire::Proposal, &'a HashMap<u32, wire::Notarize>)>;
+type Notarizable<'a, D: Digest> =
+    Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Notarize, D>>)>;
 type Nullifiable<'a> = Option<(View, &'a HashMap<u32, wire::Nullify>)>;
-type Finalizable<'a> = Option<(wire::Proposal, &'a HashMap<u32, wire::Finalize>)>;
+type Finalizable<'a, D: Digest> =
+    Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Finalize, D>>)>;
 
 const GENESIS_VIEW: View = 0;
 
-struct Round<C: Scheme, S: Supervisor<Index = View>> {
-    hasher: Sha256,
+struct Round<C: Scheme, D: Digest, S: Supervisor<Index = View>> {
     supervisor: S,
     _crypto: PhantomData<C>,
+    _digest: PhantomData<D>,
 
     view: View,
     leader: PublicKey,
@@ -54,13 +58,13 @@ struct Round<C: Scheme, S: Supervisor<Index = View>> {
     nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view
-    proposal: Option<(Digest /* proposal */, wire::Proposal)>,
+    proposal: Option<(Sha256Digest /* proposal */, Parsed<wire::Proposal, D>)>,
     requested_proposal: bool,
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notaries: HashMap<u32, Digest>,
-    notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
+    notaries: HashMap<u32, Sha256Digest>,
+    notarizes: HashMap<Sha256Digest, HashMap<u32, Parsed<wire::Notarize, D>>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
 
@@ -70,19 +74,19 @@ struct Round<C: Scheme, S: Supervisor<Index = View>> {
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalizers: HashMap<u32, Digest>,
-    finalizes: HashMap<Digest, HashMap<u32, wire::Finalize>>,
+    finalizers: HashMap<u32, Sha256Digest>,
+    finalizes: HashMap<Sha256Digest, HashMap<u32, Parsed<wire::Finalize, D>>>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
 }
 
-impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
+impl<C: Scheme, D: Digest, S: Supervisor<Index = View>> Round<C, D, S> {
     pub fn new(supervisor: S, view: View) -> Self {
         let leader = supervisor.leader(view).expect("unable to compute leader");
         Self {
-            hasher: Sha256::new(),
             supervisor,
             _crypto: PhantomData,
+            _digest: PhantomData,
 
             view,
             leader,
@@ -113,18 +117,17 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
     async fn add_verified_notarize(
         &mut self,
         public_key: &PublicKey,
-        notarize: wire::Notarize,
+        notarize: Parsed<wire::Notarize, D>,
     ) -> bool {
         // Get proposal
-        let proposal = notarize.proposal.as_ref().unwrap();
+        let proposal = notarize.message.proposal.as_ref().unwrap();
 
         // Compute proposal digest
-        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        self.hasher.update(&message);
-        let digest: Digest = self.hasher.finalize().into();
+        let message = proposal_message(proposal.view, proposal.parent, &notarize.digest);
+        let digest = hash(&message);
 
         // Check if already notarized
-        let public_key_index = notarize.signature.as_ref().unwrap().public_key;
+        let public_key_index = notarize.message.signature.as_ref().unwrap().public_key;
         if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
             if previous_notarize == &digest {
                 trace!(
@@ -143,16 +146,21 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
                 .unwrap()
                 .get(&public_key_index)
                 .unwrap();
-            let previous_proposal = previous_notarize.proposal.as_ref().unwrap();
-            let proof = Prover::<C>::serialize_conflicting_notarize(
+            let previous_proposal = previous_notarize.message.proposal.as_ref().unwrap();
+            let proof = Prover::<C, D>::serialize_conflicting_notarize(
                 self.view,
                 public_key,
                 previous_proposal.parent,
-                &previous_proposal.payload,
-                &previous_notarize.signature.as_ref().unwrap().signature,
+                &previous_notarize.digest,
+                &previous_notarize
+                    .message
+                    .signature
+                    .as_ref()
+                    .unwrap()
+                    .signature,
                 proposal.parent,
-                &proposal.payload,
-                &notarize.signature.as_ref().unwrap().signature,
+                &notarize.digest,
+                &notarize.message.signature.as_ref().unwrap().signature,
             );
             self.supervisor.report(CONFLICTING_NOTARIZE, proof).await;
             warn!(
@@ -173,8 +181,8 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
             return false;
         }
         let entry = self.notarizes.entry(digest).or_default();
-        let signature = &notarize.signature.as_ref().unwrap().signature;
-        let proof = Prover::<C>::serialize_proposal(proposal, public_key, signature);
+        let signature = &notarize.message.signature.as_ref().unwrap().signature;
+        let proof = Prover::<C, D>::serialize_proposal(proposal, public_key, signature);
         entry.insert(public_key_index, notarize);
         self.supervisor.report(NOTARIZE, proof).await;
         true
@@ -201,13 +209,13 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
             .unwrap()
             .get(&public_key_index)
             .unwrap();
-        let finalize_proposal = finalize.proposal.as_ref().unwrap();
-        let proof = Prover::<C>::serialize_nullify_finalize(
+        let finalize_proposal = finalize.message.proposal.as_ref().unwrap();
+        let proof = Prover::<C, D>::serialize_nullify_finalize(
             self.view,
             public_key,
             finalize_proposal.parent,
-            &finalize_proposal.payload,
-            &finalize.signature.as_ref().unwrap().signature,
+            &finalize.digest,
+            &finalize.message.signature.as_ref().unwrap().signature,
             &nullify.signature.as_ref().unwrap().signature,
         );
         self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
@@ -220,7 +228,7 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
         false
     }
 
-    fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable {
+    fn notarizable(&mut self, threshold: u32, force: bool) -> Notarizable<D> {
         if !force && (self.broadcast_notarization || self.broadcast_nullification) {
             // We want to broadcast a notarization, even if we haven't yet verified a proposal.
             return None;
@@ -245,11 +253,11 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
                 .values()
                 .next()
                 .unwrap()
+                .message
                 .proposal
                 .as_ref()
-                .unwrap()
-                .clone();
-            return Some((proposal, notarizes));
+                .unwrap();
+            return Some((proposal.clone(), notarizes));
         }
         None
     }
@@ -268,20 +276,20 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
     async fn add_verified_finalize(
         &mut self,
         public_key: &PublicKey,
-        finalize: wire::Finalize,
+        finalize: Parsed<wire::Finalize, D>,
     ) -> bool {
         // Check if also issued nullify
-        let proposal = finalize.proposal.as_ref().unwrap();
-        let public_key_index = finalize.signature.as_ref().unwrap().public_key;
+        let proposal = finalize.message.proposal.as_ref().unwrap();
+        let public_key_index = finalize.message.signature.as_ref().unwrap().public_key;
         let null = self.nullifies.get(&public_key_index);
         if let Some(null) = null {
             // Create fault
-            let proof = Prover::<C>::serialize_nullify_finalize(
+            let proof = Prover::<C, D>::serialize_nullify_finalize(
                 self.view,
                 public_key,
                 proposal.parent,
-                &proposal.payload,
-                &finalize.signature.as_ref().unwrap().signature,
+                &finalize.digest,
+                &finalize.message.signature.as_ref().unwrap().signature,
                 &null.signature.as_ref().unwrap().signature,
             );
             self.supervisor.report(NULLIFY_AND_FINALIZE, proof).await;
@@ -294,9 +302,8 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
             return false;
         }
         // Compute proposal digest
-        let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
-        self.hasher.update(&message);
-        let digest: Digest = self.hasher.finalize().into();
+        let message = proposal_message(proposal.view, proposal.parent, &finalize.digest);
+        let digest = hash(&message);
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
@@ -317,16 +324,21 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
                 .unwrap()
                 .get(&public_key_index)
                 .unwrap();
-            let previous_proposal = previous_finalize.proposal.as_ref().unwrap();
-            let proof = Prover::<C>::serialize_conflicting_finalize(
+            let previous_proposal = previous_finalize.message.proposal.as_ref().unwrap();
+            let proof = Prover::<C, D>::serialize_conflicting_finalize(
                 self.view,
                 public_key,
                 previous_proposal.parent,
-                &previous_proposal.payload,
-                &previous_finalize.signature.as_ref().unwrap().signature,
+                &previous_finalize.digest,
+                &previous_finalize
+                    .message
+                    .signature
+                    .as_ref()
+                    .unwrap()
+                    .signature,
                 proposal.parent,
-                &proposal.payload,
-                &finalize.signature.as_ref().unwrap().signature,
+                &finalize.digest,
+                &finalize.message.signature.as_ref().unwrap().signature,
             );
             self.supervisor.report(CONFLICTING_FINALIZE, proof).await;
             warn!(
@@ -347,14 +359,14 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
             return false;
         }
         let entry = self.finalizes.entry(digest).or_default();
-        let signature = &finalize.signature.as_ref().unwrap().signature;
-        let proof = Prover::<C>::serialize_proposal(proposal, public_key, signature);
+        let signature = &finalize.message.signature.as_ref().unwrap().signature;
+        let proof = Prover::<C, D>::serialize_proposal(proposal, public_key, signature);
         entry.insert(public_key_index, finalize);
         self.supervisor.report(FINALIZE, proof).await;
         true
     }
 
-    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable {
+    fn finalizable(&mut self, threshold: u32, force: bool) -> Finalizable<D> {
         if !force && self.broadcast_finalization {
             // We want to broadcast a finalization, even if we haven't yet verified a proposal.
             return None;
@@ -379,6 +391,7 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
                 .values()
                 .next()
                 .unwrap()
+                .message
                 .proposal
                 .as_ref()
                 .unwrap()
@@ -400,6 +413,7 @@ impl<C: Scheme, S: Supervisor<Index = View>> Round<C, S> {
                 .values()
                 .next()
                 .unwrap()
+                .message
                 .proposal
                 .as_ref()
                 .unwrap()
