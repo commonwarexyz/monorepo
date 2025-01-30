@@ -16,7 +16,7 @@ pub mod threshold_simplex;
 /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
 /// and verifying payloads proposed by other participants.
 pub trait Automaton: Clone + Send + 'static {
-    /// Context is metadata provided by the consensus engine to associated with a given payload.
+    /// Context is metadata provided by the consensus engine to be associated with a given payload.
     ///
     /// This often includes things like the proposer, view number, the height, or the epoch.
     type Context;
