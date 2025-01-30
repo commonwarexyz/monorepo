@@ -1,10 +1,11 @@
 use bytes::Bytes;
 use clap::{value_parser, Arg, Command};
 use commonware_bridge::{wire, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE};
-use commonware_consensus::{threshold_simplex::Prover, Digest};
+use commonware_consensus::threshold_simplex::Prover;
 use commonware_cryptography::{
     bls12381::primitives::group::{self, Element},
-    sha256, Ed25519, Hasher, Scheme, Sha256,
+    sha256::Digest as Sha256Digest,
+    Ed25519, Hasher, Scheme, Sha256,
 };
 use commonware_runtime::{tokio::Executor, Listener, Network, Runner, Spawner};
 use commonware_stream::{
@@ -117,7 +118,7 @@ fn main() {
         let network = from_hex(network).expect("Network not well-formed");
         let public = group::Public::deserialize(&network).expect("Network not well-formed");
         let namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
-        let prover = Prover::new(public, &namespace, size_of::<sha256::Digest>());
+        let prover = Prover::<Sha256Digest>::new(public, &namespace);
         provers.insert(network.clone(), prover);
         blocks.insert(network.clone(), HashMap::new());
         finalizations.insert(network, BTreeMap::new());
@@ -143,7 +144,7 @@ fn main() {
 
                         // Compute digest
                         hasher.update(&incoming.data);
-                        let digest: Digest = hasher.finalize().into();
+                        let digest = hasher.finalize();
 
                         // Store block
                         network.insert(digest.clone(), incoming.data);
@@ -159,7 +160,11 @@ fn main() {
                             let _ = response.send(None);
                             continue;
                         };
-                        let data = network.get(&incoming.digest);
+                        let Ok(digest) = Sha256Digest::try_from(&incoming.digest) else {
+                            let _ = response.send(None);
+                            continue;
+                        };
+                        let data = network.get(&digest);
                         let _ = response.send(data.cloned());
                     }
                     Message::PutFinalization { incoming, response } => {
