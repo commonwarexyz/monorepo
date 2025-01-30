@@ -1,6 +1,9 @@
-use crate::linked::{wire, Epoch};
+use crate::{
+    linked::{wire, Epoch},
+    Digest,
+};
 use bytes::Bytes;
-use commonware_cryptography::{bls12381::primitives::group, Digest, PublicKey};
+use commonware_cryptography::{bls12381::primitives::group, PublicKey};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Evidence for a chunk.

@@ -1,5 +1,5 @@
-use crate::{linked::Context, Collector as Z, Proof};
-use commonware_cryptography::{Digest, PublicKey};
+use crate::{linked::Context, Collector as Z, Digest, Proof};
+use commonware_cryptography::PublicKey;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt, StreamExt,

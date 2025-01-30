@@ -1,12 +1,12 @@
 use super::{encoder, wire, Context, Epoch};
-use crate::Proof;
+use crate::{Digest, Proof};
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         ops,
     },
-    Digest, Hasher, Scheme,
+    Hasher, Scheme,
 };
 use std::marker::PhantomData;
 
@@ -35,7 +35,7 @@ impl<C: Scheme, H: Hasher> Prover<C, H> {
     /// - the public key
     /// - the signature
     fn get_len() -> (usize, (usize, usize, usize)) {
-        let len_digest = H::len();
+        let len_digest = size_of::<H::Digest>();
         let (len_public_key, len_signature) = C::len();
 
         let mut len = 0;

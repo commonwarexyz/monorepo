@@ -3,12 +3,13 @@
 use std::future::Future;
 
 use bytes::Bytes;
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::PublicKey;
 use futures::channel::oneshot;
 use thiserror::Error;
 
 pub mod linked;
 
+pub type Digest = Bytes;
 pub type Proof = Bytes;
 
 /// Errors that can occur when interacting with a stream.

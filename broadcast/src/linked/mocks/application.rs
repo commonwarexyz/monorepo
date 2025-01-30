@@ -1,10 +1,9 @@
 use bytes::Bytes;
-use commonware_cryptography::Digest;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 
 use crate::{
     linked::{signer, Context},
-    Application as A, Broadcaster,
+    Application as A, Broadcaster, Digest,
 };
 
 enum Message {

@@ -224,7 +224,7 @@ mod tests {
                                 ));
                                 hasher.update(&payload);
                                 let digest = hasher.finalize();
-                                mailbox.broadcast(digest).await;
+                                mailbox.broadcast(digest.into()).await;
                             }
                             runtime.sleep(Duration::from_millis(250)).await;
                         }

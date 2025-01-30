@@ -1,6 +1,5 @@
-use crate::{linked::Context, Broadcaster};
+use crate::{linked::Context, Broadcaster, Digest};
 use bytes::Bytes;
-use commonware_cryptography::Digest;
 use futures::{
     channel::{mpsc, oneshot},
     SinkExt,

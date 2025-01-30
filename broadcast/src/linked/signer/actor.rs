@@ -1,7 +1,7 @@
 use super::{AckManager, Config, Evidence, Mailbox, Message, TipManager};
 use crate::{
     linked::{encoder, prover::Prover, wire, Context, Epoch},
-    Application, Collector, Error, ThresholdCoordinator,
+    Application, Collector, Digest, Error, ThresholdCoordinator,
 };
 use bytes::Bytes;
 use commonware_cryptography::{
@@ -10,7 +10,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, PartialSignature},
     },
-    Digest, Hasher, PublicKey, Scheme,
+    Hasher, PublicKey, Scheme,
 };
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -725,7 +725,7 @@ impl<
         }
 
         // Verify digest
-        if chunk.payload_digest.len() != H::len() {
+        if chunk.payload_digest.len() != size_of::<H::Digest>() {
             return Err(Error::InvalidDigest);
         }
 
@@ -738,7 +738,7 @@ impl<
         self.hasher.update(&chunk.sequencer);
         self.hasher.update(&chunk.height.to_be_bytes());
         self.hasher.update(&chunk.payload_digest);
-        self.hasher.finalize()
+        self.hasher.finalize().into()
     }
 
     /// Returns the digest of the given ack
@@ -748,6 +748,6 @@ impl<
         self.hasher.update(&chunk.height.to_be_bytes());
         self.hasher.update(&chunk.payload_digest);
         self.hasher.update(&epoch.to_be_bytes());
-        self.hasher.finalize()
+        self.hasher.finalize().into()
     }
 }
