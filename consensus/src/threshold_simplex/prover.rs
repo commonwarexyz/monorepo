@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use super::{
     encoder::{
         finalize_namespace, notarize_namespace, nullify_message, nullify_namespace,
@@ -5,7 +7,7 @@ use super::{
     },
     wire, View,
 };
-use crate::{Digest, Proof};
+use crate::Proof;
 use bytes::{Buf, BufMut};
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -13,7 +15,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
-    Signature,
+    Digest, Signature,
 };
 
 type Callback = Box<dyn Fn(&poly::Poly<group::Public>) -> Option<u32>>;
@@ -42,7 +44,7 @@ impl Verifier {
 /// We don't use protobuf for proof encoding because we expect external parties
 /// to decode proofs in constrained environments where protobuf may not be implemented.
 #[derive(Clone)]
-pub struct Prover {
+pub struct Prover<D: Digest> {
     public: group::Public,
 
     seed_namespace: Vec<u8>,
@@ -50,16 +52,16 @@ pub struct Prover {
     nullify_namespace: Vec<u8>,
     finalize_namespace: Vec<u8>,
 
-    digest: usize,
+    _digest: PhantomData<D>,
 }
 
 /// If we expose partial signatures of proofs, can be used to construct a partial signature
 /// over pre-aggregated data (where the public key of each index can be derived from the group
 /// polynomial). This can be very useful for distributing rewards without including all partial signatures
 /// in a block.
-impl Prover {
+impl<D: Digest> Prover<D> {
     /// Create a new prover with the given signing `namespace`.
-    pub fn new(public: group::Public, namespace: &[u8], digest: usize) -> Self {
+    pub fn new(public: group::Public, namespace: &[u8]) -> Self {
         Self {
             public,
 
@@ -68,7 +70,7 @@ impl Prover {
             nullify_namespace: nullify_namespace(namespace),
             finalize_namespace: finalize_namespace(namespace),
 
-            digest,
+            _digest: PhantomData,
         }
     }
 
@@ -92,10 +94,10 @@ impl Prover {
         &self,
         mut proof: Proof,
         namespace: &[u8],
-    ) -> Option<(View, View, Digest, Verifier)> {
+    ) -> Option<(View, View, D, Verifier)> {
         // Ensure proof is big enough
         let expected_len =
-            size_of::<u64>() + size_of::<u64>() + self.digest + poly::PARTIAL_SIGNATURE_LENGTH;
+            size_of::<u64>() + size_of::<u64>() + size_of::<D>() + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
         }
@@ -103,7 +105,8 @@ impl Prover {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(self.digest);
+        let payload = proof.copy_to_bytes(size_of::<D>());
+        let payload = D::try_from(&payload).ok()?;
         let signature = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature = poly::Eval::deserialize(&signature)?;
 
@@ -154,11 +157,11 @@ impl Prover {
         &self,
         mut proof: Proof,
         namespace: &[u8],
-    ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
+    ) -> Option<(View, View, D, group::Signature, group::Signature)> {
         // Ensure proof prefix is big enough
         let expected_len = size_of::<u64>()
             + size_of::<u64>()
-            + self.digest
+            + size_of::<D>()
             + group::SIGNATURE_LENGTH
             + group::SIGNATURE_LENGTH;
         if proof.len() != expected_len {
@@ -168,7 +171,8 @@ impl Prover {
         // Verify signature
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(self.digest);
+        let payload = proof.copy_to_bytes(size_of::<D>());
+        let payload = D::try_from(&payload).ok()?;
         let message = proposal_message(view, parent, &payload);
         let signature = proof.copy_to_bytes(group::SIGNATURE_LENGTH);
         let signature = group::Signature::deserialize(&signature)?;
@@ -187,7 +191,7 @@ impl Prover {
     }
 
     /// Deserialize a notarize proof.
-    pub fn deserialize_notarize(&self, proof: Proof) -> Option<(View, View, Digest, Verifier)> {
+    pub fn deserialize_notarize(&self, proof: Proof) -> Option<(View, View, D, Verifier)> {
         Self::deserialize_proposal(self, proof, &self.notarize_namespace)
     }
 
@@ -195,12 +199,12 @@ impl Prover {
     pub fn deserialize_notarization(
         &self,
         proof: Proof,
-    ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
+    ) -> Option<(View, View, D, group::Signature, group::Signature)> {
         self.deserialize_threshold(proof, &self.notarize_namespace)
     }
 
     /// Deserialize a finalize proof.
-    pub fn deserialize_finalize(&self, proof: Proof) -> Option<(View, View, Digest, Verifier)> {
+    pub fn deserialize_finalize(&self, proof: Proof) -> Option<(View, View, D, Verifier)> {
         self.deserialize_proposal(proof, &self.finalize_namespace)
     }
 
@@ -208,7 +212,7 @@ impl Prover {
     pub fn deserialize_finalization(
         &self,
         proof: Proof,
-    ) -> Option<(View, View, Digest, group::Signature, group::Signature)> {
+    ) -> Option<(View, View, D, group::Signature, group::Signature)> {
         self.deserialize_threshold(proof, &self.finalize_namespace)
     }
 
@@ -216,10 +220,10 @@ impl Prover {
     pub fn serialize_conflicting_proposal(
         view: View,
         parent_1: View,
-        payload_1: &Digest,
+        payload_1: &D,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &Digest,
+        payload_2: &D,
         signature_2: &Signature,
     ) -> Proof {
         // Setup proof
@@ -251,10 +255,10 @@ impl Prover {
         // Ensure proof is big enough
         let expected_len = size_of::<u64>()
             + size_of::<u64>()
-            + self.digest
+            + size_of::<D>()
             + poly::PARTIAL_SIGNATURE_LENGTH
             + size_of::<u64>()
-            + self.digest
+            + size_of::<D>()
             + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
             return None;
@@ -263,11 +267,11 @@ impl Prover {
         // Decode proof
         let view = proof.get_u64();
         let parent_1 = proof.get_u64();
-        let payload_1 = proof.copy_to_bytes(self.digest);
+        let payload_1 = proof.copy_to_bytes(size_of::<D>());
         let signature_1 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_1 = Eval::deserialize(&signature_1)?;
         let parent_2 = proof.get_u64();
-        let payload_2 = proof.copy_to_bytes(self.digest);
+        let payload_2 = proof.copy_to_bytes(size_of::<D>());
         let signature_2 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_2 = Eval::deserialize(&signature_2)?;
         if signature_1.index != signature_2.index {
@@ -307,10 +311,10 @@ impl Prover {
     pub fn serialize_conflicting_notarize(
         view: View,
         parent_1: View,
-        payload_1: &Digest,
+        payload_1: &D,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &Digest,
+        payload_2: &D,
         signature_2: &Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
@@ -334,10 +338,10 @@ impl Prover {
     pub fn serialize_conflicting_finalize(
         view: View,
         parent_1: View,
-        payload_1: &Digest,
+        payload_1: &D,
         signature_1: &Signature,
         parent_2: View,
-        payload_2: &Digest,
+        payload_2: &D,
         signature_2: &Signature,
     ) -> Proof {
         Self::serialize_conflicting_proposal(
@@ -360,7 +364,7 @@ impl Prover {
     pub fn serialize_nullify_finalize(
         view: View,
         parent: View,
-        payload: &Digest,
+        payload: &D,
         signature_finalize: &Signature,
         signature_null: &Signature,
     ) -> Proof {
@@ -383,7 +387,7 @@ impl Prover {
         // Ensure proof is big enough
         let expected_len = size_of::<u64>()
             + size_of::<u64>()
-            + self.digest
+            + size_of::<D>()
             + poly::PARTIAL_SIGNATURE_LENGTH
             + poly::PARTIAL_SIGNATURE_LENGTH;
         if proof.len() != expected_len {
@@ -393,7 +397,7 @@ impl Prover {
         // Decode proof
         let view = proof.get_u64();
         let parent = proof.get_u64();
-        let payload = proof.copy_to_bytes(self.digest);
+        let payload = proof.copy_to_bytes(size_of::<D>());
         let signature_finalize = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_finalize = Eval::deserialize(&signature_finalize)?;
         let signature_null = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
@@ -440,12 +444,10 @@ mod tests {
             dkg::ops::generate_shares,
             primitives::group::{self, Share},
         },
-        sha256,
+        sha256::Digest as Sha256Digest,
     };
     use ops::{keypair, partial_sign_message, sign_message};
     use rand::{rngs::StdRng, SeedableRng};
-
-    const DIGEST_LENGTH: usize = size_of::<sha256::Digest>();
 
     fn generate_threshold() -> (group::Public, poly::Public, Vec<Share>) {
         let mut sampler = StdRng::seed_from_u64(0);
@@ -458,12 +460,16 @@ mod tests {
         keypair(&mut sampler)
     }
 
+    fn test_digest(value: u8) -> Sha256Digest {
+        Sha256Digest::try_from(&vec![value; size_of::<Sha256Digest>()]).unwrap()
+    }
+
     #[test]
     fn test_deserialize_proposal() {
         // Create valid signature
         let (public, poly, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
-        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
+        let prover = Prover::new(public, b"test");
+        let payload = test_digest(0);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -489,8 +495,8 @@ mod tests {
     fn test_deserialize_proposal_invalid() {
         // Create valid signature
         let (public, poly, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
-        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
+        let prover = Prover::new(public, b"test");
+        let payload = test_digest(0);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -516,8 +522,8 @@ mod tests {
     fn test_deserialize_proposal_underflow() {
         // Create valid signature
         let (public, _, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
-        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
+        let prover = Prover::new(public, b"test");
+        let payload = test_digest(0);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -544,8 +550,8 @@ mod tests {
     fn test_deserialize_proposal_overflow() {
         // Create valid signature
         let (public, _, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
-        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
+        let prover = Prover::new(public, b"test");
+        let payload = test_digest(0);
         let signature = partial_sign_message(
             &shares[0],
             Some(&prover.seed_namespace),
@@ -572,10 +578,10 @@ mod tests {
     fn test_deserialize_threshold() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
+        let prover = Prover::new(public, b"test");
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
+        let payload = test_digest(0);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),
@@ -602,10 +608,10 @@ mod tests {
     fn test_deserialize_threshold_invalid() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
+        let prover = Prover::new(public, b"test");
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
+        let payload = test_digest(0);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),
@@ -632,10 +638,10 @@ mod tests {
     fn test_deserialize_threshold_underflow() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
+        let prover = Prover::new(public, b"test");
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
+        let payload = test_digest(0);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),
@@ -665,10 +671,10 @@ mod tests {
     fn test_deserialize_threshold_overflow() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test", DIGEST_LENGTH);
+        let prover = Prover::new(public, b"test");
 
         // Generate a valid signature
-        let payload = Digest::from(vec![0; DIGEST_LENGTH]);
+        let payload = test_digest(0);
         let proposal_signature = sign_message(
             &private,
             Some(&prover.notarize_namespace),

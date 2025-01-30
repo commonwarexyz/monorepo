@@ -20,6 +20,7 @@ use commonware_cryptography::{
         ops,
         poly::{self, Eval},
     },
+    sha256::Digest as Sha256Digest,
     Hasher, PublicKey, Scheme, Sha256,
 };
 use commonware_macros::select;
@@ -46,11 +47,13 @@ const GENESIS_VIEW: View = 0;
 
 struct Round<
     C: Scheme,
+    D: Digest,
     S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
 > {
     hasher: Sha256,
     supervisor: S,
     _crypto: PhantomData<C>,
+    _digest: PhantomData<D>,
 
     leader: Option<PublicKey>,
 
@@ -60,13 +63,13 @@ struct Round<
     nullify_retry: Option<SystemTime>,
 
     // Track one proposal per view (only matters prior to notarization)
-    proposal: Option<(Digest /* proposal */, wire::Proposal)>,
+    proposal: Option<(Sha256Digest /* proposal */, wire::Proposal)>,
     requested_proposal: bool,
     verified_proposal: bool,
 
     // Track notarizes for all proposals (ensuring any participant only has one recorded notarize)
-    notaries: HashMap<u32, Digest>,
-    notarizes: HashMap<Digest, HashMap<u32, wire::Notarize>>,
+    notaries: HashMap<u32, Sha256Digest>,
+    notarizes: HashMap<Sha256Digest, HashMap<u32, wire::Notarize>>,
     notarization: Option<wire::Notarization>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
@@ -78,8 +81,8 @@ struct Round<
     broadcast_nullification: bool,
 
     // Track finalizes for all proposals (ensuring any participant only has one recorded finalize)
-    finalizers: HashMap<u32, Digest>,
-    finalizes: HashMap<Digest, HashMap<u32, wire::Finalize>>,
+    finalizers: HashMap<u32, Sha256Digest>,
+    finalizes: HashMap<Sha256Digest, HashMap<u32, wire::Finalize>>,
     finalization: Option<wire::Finalization>,
     broadcast_finalize: bool,
     broadcast_finalization: bool,
@@ -87,14 +90,16 @@ struct Round<
 
 impl<
         C: Scheme,
+        D: Digest,
         S: ThresholdSupervisor<Seed = group::Signature, Index = View, Share = group::Share>,
-    > Round<C, S>
+    > Round<C, D, S>
 {
     pub fn new(supervisor: S, view: View) -> Self {
         Self {
             hasher: Sha256::new(),
             supervisor,
             _crypto: PhantomData,
+            _digest: PhantomData,
 
             view,
             leader: None,
@@ -133,7 +138,7 @@ impl<
     fn add_verified_proposal(&mut self, proposal: wire::Proposal) {
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest: Digest = self.hasher.finalize().into();
+        let digest = self.hasher.finalize();
         if self.proposal.is_none() {
             debug!(
                 view = proposal.view,
@@ -164,7 +169,7 @@ impl<
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest: Digest = self.hasher.finalize().into();
+        let digest = self.hasher.finalize();
 
         // Check if already notarized
         if let Some(previous_notarize) = self.notaries.get(&public_key_index) {
@@ -186,7 +191,7 @@ impl<
                 .get(&public_key_index)
                 .unwrap();
             let previous_proposal = previous_notarize.proposal.as_ref().unwrap();
-            let proof = Prover::serialize_conflicting_notarize(
+            let proof = Prover::<D>::serialize_conflicting_notarize(
                 self.view,
                 previous_proposal.parent,
                 &previous_proposal.payload,
@@ -287,7 +292,7 @@ impl<
         // Compute proposal digest
         let message = proposal_message(proposal.view, proposal.parent, &proposal.payload);
         self.hasher.update(&message);
-        let digest: Digest = self.hasher.finalize().into();
+        let digest = self.hasher.finalize();
 
         // Check if already finalized
         if let Some(previous_finalize) = self.finalizers.get(&public_key_index) {
@@ -544,7 +549,7 @@ impl<
                 &notarization_proposal.payload,
             );
             self.hasher.update(&message);
-            let digest: Digest = self.hasher.finalize().into();
+            let digest = self.hasher.finalize();
             if digest != *proposal {
                 warn!(
                     view = self.view,
