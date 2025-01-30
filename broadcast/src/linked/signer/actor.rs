@@ -350,6 +350,23 @@ impl<
         // the same height, even if the node crashes and restarts.
         self.journal_sync(&context.sequencer, context.height).await;
 
+        // The recipients are all the signers in the epoch and the sequencer.
+        // The sequencer may or may not be a signer.
+        let recipients = {
+            let Some(signers) = self.coordinator.signers(self.epoch) else {
+                return Err(Error::UnknownSigners(self.epoch));
+            };
+            let mut recipients = signers.clone();
+            if self
+                .coordinator
+                .is_signer(self.epoch, &chunk.sequencer)
+                .is_none()
+            {
+                recipients.push(chunk.sequencer.clone());
+            }
+            recipients
+        };
+
         // Send the ack to the network
         let ack = wire::Ack {
             chunk: Some(chunk.clone()),
@@ -357,7 +374,11 @@ impl<
             partial: partial.clone(),
         };
         ack_sender
-            .send(Recipients::All, ack.encode_to_vec().into(), false)
+            .send(
+                Recipients::Some(recipients),
+                ack.encode_to_vec().into(),
+                false,
+            )
             .await
             .map_err(|_| Error::UnableToSendMessage)?;
 
@@ -425,8 +446,9 @@ impl<
 
         // Get the partial signatures, returning early if we already have a threshold
         let evidence = self.ack_man.get_or_init(ack_epoch, chunk);
-        let Evidence::Partials(partials) = evidence else {
-            return Ok(());
+        let partials = match evidence {
+            Evidence::Threshold(_) => return Ok(()),
+            Evidence::Partials(partials) => partials,
         };
 
         // Return early if we already have this partial
