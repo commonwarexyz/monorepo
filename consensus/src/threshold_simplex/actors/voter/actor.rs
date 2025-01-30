@@ -635,7 +635,7 @@ pub struct Actor<
     E: Clock + Rng + Spawner + Storage<B>,
     C: Scheme,
     D: Digest,
-    A: Automaton<Context = Context<D>>,
+    A: Automaton<Digest = D, Context = Context<D>>,
     R: Relay,
     F: Committer,
     S: ThresholdSupervisor<
@@ -686,7 +686,7 @@ impl<
         E: Clock + Rng + Spawner + Storage<B>,
         C: Scheme,
         D: Digest,
-        A: Automaton<Context = Context<D>>,
+        A: Automaton<Digest = D, Context = Context<D>>,
         R: Relay,
         F: Committer,
         S: ThresholdSupervisor<
@@ -769,17 +769,17 @@ impl<
         )
     }
 
-    fn is_notarized(&self, view: View) -> Option<&wire::Proposal> {
+    fn is_notarized(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         if let Some(notarization) = &round.notarization {
-            return notarization.proposal.as_ref();
+            return Some(&notarization.1);
         }
         let (digest, proposal) = round.proposal.as_ref()?;
         let notarizes = round.notarizes.get(digest)?;
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if notarizes.len() >= threshold as usize {
-            return Some(proposal);
+            return Some(&proposal.1);
         }
         None
     }
@@ -797,22 +797,22 @@ impl<
         round.nullification.is_some() || round.nullifies.len() >= threshold as usize
     }
 
-    fn is_finalized(&self, view: View) -> Option<&wire::Proposal> {
+    fn is_finalized(&self, view: View) -> Option<&D> {
         let round = self.views.get(&view)?;
         if let Some(finalization) = &round.finalization {
-            return finalization.proposal.as_ref();
+            return Some(&finalization.1);
         }
         let (digest, proposal) = round.proposal.as_ref()?;
         let finalizes = round.finalizes.get(digest)?;
         let identity = self.supervisor.identity(view)?;
         let threshold = identity.required();
         if finalizes.len() >= threshold as usize {
-            return Some(proposal);
+            return Some(&proposal.1);
         }
         None
     }
 
-    fn find_parent(&self) -> Result<(View, Digest), View> {
+    fn find_parent(&self) -> Result<(View, D), View> {
         let mut cursor = self.view - 1; // self.view always at least 1
         loop {
             if cursor == 0 {
@@ -822,7 +822,7 @@ impl<
             // If have notarization, return
             let parent = self.is_notarized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, parent.payload.clone()));
+                return Ok((cursor, parent.clone()));
             }
 
             // If have finalization, return
@@ -830,7 +830,7 @@ impl<
             // We never want to build on some view less than finalized and this prevents that
             let parent = self.is_finalized(cursor);
             if let Some(parent) = parent {
-                return Ok((cursor, parent.payload.clone()));
+                return Ok((cursor, parent.clone()));
             }
 
             // If have nullification, continue
@@ -858,7 +858,7 @@ impl<
     async fn propose(
         &mut self,
         backfiller: &mut resolver::Mailbox,
-    ) -> Option<(Context, oneshot::Receiver<Digest>)> {
+    ) -> Option<(Context<D>, oneshot::Receiver<D>)> {
         // Check if we are leader
         {
             let round = self.views.get_mut(&self.view).unwrap();
@@ -1101,14 +1101,18 @@ impl<
         }
     }
 
-    async fn our_proposal(&mut self, digest: Digest, proposal: wire::Proposal) -> bool {
+    async fn our_proposal(
+        &mut self,
+        digest: Sha256Digest,
+        proposal: Parsed<wire::Proposal, D>,
+    ) -> bool {
         // Store the proposal
-        let round = self.views.get_mut(&proposal.view).expect("view missing");
+        let round = self.views.get_mut(&proposal.0.view).expect("view missing");
 
         // Check if view timed out
         if round.broadcast_nullify {
             debug!(
-                view = proposal.view,
+                view = proposal.0.view,
                 reason = "view timed out",
                 "dropping our proposal"
             );
@@ -1117,8 +1121,8 @@ impl<
 
         // Store the proposal
         debug!(
-            view = proposal.view,
-            parent = proposal.parent,
+            view = proposal.0.view,
+            parent = proposal.0.parent,
             digest = hex(&digest),
             "generated proposal"
         );
@@ -1130,7 +1134,7 @@ impl<
 
     // Attempt to set proposal from each message received over the wire
     #[allow(clippy::question_mark)]
-    async fn peer_proposal(&mut self) -> Option<(Context, oneshot::Receiver<bool>)> {
+    async fn peer_proposal(&mut self) -> Option<(Context<D>, oneshot::Receiver<bool>)> {
         // Get round
         let (proposal_digest, proposal) = {
             // Get view or exit
@@ -1159,12 +1163,8 @@ impl<
 
             // Check if leader has signed a digest
             let proposal_digest = round.notaries.get(&leader_index)?;
-            let proposal = round
-                .notarizes
-                .get(proposal_digest)?
-                .get(&leader_index)?
-                .proposal
-                .as_ref()?;
+            let notarize = round.notarizes.get(proposal_digest)?.get(&leader_index)?;
+            let proposal = notarize.0.proposal.as_ref()?;
 
             // Check parent validity
             if proposal.view <= proposal.parent {
@@ -1184,7 +1184,7 @@ impl<
                 );
                 return None;
             }
-            (proposal_digest, proposal)
+            (proposal_digest, (proposal.clone(), notarize.1.clone()))
         };
 
         // Ensure we have required notarizations
@@ -1195,9 +1195,9 @@ impl<
             _ => self.view - 1,
         };
         let parent_payload = loop {
-            if cursor == proposal.parent {
+            if cursor == proposal.0.parent {
                 // Check if first block
-                if proposal.parent == GENESIS_VIEW {
+                if proposal.0.parent == GENESIS_VIEW {
                     break self.genesis.as_ref().unwrap().clone();
                 }
 
@@ -1211,7 +1211,7 @@ impl<
                 };
 
                 // Peer proposal references a valid parent
-                break parent_proposal.payload.clone();
+                break parent_proposal.clone();
             }
 
             // Check nullification exists in gap
@@ -1226,23 +1226,22 @@ impl<
         };
 
         // Request verification
-        let payload = proposal.payload.clone();
         debug!(
-            view = proposal.view,
+            view = proposal.0.view,
             digest = hex(proposal_digest),
-            payload = hex(&payload),
+            payload = hex(&proposal.1),
             "requested proposal verification",
         );
         let context = Context {
-            view: proposal.view,
-            parent: (proposal.parent, parent_payload),
+            view: proposal.0.view,
+            parent: (proposal.0.parent, parent_payload),
         };
-        let proposal = Some((proposal_digest.clone(), proposal.clone()));
+        let round_proposal = Some((proposal_digest.clone(), (proposal.0, proposal.1.clone())));
         let round = self.views.get_mut(&context.view).unwrap();
-        round.proposal = proposal;
+        round.proposal = round_proposal;
         Some((
             context.clone(),
-            self.automaton.verify(context, payload.clone()).await,
+            self.automaton.verify(context, proposal.1).await,
         ))
     }
 
