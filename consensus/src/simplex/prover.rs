@@ -457,16 +457,18 @@ impl<C: Scheme> Prover<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Ed25519, Hasher, Sha256};
+    use commonware_cryptography::{sha256, Ed25519};
+
+    const DIGEST_LENGTH: usize = size_of::<sha256::Digest>();
 
     #[test]
     fn test_deserialize_aggregation_empty() {
         // Create a proof with no signers
-        let prover = Prover::<Ed25519>::new(b"test", Sha256::DIGEST_LENGTH);
+        let prover = Prover::<Ed25519>::new(b"test", DIGEST_LENGTH);
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
-        proof.extend_from_slice(&[0; Sha256::DIGEST_LENGTH]); // payload
+        proof.extend_from_slice(&[0; DIGEST_LENGTH]); // payload
         proof.put_u32(0); // count of 0 signatures is valid
 
         // Verify that the proof is accepted
@@ -481,10 +483,10 @@ mod tests {
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
-        proof.extend_from_slice(&[0; Sha256::DIGEST_LENGTH]); // payload
+        proof.extend_from_slice(&[0; DIGEST_LENGTH]); // payload
 
         // Verify that the proof is rejected
-        let prover = Prover::<Ed25519>::new(b"test", Sha256::DIGEST_LENGTH);
+        let prover = Prover::<Ed25519>::new(b"test", DIGEST_LENGTH);
         let result = prover.deserialize_aggregation(
             proof.into(),
             u32::MAX, // Allow any count to test overflow protection
@@ -500,11 +502,11 @@ mod tests {
         let mut proof = Vec::new();
         proof.put_u64(1); // view
         proof.put_u64(0); // parent
-        proof.extend_from_slice(&[0; Sha256::DIGEST_LENGTH]); // payload
+        proof.extend_from_slice(&[0; DIGEST_LENGTH]); // payload
         proof.put_u32(100);
 
         // Verify that the proof is rejected
-        let prover = Prover::<Ed25519>::new(b"test", Sha256::DIGEST_LENGTH);
+        let prover = Prover::<Ed25519>::new(b"test", DIGEST_LENGTH);
         let result = prover.deserialize_aggregation(
             proof.into(),
             u32::MAX, // Allow any count to test overflow protection
