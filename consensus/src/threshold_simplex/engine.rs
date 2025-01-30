@@ -22,9 +22,9 @@ pub struct Engine<
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
     D: Digest,
-    A: Automaton<Context = Context<D>>,
-    R: Relay,
-    F: Committer,
+    A: Automaton<Context = Context<D>, Digest = D>,
+    R: Relay<Digest = D>,
+    F: Committer<Digest = D>,
     S: ThresholdSupervisor<
         Seed = group::Signature,
         Index = View,
@@ -34,9 +34,9 @@ pub struct Engine<
 > {
     runtime: E,
 
-    voter: voter::Actor<B, E, C, A, R, F, S>,
-    voter_mailbox: voter::Mailbox,
-    resolver: resolver::Actor<E, C, S>,
+    voter: voter::Actor<B, E, C, D, A, R, F, S>,
+    voter_mailbox: voter::Mailbox<D>,
+    resolver: resolver::Actor<E, C, D, S>,
     resolver_mailbox: resolver::Mailbox,
 }
 
@@ -45,9 +45,9 @@ impl<
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
         D: Digest,
-        A: Automaton<Context = Context<D>>,
-        R: Relay,
-        F: Committer,
+        A: Automaton<Context = Context<D>, Digest = D>,
+        R: Relay<Digest = D>,
+        F: Committer<Digest = D>,
         S: ThresholdSupervisor<
             Seed = group::Signature,
             Index = View,

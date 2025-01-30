@@ -553,7 +553,7 @@ impl<
                                     debug!(view, sender = hex(&s), "unnecessary notarization");
                                     continue;
                                 }
-                                if !verify_notarization::<S>(&self.supervisor, &self.notarize_namespace, &self.seed_namespace, &notarization) {
+                                if !verify_notarization::<D, S>(&self.supervisor, &self.notarize_namespace, &self.seed_namespace, &notarization) {
                                     warn!(view, sender = hex(&s), "invalid notarization");
                                     self.requester.block(s.clone());
                                     continue;

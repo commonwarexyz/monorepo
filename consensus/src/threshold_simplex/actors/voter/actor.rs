@@ -1530,7 +1530,7 @@ impl<
         }
 
         // Verify notarization
-        if !verify_notarization::<S>(
+        if !verify_notarization::<D, S>(
             &self.supervisor,
             &self.notarize_namespace,
             &self.seed_namespace,
@@ -1744,7 +1744,7 @@ impl<
         }
 
         // Verify finalization
-        if !verify_finalization::<S>(
+        if !verify_finalization::<D, S>(
             &self.supervisor,
             &self.finalize_namespace,
             &self.seed_namespace,

@@ -268,10 +268,12 @@ impl<D: Digest> Prover<D> {
         let view = proof.get_u64();
         let parent_1 = proof.get_u64();
         let payload_1 = proof.copy_to_bytes(size_of::<D>());
+        let payload_1 = D::try_from(&payload_1).ok()?;
         let signature_1 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_1 = Eval::deserialize(&signature_1)?;
         let parent_2 = proof.get_u64();
         let payload_2 = proof.copy_to_bytes(size_of::<D>());
+        let payload_2 = D::try_from(&payload_2).ok()?;
         let signature_2 = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_2 = Eval::deserialize(&signature_2)?;
         if signature_1.index != signature_2.index {
@@ -398,6 +400,7 @@ impl<D: Digest> Prover<D> {
         let view = proof.get_u64();
         let parent = proof.get_u64();
         let payload = proof.copy_to_bytes(size_of::<D>());
+        let payload = D::try_from(&payload).ok()?;
         let signature_finalize = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
         let signature_finalize = Eval::deserialize(&signature_finalize)?;
         let signature_null = proof.copy_to_bytes(poly::PARTIAL_SIGNATURE_LENGTH);
@@ -468,7 +471,7 @@ mod tests {
     fn test_deserialize_proposal() {
         // Create valid signature
         let (public, poly, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test");
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
         let payload = test_digest(0);
         let signature = partial_sign_message(
             &shares[0],
@@ -495,7 +498,7 @@ mod tests {
     fn test_deserialize_proposal_invalid() {
         // Create valid signature
         let (public, poly, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test");
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
         let payload = test_digest(0);
         let signature = partial_sign_message(
             &shares[0],
@@ -522,7 +525,7 @@ mod tests {
     fn test_deserialize_proposal_underflow() {
         // Create valid signature
         let (public, _, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test");
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
         let payload = test_digest(0);
         let signature = partial_sign_message(
             &shares[0],
@@ -550,7 +553,7 @@ mod tests {
     fn test_deserialize_proposal_overflow() {
         // Create valid signature
         let (public, _, shares) = generate_threshold();
-        let prover = Prover::new(public, b"test");
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
         let payload = test_digest(0);
         let signature = partial_sign_message(
             &shares[0],
@@ -578,7 +581,7 @@ mod tests {
     fn test_deserialize_threshold() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test");
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
 
         // Generate a valid signature
         let payload = test_digest(0);
@@ -608,7 +611,7 @@ mod tests {
     fn test_deserialize_threshold_invalid() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test");
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
 
         // Generate a valid signature
         let payload = test_digest(0);
@@ -638,7 +641,7 @@ mod tests {
     fn test_deserialize_threshold_underflow() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test");
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
 
         // Generate a valid signature
         let payload = test_digest(0);
@@ -671,7 +674,7 @@ mod tests {
     fn test_deserialize_threshold_overflow() {
         // Create valid signature
         let (private, public) = generate_keypair();
-        let prover = Prover::new(public, b"test");
+        let prover = Prover::<Sha256Digest>::new(public, b"test");
 
         // Generate a valid signature
         let payload = test_digest(0);

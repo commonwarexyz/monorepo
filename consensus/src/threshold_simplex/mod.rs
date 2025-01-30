@@ -210,7 +210,7 @@ mod tests {
     use super::*;
     use commonware_cryptography::{
         bls12381::{dkg::ops, primitives::poly},
-        sha256, Ed25519, PublicKey, Scheme, Sha256,
+        Ed25519, PublicKey, Scheme, Sha256,
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
