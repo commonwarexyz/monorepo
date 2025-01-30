@@ -6,6 +6,7 @@
 //! expect breaking changes and occasional instability.
 
 use bytes::Bytes;
+use commonware_cryptography::Digest;
 
 pub mod simplex;
 pub mod threshold_simplex;
@@ -21,18 +22,18 @@ pub type Activity = u8;
 /// Proof is a blob that attests to some data.
 pub type Proof = Bytes;
 
-/// Parsed is a wrapper around a message that has a parsable digest.
-#[derive(Clone)]
-pub struct Parsed<Message, D: commonware_cryptography::Digest> {
-    pub message: Message,
-    pub digest: D,
-}
-
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
         use commonware_cryptography::{PublicKey};
         use futures::channel::oneshot;
         use std::future::Future;
+
+        /// Parsed is a wrapper around a message that has a parsable digest.
+        #[derive(Clone)]
+        struct Parsed<Message, D: Digest> {
+            pub message: Message,
+            pub digest: D,
+        }
 
         /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
         /// and verifying payloads proposed by other participants.
@@ -43,7 +44,7 @@ cfg_if::cfg_if! {
             type Context;
 
             /// Digest is an arbitrary hash digest.
-            type Digest: commonware_cryptography::Digest;
+            type Digest: Digest;
 
             /// Payload used to initialize the consensus engine.
             fn genesis(&mut self) -> impl Future<Output = Self::Digest> + Send;
@@ -75,7 +76,7 @@ cfg_if::cfg_if! {
         /// to the relay to efficiently broadcast the full payload to other participants.
         pub trait Relay: Clone + Send + 'static {
             /// Digest is an arbitrary hash digest.
-            type Digest: commonware_cryptography::Digest;
+            type Digest: Digest;
 
             /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
             /// it isn't dropped).
@@ -88,7 +89,7 @@ cfg_if::cfg_if! {
         /// Committer is the interface responsible for handling notifications of payload status.
         pub trait Committer: Clone + Send + 'static {
             /// Digest is an arbitrary hash digest.
-            type Digest: commonware_cryptography::Digest;
+            type Digest: Digest;
 
             /// Event that a payload has made some progress towards finalization but is not yet finalized.
             ///
