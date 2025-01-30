@@ -1,7 +1,6 @@
 //! SHA-256 implementation of the `Hasher` trait.
 
 use crate::{Digest as CDigest, Error, Hasher};
-use bytes::Bytes;
 use rand::{CryptoRng, Rng};
 use sha2::{Digest as _, Sha256 as ISha256};
 use std::ops::{Deref, DerefMut};
@@ -82,13 +81,6 @@ impl TryFrom<&[u8]> for Digest {
     }
 }
 
-impl TryFrom<&Bytes> for Digest {
-    type Error = Error;
-    fn try_from(value: &Bytes) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_ref())
-    }
-}
-
 impl TryFrom<&Vec<u8>> for Digest {
     type Error = Error;
     fn try_from(value: &Vec<u8>) -> Result<Self, Self::Error> {
@@ -96,10 +88,10 @@ impl TryFrom<&Vec<u8>> for Digest {
     }
 }
 
-#[allow(clippy::from_over_into)]
-impl Into<Bytes> for Digest {
-    fn into(self) -> Bytes {
-        Bytes::copy_from_slice(self.as_ref())
+impl TryFrom<Vec<u8>> for Digest {
+    type Error = Error;
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_slice())
     }
 }
 

@@ -138,13 +138,12 @@ pub enum Error {
 /// Byte array representing an arbitrary hash digest.
 pub trait Digest:
     AsRef<[u8]>
-    + for<'a> TryFrom<&'a Bytes, Error = Error>
     + for<'a> TryFrom<&'a [u8], Error = Error>
     + for<'a> TryFrom<&'a Vec<u8>, Error = Error>
+    + TryFrom<Vec<u8>, Error = Error>
     + Deref<Target = [u8]>
     + DerefMut<Target = [u8]>
     + Sized
-    + Into<Bytes>
     + Clone
     + Send
     + Sync
