@@ -10,7 +10,7 @@ use commonware_cryptography::{Digest, Hasher as CHasher};
 pub struct Mmr<H: CHasher> {
     hasher: H,
     // The nodes of the MMR, laid out according to a post-order traversal of the MMR trees, starting
-    // from the from tallest tree to shortest.
+    // from the tallest tree to shortest.
     nodes: Vec<Digest>,
 }
 
