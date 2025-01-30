@@ -231,19 +231,17 @@ fn peak_hash_from_range<'a, H: CHasher>(
 mod tests {
     use super::Proof;
     use crate::mmr::mem::Mmr;
-    use commonware_cryptography::{Hasher as CHasher, Sha256};
+    use commonware_cryptography::{sha256::Digest, Sha256};
 
-    type Sha256Digest = <Sha256 as CHasher>::Digest;
-
-    fn test_digest(v: u8) -> Sha256Digest {
-        Sha256Digest::from([v; size_of::<Sha256Digest>()])
+    fn test_digest(v: u8) -> Digest {
+        Digest::from([v; size_of::<Digest>()])
     }
 
     #[test]
     fn test_verify_element() {
         // create an 11 element MMR over which we'll test single-element inclusion proofs
         let mut mmr = Mmr::<Sha256>::new();
-        let element = Sha256Digest::from(*b"01234567012345670123456701234567");
+        let element = Digest::from(*b"01234567012345670123456701234567");
         let mut leaves: Vec<u64> = Vec::new();
         for _ in 0..11 {
             leaves.push(mmr.add(&element));
@@ -332,7 +330,7 @@ mod tests {
     fn test_verify_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut mmr: Mmr<Sha256> = Mmr::default();
-        let mut elements = Vec::<Sha256Digest>::new();
+        let mut elements = Vec::<Digest>::new();
         let mut element_positions = Vec::<u64>::new();
         for i in 0..49 {
             elements.push(test_digest(i));
@@ -495,7 +493,7 @@ mod tests {
     fn test_range_proofs_after_forgetting() {
         // create a new MMR and add a non-trivial amount (49) of elements
         let mut mmr: Mmr<Sha256> = Mmr::default();
-        let mut elements = Vec::<Sha256Digest>::new();
+        let mut elements = Vec::<Digest>::new();
         let mut element_positions = Vec::<u64>::new();
         for i in 0..49 {
             elements.push(test_digest(i));
@@ -574,7 +572,7 @@ mod tests {
         );
         // create a new MMR and add a non-trivial amount of elements
         let mut mmr: Mmr<Sha256> = Mmr::default();
-        let mut elements = Vec::<Sha256Digest>::new();
+        let mut elements = Vec::<Digest>::new();
         let mut element_positions = Vec::<u64>::new();
         for i in 0..25 {
             elements.push(test_digest(i));
