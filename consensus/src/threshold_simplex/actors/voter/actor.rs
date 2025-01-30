@@ -708,7 +708,7 @@ impl<
     pub fn new(
         runtime: E,
         journal: Journal<B, E>,
-        cfg: Config<C, A, R, F, S>,
+        cfg: Config<C, D, A, R, F, S>,
     ) -> (Self, Mailbox<D>) {
         // Assert correctness of timeouts
         if cfg.leader_timeout > cfg.notarization_timeout {
