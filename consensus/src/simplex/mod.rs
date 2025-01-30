@@ -179,7 +179,9 @@ pub const NULLIFY_AND_FINALIZE: Activity = 4;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::{Ed25519, PublicKey, Scheme, Sha256};
+    use commonware_cryptography::{
+        sha256::Digest as Sha256Digest, Ed25519, PublicKey, Scheme, Sha256,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::simulated::{Config, Link, Network, Oracle, Receiver, Sender};
     use commonware_runtime::{
@@ -336,7 +338,8 @@ mod tests {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+                let supervisor =
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -563,7 +566,7 @@ mod tests {
                         participants: view_validators.clone(),
                     };
                     let supervisor =
-                        mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+                        mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
                     supervisors.insert(validator.clone(), supervisor.clone());
                     let application_cfg = mocks::application::Config {
                         hasher: Sha256::default(),
@@ -776,7 +779,8 @@ mod tests {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+                let supervisor =
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -910,7 +914,8 @@ mod tests {
                 prover: prover.clone(),
                 participants: view_validators.clone(),
             };
-            let supervisor = mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+            let supervisor =
+                mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
             supervisors.push(supervisor.clone());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -1060,7 +1065,8 @@ mod tests {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+                let supervisor =
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1233,7 +1239,8 @@ mod tests {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+                let supervisor =
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = if idx_scheme == 0 {
                     mocks::application::Config {
@@ -1417,7 +1424,8 @@ mod tests {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+                let supervisor =
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1583,7 +1591,8 @@ mod tests {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+                let supervisor =
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1806,7 +1815,8 @@ mod tests {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+                let supervisor =
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
                 supervisors.push(supervisor.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -1977,7 +1987,8 @@ mod tests {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+                let supervisor =
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
                 if idx_scheme == 0 {
                     let cfg = mocks::conflicter::Config {
                         crypto: scheme,
@@ -2161,7 +2172,8 @@ mod tests {
                     prover: prover.clone(),
                     participants: view_validators.clone(),
                 };
-                let supervisor = mocks::supervisor::Supervisor::<Ed25519>::new(supervisor_config);
+                let supervisor =
+                    mocks::supervisor::Supervisor::<Ed25519, Sha256Digest>::new(supervisor_config);
                 if idx_scheme == 0 {
                     let cfg = mocks::nuller::Config {
                         crypto: scheme,

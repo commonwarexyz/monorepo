@@ -5,7 +5,7 @@ use crate::{
         encoder::{finalize_namespace, notarize_namespace, proposal_message},
         wire, View,
     },
-    Digest, Supervisor,
+    Supervisor,
 };
 use commonware_cryptography::{Hasher, Scheme};
 use commonware_p2p::{Receiver, Recipients, Sender};
@@ -86,6 +86,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                             continue;
                         }
                     };
+                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                        debug!(sender = hex(&s), "notarize invalid payload");
+                        continue;
+                    };
                     let view = proposal.view;
                     let public_key_index = self
                         .supervisor
@@ -94,7 +98,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
 
                     // Notarize received digest
                     let parent = proposal.parent;
-                    let msg = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+                    let msg = proposal_message(proposal.view, proposal.parent, &payload);
                     let n = wire::Notarize {
                         proposal: Some(proposal),
                         signature: Some(wire::Signature {
@@ -112,13 +116,13 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         .unwrap();
 
                     // Notarize random digest
-                    let digest: Digest = H::random(&mut self.runtime).into();
-                    let msg = proposal_message(view, parent, &digest);
+                    let payload = H::random(&mut self.runtime);
+                    let msg = proposal_message(view, parent, &payload);
                     let n = wire::Notarize {
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
-                            payload: digest,
+                            payload: payload.to_vec(),
                         }),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,
@@ -143,6 +147,10 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                             continue;
                         }
                     };
+                    let Ok(payload) = H::Digest::try_from(&proposal.payload) else {
+                        debug!(sender = hex(&s), "notarize invalid payload");
+                        continue;
+                    };
                     let view = proposal.view;
                     let public_key_index = self
                         .supervisor
@@ -151,7 +159,7 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
 
                     // Finalize provided digest
                     let parent = proposal.parent;
-                    let msg = proposal_message(proposal.view, proposal.parent, &proposal.payload);
+                    let msg = proposal_message(proposal.view, proposal.parent, &payload);
                     let f = wire::Finalize {
                         proposal: Some(proposal),
                         signature: Some(wire::Signature {
@@ -169,13 +177,13 @@ impl<E: Clock + Rng + CryptoRng + Spawner, C: Scheme, H: Hasher, S: Supervisor<I
                         .unwrap();
 
                     // Finalize random digest
-                    let digest: Digest = H::random(&mut self.runtime).into();
-                    let msg = proposal_message(view, parent, &digest);
+                    let payload = H::random(&mut self.runtime);
+                    let msg = proposal_message(view, parent, &payload);
                     let f = wire::Finalize {
                         proposal: Some(wire::Proposal {
                             view,
                             parent,
-                            payload: digest,
+                            payload: payload.to_vec(),
                         }),
                         signature: Some(wire::Signature {
                             public_key: public_key_index,

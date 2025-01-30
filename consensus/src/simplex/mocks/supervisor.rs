@@ -3,35 +3,35 @@ use crate::{
         prover::Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Activity, Digest, Proof, Supervisor as Su,
+    Activity, Proof, Supervisor as Su,
 };
-use commonware_cryptography::{PublicKey, Scheme};
+use commonware_cryptography::{Digest, PublicKey, Scheme};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
-pub struct Config<C: Scheme> {
-    pub prover: Prover<C>,
+pub struct Config<C: Scheme, D: Digest> {
+    pub prover: Prover<C, D>,
     pub participants: BTreeMap<View, Vec<PublicKey>>,
 }
 
-type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
+type Participation<D: Digest> = HashMap<View, HashMap<D, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
-pub struct Supervisor<C: Scheme> {
+pub struct Supervisor<C: Scheme, D: Digest> {
     participants: BTreeMap<View, (HashMap<PublicKey, u32>, Vec<PublicKey>)>,
 
-    prover: Prover<C>,
+    prover: Prover<C, D>,
 
-    pub notarizes: Arc<Mutex<Participation>>,
-    pub finalizes: Arc<Mutex<Participation>>,
+    pub notarizes: Arc<Mutex<Participation<D>>>,
+    pub finalizes: Arc<Mutex<Participation<D>>>,
     pub faults: Arc<Mutex<Faults>>,
 }
 
-impl<C: Scheme> Supervisor<C> {
-    pub fn new(cfg: Config<C>) -> Self {
+impl<C: Scheme, D: Digest> Supervisor<C, D> {
+    pub fn new(cfg: Config<C, D>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, mut validators) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
@@ -51,7 +51,7 @@ impl<C: Scheme> Supervisor<C> {
     }
 }
 
-impl<C: Scheme> Su for Supervisor<C> {
+impl<C: Scheme, D: Digest> Su for Supervisor<C, D> {
     type Index = View;
 
     fn leader(&self, index: Self::Index) -> Option<PublicKey> {
