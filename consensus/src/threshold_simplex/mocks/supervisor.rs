@@ -3,14 +3,14 @@ use crate::{
         Prover, View, CONFLICTING_FINALIZE, CONFLICTING_NOTARIZE, FINALIZE, NOTARIZE,
         NULLIFY_AND_FINALIZE,
     },
-    Activity, Digest, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
+    Activity, Proof, Supervisor as Su, ThresholdSupervisor as TSu,
 };
 use commonware_cryptography::{
     bls12381::primitives::{
         group::{self, Element},
         poly,
     },
-    PublicKey,
+    Digest, PublicKey,
 };
 use commonware_utils::modulo;
 use std::{
@@ -25,26 +25,26 @@ type ViewInfo = (
     group::Share,
 );
 
-pub struct Config {
-    pub prover: Prover,
+pub struct Config<D: Digest> {
+    pub prover: Prover<D>,
     pub participants: BTreeMap<View, (poly::Poly<group::Public>, Vec<PublicKey>, group::Share)>,
 }
 
-type Participation = HashMap<View, HashMap<Digest, HashSet<PublicKey>>>;
+type Participation<D: Digest> = HashMap<View, HashMap<D, HashSet<PublicKey>>>;
 type Faults = HashMap<PublicKey, HashMap<View, HashSet<Activity>>>;
 
 #[derive(Clone)]
-pub struct Supervisor {
-    prover: Prover,
+pub struct Supervisor<D: Digest> {
+    prover: Prover<D>,
     participants: BTreeMap<View, ViewInfo>,
 
-    pub notarizes: Arc<Mutex<Participation>>,
-    pub finalizes: Arc<Mutex<Participation>>,
+    pub notarizes: Arc<Mutex<Participation<D>>>,
+    pub finalizes: Arc<Mutex<Participation<D>>>,
     pub faults: Arc<Mutex<Faults>>,
 }
 
-impl Supervisor {
-    pub fn new(cfg: Config) -> Self {
+impl<D: Digest> Supervisor<D> {
+    pub fn new(cfg: Config<D>) -> Self {
         let mut parsed_participants = BTreeMap::new();
         for (view, (identity, mut validators, share)) in cfg.participants.into_iter() {
             let mut map = HashMap::new();
@@ -64,7 +64,7 @@ impl Supervisor {
     }
 }
 
-impl Su for Supervisor {
+impl<D: Digest> Su for Supervisor<D> {
     type Index = View;
 
     fn leader(&self, _: Self::Index) -> Option<PublicKey> {
@@ -198,7 +198,7 @@ impl Su for Supervisor {
     }
 }
 
-impl TSu for Supervisor {
+impl<D: Digest> TSu for Supervisor<D> {
     type Seed = group::Signature;
     type Identity = poly::Public;
     type Share = group::Share;

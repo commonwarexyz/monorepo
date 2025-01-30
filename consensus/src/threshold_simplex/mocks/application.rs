@@ -138,7 +138,7 @@ pub enum Progress<D: Digest> {
 pub struct Config<H: Hasher> {
     pub hasher: H,
 
-    pub relay: Arc<Relay>,
+    pub relay: Arc<Relay<H::Digest>>,
 
     /// The public key of the participant.
     ///
@@ -157,7 +157,7 @@ pub struct Application<E: Clock + RngCore, H: Hasher> {
     hasher: H,
     participant: PublicKey,
 
-    relay: Arc<Relay>,
+    relay: Arc<Relay<H::Digest>>,
     broadcast: mpsc::UnboundedReceiver<(H::Digest, Bytes)>,
     tracker: mpsc::UnboundedSender<(PublicKey, Progress<H::Digest>)>,
 
