@@ -38,11 +38,9 @@ use std::{
 use std::{marker::PhantomData, sync::atomic::AtomicI64};
 use tracing::{debug, info, trace, warn};
 
-type Notarizable<'a, D: Digest> =
-    Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Notarize, D>>)>;
+type Notarizable<'a, D> = Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Notarize, D>>)>;
 type Nullifiable<'a> = Option<(View, &'a HashMap<u32, wire::Nullify>)>;
-type Finalizable<'a, D: Digest> =
-    Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Finalize, D>>)>;
+type Finalizable<'a, D> = Option<(wire::Proposal, &'a HashMap<u32, Parsed<wire::Finalize, D>>)>;
 
 const GENESIS_VIEW: View = 0;
 

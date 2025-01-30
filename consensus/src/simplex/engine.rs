@@ -4,7 +4,7 @@ use super::{
     Context, View,
 };
 use crate::{Automaton, Committer, Relay, Supervisor};
-use commonware_cryptography::Scheme;
+use commonware_cryptography::{Digest, Scheme};
 use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender};
 use commonware_runtime::{Blob, Clock, Spawner, Storage};
@@ -18,16 +18,17 @@ pub struct Engine<
     B: Blob,
     E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
     C: Scheme,
-    A: Automaton<Context = Context>,
-    R: Relay,
-    F: Committer,
+    D: Digest,
+    A: Automaton<Context = Context<D>, Digest = D>,
+    R: Relay<Digest = D>,
+    F: Committer<Digest = D>,
     S: Supervisor<Index = View>,
 > {
     runtime: E,
 
-    voter: voter::Actor<B, E, C, A, R, F, S>,
-    voter_mailbox: voter::Mailbox,
-    resolver: resolver::Actor<E, C, S>,
+    voter: voter::Actor<B, E, C, D, A, R, F, S>,
+    voter_mailbox: voter::Mailbox<D>,
+    resolver: resolver::Actor<E, C, D, S>,
     resolver_mailbox: resolver::Mailbox,
 }
 
@@ -35,14 +36,15 @@ impl<
         B: Blob,
         E: Clock + GClock + Rng + CryptoRng + Spawner + Storage<B>,
         C: Scheme,
-        A: Automaton<Context = Context>,
-        R: Relay,
-        F: Committer,
+        D: Digest,
+        A: Automaton<Context = Context<D>, Digest = D>,
+        R: Relay<Digest = D>,
+        F: Committer<Digest = D>,
         S: Supervisor<Index = View>,
-    > Engine<B, E, C, A, R, F, S>
+    > Engine<B, E, C, D, A, R, F, S>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, A, R, F, S>) -> Self {
+    pub fn new(runtime: E, journal: Journal<B, E>, cfg: Config<C, D, A, R, F, S>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
